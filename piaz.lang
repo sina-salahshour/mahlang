@@ -1,0 +1,15 @@
+!PAREN_OPEN: "[(]"
+!PAREN_CLOSE: "[)]"
+!OP_ADD: "[+]"
+!OP_SUB: "-"
+!OP_DIV: "/"
+!OP_MUL: "[*]"
+!EQ: "[=]{2}"
+!ASSIGN: "[=]"
+IDENTIFIER: "[a-zA-Z_]\w*"
+--
+E -> T E'
+E' -> #OP_ADD T @add E' | #e
+T -> F T'
+T' -> #OP_MUL F @mul T' | #e
+F -> #PAREN_OPEN E #PAREN_CLOSE | @pid #IDENTIFIER
