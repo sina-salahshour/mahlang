@@ -37,7 +37,7 @@ def run_code(code_block: list):
             case ("/", lhs, rhs, dest):
                 b = stack[lhs]
                 a = stack[rhs]
-                stack[dest] = a / b
+                stack[dest] = a // b
             case ("lt", lhs, rhs, dest):
                 b = stack[lhs]
                 a = stack[rhs]
