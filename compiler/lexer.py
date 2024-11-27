@@ -14,8 +14,6 @@ class TokenType(Enum):
     PAREN_OPEN = 'PAREN_OPEN'
     PAREN_CLOSE = 'PAREN_CLOSE'
     OP_ADD = 'OP_ADD'
-    OP_SUB = 'OP_SUB'
-    OP_DIV = 'OP_DIV'
     OP_MUL = 'OP_MUL'
     EQ = 'EQ'
     ASSIGN = 'ASSIGN'
@@ -25,6 +23,7 @@ class TokenType(Enum):
     ELIF = 'ELIF'
     ELSE = 'ELSE'
     WHILE = 'WHILE'
+    LET = 'LET'
     BREAK = 'BREAK'
     CONTINUE = 'CONTINUE'
     IDENTIFIER = 'IDENTIFIER'
@@ -45,17 +44,16 @@ TOKEN_RULES = {
     TokenType.PAREN_OPEN : r"[(]",
     TokenType.PAREN_CLOSE : r"[)]",
     TokenType.OP_ADD : r"[+]",
-    TokenType.OP_SUB : r"-",
-    TokenType.OP_DIV : r"/",
     TokenType.OP_MUL : r"[*]",
     TokenType.EQ : r"[=]{2}",
-    TokenType.ASSIGN : r":[=]",
+    TokenType.ASSIGN : r"[=]",
     TokenType.BRACE_OPEN : r"[{]",
     TokenType.BRACE_CLOSE : r"[}]",
     TokenType.IF : r"if",
     TokenType.ELIF : r"elif",
     TokenType.ELSE : r"else",
     TokenType.WHILE : r"while",
+    TokenType.LET : r"let",
     TokenType.BREAK : r"break",
     TokenType.CONTINUE : r"continue",
     TokenType.IDENTIFIER : r"[a-zA-Z_]\w*",
@@ -89,8 +87,6 @@ RULE_SEPARATORS = [
     TOKEN_RULES[TokenType.PAREN_OPEN],
     TOKEN_RULES[TokenType.PAREN_CLOSE],
     TOKEN_RULES[TokenType.OP_ADD],
-    TOKEN_RULES[TokenType.OP_SUB],
-    TOKEN_RULES[TokenType.OP_DIV],
     TOKEN_RULES[TokenType.OP_MUL],
     TOKEN_RULES[TokenType.EQ],
     TOKEN_RULES[TokenType.ASSIGN],

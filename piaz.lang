@@ -1,17 +1,16 @@
 !PAREN_OPEN: "[(]"
 !PAREN_CLOSE: "[)]"
 !OP_ADD: "[+]"
-!OP_SUB: "-"
-!OP_DIV: "/"
 !OP_MUL: "[*]"
 !EQ: "[=]{2}"
-!ASSIGN: ":[=]"
+!ASSIGN: "[=]"
 !BRACE_OPEN: "[{]"
 !BRACE_CLOSE: "[}]"
 IF: "if"
 ELIF: "elif"
 ELSE: "else"
 WHILE: "while"
+LET: "let"
 BREAK: "break"
 CONTINUE: "continue"
 IDENTIFIER: "[a-zA-Z_]\w*"
@@ -20,16 +19,18 @@ NUMBER: "\d+"
 --
 Start -> Stmt Stmts @nop
 Stmts -> Stmt Stmts |  #e
-Stmt -> Assign | If | While | #BREAK @break | #CONTINUE @continue
+Stmt -> Declare | If | While | #BREAK @break | #CONTINUE @continue | Assign
 CodeBlock -> #BRACE_OPEN Stmts #BRACE_CLOSE
 If -> #IF E @save CodeBlock @jmpfalse Elif
 Elif -> #ELIF E @save CodeBlock @jmpfalse Elif | Else
 Else -> #ELSE @save CodeBlock @jmp | #e
 While -> #WHILE @save @save E @save CodeBlock @jmpwhile
-Assign -> G #ASSIGN E @assign
+Declare -> #LET G #ASSIGN E @assign
+Assign -> Id #ASSIGN E @assign
 E -> T E'
 E' -> #OP_ADD T @add E' | #e
 T -> F T'
 T' -> #OP_MUL F @mul T' | #e
-F -> #PAREN_OPEN E #PAREN_CLOSE | @pid #IDENTIFIER | @num #NUMBER
+F -> #PAREN_OPEN E #PAREN_CLOSE | Id | @num #NUMBER
 G -> @setpid #IDENTIFIER
+Id -> @pid #IDENTIFIER
