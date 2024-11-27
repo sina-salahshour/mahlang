@@ -3,14 +3,18 @@
 !OP_ADD: "[+]"
 !OP_MUL: "[*]"
 !EQ: "[=]{2}"
+!NEQ: "[!][=]"
+!NOT: "[!]"
 !ASSIGN: "[=]"
 !BRACE_OPEN: "[{]"
 !BRACE_CLOSE: "[}]"
+!COMA: ","
 IF: "if"
 ELIF: "elif"
 ELSE: "else"
 WHILE: "while"
 LET: "let"
+PRINT: "print"
 BREAK: "break"
 CONTINUE: "continue"
 IDENTIFIER: "[a-zA-Z_]\w*"
@@ -19,16 +23,23 @@ NUMBER: "\d+"
 --
 Start -> Stmt Stmts @nop
 Stmts -> Stmt Stmts |  #e
-Stmt -> Declare | If | While | #BREAK @break | #CONTINUE @continue | Assign
+Stmt -> Declare | If | While | #BREAK @break | #CONTINUE @continue | Assign | Print
 CodeBlock -> #BRACE_OPEN Stmts #BRACE_CLOSE
 If -> #IF E @save CodeBlock @jmpfalse Elif
-Elif -> #ELIF E @save CodeBlock @jmpfalse Elif | Else
-Else -> #ELSE @save CodeBlock @jmp | #e
+Elif -> @omit #ELIF E @save CodeBlock @jmpfalse Elif | Else @omit
+Else -> #ELSE @save CodeBlock @jmptrue | #e
 While -> #WHILE @save @save E @save CodeBlock @jmpwhile
 Declare -> #LET G #ASSIGN E @assign
 Assign -> Id #ASSIGN E @assign
-E -> T E'
-E' -> #OP_ADD T @add E' | #e
+Print -> @init_call #PRINT #PAREN_OPEN Args #PAREN_CLOSE @call
+Args -> E ArgsRest | #e
+ArgsRest -> #COMA Args | #e
+E -> B E'
+E' -> #EQ B @eq E' | #e
+B -> A B'
+B' -> #NEQ A @neq B' | #e
+A -> T A'
+A' -> #OP_ADD T @add A' | #e
 T -> F T'
 T' -> #OP_MUL F @mul T' | #e
 F -> #PAREN_OPEN E #PAREN_CLOSE | Id | @num #NUMBER

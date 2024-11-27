@@ -1,14 +1,20 @@
-let g = 3
-let b = 32
-while b + g {
+let a = 1
+let b = 1
+let tmp = 0
+let i = 0
+while i != 20 {
+	print(a)
+	tmp = a
+	a = b + a
+	b = tmp
+	i = i+1
 
-	b = 3
-
-	if b + 2 * 3 {
-		break
-	} elif g + b {
-		continue
+	if i == 10 {
+		print(10101010)
+	} elif i == 15 {
+		print(151515)
 	} else {
-		let h = 8
+		print(0)
 	}
 }
+

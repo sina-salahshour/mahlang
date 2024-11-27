@@ -13,6 +13,26 @@ def register_actions(ir: IRGenerator):
         code = ("+", lhs, rhs, tmp)
         ir.write_code(code)
 
+    @ir.action("eq")
+    def _(_: Token):
+        lhs = ir.stack.pop()
+        rhs = ir.stack.pop()
+        tmp = ir.get_temp_address()
+        ir.stack.append(tmp)
+
+        code = ("eq", lhs, rhs, tmp)
+        ir.write_code(code)
+
+    @ir.action("neq")
+    def _(_: Token):
+        lhs = ir.stack.pop()
+        rhs = ir.stack.pop()
+        tmp = ir.get_temp_address()
+        ir.stack.append(tmp)
+
+        code = ("neq", lhs, rhs, tmp)
+        ir.write_code(code)
+
     @ir.action("mul")
     def _(_: Token):
         lhs = ir.stack.pop()
@@ -59,9 +79,18 @@ def register_actions(ir: IRGenerator):
     @ir.action("jmpfalse")
     def _(_: Token):
         addr: int = ir.stack.pop()
-        cond_addr = ir.stack.pop()
+        cond_addr = ir.stack[-1]
 
-        code = ("jmpf", cond_addr, None, ir.code_pointer + 1)
+        code = ("jmpf", cond_addr, None, ir.code_pointer)
+
+        ir.write_code(code, addr)
+
+    @ir.action("jmptrue")
+    def _(_: Token):
+        addr: int = ir.stack.pop()
+        cond_addr = ir.stack[-1]
+
+        code = ("jmpt", cond_addr, None, ir.code_pointer)
 
         ir.write_code(code, addr)
 
@@ -112,3 +141,25 @@ def register_actions(ir: IRGenerator):
     def _(_: Token):
         code = (None, None, None, None)
         ir.write_code(code)
+
+    @ir.action("init_call")
+    def _(current_token: Token):
+        function_name = current_token.literal
+
+        ir.stack.append(["function_arg_stack_base", function_name])
+
+    @ir.action("call")
+    def _(_: Token):
+        arg_list = []
+        while True:
+            current_stack_item = ir.stack.pop()
+
+            match current_stack_item:
+                case ["function_arg_stack_base", function_name]:
+                    break
+                case item:
+                    arg_list.append(item)
+
+        for arg in arg_list:
+            code = (function_name, arg, None, None)
+            ir.write_code(code)

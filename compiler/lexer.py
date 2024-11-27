@@ -16,14 +16,18 @@ class TokenType(Enum):
     OP_ADD = 'OP_ADD'
     OP_MUL = 'OP_MUL'
     EQ = 'EQ'
+    NEQ = 'NEQ'
+    NOT = 'NOT'
     ASSIGN = 'ASSIGN'
     BRACE_OPEN = 'BRACE_OPEN'
     BRACE_CLOSE = 'BRACE_CLOSE'
+    COMA = 'COMA'
     IF = 'IF'
     ELIF = 'ELIF'
     ELSE = 'ELSE'
     WHILE = 'WHILE'
     LET = 'LET'
+    PRINT = 'PRINT'
     BREAK = 'BREAK'
     CONTINUE = 'CONTINUE'
     IDENTIFIER = 'IDENTIFIER'
@@ -46,14 +50,18 @@ TOKEN_RULES = {
     TokenType.OP_ADD : r"[+]",
     TokenType.OP_MUL : r"[*]",
     TokenType.EQ : r"[=]{2}",
+    TokenType.NEQ : r"[!][=]",
+    TokenType.NOT : r"[!]",
     TokenType.ASSIGN : r"[=]",
     TokenType.BRACE_OPEN : r"[{]",
     TokenType.BRACE_CLOSE : r"[}]",
+    TokenType.COMA : r",",
     TokenType.IF : r"if",
     TokenType.ELIF : r"elif",
     TokenType.ELSE : r"else",
     TokenType.WHILE : r"while",
     TokenType.LET : r"let",
+    TokenType.PRINT : r"print",
     TokenType.BREAK : r"break",
     TokenType.CONTINUE : r"continue",
     TokenType.IDENTIFIER : r"[a-zA-Z_]\w*",
@@ -89,9 +97,12 @@ RULE_SEPARATORS = [
     TOKEN_RULES[TokenType.OP_ADD],
     TOKEN_RULES[TokenType.OP_MUL],
     TOKEN_RULES[TokenType.EQ],
+    TOKEN_RULES[TokenType.NEQ],
+    TOKEN_RULES[TokenType.NOT],
     TOKEN_RULES[TokenType.ASSIGN],
     TOKEN_RULES[TokenType.BRACE_OPEN],
     TOKEN_RULES[TokenType.BRACE_CLOSE],
+    TOKEN_RULES[TokenType.COMA],
     TOKEN_RULES[TokenType.COLON],
 ]
 

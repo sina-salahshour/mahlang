@@ -3,6 +3,7 @@ from compiler.parser import Parser
 from compiler.ir_generator import IRGenerator
 from actions import register_actions
 import sys
+from code_interpreter import run_code
 
 
 def print_code_block(ir: IRGenerator):
@@ -15,8 +16,7 @@ def print_code_block(ir: IRGenerator):
         print("\t  " + "- " * 32)
 
 
-def main():
-    file_name = sys.argv[1]
+def generate_code(file_name: str):
     with open(file_name) as f:
         input_str = f.read()
 
@@ -28,10 +28,20 @@ def main():
 
     ir.generate()
 
-    print(ir.stack)
     assert len(ir.stack) == 0, "Error Stack is not empty"
 
-    print_code_block(ir)
+    return ir
+
+
+def main():
+    file_name = sys.argv[1]
+
+    ir = generate_code(file_name)
+    match sys.argv[2]:
+        case "build":
+            print_code_block(ir)
+        case "run":
+            run_code(ir.sstack[:400])
 
 
 if __name__ == "__main__":
