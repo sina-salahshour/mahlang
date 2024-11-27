@@ -20,27 +20,27 @@ PARSE_TABLE = {
     TokenType.IDENTIFIER: RULES["Stmt"][0],
 }, 
 "E":{
-    TokenType.PAREN_OPEN: RULES["E"][0],
     TokenType.IDENTIFIER: RULES["E"][0],
+    TokenType.PAREN_OPEN: RULES["E"][0],
     TokenType.NUMBER: RULES["E"][0],
 }, 
 "E'":{
     TokenType.OP_ADD: RULES["E'"][0],
-    TokenType.IDENTIFIER: [],
-    TokenType.EOF: [],
     TokenType.PAREN_CLOSE: [],
+    TokenType.EOF: [],
+    TokenType.IDENTIFIER: [],
 }, 
 "T":{
-    TokenType.PAREN_OPEN: RULES["T"][0],
     TokenType.IDENTIFIER: RULES["T"][0],
+    TokenType.PAREN_OPEN: RULES["T"][0],
     TokenType.NUMBER: RULES["T"][0],
 }, 
 "T'":{
     TokenType.OP_MUL: RULES["T'"][0],
-    TokenType.OP_ADD: [],
     TokenType.IDENTIFIER: [],
     TokenType.EOF: [],
     TokenType.PAREN_CLOSE: [],
+    TokenType.OP_ADD: [],
 }, 
 "F":{
     TokenType.PAREN_OPEN: RULES["F"][0],
