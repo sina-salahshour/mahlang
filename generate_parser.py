@@ -153,7 +153,7 @@ def find_follows(variable: str, checked: set) -> set:
                             break
                         else:
                             child_res, child_has_lambda = find_first(
-                                to_check.pop()[1:-1], set()
+                                to_check.pop(0)[1:-1], set()
                             )
                             res = res | child_res
                             if not child_has_lambda:
@@ -194,7 +194,7 @@ for key, rules in grammar.items():
         if has_lambda:
             res = find_follows(key, set())
             for item in res:
-                parsing_table[key][item] = f"[]"
+                parsing_table[key][item] = f'RULES["{key}"][{index}]'
             if len(res.intersection(key_res)):
                 raise Exception("Error: the grammar is not LL(1)")
         key_res = key_res | res

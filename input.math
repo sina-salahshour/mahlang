@@ -1,5 +1,12 @@
-x := 1
-y := 2
-z := 3
+g := 3
+b := 32
+while 1 + 2 {
 
-w := (x + y) * y + y * z
+	if b + 2 * 3 {
+		break
+	} elif g + b {
+		continue
+	} else {
+		h := 8
+	}
+}

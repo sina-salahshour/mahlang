@@ -6,11 +6,27 @@
 !OP_MUL: "[*]"
 !EQ: "[=]{2}"
 !ASSIGN: ":[=]"
+!BRACE_OPEN: "[{]"
+!BRACE_CLOSE: "[}]"
+IF: "if"
+ELIF: "elif"
+ELSE: "else"
+WHILE: "while"
+BREAK: "break"
+CONTINUE: "continue"
 IDENTIFIER: "[a-zA-Z_]\w*"
 NUMBER: "\d+"
+!COLON: ":"
 --
-Stmts -> Stmt Stmts | #e
-Stmt -> G #ASSIGN E @assign
+Start -> Stmt Stmts @nop
+Stmts -> Stmt Stmts |  #e
+Stmt -> Assign | If | While | #BREAK @break | #CONTINUE @continue
+CodeBlock -> #BRACE_OPEN Stmts #BRACE_CLOSE
+If -> #IF E @save CodeBlock @jmpfalse Elif
+Elif -> #ELIF E @save CodeBlock @jmpfalse Elif | Else
+Else -> #ELSE @save CodeBlock @jmp | #e
+While -> #WHILE @save @save E @save CodeBlock @jmpwhile
+Assign -> G #ASSIGN E @assign
 E -> T E'
 E' -> #OP_ADD T @add E' | #e
 T -> F T'

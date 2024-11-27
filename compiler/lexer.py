@@ -19,8 +19,17 @@ class TokenType(Enum):
     OP_MUL = 'OP_MUL'
     EQ = 'EQ'
     ASSIGN = 'ASSIGN'
+    BRACE_OPEN = 'BRACE_OPEN'
+    BRACE_CLOSE = 'BRACE_CLOSE'
+    IF = 'IF'
+    ELIF = 'ELIF'
+    ELSE = 'ELSE'
+    WHILE = 'WHILE'
+    BREAK = 'BREAK'
+    CONTINUE = 'CONTINUE'
     IDENTIFIER = 'IDENTIFIER'
     NUMBER = 'NUMBER'
+    COLON = 'COLON'
 
     # --- internals
 
@@ -41,8 +50,17 @@ TOKEN_RULES = {
     TokenType.OP_MUL : r"[*]",
     TokenType.EQ : r"[=]{2}",
     TokenType.ASSIGN : r":[=]",
+    TokenType.BRACE_OPEN : r"[{]",
+    TokenType.BRACE_CLOSE : r"[}]",
+    TokenType.IF : r"if",
+    TokenType.ELIF : r"elif",
+    TokenType.ELSE : r"else",
+    TokenType.WHILE : r"while",
+    TokenType.BREAK : r"break",
+    TokenType.CONTINUE : r"continue",
     TokenType.IDENTIFIER : r"[a-zA-Z_]\w*",
     TokenType.NUMBER : r"\d+",
+    TokenType.COLON : r":",
 }
 
 assert (
@@ -76,6 +94,9 @@ RULE_SEPARATORS = [
     TOKEN_RULES[TokenType.OP_MUL],
     TOKEN_RULES[TokenType.EQ],
     TOKEN_RULES[TokenType.ASSIGN],
+    TOKEN_RULES[TokenType.BRACE_OPEN],
+    TOKEN_RULES[TokenType.BRACE_CLOSE],
+    TOKEN_RULES[TokenType.COLON],
 ]
 
 

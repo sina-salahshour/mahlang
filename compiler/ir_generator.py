@@ -30,11 +30,15 @@ class IRGenerator:
         return variable_address
 
     def write_code(self, code, address=None):
-        if not address:
-            self.sstack[self.code_pointer] = code
+        addr = address or self.code_pointer
+        if address is None:
+            if self.code_pointer >= 400:
+                raise RuntimeError("Error: CodeBlock is full")
+            self.sstack[addr] = code
             self.code_pointer += 1
         else:
             self.sstack[address] = code
+        return addr
 
     def action(self, name: str):
         def action_fn(fn: Callable[[Token], None]):
