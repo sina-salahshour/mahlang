@@ -10,6 +10,7 @@ class IRGenerator:
         self.variable_pointer = 400
         self.code_pointer = 0
         self.parser = parser
+        self.stack = []
 
         # self defined
         self.variable_table = {}

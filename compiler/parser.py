@@ -1,41 +1,59 @@
 from .lexer import TokenType, Lexer, Token
 
 RULES = {
+    "Stmts": [["Stmt", "Stmts"], []], 
+    "Stmt": [["G", TokenType.ASSIGN, "E", "@assign"]], 
     "E": [["T", "E'"]], 
     "E'": [[TokenType.OP_ADD, "T", "@add", "E'"], []], 
     "T": [["F", "T'"]], 
     "T'": [[TokenType.OP_MUL, "F", "@mul", "T'"], []], 
-    "F": [[TokenType.PAREN_OPEN, "E", TokenType.PAREN_CLOSE], ["@pid", TokenType.IDENTIFIER]], 
+    "F": [[TokenType.PAREN_OPEN, "E", TokenType.PAREN_CLOSE], ["@pid", TokenType.IDENTIFIER], ["@num", TokenType.NUMBER]], 
+    "G": [["@setpid", TokenType.IDENTIFIER]], 
 }
 
 PARSE_TABLE = {
+"Stmts":{
+    TokenType.IDENTIFIER: RULES["Stmts"][0],
+    TokenType.EOF: [],
+}, 
+"Stmt":{
+    TokenType.IDENTIFIER: RULES["Stmt"][0],
+}, 
 "E":{
-    TokenType.IDENTIFIER: RULES["E"][0],
     TokenType.PAREN_OPEN: RULES["E"][0],
+    TokenType.IDENTIFIER: RULES["E"][0],
+    TokenType.NUMBER: RULES["E"][0],
 }, 
 "E'":{
     TokenType.OP_ADD: RULES["E'"][0],
-    TokenType.PAREN_CLOSE: [],
+    TokenType.IDENTIFIER: [],
     TokenType.EOF: [],
+    TokenType.PAREN_CLOSE: [],
 }, 
 "T":{
-    TokenType.IDENTIFIER: RULES["T"][0],
     TokenType.PAREN_OPEN: RULES["T"][0],
+    TokenType.IDENTIFIER: RULES["T"][0],
+    TokenType.NUMBER: RULES["T"][0],
 }, 
 "T'":{
     TokenType.OP_MUL: RULES["T'"][0],
     TokenType.OP_ADD: [],
-    TokenType.PAREN_CLOSE: [],
+    TokenType.IDENTIFIER: [],
     TokenType.EOF: [],
+    TokenType.PAREN_CLOSE: [],
 }, 
 "F":{
     TokenType.PAREN_OPEN: RULES["F"][0],
     TokenType.IDENTIFIER: RULES["F"][1],
+    TokenType.NUMBER: RULES["F"][2],
+}, 
+"G":{
+    TokenType.IDENTIFIER: RULES["G"][0],
 }, 
 
 }
 
-START_SYMBOL = "E"
+START_SYMBOL = "Stmts"
 
 
 class Parser:

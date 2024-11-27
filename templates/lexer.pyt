@@ -6,6 +6,8 @@ from enum import Enum
 class TokenString(str):
     def __eq__(self, pattern):
         return re.fullmatch(pattern, self) is not None
+    def __hash__(self) -> int:
+        return super().__hash__()
 
 
 class TokenType(Enum):
@@ -101,6 +103,6 @@ class Lexer:
 
         for type, pattern in self.rules.items():
             if char == pattern:
-                return Token(type, char, start_position)
+                return Token(type, str(char), start_position)
         else:
             raise SyntaxError(f"Invalid token at position {start_position}: '{char}'")

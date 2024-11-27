@@ -166,8 +166,8 @@ def find_follows(variable: str, checked: set) -> set:
 
 parsing_table = {}
 
-# TokenType.IDENTIFIER: RULES["E"][0],
 for key, rules in grammar.items():
+    key_res = set()
     parsing_table[key] = {}
     for index, rule_set in enumerate(rules):
         res = set()
@@ -186,12 +186,18 @@ for key, rules in grammar.items():
                     break
         else:
             has_lambda = True
+        if len(res & key_res):
+            raise Exception("Error: the grammar is not LL(1)")
+        key_res = key_res | res
         for item in res:
             parsing_table[key][item] = f'RULES["{key}"][{index}]'
         if has_lambda:
             res = find_follows(key, set())
             for item in res:
                 parsing_table[key][item] = f"[]"
+            if len(res.intersection(key_res)):
+                raise Exception("Error: the grammar is not LL(1)")
+        key_res = key_res | res
 
 parsing_table_string = ""
 for key, fields in parsing_table.items():
