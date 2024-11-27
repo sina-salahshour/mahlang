@@ -23,20 +23,44 @@ def run_code(code_block: list):
             case ("jmp", None, None, loc):
                 pc = loc
             case ("+", lhs, rhs, dest):
-                a = stack[lhs]
-                b = stack[rhs]
+                b = stack[lhs]
+                a = stack[rhs]
                 stack[dest] = a + b
             case ("*", lhs, rhs, dest):
-                a = stack[lhs]
-                b = stack[rhs]
+                b = stack[lhs]
+                a = stack[rhs]
                 stack[dest] = a + b
+            case ("-", lhs, rhs, dest):
+                b = stack[lhs]
+                a = stack[rhs]
+                stack[dest] = a - b
+            case ("/", lhs, rhs, dest):
+                b = stack[lhs]
+                a = stack[rhs]
+                stack[dest] = a / b
+            case ("lt", lhs, rhs, dest):
+                b = stack[lhs]
+                a = stack[rhs]
+                stack[dest] = int(a < b)
+            case ("gt", lhs, rhs, dest):
+                b = stack[lhs]
+                a = stack[rhs]
+                stack[dest] = int(a > b)
+            case ("and", lhs, rhs, dest):
+                b = stack[lhs]
+                a = stack[rhs]
+                stack[dest] = int(bool(a and b))
+            case ("or", lhs, rhs, dest):
+                b = stack[lhs]
+                a = stack[rhs]
+                stack[dest] = int(bool(a or b))
             case ("neq", lhs, rhs, dest):
-                a = stack[lhs]
-                b = stack[rhs]
+                b = stack[lhs]
+                a = stack[rhs]
                 stack[dest] = int(a != b)
             case ("eq", lhs, rhs, dest):
-                a = stack[lhs]
-                b = stack[rhs]
+                b = stack[lhs]
+                a = stack[rhs]
                 stack[dest] = int(a == b)
             case ("=", src, None, dest):
                 stack[dest] = stack[src]

@@ -13,6 +13,16 @@ def register_actions(ir: IRGenerator):
         code = ("+", lhs, rhs, tmp)
         ir.write_code(code)
 
+    @ir.action("sub")
+    def _(_: Token):
+        lhs = ir.stack.pop()
+        rhs = ir.stack.pop()
+        tmp = ir.get_temp_address()
+        ir.stack.append(tmp)
+
+        code = ("-", lhs, rhs, tmp)
+        ir.write_code(code)
+
     @ir.action("eq")
     def _(_: Token):
         lhs = ir.stack.pop()
@@ -21,6 +31,46 @@ def register_actions(ir: IRGenerator):
         ir.stack.append(tmp)
 
         code = ("eq", lhs, rhs, tmp)
+        ir.write_code(code)
+
+    @ir.action("lt")
+    def _(_: Token):
+        lhs = ir.stack.pop()
+        rhs = ir.stack.pop()
+        tmp = ir.get_temp_address()
+        ir.stack.append(tmp)
+
+        code = ("lt", lhs, rhs, tmp)
+        ir.write_code(code)
+
+    @ir.action("gt")
+    def _(_: Token):
+        lhs = ir.stack.pop()
+        rhs = ir.stack.pop()
+        tmp = ir.get_temp_address()
+        ir.stack.append(tmp)
+
+        code = ("gt", lhs, rhs, tmp)
+        ir.write_code(code)
+
+    @ir.action("and")
+    def _(_: Token):
+        lhs = ir.stack.pop()
+        rhs = ir.stack.pop()
+        tmp = ir.get_temp_address()
+        ir.stack.append(tmp)
+
+        code = ("and", lhs, rhs, tmp)
+        ir.write_code(code)
+
+    @ir.action("or")
+    def _(_: Token):
+        lhs = ir.stack.pop()
+        rhs = ir.stack.pop()
+        tmp = ir.get_temp_address()
+        ir.stack.append(tmp)
+
+        code = ("or", lhs, rhs, tmp)
         ir.write_code(code)
 
     @ir.action("neq")
@@ -41,6 +91,16 @@ def register_actions(ir: IRGenerator):
         ir.stack.append(tmp)
 
         code = ("*", lhs, rhs, tmp)
+        ir.write_code(code)
+
+    @ir.action("div")
+    def _(_: Token):
+        lhs = ir.stack.pop()
+        rhs = ir.stack.pop()
+        tmp = ir.get_temp_address()
+        ir.stack.append(tmp)
+
+        code = ("/", lhs, rhs, tmp)
         ir.write_code(code)
 
     @ir.action("pid")

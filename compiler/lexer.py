@@ -15,8 +15,14 @@ class TokenType(Enum):
     PAREN_CLOSE = 'PAREN_CLOSE'
     OP_ADD = 'OP_ADD'
     OP_MUL = 'OP_MUL'
+    OP_SUB = 'OP_SUB'
+    OP_DIV = 'OP_DIV'
     EQ = 'EQ'
     NEQ = 'NEQ'
+    LT = 'LT'
+    GT = 'GT'
+    AND = 'AND'
+    OR = 'OR'
     NOT = 'NOT'
     ASSIGN = 'ASSIGN'
     BRACE_OPEN = 'BRACE_OPEN'
@@ -49,8 +55,14 @@ TOKEN_RULES = {
     TokenType.PAREN_CLOSE : r"[)]",
     TokenType.OP_ADD : r"[+]",
     TokenType.OP_MUL : r"[*]",
+    TokenType.OP_SUB : r"-",
+    TokenType.OP_DIV : r"/",
     TokenType.EQ : r"[=]{2}",
     TokenType.NEQ : r"[!][=]",
+    TokenType.LT : r"[<]",
+    TokenType.GT : r"[>]",
+    TokenType.AND : r"&",
+    TokenType.OR : r"[|]",
     TokenType.NOT : r"[!]",
     TokenType.ASSIGN : r"[=]",
     TokenType.BRACE_OPEN : r"[{]",
@@ -96,8 +108,14 @@ RULE_SEPARATORS = [
     TOKEN_RULES[TokenType.PAREN_CLOSE],
     TOKEN_RULES[TokenType.OP_ADD],
     TOKEN_RULES[TokenType.OP_MUL],
+    TOKEN_RULES[TokenType.OP_SUB],
+    TOKEN_RULES[TokenType.OP_DIV],
     TOKEN_RULES[TokenType.EQ],
     TOKEN_RULES[TokenType.NEQ],
+    TOKEN_RULES[TokenType.LT],
+    TOKEN_RULES[TokenType.GT],
+    TOKEN_RULES[TokenType.AND],
+    TOKEN_RULES[TokenType.OR],
     TOKEN_RULES[TokenType.NOT],
     TOKEN_RULES[TokenType.ASSIGN],
     TOKEN_RULES[TokenType.BRACE_OPEN],
