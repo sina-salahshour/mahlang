@@ -2,8 +2,9 @@ from typing import Any, Iterable
 
 
 def run_code(code_block: list):
-    stack: Iterable[Any] = [None] * 1000
+    stack: Iterable[Any] = [None] * 1500
     pc = 0
+    sp = 1000
     while True:
         operation = code_block[pc]
         pc += 1
@@ -66,5 +67,12 @@ def run_code(code_block: list):
                 stack[dest] = stack[src]
             case ("ld", num, None, loc):
                 stack[loc] = num
+            case ("call", None, None, addr):
+                stack[sp] = pc
+                sp += 1
+                pc = addr
+            case ("ret", None, None, None):
+                sp -= 1
+                pc = stack[sp]
             case catchall:
                 raise RuntimeError(f"invalid operation {catchall}")

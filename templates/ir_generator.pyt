@@ -23,11 +23,12 @@ class IRGenerator:
     def get_variable_address(self, name: str):
         return self.variable_table[name]
 
-    def declare_variable(self, name):
-        variable_address = self.variable_pointer
-        self.variable_pointer += 1
-        self.variable_table[name] = variable_address
-        return variable_address
+    def declare_variable(self, name, address=None):
+        addr = address if address is not None else self.variable_pointer
+        if address is None:
+            self.variable_pointer += 1
+        self.variable_table[name] = addr
+        return addr
 
     def write_code(self, code, address=None):
         addr = address or self.code_pointer

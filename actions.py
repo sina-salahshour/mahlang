@@ -115,6 +115,37 @@ def register_actions(ir: IRGenerator):
         addr = ir.declare_variable(current_token.literal)
         ir.stack.append(addr)
 
+    @ir.action("savefn")
+    def _(current_token: Token):
+        ir.declare_variable(current_token.literal, ir.code_pointer)
+
+    @ir.action("ret")
+    def _(_: Token):
+        code = ("ret", None, None, None)
+        ir.write_code(code)
+
+    @ir.action("call")
+    def _(current_token: Token):
+        arg_list = []
+        while True:
+            current_stack_item = ir.stack.pop()
+
+            match current_stack_item:
+                case ["function_arg_stack_base", function_name]:
+                    break
+                case item:
+                    arg_list.append(item)
+
+        # ignore args for now
+        if len(arg_list):
+            raise NotImplemented("Error Args are not supported for now")
+
+        addr = ir.variable_table.get(function_name)
+        if addr is None:
+            raise NameError(f"Undefined function '{current_token.literal}'")
+        code = ("call", None, None, addr)
+        ir.write_code(code)
+
     @ir.action("assign")
     def _(_: Token):
         src = ir.stack.pop()
@@ -208,7 +239,7 @@ def register_actions(ir: IRGenerator):
 
         ir.stack.append(["function_arg_stack_base", function_name])
 
-    @ir.action("call")
+    @ir.action("print")
     def _(_: Token):
         arg_list = []
         while True:

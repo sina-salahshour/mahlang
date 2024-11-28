@@ -23,13 +23,16 @@ LET: "let"
 PRINT: "print"
 BREAK: "break"
 CONTINUE: "continue"
+RETURN: "return"
+FUNCTION_NAME: "[$]\w+"
+FUNCTION_DEF: "def"
 IDENTIFIER: "[a-zA-Z_]\w*"
 NUMBER: "\d+"
 !COLON: ":"
 --
 Start -> Stmt Stmts @nop
 Stmts -> Stmt Stmts |  #e
-Stmt -> Declare | If | While | #BREAK @break | #CONTINUE @continue | Assign | Print
+Stmt -> Declare | If | While | #BREAK @break | #CONTINUE @continue | Assign | Print | FunctionCall | FunctionDef | FunctionReturn
 CodeBlock -> #BRACE_OPEN Stmts #BRACE_CLOSE
 If -> #IF Exp @save CodeBlock @jmpfalse Elif
 Elif -> @omit #ELIF Exp @save CodeBlock @jmpfalse Elif | Else @omit
@@ -37,7 +40,7 @@ Else -> #ELSE @save CodeBlock @jmptrue | #e
 While -> #WHILE @save @save Exp @save CodeBlock @jmpwhile
 Declare -> #LET G #ASSIGN Exp @assign
 Assign -> Id #ASSIGN Exp @assign
-Print -> @init_call #PRINT #PAREN_OPEN Args #PAREN_CLOSE @call
+Print -> @init_call #PRINT #PAREN_OPEN Args #PAREN_CLOSE @print
 Args -> Exp ArgsRest | #e
 ArgsRest -> #COMA Args | #e
 Exp -> Unary
@@ -50,5 +53,8 @@ Add' -> #OP_ADD Mul @add Add' | #OP_SUB Mul @sub Add' | #e
 Mul -> Atom Mul'
 Mul' -> #OP_MUL Atom @mul Mul' | #OP_DIV Atom @div Mul' | #e
 Atom -> #PAREN_OPEN Exp #PAREN_CLOSE | Id | @num #NUMBER
+FunctionCall -> @init_call #FUNCTION_NAME #PAREN_OPEN Args #PAREN_CLOSE @call
+FunctionDef -> @save #FUNCTION_DEF @savefn #FUNCTION_NAME #PAREN_OPEN #PAREN_CLOSE CodeBlock @ret @jmp
+FunctionReturn -> #RETURN @ret
 G -> @setpid #IDENTIFIER
 Id -> @pid #IDENTIFIER
