@@ -1,5 +1,7 @@
 # The Piaz Language
 
+> A language that makes you cry
+
 ## how to run it?
 
 ```sh
