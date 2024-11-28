@@ -136,6 +136,16 @@ def register_actions(ir: IRGenerator):
         addr = ir.write_code((None, None, None, None))
         ir.stack.append(addr)
 
+    @ir.action("freeze")
+    def _(_: Token):
+        addr = ir.stack.pop()
+        tmp = ir.get_temp_address()
+
+        code = ("=", addr, None, tmp)
+        ir.write_code(code)
+
+        ir.stack.append(tmp)
+
     @ir.action("jmpfalse")
     def _(_: Token):
         addr: int = ir.stack.pop()
