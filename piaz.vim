@@ -4,9 +4,10 @@ endif
 
 syntax clear
 
-syntax keyword piazKeyword if elif else while let print break continue return def
+syntax keyword piazKeyword if elif else while let break continue return def
 
 syntax match piazOperator /[+\-*\/%&|!<>]=\?/
+syntax match piazOperator print
 syntax match piazOperator /[=]/
 
 syntax match piazDelimiter /[(){}]/
