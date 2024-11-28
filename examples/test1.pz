@@ -1,0 +1,15 @@
+let x = 10
+
+def $printx() {
+	print(x)
+}
+
+while x < 1000 {
+	x = x * 3 - 1
+	if x % 2 {
+		$printx()
+	} elif x % 5 {
+		print(5)
+		$printx()
+	}
+}

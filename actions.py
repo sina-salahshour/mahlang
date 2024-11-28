@@ -101,7 +101,7 @@ def register_actions(ir: IRGenerator):
 
         # ignore args for now
         if len(arg_list):
-            raise NotImplemented("Error Args are not supported for now")
+            raise Exception("Error Args are not supported for now")
 
         addr = ir.variable_table.get(function_name)
         if addr is None:
@@ -214,6 +214,6 @@ def register_actions(ir: IRGenerator):
                 case item:
                     arg_list.append(item)
 
-        for arg in arg_list:
+        for arg in arg_list[::-1]:
             code = (function_name, arg, None, None)
             ir.write_code(code)

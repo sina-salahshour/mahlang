@@ -12,6 +12,9 @@ python ./generate_parser.py ./piaz.lang
 
 # then get the result how ever you want
 
-python ./piaz.py ./input.pz run
+python ./piaz.py ./examples/input.pz run
+
+# or you can see the generated code with
+python ./piaz.py ./examples/input.pz build
 
 ```
