@@ -60,7 +60,9 @@ def register_actions(ir: IRGenerator):
     def _(current_token: Token):
         addr = ir.get_variable_address(current_token.literal)
         if addr is None:
-            raise NameError(f"Error: Undefined variable '{current_token.literal}'")
+            raise NameError(
+                f"Undefined variable '{current_token.literal}' at position {current_token.position}"
+            )
         ir.stack.append(addr)
 
     @ir.action("setpid")
@@ -68,7 +70,7 @@ def register_actions(ir: IRGenerator):
         tmp = ir.get_variable_address_in_scope(current_token.literal)
         if tmp is not None:
             raise NameError(
-                f"Error: variable is already defined {current_token.literal}"
+                f"Error at position {current_token.position}: variable is already defined {current_token.literal}"
             )
         addr = ir.declare_variable(current_token.literal)
         ir.stack.append(addr)
@@ -78,7 +80,7 @@ def register_actions(ir: IRGenerator):
         tmp = ir.get_variable_address_in_scope(current_token.literal)
         if tmp is not None:
             raise NameError(
-                f"Error: function is already defined {current_token.literal}"
+                f"Error at position {current_token.position}: function is already defined {current_token.literal}"
             )
         ir.declare_variable(current_token.literal, ir.code_pointer)
 
@@ -101,11 +103,15 @@ def register_actions(ir: IRGenerator):
 
         # ignore args for now
         if len(arg_list):
-            raise Exception("Error Args are not supported for now")
+            raise Exception(
+                f"Error at position {current_token.position}: Args are not supported for now."
+            )
 
         addr = ir.get_variable_address(function_name)
         if addr is None:
-            raise NameError(f"Undefined function '{current_token.literal}'")
+            raise NameError(
+                f"Undefined function '{current_token.literal}' at position {current_token.position}"
+            )
         code = ("call", None, None, addr)
         ir.write_code(code)
 

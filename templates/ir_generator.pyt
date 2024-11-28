@@ -26,8 +26,6 @@ class IRGenerator:
             addr = scope["variables"].get(name)
             if addr is not None:
                 return addr
-        else:
-            raise NameError(f"Error undefined variable {name}")
 
     def get_variable_address_in_scope(self, name: str):
         scope = self.scope_stack[-1]
@@ -52,7 +50,7 @@ class IRGenerator:
         addr = address or self.code_pointer
         if address is None:
             if self.code_pointer >= 400:
-                raise RuntimeError("Error: CodeBlock is full")
+                raise RuntimeError("CodeBlock is full")
             self.sstack[addr] = code
             self.code_pointer += 1
         else:

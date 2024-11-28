@@ -36,15 +36,19 @@ class Parser:
                     )
                 stack[:0] = production
             else:
-                raise SyntaxError(f"Invalid input file")
+                raise SyntaxError(
+                    f"Invalid syntax '{current_token}' at position '{current_token.position}'"
+                )
 
         if current_token != TokenType.EOF:
-            raise SyntaxError("Invalid input file")
+            raise SyntaxError(
+                "Invalid input file. input did not finish after parsing"
+            )
 
     def consume_action(self, action: str, current_token):
         action_fn = self.actions.get(action)
         if not action_fn:
-            raise RuntimeError(f"Error: Action not found '{action}'")
+            raise SystemError(f"Action not found '{action}' at position {current_token.position}")
 
         action_fn(current_token)
 

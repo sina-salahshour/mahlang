@@ -29,7 +29,7 @@ TOKEN_RULES = {
 
 assert (
     len(TOKEN_RULES) == len(TokenType) - INTERNAL_TOKEN_TYPE_COUNT
-), "Error specify rules for all tokens"
+), "Error: specify rules for all tokens"
 
 
 @dataclass
