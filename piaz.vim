@@ -7,10 +7,10 @@ syntax clear
 syntax keyword piazKeyword if elif else while let break continue return def
 
 syntax match piazOperator /[+\-*\/%&|!<>]=\?/
-syntax match piazOperator print
+syntax keyword piazOperator print
 syntax match piazOperator /[=]/
 
-syntax match piazDelimiter /[(){}]/
+syntax match piazDelimiter /[(){},]/
 
 syntax match piazFunction /\$\w\+/
 syntax match piazIdentifier /\<[a-zA-Z_]\w*\>/
