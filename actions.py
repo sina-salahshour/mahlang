@@ -58,14 +58,14 @@ def register_actions(ir: IRGenerator):
 
     @ir.action("pid")
     def _(current_token: Token):
-        addr = ir.variable_table.get(current_token.literal)
+        addr = ir.get_variable_address(current_token.literal)
         if addr is None:
             raise NameError(f"Error: Undefined variable '{current_token.literal}'")
         ir.stack.append(addr)
 
     @ir.action("setpid")
     def _(current_token: Token):
-        tmp = ir.variable_table.get(current_token.literal)
+        tmp = ir.get_variable_address_in_scope(current_token.literal)
         if tmp is not None:
             raise NameError(
                 f"Error: variable is already defined {current_token.literal}"
@@ -75,7 +75,7 @@ def register_actions(ir: IRGenerator):
 
     @ir.action("savefn")
     def _(current_token: Token):
-        tmp = ir.variable_table.get(current_token.literal)
+        tmp = ir.get_variable_address_in_scope(current_token.literal)
         if tmp is not None:
             raise NameError(
                 f"Error: function is already defined {current_token.literal}"
@@ -103,7 +103,7 @@ def register_actions(ir: IRGenerator):
         if len(arg_list):
             raise Exception("Error Args are not supported for now")
 
-        addr = ir.variable_table.get(function_name)
+        addr = ir.get_variable_address(function_name)
         if addr is None:
             raise NameError(f"Undefined function '{current_token.literal}'")
         code = ("call", None, None, addr)
@@ -159,6 +159,14 @@ def register_actions(ir: IRGenerator):
     @ir.action("omit")
     def _(_: Token):
         ir.stack.pop()
+
+    @ir.action("scopestart")
+    def _(_: Token):
+        ir.push_scope()
+
+    @ir.action("scopeend")
+    def _(_: Token):
+        ir.pop_scope()
 
     @ir.action("jmpwhile")
     def _(_: Token):

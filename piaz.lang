@@ -34,7 +34,7 @@ NUMBER: "\d+"
 Start -> Stmt Stmts @nop
 Stmts -> Stmt Stmts |  #e
 Stmt -> Declare | If | While | #BREAK @break | #CONTINUE @continue | Assign | Print | FunctionCall | FunctionDef | FunctionReturn
-CodeBlock -> #BRACE_OPEN Stmts #BRACE_CLOSE
+CodeBlock -> #BRACE_OPEN @scopestart Stmts @scopeend #BRACE_CLOSE
 If -> #IF Exp @save CodeBlock @jmpfalse Elif
 Elif -> @omit #ELIF Exp @save CodeBlock @jmpfalse Elif | Else @omit
 Else -> #ELSE @save CodeBlock @jmptrue | #e

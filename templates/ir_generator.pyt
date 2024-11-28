@@ -13,7 +13,8 @@ class IRGenerator:
         self.stack = []
 
         # self defined
-        self.variable_table = {}
+        self.scope_stack = []
+        self.scope_stack.append({"variables": {}})
 
     def get_temp_address(self):
         tmp_address = self.tmp_pointer
@@ -21,14 +22,31 @@ class IRGenerator:
         return tmp_address
 
     def get_variable_address(self, name: str):
-        return self.variable_table[name]
+        for scope in self.scope_stack[::-1]:
+            addr = scope["variables"].get(name)
+            if addr is not None:
+                return addr
+        else:
+            raise NameError(f"Error undefined variable {name}")
+
+    def get_variable_address_in_scope(self, name: str):
+        scope = self.scope_stack[-1]
+        addr = scope["variables"].get(name)
+        return addr
 
     def declare_variable(self, name, address=None):
+        current_scope = self.scope_stack[-1]
         addr = address if address is not None else self.variable_pointer
         if address is None:
             self.variable_pointer += 1
-        self.variable_table[name] = addr
+        current_scope["variables"][name] = addr
         return addr
+
+    def push_scope(self):
+        self.scope_stack.append({"variables": {}})
+
+    def pop_scope(self):
+        self.scope_stack.pop()
 
     def write_code(self, code, address=None):
         addr = address or self.code_pointer
