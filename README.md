@@ -12,6 +12,6 @@ python ./generate_parser.py ./piaz.lang
 
 # then get the result how ever you want
 
-python ./piaz.py ./input.math
+python ./piaz.py ./input.pz run
 
 ```
