@@ -3,105 +3,58 @@ from compiler.lexer import Token
 
 
 def register_actions(ir: IRGenerator):
-    @ir.action("add")
-    def _(_: Token):
+    def operator(op: str):
         lhs = ir.stack.pop()
         rhs = ir.stack.pop()
         tmp = ir.get_temp_address()
         ir.stack.append(tmp)
 
-        code = ("+", lhs, rhs, tmp)
+        code = (op, lhs, rhs, tmp)
         ir.write_code(code)
+
+    @ir.action("add")
+    def _(_: Token):
+        operator("+")
 
     @ir.action("sub")
     def _(_: Token):
-        lhs = ir.stack.pop()
-        rhs = ir.stack.pop()
-        tmp = ir.get_temp_address()
-        ir.stack.append(tmp)
-
-        code = ("-", lhs, rhs, tmp)
-        ir.write_code(code)
+        operator("-")
 
     @ir.action("eq")
     def _(_: Token):
-        lhs = ir.stack.pop()
-        rhs = ir.stack.pop()
-        tmp = ir.get_temp_address()
-        ir.stack.append(tmp)
-
-        code = ("eq", lhs, rhs, tmp)
-        ir.write_code(code)
+        operator("eq")
 
     @ir.action("lt")
     def _(_: Token):
-        lhs = ir.stack.pop()
-        rhs = ir.stack.pop()
-        tmp = ir.get_temp_address()
-        ir.stack.append(tmp)
-
-        code = ("lt", lhs, rhs, tmp)
-        ir.write_code(code)
+        operator("lt")
 
     @ir.action("gt")
     def _(_: Token):
-        lhs = ir.stack.pop()
-        rhs = ir.stack.pop()
-        tmp = ir.get_temp_address()
-        ir.stack.append(tmp)
-
-        code = ("gt", lhs, rhs, tmp)
-        ir.write_code(code)
+        operator("gt")
 
     @ir.action("and")
     def _(_: Token):
-        lhs = ir.stack.pop()
-        rhs = ir.stack.pop()
-        tmp = ir.get_temp_address()
-        ir.stack.append(tmp)
-
-        code = ("and", lhs, rhs, tmp)
-        ir.write_code(code)
+        operator("and")
 
     @ir.action("or")
     def _(_: Token):
-        lhs = ir.stack.pop()
-        rhs = ir.stack.pop()
-        tmp = ir.get_temp_address()
-        ir.stack.append(tmp)
-
-        code = ("or", lhs, rhs, tmp)
-        ir.write_code(code)
+        operator("or")
 
     @ir.action("neq")
     def _(_: Token):
-        lhs = ir.stack.pop()
-        rhs = ir.stack.pop()
-        tmp = ir.get_temp_address()
-        ir.stack.append(tmp)
-
-        code = ("neq", lhs, rhs, tmp)
-        ir.write_code(code)
+        operator("neq")
 
     @ir.action("mul")
     def _(_: Token):
-        lhs = ir.stack.pop()
-        rhs = ir.stack.pop()
-        tmp = ir.get_temp_address()
-        ir.stack.append(tmp)
-
-        code = ("*", lhs, rhs, tmp)
-        ir.write_code(code)
+        operator("*")
 
     @ir.action("div")
     def _(_: Token):
-        lhs = ir.stack.pop()
-        rhs = ir.stack.pop()
-        tmp = ir.get_temp_address()
-        ir.stack.append(tmp)
+        operator("/")
 
-        code = ("/", lhs, rhs, tmp)
-        ir.write_code(code)
+    @ir.action("mod")
+    def _(_: Token):
+        operator("%")
 
     @ir.action("pid")
     def _(current_token: Token):

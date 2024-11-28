@@ -2,6 +2,7 @@
 !PAREN_CLOSE: "[)]"
 !OP_ADD: "[+]"
 !OP_MUL: "[*]"
+!OP_MOD: "[%]"
 !OP_SUB: "-"
 !OP_DIV: "/"
 !EQ: "[=]{2}"
@@ -49,7 +50,7 @@ Unary' -> #AND Cond @and Unary' | #OR Cond @or Unary' | #e
 Cond -> Add Cond'
 Cond' -> #EQ Add @eq Cond' | #NEQ Add @neq Cond' | #LT Add @lt Cond' | #GT Add @gt Cond' | #e
 Add -> Mul Add'
-Add' -> #OP_ADD Mul @add Add' | #OP_SUB Mul @sub Add' | #e
+Add' -> #OP_ADD Mul @add Add' | #OP_SUB Mul @sub Add' | #OP_MOD Mul @mod Add' | #e
 Mul -> Atom Mul'
 Mul' -> #OP_MUL Atom @mul Mul' | #OP_DIV Atom @div Mul' | #e
 Atom -> #PAREN_OPEN Exp #PAREN_CLOSE | Id | @num #NUMBER
