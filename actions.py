@@ -107,16 +107,26 @@ def register_actions(ir: IRGenerator):
     def _(current_token: Token):
         addr = ir.variable_table.get(current_token.literal)
         if addr is None:
-            raise NameError(f"Undefined variable '{current_token.literal}'")
+            raise NameError(f"Error: Undefined variable '{current_token.literal}'")
         ir.stack.append(addr)
 
     @ir.action("setpid")
     def _(current_token: Token):
+        tmp = ir.variable_table.get(current_token.literal)
+        if tmp is not None:
+            raise NameError(
+                f"Error: variable is already defined {current_token.literal}"
+            )
         addr = ir.declare_variable(current_token.literal)
         ir.stack.append(addr)
 
     @ir.action("savefn")
     def _(current_token: Token):
+        tmp = ir.variable_table.get(current_token.literal)
+        if tmp is not None:
+            raise NameError(
+                f"Error: function is already defined {current_token.literal}"
+            )
         ir.declare_variable(current_token.literal, ir.code_pointer)
 
     @ir.action("ret")
