@@ -5,6 +5,7 @@ from compiler.ir_generator import IRGenerator
 from actions import register_actions
 import sys
 from code_interpreter import run_code
+import re
 
 sys.tracebacklimit = 0
 
@@ -23,7 +24,7 @@ def print_code_block(ir: IRGenerator):
         print("\t  " + "- " * 32)
 
 
-def generate_code(file_name: str):
+def read_file(file_name):
     try:
         with open(file_name) as f:
             input_str = f.read()
@@ -31,7 +32,10 @@ def generate_code(file_name: str):
         print(f"Error: file not found '{file_name}'\n")
         print(USAGE_HELP_MESSGE)
         exit(-3)
+    return input_str
 
+
+def generate_code(input_str: str):
     lexer = Lexer(input_str)
     parser = Parser(lexer)
     ir = IRGenerator(parser)
@@ -45,25 +49,55 @@ def generate_code(file_name: str):
     return ir
 
 
+def find_error_line(input_str: str, pos: int):
+    line_number = 1
+    row_number = 1
+
+    for index, char in enumerate(input_str):
+        row_number += 1
+        if char == "\n":
+            line_number += 1
+            row_number = 1
+        if index == pos:
+            return line_number, row_number
+
+
 def main():
     if len(sys.argv) != 3:
         print(USAGE_HELP_MESSGE)
         exit(-1)
     file_name = sys.argv[2]
+    file_str = read_file(file_name)
 
-    match sys.argv[1]:
-        case "build":
-            ir = generate_code(file_name)
-            print_code_block(ir)
-        case "run":
-            ir = generate_code(file_name)
-            run_code(ir.sstack[:400])
-        case unknown_command:
-            print(
-                f"Error: command not found '{unknown_command}'.\navailable commands are 'build' and 'run'\n"
-            )
-            print(USAGE_HELP_MESSGE)
-            exit(-2)
+    try:
+        match sys.argv[1]:
+            case "build":
+                ir = generate_code(file_str)
+                print_code_block(ir)
+            case "run":
+                ir = generate_code(file_str)
+                run_code(ir.sstack[:400])
+            case unknown_command:
+                print(
+                    f"Error: command not found '{unknown_command}'.\navailable commands are 'build' and 'run'\n"
+                )
+                print(USAGE_HELP_MESSGE)
+                exit(-2)
+    except Exception as e:
+        (message, *_) = e.args
+        pos = re.findall(r"at position (\d+)", message)
+        if not len(pos):
+            raise e
+        [pos] = pos
+        line_info = find_error_line(file_str, int(pos))
+        if not (line_info):
+            raise e
+        line, row = line_info
+        message = message.replace(pos, f"#{line}:{row}")
+
+        e.args = (message,)
+
+        raise e
 
 
 if __name__ == "__main__":
