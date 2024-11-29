@@ -17,11 +17,14 @@ syntax match piazIdentifier /\<[a-zA-Z_]\w*\>/
 
 syntax match piazNumber /\d\+/
 
+syn match   piazComment	"#.*$"
+
 highlight link piazKeyword Keyword
 highlight link piazOperator Operator
 highlight link piazDelimiter Delimiter
 highlight link piazFunction Function
 highlight link piazIdentifier Identifier
 highlight link piazNumber Number
+highlight link piazComment Comment
 
 let b:current_syntax = "piaz"

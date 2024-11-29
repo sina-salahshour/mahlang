@@ -17,19 +17,33 @@ with open(file_name) as f:
 raw_tokens, raw_grammar = input_string.split("\n--\n")
 
 tokens = []
+range_tokens = []
+range_separator_tokens = []
 separator_tokens = []
+ignored_tokens = []
 
 for token_line in raw_tokens.split("\n"):
-    is_separator = token_line.startswith("!")
+    is_separator = token_line.startswith(("#!", "!#", "!"))
+    is_ignored = token_line.startswith(("!#", "#!", "#"))
     if is_separator:
         token_line = token_line[1:]
+    if is_ignored:
+        token_line = token_line[1:]
     token_name, _, token_rule = token_line.partition(":")
-    tokens.append((token_name.strip(), token_rule.strip()))
-    if is_separator:
-        separator_tokens.append((token_name.strip(), token_rule.strip()))
+    is_range_token = token_rule.strip().startswith("(")
+    if is_ignored:
+        ignored_tokens.append(token_name)
+    if is_range_token:
+        range_tokens.append((token_name.strip(), token_rule.strip()))
+        if is_separator:
+            range_separator_tokens.append((token_name.strip(), token_rule.strip()))
+    else:
+        tokens.append((token_name.strip(), token_rule.strip()))
+        if is_separator:
+            separator_tokens.append((token_name.strip(), token_rule.strip()))
 
 token_types = "\n    ".join(
-    [f"{token_name} = '{token_name}'" for token_name, _ in tokens]
+    [f"{token_name} = '{token_name}'" for token_name, _ in [*tokens, *range_tokens]]
 )
 lexer_template = lexer_template.replace(
     "{% TOKEN_TYPES %}",
@@ -42,12 +56,40 @@ lexer_template = lexer_template.replace(
     "{% TOKEN_RULES %}",
     f"    {token_rules}",
 )
+range_token_rules = []
+for token_name, token_rule in range_tokens:
+    rule1, rule2 = token_rule[1:-1].split(",")
+    range_token_rules.append(
+        f"TokenType.{token_name} : (r{rule1.strip()},r{rule2.strip()}),"
+    )
+
+range_token_rules = "\n    ".join(range_token_rules)
+lexer_template = lexer_template.replace(
+    "{% RANGE_TOKEN_RULES %}",
+    f"    {range_token_rules}",
+)
 token_separators = "\n    ".join(
-    [f"TOKEN_RULES[TokenType.{token_name}]," for token_name, _ in separator_tokens]
+    [
+        *[
+            f"TOKEN_RULES[TokenType.{token_name}],"
+            for token_name, _ in separator_tokens
+        ],
+        *[
+            f"RANGE_TOKEN_RULES[TokenType.{token_name}][0],"
+            for token_name, _ in range_separator_tokens
+        ],
+    ]
 )
 lexer_template = lexer_template.replace(
     "{% TOKEN_SEPARATORS %}",
     f"    {token_separators}",
+)
+ignored_tokens_string = "\n    ".join(
+    [f"TokenType.{token_name}," for token_name in ignored_tokens]
+)
+lexer_template = lexer_template.replace(
+    "{% IGNORED_TOKENS %}",
+    f"    {ignored_tokens_string}",
 )
 
 # --

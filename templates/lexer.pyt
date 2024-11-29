@@ -27,8 +27,14 @@ TOKEN_RULES = {
 {% TOKEN_RULES %}
 }
 
+
+RANGE_TOKEN_RULES = {
+{% RANGE_TOKEN_RULES %}
+}
+
 assert (
-    len(TOKEN_RULES) == len(TokenType) - INTERNAL_TOKEN_TYPE_COUNT
+    len(TOKEN_RULES) + len(RANGE_TOKEN_RULES)
+    == len(TokenType) - INTERNAL_TOKEN_TYPE_COUNT
 ), "Error: specify rules for all tokens"
 
 
@@ -53,6 +59,9 @@ RULE_SEPARATORS = [
 {% TOKEN_SEPARATORS %}
 ]
 
+IGNORED_TOKENS = [
+{% IGNORED_TOKENS %}
+]
 
 class Lexer:
     rules = TOKEN_RULES
@@ -77,12 +86,26 @@ class Lexer:
         self.position += 1
         return current_char
 
-    def get_next_token(self):
+    def get_range_token(self, char, type, start_position):
+        range_token = RANGE_TOKEN_RULES[type]
+        while not re.fullmatch(range_token[1], self.peek_char()):
+            if len(self.input_str) == self.position:
+                raise SyntaxError("Unexpected EOF")
+            char += self.read_char()
+        char += self.read_char()
+        return Token(type, char, start_position)
+
+    def _get_next_token(self):
         self.skip_whitespaces()
         if len(self.input_str) == self.position:
             return Token(TokenType.EOF, "$", self.position)
         start_position = self.position
         char = self.read_char()
+
+        for type, [start, _] in RANGE_TOKEN_RULES.items():
+            if char == start:
+                return self.get_range_token(char, type, start_position)
+
         while True:
             next_char = self.peek_char()
             if (
@@ -106,3 +129,9 @@ class Lexer:
                 return Token(type, str(char), start_position)
         else:
             raise SyntaxError(f"Invalid token at position {start_position}: '{char}'")
+
+    def get_next_token(self):
+        while True:
+            token = self._get_next_token()
+            if token.type not in IGNORED_TOKENS:
+                return token

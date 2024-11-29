@@ -30,8 +30,9 @@ FUNCTION_DEF: "def"
 IDENTIFIER: "[a-zA-Z_]\w*"
 NUMBER: "\d+"
 !COLON: ":"
+#!COMMENT: ("#", "\n")
 --
-Start -> Stmt Stmts @nop
+Start -> Stmts @nop
 Stmts -> Stmt Stmts |  #e
 Stmt -> Declare | If | While | #BREAK @break | #CONTINUE @continue | Assign | Print | FunctionCall | FunctionDef | FunctionReturn
 CodeBlock -> #BRACE_OPEN @scopestart Stmts @scopeend #BRACE_CLOSE
