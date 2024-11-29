@@ -6,7 +6,7 @@ from actions import register_actions
 import sys
 from code_interpreter import run_code
 
-# sys.tracebacklimit = 0
+sys.tracebacklimit = 0
 
 USAGE_HELP_MESSGE = """Usage:
     pz run\t <input file>\t\t# to run file
