@@ -1,0 +1,22 @@
+STRING:"\"([^\"\\]|\\.)*\"";
+TOKEN_IGNORE_FLAG: "!";
+EPSILON: "#e";
+SEP: "--";
+TRANSITION: "->";
+PIPE: "\|";
+TOKEN_NAME: "#[a-zA-Z_]\w*";
+ID: "[a-zA-Z_]\w*";
+COLON: ":";
+ACTION: "@[a-zA-Z_]\w*";
+SEMICOLON: ";";
+--
+Lang -> @token_read_init Tokens @token_read_end #SEP @grammar_read_init Grammar @grammar_read_end;
+Tokens -> Token #SEMICOLON Tokens | #e;
+Token -> TokenModifiers @token_name #ID #COLON @token_rule #STRING @save_token;
+TokenModifiers -> @token_ignore_flag #TOKEN_IGNORE_FLAG | #e;
+Grammar -> Rule #SEMICOLON Grammar | #e;
+Rule -> @grammar_name #ID #TRANSITION SingleRuleResult RuleResult @save_rule;
+RuleResult -> @next_rule_result #PIPE SingleRuleResult RuleResult | #e;
+SingleRuleResult -> VariableCombination VariableCombinations;
+VariableCombinations ->  VariableCombination VariableCombinations | #e;
+VariableCombination ->  @rule_variable #EPSILON | @rule_variable #TOKEN_NAME | @rule_variable #ID | @rule_variable #ACTION;

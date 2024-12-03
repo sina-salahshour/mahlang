@@ -1,11 +1,8 @@
 from .lexer import TokenType, Lexer, Token
 
-RULES = {
-{% GRAMMAR_RULES %}}
+RULES = {% GRAMMAR_RULES %}
 
-PARSE_TABLE = {
-{% PARSING_TABLE %}
-}
+PARSE_TABLE = {% PARSING_TABLE %}
 
 START_SYMBOL = {% START_SYMBOL %}
 

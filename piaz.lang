@@ -1,62 +1,66 @@
-!PAREN_OPEN: "[(]"
-!PAREN_CLOSE: "[)]"
-!OP_ADD: "[+]"
-!OP_MUL: "[*]"
-!OP_MOD: "[%]"
-!OP_SUB: "-"
-!OP_DIV: "/"
-!EQ: "[=]{2}"
-!NEQ: "[!][=]"
-!LT: "[<]"
-!GT: "[>]"
-!AND: "&"
-!OR: "[|]"
-!NOT: "[!]"
-!ASSIGN: "[=]"
-!BRACE_OPEN: "[{]"
-!BRACE_CLOSE: "[}]"
-!COMA: ","
-IF: "if"
-ELIF: "elif"
-ELSE: "else"
-WHILE: "while"
-LET: "let"
-PRINT: "print"
-BREAK: "break"
-CONTINUE: "continue"
-RETURN: "return"
-FUNCTION_NAME: "[$]\w+"
-FUNCTION_DEF: "def"
-IDENTIFIER: "[a-zA-Z_]\w*"
-NUMBER: "\d+"
-!COLON: ":"
-#!COMMENT: ("#", "\n")
+PAREN_OPEN: "[(]";
+PAREN_CLOSE: "[)]";
+OP_ADD: "[+]";
+OP_MUL: "[*]";
+OP_MOD: "[%]";
+OP_SUB: "-";
+OP_DIV: "/";
+EQ: "[=]{2}";
+NEQ: "[!][=]";
+LT: "[<]";
+GT: "[>]";
+AND: "&";
+OR: "[|]";
+NOT: "[!]";
+ASSIGN: "[=]";
+BRACE_OPEN: "[{]";
+BRACE_CLOSE: "[}]";
+COMA: ",";
+IF: "if";
+ELIF: "elif";
+ELSE: "else";
+WHILE: "while";
+LET: "let";
+PRINT: "print";
+BREAK: "break";
+CONTINUE: "continue";
+RETURN: "return";
+FUNCTION_NAME: "[$]\w+";
+FUNCTION_DEF: "def";
+IDENTIFIER: "[a-zA-Z_]\w*";
+NUMBER: "\d+";
+COLON: ":";
+!COMMENT: "#.*";
 --
-Start -> Stmts @nop
-Stmts -> Stmt Stmts |  #e
-Stmt -> Declare | If | While | #BREAK @break | #CONTINUE @continue | Assign | Print | FunctionCall | FunctionDef | FunctionReturn | CodeBlock
-CodeBlock -> #BRACE_OPEN @scopestart Stmts @scopeend #BRACE_CLOSE
-If -> #IF Exp @freeze @save CodeBlock @jmpfalse Elif
-Elif -> @omit #ELIF Exp @save CodeBlock @jmpfalse Elif | Else @omit
-Else -> #ELSE @save CodeBlock @jmptrue | #e
-While -> #WHILE @save @save Exp @save CodeBlock @jmpwhile
-Declare -> #LET G #ASSIGN Exp @assign
-Assign -> Id #ASSIGN Exp @assign
-Print -> @init_call #PRINT #PAREN_OPEN Args #PAREN_CLOSE @print
-Args -> Exp ArgsRest | #e
-ArgsRest -> #COMA Args | #e
-Exp -> Unary
-Unary -> Cond Unary'
-Unary' -> #AND Cond @and Unary' | #OR Cond @or Unary' | #e
-Cond -> Add Cond'
-Cond' -> #EQ Add @eq Cond' | #NEQ Add @neq Cond' | #LT Add @lt Cond' | #GT Add @gt Cond' | #e
-Add -> Mul Add'
-Add' -> #OP_ADD Mul @add Add' | #OP_SUB Mul @sub Add' | #OP_MOD Mul @mod Add' | #e
-Mul -> Atom Mul'
-Mul' -> #OP_MUL Atom @mul Mul' | #OP_DIV Atom @div Mul' | #e
-Atom -> #PAREN_OPEN Exp #PAREN_CLOSE | Id | @num #NUMBER
-FunctionCall -> @init_call #FUNCTION_NAME #PAREN_OPEN Args #PAREN_CLOSE @call
-FunctionDef -> @save #FUNCTION_DEF @savefn #FUNCTION_NAME #PAREN_OPEN #PAREN_CLOSE CodeBlock @ret @jmp
-FunctionReturn -> #RETURN @ret
-G -> @setpid #IDENTIFIER
-Id -> @pid #IDENTIFIER
+Start -> Stmts @nop;
+Stmts -> Stmt Stmts |  #e;
+Stmt -> Declare | If | While | #BREAK @break | #CONTINUE @continue | Assign |
+Print | FunctionCall | FunctionDef | FunctionReturn | CodeBlock;
+CodeBlock -> #BRACE_OPEN @scopestart Stmts @scopeend #BRACE_CLOSE;
+If -> #IF Exp @freeze @save CodeBlock @jmpfalse Elif;
+Elif -> @omit #ELIF Exp @save CodeBlock @jmpfalse Elif | Else @omit;
+Else -> #ELSE @save CodeBlock @jmptrue | #e;
+While -> #WHILE @save @save Exp @save CodeBlock @jmpwhile;
+Declare -> #LET G #ASSIGN Exp @assign;
+Assign -> Id #ASSIGN Exp @assign;
+Print -> @init_call #PRINT #PAREN_OPEN Args #PAREN_CLOSE @print;
+Args -> Exp ArgsRest | #e;
+ArgsRest -> #COMA Args | #e;
+Exp -> Unary;
+Unary -> Cond Unaryp;
+Unaryp -> #AND Cond @and Unaryp | #OR Cond @or Unaryp | #e;
+Cond -> Add Condp;
+Condp -> #EQ Add @eq Condp | #NEQ Add @neq Condp | #LT Add @lt Condp | #GT Add
+@gt Condp | #e;
+Add -> Mul Addp;
+Addp -> #OP_ADD Mul @add Addp | #OP_SUB Mul @sub Addp | #OP_MOD Mul @mod Addp |
+#e;
+Mul -> Atom Mulp;
+Mulp -> #OP_MUL Atom @mul Mulp | #OP_DIV Atom @div Mulp | #e;
+Atom -> #PAREN_OPEN Exp #PAREN_CLOSE | Id | @num #NUMBER;
+FunctionCall -> @init_call #FUNCTION_NAME #PAREN_OPEN Args #PAREN_CLOSE @call;
+FunctionDef -> @save #FUNCTION_DEF @savefn #FUNCTION_NAME #PAREN_OPEN
+#PAREN_CLOSE CodeBlock @ret @jmp;
+FunctionReturn -> #RETURN @ret;
+G -> @setpid #IDENTIFIER;
+Id -> @pid #IDENTIFIER;
