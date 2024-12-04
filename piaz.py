@@ -63,14 +63,19 @@ def find_error_line(input_str: str, pos: int):
 
 
 def main():
-    if len(sys.argv) != 3:
+    if len(sys.argv) == 3:
+        command = sys.argv[1]
+        file_name = sys.argv[2]
+    elif len(sys.argv) == 2:
+        command = "run"
+        file_name = sys.argv[1]
+    else:
         print(USAGE_HELP_MESSGE)
         exit(-1)
-    file_name = sys.argv[2]
     file_str = read_file(file_name)
 
     try:
-        match sys.argv[1]:
+        match command:
             case "build":
                 ir = generate_code(file_str)
                 print_code_block(ir)
