@@ -262,3 +262,26 @@ def register_actions(ir: IRGenerator):
         for arg in arg_list[::-1]:
             code = (function_name, arg, None, None)
             ir.write_code(code)
+
+    @ir.action("input")
+    def _(current_token: Token):
+        arg_list = []
+        while True:
+            current_stack_item = ir.stack.pop()
+
+            match current_stack_item:
+                case ["function_arg_stack_base", function_name]:
+                    break
+                case item:
+                    arg_list.append(item)
+
+        # ignore args for now
+        if len(arg_list):
+            raise Exception(
+                f"Error at position {current_token.position}: Args are not supported for now."
+            )
+        tmp = ir.get_temp_address()
+
+        code = (function_name, None, None, tmp)
+        ir.write_code(code)
+        ir.stack.append(tmp)

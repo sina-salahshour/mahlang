@@ -1,4 +1,5 @@
 from typing import Any, Iterable
+import sys
 
 
 def run_code(code_block: list):
@@ -15,6 +16,21 @@ def run_code(code_block: list):
                 break
             case ("print", arg, None, None):
                 print(stack[arg])
+            case ("input", None, None, loc):
+                raw_num = ""
+                has_num_started = False
+                while True:
+                    char = sys.stdin.read(1)
+                    if char.isdigit():
+                        has_num_started = True
+                        raw_num += char
+                    else:
+                        if not has_num_started:
+                            continue
+                        else:
+                            break
+                num = int(raw_num)
+                stack[loc] = num
             case ("jmpf", cond_addr, None, loc):
                 if not stack[cond_addr]:
                     pc = loc

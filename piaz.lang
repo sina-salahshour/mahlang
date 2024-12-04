@@ -22,6 +22,7 @@ ELSE: "else";
 WHILE: "while";
 LET: "let";
 PRINT: "print";
+INPUT: "input";
 BREAK: "break";
 CONTINUE: "continue";
 RETURN: "return";
@@ -44,6 +45,7 @@ While -> #WHILE @savewhile @savewhile Exp @save CodeBlock @jmpwhile;
 Declare -> #LET G #ASSIGN Exp @assign;
 Assign -> Id #ASSIGN Exp @assign;
 Print -> @init_call #PRINT #PAREN_OPEN Args #PAREN_CLOSE @print;
+Input -> @init_call #INPUT #PAREN_OPEN Args #PAREN_CLOSE @input;
 Args -> Exp ArgsRest | #e;
 ArgsRest -> #COMA Args | #e;
 Exp -> Unary;
@@ -57,7 +59,7 @@ Addp -> #OP_ADD Mul @add Addp | #OP_SUB Mul @sub Addp | #OP_MOD Mul @mod Addp |
 #e;
 Mul -> Atom Mulp;
 Mulp -> #OP_MUL Atom @mul Mulp | #OP_DIV Atom @div Mulp | #e;
-Atom -> #PAREN_OPEN Exp #PAREN_CLOSE | Id | @num #NUMBER;
+Atom -> #PAREN_OPEN Exp #PAREN_CLOSE | Id | @num #NUMBER | Input;
 FunctionCall -> @init_call #FUNCTION_NAME #PAREN_OPEN Args #PAREN_CLOSE @call;
 FunctionDef -> @save #FUNCTION_DEF @savefn #FUNCTION_NAME #PAREN_OPEN
 #PAREN_CLOSE CodeBlock @ret @jmp;

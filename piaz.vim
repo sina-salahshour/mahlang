@@ -7,7 +7,7 @@ syntax clear
 syntax keyword piazKeyword if elif else while let break continue return def
 
 syntax match piazOperator /[+\-*\/%&|!<>]=\?/
-syntax keyword piazOperator print
+syntax keyword piazOperator print input
 syntax match piazOperator /[=]/
 
 syntax match piazDelimiter /[(){},]/
