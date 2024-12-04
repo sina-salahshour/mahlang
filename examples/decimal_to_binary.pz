@@ -1,0 +1,34 @@
+let pow_a = 0
+let pow_b = 0
+let pow_res = 0
+def $pow() {
+	pow_res = 1
+	while pow_b {
+		pow_res = pow_res * pow_a
+		pow_b = pow_b - 1
+	}
+}
+
+# pow_a = 2
+# pow_b = 3
+# $pow()
+# print(pow_res)
+
+let x = input()
+let res = 0
+let i = 0
+while x {
+	let rem = x % 2
+	x = x / 2
+
+	pow_a = 10
+	pow_b = i
+	$pow()
+
+
+	res = res + rem * pow_res
+
+	i = i + 1
+}
+
+print(res)
