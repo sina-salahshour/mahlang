@@ -1,4 +1,3 @@
-from copyreg import constructor
 from compiler.lexer import Lexer, Token
 from compiler.parser import Parser
 from compiler.ir_generator import IRGenerator
@@ -16,7 +15,7 @@ file_name = sys.argv[1]
 ROOT_DIR = Path(__file__).parent
 TEMPLATE_DIR = ROOT_DIR / "templates"
 
-DEST_DIR = ROOT_DIR if len(sys.argv) < 3 else Path(sys.argv[2])
+DEST_DIR = Path(".") if len(sys.argv) < 3 else Path(sys.argv[2])
 with open(TEMPLATE_DIR / "lexer.pyt") as f:
     lexer_template = f.read()
 with open(TEMPLATE_DIR / "parser.pyt") as f:

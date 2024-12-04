@@ -40,7 +40,7 @@ CodeBlock -> #BRACE_OPEN @scopestart Stmts @scopeend #BRACE_CLOSE;
 If -> #IF Exp @freeze @save CodeBlock @jmpfalse Elif;
 Elif -> @omit #ELIF Exp @save CodeBlock @jmpfalse Elif | Else @omit;
 Else -> #ELSE @save CodeBlock @jmptrue | #e;
-While -> #WHILE @save @save Exp @save CodeBlock @jmpwhile;
+While -> #WHILE @savewhile @savewhile Exp @save CodeBlock @jmpwhile;
 Declare -> #LET G #ASSIGN Exp @assign;
 Assign -> Id #ASSIGN Exp @assign;
 Print -> @init_call #PRINT #PAREN_OPEN Args #PAREN_CLOSE @print;

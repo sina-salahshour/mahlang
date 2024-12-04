@@ -136,6 +136,11 @@ def register_actions(ir: IRGenerator):
         addr = ir.write_code((None, None, None, None))
         ir.stack.append(addr)
 
+    @ir.action("savewhile")
+    def _(_: Token):
+        addr = ir.write_code(("while", None, None, None))
+        ir.stack.append(addr)
+
     @ir.action("freeze")
     def _(_: Token):
         addr = ir.stack.pop()
@@ -205,14 +210,30 @@ def register_actions(ir: IRGenerator):
 
     @ir.action("break")
     def _(_: Token):
-        pre_cond_addr_2 = ir.stack[-3]
-        code = ("jmp", None, None, pre_cond_addr_2)
+        save_counter = 1
+        for addr in ir.stack[::-1]:
+            if isinstance(ir.sstack[addr], tuple) and ir.sstack[addr][0] == "while":
+                if save_counter == 1:
+                    code = ("jmp", None, None, addr)
+                    break
+                else:
+                    save_counter += 1
+        else:
+            raise Exception("Error while backpatching while loop")
         ir.write_code(code)
 
     @ir.action("continue")
     def _(_: Token):
-        pre_cond_addr_1 = ir.stack[-4]
-        code = ("jmp", None, None, pre_cond_addr_1)
+        save_counter = 1
+        for addr in ir.stack[::-1]:
+            if isinstance(ir.sstack[addr], tuple) and ir.sstack[addr][0] == "while":
+                if save_counter == 2:
+                    code = ("jmp", None, None, addr)
+                    break
+                else:
+                    save_counter += 1
+        else:
+            raise Exception("Error while backpatching while loop")
         ir.write_code(code)
 
     @ir.action("nop")
