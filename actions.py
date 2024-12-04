@@ -275,10 +275,9 @@ def register_actions(ir: IRGenerator):
                 case item:
                     arg_list.append(item)
 
-        # ignore args for now
         if len(arg_list):
             raise Exception(
-                f"Error at position {current_token.position}: Args are not supported for now."
+                f"Error at position {current_token.position}: input command doesn't take any arguments."
             )
         tmp = ir.get_temp_address()
 
