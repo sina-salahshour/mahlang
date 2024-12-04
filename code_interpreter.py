@@ -12,7 +12,7 @@ def run_code(code_block: list):
 
         match operation:
             case (None, None, None, None):
-                print("program ended")
+                # print("program ended")
                 break
             case ("print", arg, None, None):
                 print(stack[arg])
