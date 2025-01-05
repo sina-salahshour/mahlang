@@ -5,7 +5,7 @@ SEP: "--";
 TRANSITION: "->";
 PIPE: "\|";
 TOKEN_NAME: "#[a-zA-Z_]\w*";
-ID: "[a-zA-Z_]\w*";
+ID: "[a-zA-Z_](?:\w|')*";
 COLON: ":";
 ACTION: "@[a-zA-Z_]\w*";
 SEMICOLON: ";";

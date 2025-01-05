@@ -41,7 +41,7 @@ TOKEN_RULES = {
     TokenType.TRANSITION : r"->",
     TokenType.PIPE : r"\|",
     TokenType.TOKEN_NAME : r"#[a-zA-Z_]\w*",
-    TokenType.ID : r"[a-zA-Z_]\w*",
+    TokenType.ID : r"[a-zA-Z_](?:\w|')*",
     TokenType.COLON : r":",
     TokenType.ACTION : r"@[a-zA-Z_]\w*",
     TokenType.SEMICOLON : r";",

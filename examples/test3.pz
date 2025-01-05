@@ -1,6 +1,0 @@
-let i = 21
-
-while i > 20 & i < 30 | i == 30 {
-print(i)
-i = i + 1
-}

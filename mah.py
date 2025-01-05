@@ -1,17 +1,18 @@
 #!/usr/bin/python
+import re
+import sys
+
+from actions import register_actions
+from code_interpreter import run_code
+from compiler.ir_generator import IRGenerator
 from compiler.lexer import Lexer
 from compiler.parser import Parser
-from compiler.ir_generator import IRGenerator
-from actions import register_actions
-import sys
-from code_interpreter import run_code
-import re
 
 sys.tracebacklimit = 0
 
 USAGE_HELP_MESSGE = """Usage:
-    pz run\t <input file>\t\t# to run file
-    pz build\t <input file>\t\t# to see the program instructions"""
+    mah run\t <input file>\t\t# to run file
+    mah build\t <input file>\t\t# to see the program instructions"""
 
 
 def print_code_block(ir: IRGenerator):

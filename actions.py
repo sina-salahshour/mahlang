@@ -20,6 +20,10 @@ def register_actions(ir: IRGenerator):
     def _(_: Token):
         operator("-")
 
+    @ir.action("pow")
+    def _(_: Token):
+        operator("**")
+
     @ir.action("eq")
     def _(_: Token):
         operator("eq")
@@ -51,6 +55,10 @@ def register_actions(ir: IRGenerator):
     @ir.action("div")
     def _(_: Token):
         operator("/")
+
+    @ir.action("truediv")
+    def _(_: Token):
+        operator("//")
 
     @ir.action("mod")
     def _(_: Token):
@@ -128,7 +136,7 @@ def register_actions(ir: IRGenerator):
         tmp = ir.get_temp_address()
         ir.stack.append(tmp)
 
-        code = ("ld", int(current_token.literal), None, tmp)
+        code = ("ld", float(current_token.literal), None, tmp)
         ir.write_code(code)
 
     @ir.action("save")

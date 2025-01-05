@@ -33,7 +33,7 @@ NUMBER: "\d+";
 COLON: ":";
 !COMMENT: "#.*";
 --
-Start -> Stmts @nop;
+Start' -> Stmts @nop;
 Stmts -> Stmt Stmts |  #e;
 Stmt -> Declare | If | While | #BREAK @break | #CONTINUE @continue | Assign |
 Print | FunctionCall | FunctionDef | FunctionReturn | CodeBlock;

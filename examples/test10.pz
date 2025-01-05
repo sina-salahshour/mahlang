@@ -1,3 +1,0 @@
-let x = input()
-let y = input()
-print(x + y)

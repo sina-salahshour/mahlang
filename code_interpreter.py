@@ -1,5 +1,5 @@
-from typing import Any, Iterable
 import sys
+from typing import Any, Iterable
 
 
 def run_code(code_block: list):
@@ -43,6 +43,10 @@ def run_code(code_block: list):
                 b = stack[lhs]
                 a = stack[rhs]
                 stack[dest] = a + b
+            case ("**", lhs, rhs, dest):
+                b = stack[lhs]
+                a = stack[rhs]
+                stack[dest] = a**b
             case ("*", lhs, rhs, dest):
                 b = stack[lhs]
                 a = stack[rhs]
@@ -52,6 +56,10 @@ def run_code(code_block: list):
                 a = stack[rhs]
                 stack[dest] = a - b
             case ("/", lhs, rhs, dest):
+                b = stack[lhs]
+                a = stack[rhs]
+                stack[dest] = a / b
+            case ("//", lhs, rhs, dest):
                 b = stack[lhs]
                 a = stack[rhs]
                 stack[dest] = a // b

@@ -1,8 +1,10 @@
+import sys
+from os import error
+from pathlib import Path
+
+from compiler.ir_generator import IRGenerator
 from compiler.lexer import Lexer, Token
 from compiler.parser import Parser
-from compiler.ir_generator import IRGenerator
-import sys
-from pathlib import Path
 
 
 class NonQuoteStr(str):
@@ -25,6 +27,8 @@ with open(TEMPLATE_DIR / "ir_generator.pyt") as f:
 
 with open(file_name) as f:
     input_string = f.read()
+
+used_tokens = set()
 
 lexer = Lexer(input_string)
 parser = Parser(lexer)
@@ -103,6 +107,7 @@ def _(var: Token):
     if var.literal == "#e":
         return
     if var.literal.startswith("#"):
+        used_tokens.add(var.literal[1:])
         current_rule_result.append(NonQuoteStr("TokenType." + var.literal[1:]))
     else:
         current_rule_result.append(var.literal)
@@ -254,7 +259,7 @@ for key, rules in grammar.items():
         else:
             has_lambda = True
         if len(res & key_res):
-            raise Exception("Error: the grammar is not LL(1)")
+            raise Exception("Error: the grammar is not LL(1)", res & key_res, key)
         key_res = key_res | res
         for item in res:
             parsing_table[key][item] = NonQuoteStr(f'RULES["{key}"][{index}]')
@@ -263,7 +268,9 @@ for key, rules in grammar.items():
             for item in res:
                 parsing_table[key][item] = NonQuoteStr(f'RULES["{key}"][{index}]')
             if len(res.intersection(key_res)):
-                raise Exception("Error: the grammar is not LL(1)")
+                raise Exception(
+                    "Error: the grammar is not LL(1)", key, res.intersection(key_res)
+                )
         key_res = key_res | res
 
 parser_template = parser_template.replace(
@@ -275,6 +282,13 @@ parser_template = parser_template.replace(
     f'"{start_symbol}"',
 )
 
+defined_tokens = set(map(lambda x: x[0], tokens))
+undefined_tokens = used_tokens - defined_tokens
+if undefined_tokens:
+    raise Exception(f"Undefined Token[s] '{', '.join(undefined_tokens)}'")
+unused_tokens = defined_tokens - used_tokens
+if unused_tokens:
+    print(f"Warning: Unused Token[s] '{', '.join(unused_tokens)}'")
 
 COMPILER_DIR = DEST_DIR / "compiler"
 

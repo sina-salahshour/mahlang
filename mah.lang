@@ -1,0 +1,122 @@
+Semicolon: ";";
+ParenOpen: "[(]";
+ParenClose: "[)]";
+Add: "[+]";
+Pow: "\*\*";
+Mul: "[*]";
+Sub: "-";
+TrueDiv: "//";
+Div: "/";
+Mod: "%";
+Assign: "[=]";
+Let: "let";
+Print: "print";
+Input: "input";
+Sin: "sin";
+Cos: "cos";
+Coma: ",";
+Number: "\d+(?:\.\d+)?";
+ID: "[a-zA-Z_]\w*";
+--
+
+Stmts ->
+	Stmt #Semicolon Stmts'
+;
+
+Stmts' ->
+	Stmts
+|	@nop
+;
+
+Stmt ->
+	Print
+|	Declaration
+|	Assignment
+;
+
+Expr ->
+	Term Expr'
+;
+
+Expr' ->
+	#Add Term @add Expr'
+|	#Sub Term @sub Expr'
+|	#Mod Term @mod Expr'
+|	#e
+;
+
+Term ->
+	Unary Term'
+;
+
+Term' ->
+	#Mul Unary @mul Term'
+|	#Div Unary @div Term'
+|	#TrueDiv Unary @truediv Term'
+|	#e
+;
+
+Unary ->
+	#Sub Unary @negate
+|	Pow
+;
+
+Pow ->
+	Factor Pow'
+;
+
+Pow' ->
+	#Pow Pow @pow
+|	#e
+;
+
+Factor ->
+	#ParenOpen Expr #ParenClose
+|	ID
+|	Sin
+|	Cos
+|	Num
+|	Input
+;
+
+ID ->
+	@pid #ID
+;
+
+Print ->
+	@init_call #Print #ParenOpen Args #ParenClose @print
+;
+
+Input ->
+	@init_call #Input #ParenOpen #ParenClose @input
+;
+
+Sin ->
+	@init_call #Sin #ParenOpen Args #ParenClose @sin
+;
+
+Cos ->
+	@init_call #Cos #ParenOpen Args #ParenClose @cos
+;
+
+Declaration ->
+	#Let @setpid #ID #Assign Expr @assign
+;
+
+Assignment ->
+	ID #Assign Expr @assign
+;
+
+Num ->
+	@num #Number;
+
+Args ->
+	Expr Args'
+|	#e
+;
+
+Args' ->
+	#Coma Args
+|	#e
+;
+
