@@ -32,7 +32,7 @@ Continue: "continue";
 Return: "return";
 Def: "def";
 Number: "\d+(?:\.\d+)?";
-ID: "[a-zA-Z_]\w*";
+ID: "[a-zA-Z_$](?:\w|$)*";
 !Comment: "#.*";
 --
 
