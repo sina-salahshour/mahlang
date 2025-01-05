@@ -1,7 +1,7 @@
 let pow_a = 0
 let pow_b = 0
 let pow_res = 0
-def $pow() {
+def pow() {
 	pow_res = 1
 	while pow_b {
 		pow_res = pow_res * pow_a
@@ -11,7 +11,7 @@ def $pow() {
 
 # pow_a = 2
 # pow_b = 3
-# $pow()
+# pow()
 # print(pow_res)
 
 let x = input()
@@ -23,7 +23,7 @@ while x {
 
 	pow_a = 10
 	pow_b = i
-	$pow()
+	pow()
 
 
 	res = res + rem * pow_res
