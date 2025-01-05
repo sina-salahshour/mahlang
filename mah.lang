@@ -41,7 +41,12 @@ Start ->
 ;
 
 Stmts ->
-	Stmt #Semicolon Stmts'
+	Stmt OptionalSemicolon Stmts'
+;
+
+OptionalSemicolon -> 
+	#Semicolon
+|	#e
 ;
 
 Stmts' ->
