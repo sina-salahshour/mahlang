@@ -104,7 +104,7 @@ def register_actions(ir: IRGenerator):
             current_stack_item = ir.stack.pop()
 
             match current_stack_item:
-                case ["function_arg_stack_base", function_name]:
+                case ["function_arg_stack_base", addr]:
                     break
                 case item:
                     arg_list.append(item)
@@ -115,7 +115,6 @@ def register_actions(ir: IRGenerator):
                 f"Error at position {current_token.position}: Args are not supported for now."
             )
 
-        addr = ir.get_variable_address(function_name)
         if addr is None:
             raise NameError(
                 f"Undefined function '{current_token.literal}' at position {current_token.position}"
@@ -257,6 +256,12 @@ def register_actions(ir: IRGenerator):
     def _(_: Token):
         code = (None, None, None, None)
         ir.write_code(code)
+
+    @ir.action("init_call_local")
+    def _(_: Token):
+        function_addr = ir.stack.pop()
+
+        ir.stack.append(["function_arg_stack_base", function_addr])
 
     @ir.action("init_call")
     def _(current_token: Token):

@@ -1,2 +1,9 @@
 let x = ---(10);
-print(x);
+def test() {
+	print(x);
+};
+test();
+test();
+test();
+test();
+test();

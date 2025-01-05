@@ -16,7 +16,11 @@ def run_code(code_block: list):
                 # print("program ended")
                 break
             case ("print", arg, None, None):
-                print(stack[arg])
+                val = stack[arg]
+                if val % 1 == 0:
+                    print(int(val))
+                else:
+                    print(val)
             case ("input", None, None, loc):
                 raw_num = ""
                 has_num_started = False

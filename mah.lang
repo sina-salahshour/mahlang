@@ -1,4 +1,6 @@
 Semicolon: ";";
+BraceOpen: "[{]";
+BraceClose: "[}]";
 ParenOpen: "[(]";
 ParenClose: "[)]";
 Add: "[+]";
@@ -21,10 +23,22 @@ Input: "input";
 Sin: "sin";
 Cos: "cos";
 Coma: ",";
+If: "if";
+Elif: "elif";
+Else: "else";
+While: "while";
+Break: "break";
+Continue: "continue";
+Return: "return";
+Def: "def";
 Number: "\d+(?:\.\d+)?";
 ID: "[a-zA-Z_]\w*";
 !Comment: "#.*";
 --
+
+Start ->
+	Stmts @nop
+;
 
 Stmts ->
 	Stmt #Semicolon Stmts'
@@ -32,12 +46,23 @@ Stmts ->
 
 Stmts' ->
 	Stmts
-|	@nop
+|	#e
 ;
 
 Stmt ->
 	Print
 |	Declaration
+|	ID CallOrAssign
+|	If
+|	While
+|	#Break @break
+|	#Continue @continue
+|	#Return @ret
+|	FunctionDef
+;
+
+CallOrAssign ->
+	Call
 |	Assignment
 ;
 
@@ -137,7 +162,7 @@ Declaration ->
 ;
 
 Assignment ->
-	ID #Assign Expr @assign
+	#Assign Expr @assign
 ;
 
 Num ->
@@ -153,3 +178,32 @@ Args' ->
 |	#e
 ;
 
+CodeBlock ->
+	#BraceOpen @scopestart Stmts' @scopeend #BraceClose
+;
+
+If ->
+	#If Expr @freeze @save CodeBlock @jmpfalse Elif
+;
+
+Elif ->
+	@omit #Elif Expr @save CodeBlock @jmpfalse Elif
+|	Else @omit
+;
+
+Else ->
+	#Else @save CodeBlock @jmptrue
+|	#e
+;
+
+While ->
+	#While @savewhile @savewhile Expr @save CodeBlock @jmpwhile
+;
+
+FunctionDef ->
+	@save #Def @savefn #ID
+		#ParenOpen #ParenClose CodeBlock @ret @jmp
+;
+
+Call ->
+	@init_call_local #ParenOpen Args #ParenClose @call;
