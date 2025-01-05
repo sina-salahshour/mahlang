@@ -1,2 +1,2 @@
-let x = sin(input());
+let x = ---(10);
 print(x);

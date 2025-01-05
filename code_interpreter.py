@@ -50,6 +50,9 @@ def run_code(code_block: list):
             case ("cos", lhs, None, dest):
                 b = stack[lhs]
                 stack[dest] = math.cos(b)
+            case ("neg", lhs, None, dest):
+                b = stack[lhs]
+                stack[dest] = -b
             case ("**", lhs, rhs, dest):
                 b = stack[lhs]
                 a = stack[rhs]

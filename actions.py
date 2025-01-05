@@ -131,6 +131,15 @@ def register_actions(ir: IRGenerator):
         code = ("=", src, None, dest)
         ir.write_code(code)
 
+    @ir.action("negate")
+    def _(_: Token):
+        src = ir.stack.pop()
+        tmp = ir.get_temp_address()
+
+        code = ("neg", src, None, tmp)
+        ir.write_code(code)
+        ir.stack.append(tmp)
+
     @ir.action("num")
     def _(current_token: Token):
         tmp = ir.get_temp_address()

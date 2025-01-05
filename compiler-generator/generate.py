@@ -282,7 +282,7 @@ parser_template = parser_template.replace(
     f'"{start_symbol}"',
 )
 
-defined_tokens = set(map(lambda x: x[0], tokens))
+defined_tokens = set(map(lambda x: x[0], filter(lambda x: not x[2], tokens)))
 undefined_tokens = used_tokens - defined_tokens
 if undefined_tokens:
     raise Exception(f"Undefined Token[s] '{', '.join(undefined_tokens)}'")

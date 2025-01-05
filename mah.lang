@@ -6,6 +6,12 @@ Pow: "\*\*";
 Mul: "[*]";
 Sub: "-";
 TrueDiv: "//";
+Eq: "[=]{2}";
+Neq: "[!][=]";
+Lt: "[<]";
+Gt: "[>]";
+And: "&";
+Or: "[|]";
 Div: "/";
 Mod: "%";
 Assign: "[=]";
@@ -17,6 +23,7 @@ Cos: "cos";
 Coma: ",";
 Number: "\d+(?:\.\d+)?";
 ID: "[a-zA-Z_]\w*";
+!Comment: "#.*";
 --
 
 Stmts ->
@@ -34,14 +41,40 @@ Stmt ->
 |	Assignment
 ;
 
-Expr ->
-	Term Expr'
+Expr -> 
+	Condition
 ;
 
-Expr' ->
-	#Add Term @add Expr'
-|	#Sub Term @sub Expr'
-|	#Mod Term @mod Expr'
+Condition ->
+	Compare Condition'
+;
+
+Condition' ->
+	#Or Compare @or Condition'
+|	#And Compare @and Condition'
+|	#e
+;
+
+Compare ->
+	Exp Compare'
+;
+
+Compare' ->
+	#Eq Exp @eq Compare'
+|	#Neq Exp @neq Compare'
+|	#Lt Exp @lt Compare'
+|	#Gt Exp @gt Compare'
+|	#e
+;
+
+Exp ->
+	Term Exp'
+;
+
+Exp' ->
+	#Add Term @add Exp'
+|	#Sub Term @sub Exp'
+|	#Mod Term @mod Exp'
 |	#e
 ;
 
