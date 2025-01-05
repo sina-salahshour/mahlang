@@ -271,6 +271,50 @@ def register_actions(ir: IRGenerator):
             code = (function_name, arg, None, None)
             ir.write_code(code)
 
+    @ir.action("sin")
+    def _(_: Token):
+        arg_list = []
+        while True:
+            current_stack_item = ir.stack.pop()
+
+            match current_stack_item:
+                case ["function_arg_stack_base", function_name]:
+                    break
+                case item:
+                    arg_list.append(item)
+
+        if len(arg_list) > 1:
+            raise SyntaxError("'sin' can only have one argument")
+
+        [arg] = arg_list
+        tmp = ir.get_temp_address()
+
+        code = (function_name, arg, None, tmp)
+        ir.write_code(code)
+        ir.stack.append(tmp)
+
+    @ir.action("cos")
+    def _(_: Token):
+        arg_list = []
+        while True:
+            current_stack_item = ir.stack.pop()
+
+            match current_stack_item:
+                case ["function_arg_stack_base", function_name]:
+                    break
+                case item:
+                    arg_list.append(item)
+
+        if len(arg_list) > 1:
+            raise SyntaxError("'cos' can only have one argument")
+
+        [arg] = arg_list
+        tmp = ir.get_temp_address()
+
+        code = (function_name, arg, None, tmp)
+        ir.write_code(code)
+        ir.stack.append(tmp)
+
     @ir.action("input")
     def _(current_token: Token):
         arg_list = []

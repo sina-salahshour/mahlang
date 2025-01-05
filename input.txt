@@ -1,2 +1,2 @@
-let x = 10.2 // 2;
+let x = sin(input());
 print(x);

@@ -1,3 +1,4 @@
+import math
 import sys
 from typing import Any, Iterable
 
@@ -43,6 +44,12 @@ def run_code(code_block: list):
                 b = stack[lhs]
                 a = stack[rhs]
                 stack[dest] = a + b
+            case ("sin", lhs, None, dest):
+                b = stack[lhs]
+                stack[dest] = math.sin(b)
+            case ("cos", lhs, None, dest):
+                b = stack[lhs]
+                stack[dest] = math.cos(b)
             case ("**", lhs, rhs, dest):
                 b = stack[lhs]
                 a = stack[rhs]
