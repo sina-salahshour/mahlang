@@ -1,0 +1,26 @@
+def is_prime(x) {
+	if x % 2 == 0 {
+		return;
+	};
+
+	let k = 3;
+	while k * k < x | k * k == x {
+		if x % k == 0 {
+			return;
+		};
+		k = k + 2
+	};
+
+	return 1;
+};
+
+
+print(2);
+let i = 3;
+
+while i < 100 {
+	if is_prime(i) {
+		print(i);
+	};
+	i = i + 1;
+};
