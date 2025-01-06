@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from compiler.ir_generator import IRGenerator
 from compiler.lexer import Token
 
@@ -206,7 +208,7 @@ def register_actions(ir: IRGenerator):
         tmp = ir.get_temp_address()
         ir.stack.append(tmp)
 
-        code = ("ld", float(current_token.literal), None, tmp)
+        code = ("ld", Decimal(current_token.literal), None, tmp)
         ir.write_code(code)
 
     @ir.action("save")
