@@ -159,6 +159,31 @@ def register_actions(ir: IRGenerator):
         code = ("call", None, None, function["address"])
         ir.write_code(code)
 
+    @ir.action("callwithvalue")
+    def _(_: Token):
+        arg_list = []
+        while True:
+            current_stack_item = ir.stack.pop()
+
+            match current_stack_item:
+                case ["function_arg_stack_base", function]:
+                    break
+                case item:
+                    arg_list.append(item)
+        if function is None or isinstance(function, int):
+            raise NameError(f"Tried to call a non function.")
+        if len(arg_list) != len(function["args"]):
+            raise Exception(
+                f"Argument Count is invalid. '{function['name']}' accepts {len(function['args'])} arguments but {len(arg_list)} was given at position {_.position - 1}"
+            )
+
+        for arg, arg_addr in zip(arg_list, function["args"]):
+            code = ("=", arg, None, arg_addr)
+            ir.write_code(code)
+        code = ("call", None, None, function["address"])
+        ir.write_code(code)
+        ir.stack.append(function["return_address"])
+
     @ir.action("assign")
     def _(_: Token):
         src = ir.stack.pop()

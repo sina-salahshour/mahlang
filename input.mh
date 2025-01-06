@@ -1,13 +1,12 @@
 let a = 20;
 def test(a,b,c) {
 let d = 22;;;;;
-	return 33;
-	print(a,b,c)
+	return;
 
 }
 
-print(10);
 
 test(0, a, 2)
-print(a)
+let d = test(1,2,3);
+print(d)
 

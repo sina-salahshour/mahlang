@@ -140,11 +140,16 @@ Pow' ->
 
 Factor ->
 	#ParenOpen Expr #ParenClose
-|	ID
+|	ID MaybeCallWithValue
 |	Sin
 |	Cos
 |	Num
 |	Input
+;
+
+MaybeCallWithValue -> 
+	CallWithValue
+|	#e
 ;
 
 ID ->
@@ -227,3 +232,6 @@ FunctionParams' ->
 
 Call ->
 	@init_call_local #ParenOpen Args @call #ParenClose;
+
+CallWithValue ->
+	@init_call_local #ParenOpen Args @callwithvalue #ParenClose;
