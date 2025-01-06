@@ -130,7 +130,7 @@ def register_actions(ir: IRGenerator):
             raise NameError(f"Tried to call a non function.")
         if len(arg_list) != len(function["args"]):
             raise Exception(
-                f"Argument Count is invalid. '{function['name']}' accepts {len(function['args'])} arguments"
+                f"Argument Count is invalid. '{function['name']}' accepts {len(function['args'])} arguments but {len(arg_list)} was given at position {_.position - 1}"
             )
 
         for arg, arg_addr in zip(arg_list, function["args"]):

@@ -6,3 +6,8 @@ let d = 22;
 print(10);
 
 let x = 20;
+test(0, 10, 2, 2)
+
+let z = 20;
+let z = 20;
+let s = 20;

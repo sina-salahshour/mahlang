@@ -221,4 +221,4 @@ FunctionParams' ->
 ;
 
 Call ->
-	@init_call_local #ParenOpen Args #ParenClose @call;
+	@init_call_local #ParenOpen Args @call #ParenClose;
