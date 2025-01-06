@@ -83,14 +83,31 @@ def register_actions(ir: IRGenerator):
         addr = ir.declare_variable(current_token.literal)
         ir.stack.append(addr)
 
-    @ir.action("savefn")
+    @ir.action("init_fn_def")
     def _(current_token: Token):
         tmp = ir.get_variable_address_in_scope(current_token.literal)
         if tmp is not None:
             raise NameError(
-                f"Error at position {current_token.position}: function is already defined {current_token.literal}"
+                f"Error at position {current_token.position}: a function or variable is already defined with name {current_token.literal}"
             )
-        ir.declare_variable(current_token.literal, ir.code_pointer)
+        ir.stack.append(["function_def", current_token.literal])
+
+    @ir.action("save_fn_def")
+    def _(_: Token):
+        args = []
+
+        while True:
+            current_stack_item = ir.stack.pop()
+
+            match current_stack_item:
+                case ["function_def", function_name]:
+                    break
+                case item:
+                    args.append(item)
+
+        tmp = ir.pop_scope()
+        ir.declare_function(function_name, args)
+        ir.push_scope(tmp)
 
     @ir.action("ret")
     def _(_: Token):
@@ -98,28 +115,28 @@ def register_actions(ir: IRGenerator):
         ir.write_code(code)
 
     @ir.action("call")
-    def _(current_token: Token):
+    def _(_: Token):
         arg_list = []
         while True:
             current_stack_item = ir.stack.pop()
 
             match current_stack_item:
-                case ["function_arg_stack_base", addr]:
+                case ["function_arg_stack_base", function]:
                     break
                 case item:
                     arg_list.append(item)
 
-        # ignore args for now
-        if len(arg_list):
+        if function is None or isinstance(function, int):
+            raise NameError(f"Tried to call a non function.")
+        if len(arg_list) != len(function["args"]):
             raise Exception(
-                f"Error at position {current_token.position}: Args are not supported for now."
+                f"Argument Count is invalid. '{function['name']}' accepts {len(function['args'])} arguments"
             )
 
-        if addr is None:
-            raise NameError(
-                f"Undefined function '{current_token.literal}' at position {current_token.position}"
-            )
-        code = ("call", None, None, addr)
+        for arg, arg_addr in zip(arg_list, function["args"]):
+            code = ("=", arg, None, arg_addr)
+            ir.write_code(code)
+        code = ("call", None, None, function["address"])
         ir.write_code(code)
 
     @ir.action("assign")

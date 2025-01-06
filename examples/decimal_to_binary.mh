@@ -23,7 +23,7 @@ while x {
 
 	pow_a = 10
 	pow_b = i
-	pow()
+	pow();
 
 
 	res = res + rem * pow_res

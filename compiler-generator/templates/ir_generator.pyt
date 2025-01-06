@@ -1,6 +1,7 @@
 from typing import Callable
-from .parser import Parser
+
 from .lexer import Token
+from .parser import Parser
 
 
 class IRGenerator:
@@ -40,11 +41,25 @@ class IRGenerator:
         current_scope["variables"][name] = addr
         return addr
 
-    def push_scope(self):
-        self.scope_stack.append({"variables": {}})
+    def declare_function(self, name, args, address=None):
+        current_scope = self.scope_stack[-1]
+        addr = address if address is not None else self.variable_pointer
+        return_address = self.get_temp_address()
+        if address is None:
+            self.variable_pointer += 1
+        current_scope["variables"][name] = {
+            "address": self.code_pointer,
+            "args": args,
+            "name": name,
+            "return_address": return_address,
+        }
+        return addr
+
+    def push_scope(self, scope=None):
+        self.scope_stack.append(scope or {"variables": {}})
 
     def pop_scope(self):
-        self.scope_stack.pop()
+        return self.scope_stack.pop()
 
     def write_code(self, code, address=None):
         addr = address or self.code_pointer

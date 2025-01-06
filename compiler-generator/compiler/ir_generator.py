@@ -1,6 +1,7 @@
 from typing import Callable
-from .parser import Parser
+
 from .lexer import Token
+from .parser import Parser
 
 
 class IRGenerator:

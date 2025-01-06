@@ -45,7 +45,7 @@ def generate_code(input_str: str):
 
     ir.generate()
 
-    assert len(ir.stack) == 0, "Error: Stack is not empty"
+    assert len(ir.stack) == 0, "Error: Stack is not empty" + str(ir.stack)
 
     return ir
 
