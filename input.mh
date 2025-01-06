@@ -1,0 +1,13 @@
+let a = 20;
+def test(a,b,c) {
+let d = 22;;;;;
+	return 33;
+	print(a,b,c)
+
+}
+
+print(10);
+
+test(0, a, 2)
+print(a)
+

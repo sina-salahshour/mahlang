@@ -41,14 +41,15 @@ class IRGenerator:
         current_scope["variables"][name] = addr
         return addr
 
-    def declare_function(self, name, args, address=None):
+    def declare_function(
+        self, name, args, code_address, return_address=None, address=None
+    ):
         current_scope = self.scope_stack[-1]
         addr = address if address is not None else self.variable_pointer
-        return_address = self.get_temp_address()
         if address is None:
             self.variable_pointer += 1
         current_scope["variables"][name] = {
-            "address": self.code_pointer,
+            "address": code_address,
             "args": args,
             "name": name,
             "return_address": return_address,

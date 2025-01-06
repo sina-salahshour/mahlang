@@ -90,7 +90,10 @@ def register_actions(ir: IRGenerator):
             raise NameError(
                 f"Error at position {current_token.position}: a function or variable is already defined with name {current_token.literal}"
             )
-        ir.stack.append(["function_def", current_token.literal])
+        return_address = ir.get_temp_address()
+        ir.stack.append(
+            ["function_def", current_token.literal, return_address, ir.code_pointer]
+        )
 
     @ir.action("save_fn_def")
     def _(_: Token):
@@ -100,19 +103,37 @@ def register_actions(ir: IRGenerator):
             current_stack_item = ir.stack.pop()
 
             match current_stack_item:
-                case ["function_def", function_name]:
+                case ["function_def", function_name, return_address, code_address]:
                     break
                 case item:
                     args.append(item)
 
         tmp = ir.pop_scope()
-        ir.declare_function(function_name, args)
+        ir.declare_function(function_name, args, code_address, return_address)
         ir.push_scope(tmp)
 
     @ir.action("ret")
     def _(_: Token):
+        for stack_item in ir.stack[::-1]:
+            match stack_item:
+                case ["function_def", _, return_address, _]:
+                    break
+        else:
+            raise Exception("return keyword used outside function")
+
+        tmp = ir.stack.pop()
+        code = ("=", tmp, None, return_address)
+        ir.write_code(code)
+
         code = ("ret", None, None, None)
         ir.write_code(code)
+
+    @ir.action("fn_ret_inject_zero")
+    def _(_: Token):
+        tmp = ir.get_temp_address()
+        code = ("ld", 0, None, tmp)
+        ir.write_code(code)
+        ir.stack.append(tmp)
 
     @ir.action("call")
     def _(_: Token):
@@ -125,7 +146,6 @@ def register_actions(ir: IRGenerator):
                     break
                 case item:
                     arg_list.append(item)
-
         if function is None or isinstance(function, int):
             raise NameError(f"Tried to call a non function.")
         if len(arg_list) != len(function["args"]):

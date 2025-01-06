@@ -8,7 +8,7 @@ from compiler.ir_generator import IRGenerator
 from compiler.lexer import Lexer
 from compiler.parser import Parser
 
-sys.tracebacklimit = 0
+# sys.tracebacklimit = 0
 
 USAGE_HELP_MESSGE = """Usage:
     mah run\t <input file>\t\t# to run file

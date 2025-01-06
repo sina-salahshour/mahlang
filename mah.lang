@@ -45,7 +45,7 @@ Stmts ->
 ;
 
 OptionalSemicolon -> 
-	#Semicolon
+	#Semicolon OptionalSemicolon
 |	#e
 ;
 
@@ -62,8 +62,13 @@ Stmt ->
 |	While
 |	#Break @break
 |	#Continue @continue
-|	#Return @ret
+|	#Return MaybeExpr @ret
 |	FunctionDef
+;
+
+MaybeExpr ->
+	Expr
+|	@fn_ret_inject_zero #Semicolon
 ;
 
 CallOrAssign ->
@@ -207,7 +212,7 @@ While ->
 
 FunctionDef ->
 	@save #Def @init_fn_def #ID
-		@scopestart #ParenOpen FunctionParams #ParenClose @save_fn_def CodeBlock @ret @jmp @scopeend
+		@scopestart #ParenOpen FunctionParams #ParenClose CodeBlock @fn_ret_inject_zero @ret @save_fn_def  @jmp @scopeend
 ;
 
 FunctionParams ->
