@@ -82,7 +82,16 @@ module.exports = grammar({
     term: ($) =>
       seq(
         $.unary,
-        repeat(choice(seq("+", $.unary), seq("-", $.unary), seq("%", $.unary))),
+        repeat(
+          choice(
+            seq("+", $.unary),
+            seq("-", $.unary),
+            seq("%", $.unary),
+            seq("//", $.unary),
+            seq("/", $.unary),
+            seq("*", $.unary),
+          ),
+        ),
       ),
 
     unary: ($) => choice(seq("-", $.unary), $.power),

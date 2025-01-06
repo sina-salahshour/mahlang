@@ -1,0 +1,23 @@
+# # we don't need this because language supports pow now
+# def pow(a,b) {
+# 	let res = 1
+# 	while b {
+# 		res = res * a
+# 		b = b - 1
+# 	}
+# 	return res;
+# }
+
+let x = input()
+let res = 0
+let i = 0
+while x {
+	let rem = x % 2
+	x = x // 2
+
+	res = res + rem * 10 ** i;
+
+	i = i + 1
+}
+
+print(res)
