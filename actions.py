@@ -5,9 +5,17 @@ from compiler.lexer import Token
 
 
 def register_actions(ir: IRGenerator):
+    def assert_not_function(value):
+        match value:
+            case {"name": name}:
+                raise Exception(f"tried to use function '{name}' as variable.")
+
     def operator(op: str):
         lhs = ir.stack.pop()
         rhs = ir.stack.pop()
+        for item in (lhs, rhs):
+            assert_not_function(item)
+
         tmp = ir.get_temp_address()
         ir.stack.append(tmp)
 
@@ -191,6 +199,9 @@ def register_actions(ir: IRGenerator):
         src = ir.stack.pop()
         dest = ir.stack.pop()
 
+        for item in (src, dest):
+            assert_not_function(item)
+
         code = ("=", src, None, dest)
         ir.write_code(code)
 
@@ -198,6 +209,8 @@ def register_actions(ir: IRGenerator):
     def _(_: Token):
         src = ir.stack.pop()
         tmp = ir.get_temp_address()
+
+        assert_not_function(src)
 
         code = ("neg", src, None, tmp)
         ir.write_code(code)
@@ -346,11 +359,11 @@ def register_actions(ir: IRGenerator):
                     arg_list.append(item)
 
         for arg in arg_list[::-1]:
+            assert_not_function(arg)
             code = (function_name, arg, None, None)
             ir.write_code(code)
 
-    @ir.action("sin")
-    def _(_: Token):
+    def builtin_single_arg_function(name: str):
         arg_list = []
         while True:
             current_stack_item = ir.stack.pop()
@@ -362,36 +375,23 @@ def register_actions(ir: IRGenerator):
                     arg_list.append(item)
 
         if len(arg_list) > 1:
-            raise SyntaxError("'sin' can only have one argument")
+            raise SyntaxError(f"'{name}' can only have one argument")
 
         [arg] = arg_list
+        assert_not_function(arg)
         tmp = ir.get_temp_address()
 
         code = (function_name, arg, None, tmp)
         ir.write_code(code)
         ir.stack.append(tmp)
+
+    @ir.action("sin")
+    def _(_: Token):
+        builtin_single_arg_function("sin")
 
     @ir.action("cos")
     def _(_: Token):
-        arg_list = []
-        while True:
-            current_stack_item = ir.stack.pop()
-
-            match current_stack_item:
-                case ["function_arg_stack_base", function_name]:
-                    break
-                case item:
-                    arg_list.append(item)
-
-        if len(arg_list) > 1:
-            raise SyntaxError("'cos' can only have one argument")
-
-        [arg] = arg_list
-        tmp = ir.get_temp_address()
-
-        code = (function_name, arg, None, tmp)
-        ir.write_code(code)
-        ir.stack.append(tmp)
+        builtin_single_arg_function("cos")
 
     @ir.action("input")
     def _(current_token: Token):
