@@ -64,6 +64,7 @@ Stmt ->
 |	#Continue @continue
 |	#Return MaybeExpr @ret
 |	FunctionDef
+|	CodeBlock
 ;
 
 MaybeExpr ->
