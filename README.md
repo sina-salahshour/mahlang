@@ -40,3 +40,5 @@ python mah.py examples/new_prime_numbers.mh
 ## Syntax highlighting in neovim
 
 you can install the `syntax-highlight` folder as a neovim plugin (then you need to TSInstall it), then copy the `queries` folder inside of it into nvim config root to have syntax highlighting in `.mh` files.
+
+![syntax highlight showcase](./examples/example.png)
