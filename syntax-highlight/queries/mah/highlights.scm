@@ -34,6 +34,7 @@
 ; Identifiers and literals
 (identifier) @variable
 (number) @number
+(string) @string
 
 ; Comments
 (comment) @comment
