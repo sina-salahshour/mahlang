@@ -1,3 +1,4 @@
+import ast
 from decimal import Decimal
 
 from compiler.ir_generator import IRGenerator
@@ -222,6 +223,17 @@ def register_actions(ir: IRGenerator):
         ir.stack.append(tmp)
 
         code = ("ld", Decimal(current_token.literal), None, tmp)
+        ir.write_code(code)
+
+    @ir.action("string")
+    def _(current_token: Token):
+        tmp = ir.get_temp_address()
+        ir.stack.append(tmp)
+
+        # The lexer keeps the quotes in the token. Decode them here so that
+        # escaped characters such as \\n, \", and \\\\ become their actual values.
+        value = ast.literal_eval(current_token.literal)
+        code = ("ld", value, None, tmp)
         ir.write_code(code)
 
     @ir.action("save")

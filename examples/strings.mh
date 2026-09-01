@@ -1,0 +1,9 @@
+let hello = "Hello";
+let world = "world";
+
+print(hello + ", " + world + "!");
+print("quoted: \"hello\"");
+print("line 1\nline 2");
+
+print(hello == "Hello");
+print(hello != world);

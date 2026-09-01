@@ -4,7 +4,7 @@ BraceClose: "[}]";
 ParenOpen: "[(]";
 ParenClose: "[)]";
 Add: "[+]";
-Pow: "\*\*";
+Pow: "\\*\\*";
 Mul: "[*]";
 Sub: "-";
 TrueDiv: "//";
@@ -31,8 +31,9 @@ Break: "break";
 Continue: "continue";
 Return: "return";
 Def: "def";
-Number: "\d+(?:\.\d+)?";
-ID: "[a-zA-Z_$](?:\w|$)*";
+Number: "\\d+(?:\\.\\d+)?";
+String: "\\\"([^\\\"\\\\]|\\\\.)*\\\"";
+ID: "[a-zA-Z_$](?:\\w|$)*";
 !Comment: "#.*";
 --
 
@@ -70,11 +71,6 @@ Stmt ->
 MaybeExpr ->
 	Expr
 |	@fn_ret_inject_zero #Semicolon
-;
-
-CallOrAssign ->
-	Call
-|	Assignment
 ;
 
 Expr -> 
@@ -145,6 +141,7 @@ Factor ->
 |	Sin
 |	Cos
 |	Num
+|	String
 |	Input
 ;
 
@@ -183,6 +180,9 @@ Assignment ->
 
 Num ->
 	@num #Number;
+
+String ->
+	@string #String;
 
 Args ->
 	Expr Args'

@@ -17,7 +17,7 @@ def run_code(code_block: list):
                 break
             case ("print", arg, None, None):
                 val = stack[arg]
-                if val % 1 == 0:
+                if isinstance(val, (int, float)) and val % 1 == 0:
                     print(int(val))
                 else:
                     print(val)
@@ -107,8 +107,8 @@ def run_code(code_block: list):
                 stack[dest] = int(a == b)
             case ("=", src, None, dest):
                 stack[dest] = stack[src]
-            case ("ld", num, None, loc):
-                stack[loc] = num
+            case ("ld", value, None, loc):
+                stack[loc] = value
             case ("call", None, None, addr):
                 stack[sp] = pc
                 sp += 1
