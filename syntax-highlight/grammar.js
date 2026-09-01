@@ -105,6 +105,7 @@ module.exports = grammar({
         $.sin_call,
         $.cos_call,
         $.number,
+        $.string,
         $.input_call,
       ),
 
@@ -117,6 +118,8 @@ module.exports = grammar({
     identifier: ($) => /[a-zA-Z_]\w*/,
 
     number: ($) => /\d+(\.\d+)?/,
+
+    string: ($) => /"([^"\\]|\\.)*"/,
 
     comment: ($) => /#.*/,
   },
