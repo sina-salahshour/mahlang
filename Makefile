@@ -1,9 +1,11 @@
-build:
-	python compiler-generator/compiler.py mah.lang
+build: lang
 
-nvim-install: build
-	@mkdir -p ~/.local/share/nvim/site/queries/mahlang
-	@cp compiler-generator/tree-sitter/queries/highlights.scm ~/.local/share/nvim/site/queries/mahlang/highlights.scm
+lang:
+	python ./compiler-generator/generate.py ./mah.lang
+
+nvim-install:
+	@mkdir -p ~/.local/share/nvim/site/queries/mah
+	@cp syntax-highlight/queries/mah/highlights.scm ~/.local/share/nvim/site/queries/mah/highlights.scm
 	@echo "MahLang Neovim syntax highlighting installed."
 
-.PHONY: build nvim-install
+.PHONY: build lang nvim-install
