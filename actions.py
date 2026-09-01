@@ -224,6 +224,16 @@ def register_actions(ir: IRGenerator):
         code = ("ld", Decimal(current_token.literal), None, tmp)
         ir.write_code(code)
 
+    @ir.action("str")
+    def _(current_token: Token):
+        tmp = ir.get_temp_address()
+        ir.stack.append(tmp)
+
+        raw = current_token.literal[1:-1]
+        val = bytes(raw, "utf-8").decode("unicode_escape")
+        code = ("ld", val, None, tmp)
+        ir.write_code(code)
+
     @ir.action("save")
     def _(_: Token):
         addr = ir.write_code((None, None, None, None))

@@ -31,6 +31,7 @@ Break: "break";
 Continue: "continue";
 Return: "return";
 Def: "def";
+String: "\"([^\"\\]|\\.)*\"";
 Number: "\d+(?:\.\d+)?";
 ID: "[a-zA-Z_$](?:\w|$)*";
 !Comment: "#.*";
@@ -145,6 +146,7 @@ Factor ->
 |	Sin
 |	Cos
 |	Num
+|	Str
 |	Input
 ;
 
@@ -183,6 +185,9 @@ Assignment ->
 
 Num ->
 	@num #Number;
+
+Str ->
+	@str #String;
 
 Args ->
 	Expr Args'

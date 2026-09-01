@@ -616,6 +616,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "string"
+        },
+        {
+          "type": "SYMBOL",
           "name": "input_call"
         }
       ]
@@ -703,6 +707,10 @@
       "type": "PATTERN",
       "value": "\\d+(\\.\\d+)?"
     },
+    "string": {
+      "type": "PATTERN",
+      "value": "\"([^\"\\\\]|\\\\.)*\""
+    },
     "comment": {
       "type": "PATTERN",
       "value": "#.*"
@@ -726,5 +734,6 @@
   "precedences": [],
   "externals": [],
   "inline": [],
-  "supertypes": []
+  "supertypes": [],
+  "reserved": {}
 }

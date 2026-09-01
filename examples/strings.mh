@@ -1,0 +1,46 @@
+# String Demonstration in Mah
+
+# 1. Declaration and basic printing
+let greeting = "Hello"
+let target = "World"
+print(greeting, target)
+
+# 2. String Concatenation
+let message = greeting + " " + target + "!"
+print(message)
+
+# 3. String Equality Checks
+if greeting == "Hello" {
+	print("greeting is indeed Hello")
+}
+
+if greeting != target {
+	print("greeting and target are different")
+}
+
+# 4. Strings in functions
+def format_user(title, name) {
+	return title + " " + name
+}
+
+let user = format_user("Developer", "Sina")
+print(user)
+
+# 5. Escape characters and empty strings
+let empty = ""
+if empty == "" {
+	print("Empty string matched!")
+}
+
+let escaped = "First line\nSecond line"
+print(escaped)
+
+# 6. String concatenation in a loop
+let counter = 0
+let pattern = ""
+while counter < 5 {
+	pattern = pattern + "*"
+	counter = counter + 1
+}
+print(pattern)
+

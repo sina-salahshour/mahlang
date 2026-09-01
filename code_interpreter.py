@@ -1,6 +1,15 @@
+from decimal import Decimal
 import math
 import sys
 from typing import Any, Iterable
+
+
+def _to_str(val: Any) -> str:
+    if isinstance(val, (int, float, Decimal)):
+        if val % 1 == 0:
+            return str(int(val))
+        return str(val)
+    return str(val)
 
 
 def run_code(code_block: list):
@@ -17,7 +26,9 @@ def run_code(code_block: list):
                 break
             case ("print", arg, None, None):
                 val = stack[arg]
-                if val % 1 == 0:
+                if isinstance(val, str):
+                    print(val)
+                elif isinstance(val, (int, float, Decimal)) and val % 1 == 0:
                     print(int(val))
                 else:
                     print(val)
@@ -47,7 +58,10 @@ def run_code(code_block: list):
             case ("+", lhs, rhs, dest):
                 b = stack[lhs]
                 a = stack[rhs]
-                stack[dest] = a + b
+                if isinstance(a, str) or isinstance(b, str):
+                    stack[dest] = _to_str(a) + _to_str(b)
+                else:
+                    stack[dest] = a + b
             case ("sin", lhs, None, dest):
                 b = stack[lhs]
                 stack[dest] = math.sin(b)
@@ -64,7 +78,12 @@ def run_code(code_block: list):
             case ("*", lhs, rhs, dest):
                 b = stack[lhs]
                 a = stack[rhs]
-                stack[dest] = a * b
+                if isinstance(a, str) and isinstance(b, (int, Decimal)):
+                    stack[dest] = a * int(b)
+                elif isinstance(b, str) and isinstance(a, (int, Decimal)):
+                    stack[dest] = b * int(a)
+                else:
+                    stack[dest] = a * b
             case ("-", lhs, rhs, dest):
                 b = stack[lhs]
                 a = stack[rhs]

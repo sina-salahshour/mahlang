@@ -235,6 +235,10 @@
         {
           "type": "sin_call",
           "named": true
+        },
+        {
+          "type": "string",
+          "named": true
         }
       ]
     }
@@ -540,7 +544,8 @@
   },
   {
     "type": "comment",
-    "named": true
+    "named": true,
+    "extra": true
   },
   {
     "type": "continue_stmt",
@@ -593,6 +598,10 @@
   {
     "type": "sin",
     "named": false
+  },
+  {
+    "type": "string",
+    "named": true
   },
   {
     "type": "while",

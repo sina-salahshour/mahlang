@@ -34,11 +34,25 @@ python mah.py
 To see the language in action, you can check out the `examples` folder.
 
 ```sh
+# Prime numbers calculation
 python mah.py examples/new_prime_numbers.mh
+
+# String operations, concatenation, comparisons, and functions
+python mah.py examples/strings.mh
 ```
 
 ## Syntax highlighting in neovim
 
-you can install the `syntax-highlight` folder as a neovim plugin (then you need to TSInstall it), then copy the `queries` folder inside of it into nvim config root to have syntax highlighting in `.mh` files.
+You can automatically install or remove the syntax highlighting for Neovim via Makefile:
+
+```sh
+# Install syntax highlighting, parser, and filetype detection to Neovim
+make install-nvim
+
+# Remove syntax highlighting from Neovim
+make uninstall-nvim
+```
+
+Alternatively, you can install the `syntax-highlight` folder as a Neovim plugin, then copy the `queries` folder inside of it into your Neovim config root.
 
 ![syntax highlight showcase](./examples/example.png)
