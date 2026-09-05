@@ -56,3 +56,44 @@ make uninstall-nvim
 Alternatively, you can install the `syntax-highlight` folder as a Neovim plugin, then copy the `queries` folder inside of it into your Neovim config root.
 
 ![syntax highlight showcase](./examples/example.png)
+
+## Language server (LSP)
+
+Mah ships with a language server (`lsp/`) written in pure Python (standard
+library only, no extra dependencies). It reuses the compiler pipeline to
+provide:
+
+- live diagnostics (compile errors) as you type
+- hover docs for keywords, builtins, functions and variables
+- completion for keywords, builtins and symbols in the current file
+- document symbols (functions and variables)
+
+### Neovim
+
+Install the server and the filetype hook that starts it for `*.mh` files:
+
+```sh
+# Install the language server + Neovim integration
+make install-lsp
+
+# Remove it
+make uninstall-lsp
+```
+
+`make install-lsp` copies the server (and the compiler modules it needs) to
+`<nvim-config>/mah-lsp/` and installs `<nvim-config>/ftplugin/mah.lua`, which
+launches the server via `vim.lsp.start` for every Mah buffer. It uses
+`python3` by default; set `$MAH_LSP_PYTHON` to choose a different interpreter.
+
+`make install` installs both syntax highlighting and the language server.
+
+### Other editors
+
+Any LSP client can run the server directly over stdio:
+
+```sh
+python3 ./lsp/server.py
+```
+
+Point your editor's LSP client at that command for the `mah` filetype
+(`.mh` files).
