@@ -1,14 +1,28 @@
-# A small library of reusable math helpers, meant to be imported.
+# A small library of reusable math helpers.
+# Only names marked with `export` are visible to files that import this one.
 
-# a function to get the square of n
-def square(n) {
+# squares a number
+export def square(n) {
 	return n ** 2
 }
 
-def cube(n) {
+# cubes a number
+export def cube(n) {
 	return n ** 3
 }
 
-def is_even(n) {
+export def is_even(n) {
 	return n % 2 == 0
 }
+
+# an exported constant
+export let answer = 42
+
+# a private helper: NOT exported, so importers can't see or clash with it.
+def clamp_positive(n) {
+	if n < 0 {
+		return 0
+	}
+	return n
+}
+

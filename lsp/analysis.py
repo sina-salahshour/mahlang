@@ -32,7 +32,7 @@ from compiler.lexer import (  # noqa: E402
     TokenType,
 )
 from compiler.parser import Parser  # noqa: E402
-from preprocessor import BUFFER_PATH, preprocess  # noqa: E402
+from preprocessor import BUFFER_PATH, demangle_message, preprocess  # noqa: E402
 
 # --------------------------------------------------------------------------
 # Language metadata (used for hover + completion)
@@ -70,6 +70,10 @@ KEYWORD_DOCS = {
     "return": "Return from a function, optionally with a value.\n\n"
     "```mah\nreturn expr\n```",
     "def": "Define a function.\n\n```mah\ndef name(a, b) {\n\treturn a + b\n}\n```",
+    "export": "Make a top-level declaration visible to files that `import` this "
+    "one.\n\n```mah\nexport def name(a) { ... }\nexport let value = 1\nexport name  # export something declared elsewhere\n```",
+    "import": "Inline another file's `export`ed declarations. The path is "
+    "resolved relative to this file.\n\n```mah\nimport \"lib.mh\"\n```",
 }
 
 BUILTIN_DOCS = {
@@ -85,9 +89,15 @@ SEVERITY_ERROR = 1
 COMPLETION_KEYWORD = 14
 COMPLETION_FUNCTION = 3
 COMPLETION_VARIABLE = 6
+COMPLETION_MODULE = 9
 
 SYMBOL_FUNCTION = 12
 SYMBOL_VARIABLE = 13
+
+# `import` / `export` are not lexer keywords (they tokenize as identifiers);
+# the preprocessor gives them meaning. Treat them as soft keywords for editor
+# features when they appear in the right position.
+SOFT_KEYWORDS = {"import", "export"}
 
 
 # --------------------------------------------------------------------------
@@ -170,22 +180,29 @@ class TrackingLexer(Lexer):
 def tokenize(text: str):
     """Return ``(tokens, lex_error)``.
 
-    ``tokens`` excludes the internal EOF token and ignored tokens (comments).
-    ``lex_error`` is the :class:`SyntaxError` raised on an invalid token, if
-    any (tokenization stops at that point).
+    Resilient tokenizer for editor features: characters the compiler lexer
+    rejects (notably ``.`` used by namespaced imports, which the compiler has
+    no token for) are skipped rather than aborting tokenization, so features
+    keep working on the whole buffer. ``tokens`` excludes EOF and ignored
+    tokens (comments). ``lex_error`` is kept for signature compatibility and is
+    always ``None`` here (diagnostics use a strict pass on preprocessed text).
     """
     lexer = Lexer(text)
     tokens: list[Token] = []
-    lex_error: Optional[SyntaxError] = None
-    try:
-        while True:
+    length = len(text)
+    while True:
+        try:
             token = lexer.get_next_token()
-            if token.type == TokenType.EOF:
+        except SyntaxError:
+            # Skip the offending character and resume.
+            lexer.position += 1
+            if lexer.position > length:
                 break
-            tokens.append(token)
-    except SyntaxError as error:
-        lex_error = error
-    return tokens, lex_error
+            continue
+        if token.type == TokenType.EOF:
+            break
+        tokens.append(token)
+    return tokens, None
 
 
 def _token_length_at(text: str, offset: int) -> int:
@@ -217,6 +234,41 @@ def _token_index_at_offset(tokens: list[Token], offset: int) -> Optional[int]:
         if offset == end:
             return index
     return None
+
+
+def _is_soft_keyword(token: Token, tokens: list[Token]) -> bool:
+    """True when ``token`` is an ``import``/``export`` acting as a keyword.
+
+    ``export`` counts when followed by ``def``/``let``/an identifier; ``import``
+    counts when followed by a string (``import "x"``) or ``<id> from "x"``.
+    """
+    if token.type != TokenType.ID or token.literal not in SOFT_KEYWORDS:
+        return False
+    # Token.__eq__ compares by type only, so locate by position instead.
+    pos = next(
+        (i for i, t in enumerate(tokens) if t.position == token.position), None
+    )
+    if pos is None:
+        return False
+    nxt = tokens[pos + 1] if pos + 1 < len(tokens) else None
+    if token.literal == "import":
+        if nxt is not None and nxt.type == TokenType.String:
+            return True
+        # import <ns> from "..."
+        return (
+            nxt is not None
+            and nxt.type == TokenType.ID
+            and pos + 3 < len(tokens)
+            and tokens[pos + 2].type == TokenType.ID
+            and tokens[pos + 2].literal == "from"
+            and tokens[pos + 3].type == TokenType.String
+        )
+    # export
+    return nxt is not None and nxt.type in (
+        TokenType.Def,
+        TokenType.Let,
+        TokenType.ID,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -292,7 +344,12 @@ def get_diagnostics(text: str, path: Optional[str] = None) -> list[dict]:
 
         diagnostics.append(
             _diagnostic_for_combined_offset(
-                pp, text, combined, combined_offset, length, _clean_message(message)
+                pp,
+                text,
+                combined,
+                combined_offset,
+                length,
+                demangle_message(_clean_message(message)),
             )
         )
 
@@ -304,11 +361,15 @@ def _diagnostic_for_combined_offset(
 ) -> dict:
     """Build a diagnostic in the buffer for an error at a combined-text offset."""
     origin_path, src_offset = pp.map_to_source(combined_offset)
+    # Map the end through the source map too: a renamed/mangled token is longer
+    # in the combined text than in the source, so a raw length would overshoot.
+    _end_path, src_end = pp.map_to_source(combined_offset + max(length, 1) - 1)
+    src_length = max(1, src_end - src_offset + 1)
 
     if origin_path == pp.entry_path:
         # Error is in the buffer itself; the entry source equals the buffer.
         return {
-            "range": make_range(text, src_offset, src_offset + length),
+            "range": make_range(text, src_offset, src_offset + src_length),
             "severity": SEVERITY_ERROR,
             "source": "mah",
             "message": message or "error",
@@ -479,10 +540,13 @@ def _read_params(tokens: list[Token], start: int) -> list[str]:
 
 
 def collect_imported_symbols(text: str, path: Optional[str]) -> list[Symbol]:
-    """Top-level symbols contributed by files imported from the buffer.
+    """Exported top-level symbols brought into scope by *flat* imports.
 
-    Returns symbols whose ``token`` positions are offsets *within their own
-    file* (``symbol.file``), suitable for building cross-file locations.
+    Only names a file marks with ``export`` are surfaced (scoped imports), and
+    only flat ``import "path"`` directives contribute names at top level;
+    namespaced imports expose their members through the namespace instead (see
+    :func:`collect_namespaces`). Returned symbols carry positions *within their
+    own file* (``symbol.file``), suitable for cross-file locations.
     """
     if path is None:
         return []
@@ -495,16 +559,56 @@ def collect_imported_symbols(text: str, path: Optional[str]) -> list[Symbol]:
         source = pp.files.get(import_site.resolved)
         if source is None:
             continue
+        exported = pp.exported_names(import_site.resolved)
         file_tokens, _err = tokenize(source)
         for symbol in collect_symbols(file_tokens, source, import_site.resolved):
             if symbol.detail == "parameter":
                 continue
+            if symbol.name not in exported:
+                continue  # scoped: only exported names are importable
             key = (symbol.name, symbol.kind)
             if key in seen:
                 continue
             seen.add(key)
             results.append(symbol)
     return results
+
+
+@dataclass
+class Namespace:
+    name: str
+    file: str
+    token: Optional[Token]      # the namespace identifier token in the buffer
+    members: list               # list[Symbol] for exported members
+
+
+def collect_namespaces(text: str, path: Optional[str]) -> list[Namespace]:
+    """Namespaces introduced by ``import ns from "path"`` in the buffer."""
+    if path is None:
+        return []
+    pp = preprocess(path, text)
+    result: list[Namespace] = []
+    for ns in pp.entry_namespaces:
+        if not ns.exists or ns.resolved is None:
+            result.append(Namespace(ns.name, "", None, []))
+            continue
+        source = pp.files.get(ns.resolved, "")
+        exported = pp.exported_names(ns.resolved)
+        file_tokens, _err = tokenize(source)
+        members = [
+            s
+            for s in collect_symbols(file_tokens, source, ns.resolved)
+            if s.detail != "parameter" and s.name in exported
+        ]
+        # Token for the namespace name in the buffer (for hover/goto-def).
+        buf_tokens, _e = tokenize(text)
+        ns_token = None
+        for tok in buf_tokens:
+            if tok.type == TokenType.ID and tok.position == ns.name_offset:
+                ns_token = tok
+                break
+        result.append(Namespace(ns.name, ns.resolved, ns_token, members))
+    return result
 
 
 def get_document_symbols(text: str) -> list[dict]:
@@ -534,7 +638,60 @@ def get_document_symbols(text: str) -> list[dict]:
 # Completion
 # --------------------------------------------------------------------------
 
-def get_completions(text: str, path: Optional[str] = None) -> list[dict]:
+def _symbol_completion_item(symbol: Symbol) -> dict:
+    kind = (
+        COMPLETION_FUNCTION
+        if symbol.kind == SYMBOL_FUNCTION
+        else COMPLETION_VARIABLE
+    )
+    detail = symbol.detail
+    if symbol.file is not None:
+        detail = f"{detail}  (from {os.path.basename(symbol.file)})"
+    item = {"label": symbol.name, "kind": kind, "detail": detail}
+    if symbol.doc:
+        item["documentation"] = {"kind": "markdown", "value": symbol.doc}
+    return item
+
+
+def _namespace_prefix_at(text: str, offset: int) -> Optional[str]:
+    """If the cursor is positioned right after ``ident.`` return ``ident``.
+
+    Handles ``math.`` and ``math.par`` (partway through a member name).
+    """
+    i = offset
+    # Skip an in-progress member identifier immediately before the cursor.
+    while i > 0 and (text[i - 1].isalnum() or text[i - 1] in "_$"):
+        i -= 1
+    if i == 0 or text[i - 1] != ".":
+        return None
+    j = i - 1  # index of the dot
+    end = j
+    k = j
+    while k > 0 and (text[k - 1].isalnum() or text[k - 1] in "_$"):
+        k -= 1
+    name = text[k:end]
+    return name or None
+
+
+def get_completions(
+    text: str,
+    path: Optional[str] = None,
+    line: Optional[int] = None,
+    character: Optional[int] = None,
+) -> list[dict]:
+    namespaces = collect_namespaces(text, path)
+
+    # Namespaced member completion: when the cursor follows `ns.`, offer only
+    # that namespace's exported members.
+    if line is not None and character is not None:
+        offset = position_to_offset(text, line, character)
+        ns_name = _namespace_prefix_at(text, offset)
+        if ns_name is not None:
+            for ns in namespaces:
+                if ns.name == ns_name:
+                    return [_symbol_completion_item(m) for m in ns.members]
+            return []
+
     items: list[dict] = []
 
     for keyword, doc in KEYWORD_DOCS.items():
@@ -557,6 +714,18 @@ def get_completions(text: str, path: Optional[str] = None) -> list[dict]:
             }
         )
 
+    # Namespaces themselves are completable identifiers.
+    for ns in namespaces:
+        items.append(
+            {
+                "label": ns.name,
+                "kind": COMPLETION_MODULE,
+                "detail": f"namespace (from {os.path.basename(ns.file)})"
+                if ns.file
+                else "namespace",
+            }
+        )
+
     tokens, _lex_error = tokenize(text)
     local_symbols = collect_symbols(tokens, text)
     imported_symbols = collect_imported_symbols(text, path)
@@ -567,22 +736,7 @@ def get_completions(text: str, path: Optional[str] = None) -> list[dict]:
         if key in seen:
             continue
         seen.add(key)
-        kind = (
-            COMPLETION_FUNCTION
-            if symbol.kind == SYMBOL_FUNCTION
-            else COMPLETION_VARIABLE
-        )
-        detail = symbol.detail
-        if symbol.file is not None:
-            detail = f"{detail}  (from {os.path.basename(symbol.file)})"
-        item = {
-            "label": symbol.name,
-            "kind": kind,
-            "detail": detail,
-        }
-        if symbol.doc:
-            item["documentation"] = {"kind": "markdown", "value": symbol.doc}
-        items.append(item)
+        items.append(_symbol_completion_item(symbol))
 
     return items
 
@@ -602,6 +756,8 @@ def get_hover(text: str, line: int, character: int, path: Optional[str] = None) 
         text, token.position, token.position + len(token.literal)
     )
 
+    namespaces = {ns.name: ns for ns in collect_namespaces(text, path)}
+
     value: Optional[str] = None
     if token.type in KEYWORD_TOKENS:
         value = f"**keyword** `{token.literal}`\n\n" + KEYWORD_DOCS.get(
@@ -610,6 +766,30 @@ def get_hover(text: str, line: int, character: int, path: Optional[str] = None) 
     elif token.type in BUILTIN_TOKENS:
         value = f"**builtin** `{token.literal}`\n\n" + BUILTIN_DOCS.get(
             token.literal, ""
+        )
+    elif token.type == TokenType.ID and _is_soft_keyword(token, tokens):
+        value = f"**keyword** `{token.literal}`\n\n" + KEYWORD_DOCS.get(
+            token.literal, ""
+        )
+    elif token.type == TokenType.ID and _member_owner(text, token) in namespaces:
+        # Cursor on `member` in `ns.member`.
+        ns = namespaces[_member_owner(text, token)]
+        member = next((m for m in ns.members if m.name == token.literal), None)
+        if member is not None and member.kind == SYMBOL_FUNCTION:
+            value = f"**function** `{ns.name}.{member.name}`\n\n```mah\n{member.detail}\n```"
+        elif member is not None:
+            value = f"**variable** `{ns.name}.{member.name}`"
+        else:
+            value = f"`{token.literal}` is not exported by `{ns.name}`"
+        value += f"\n\n*from `{os.path.basename(ns.file)}`*"
+        if member is not None and member.doc:
+            value += "\n\n---\n\n" + member.doc
+    elif token.type == TokenType.ID and token.literal in namespaces and _is_namespace_use(text, token):
+        ns = namespaces[token.literal]
+        exports = ", ".join(sorted(m.name for m in ns.members)) or "(nothing)"
+        value = (
+            f"**namespace** `{token.literal}`\n\n"
+            f"*from `{os.path.basename(ns.file)}`*\n\nExports: {exports}"
         )
     elif token.type == TokenType.ID:
         # Prefer local declarations, then symbols pulled in via imports.
@@ -641,6 +821,31 @@ def get_hover(text: str, line: int, character: int, path: Optional[str] = None) 
         "contents": {"kind": "markdown", "value": value},
         "range": token_range,
     }
+
+
+def _member_owner(text: str, token: Token) -> Optional[str]:
+    """If ``token`` is the ``member`` in ``owner.member``, return ``owner``."""
+    i = token.position
+    # scan backwards over whitespace to a dot
+    j = i - 1
+    while j >= 0 and text[j] in " \t":
+        j -= 1
+    if j < 0 or text[j] != ".":
+        return None
+    end = j
+    k = j
+    while k > 0 and (text[k - 1].isalnum() or text[k - 1] in "_$"):
+        k -= 1
+    owner = text[k:end]
+    return owner or None
+
+
+def _is_namespace_use(text: str, token: Token) -> bool:
+    """True when ``token`` is an identifier followed by ``.`` (namespace use)."""
+    i = token.position + len(token.literal)
+    while i < len(text) and text[i] in " \t":
+        i += 1
+    return i < len(text) and text[i] == "."
 
 
 # --------------------------------------------------------------------------
@@ -763,29 +968,32 @@ def get_definition(
     Returns ``{"path": <abs path or None>, "range": <lsp range>}`` where a
     ``path`` of ``None`` means "the current buffer". Resolution order:
 
-      1. cursor on an ``import "..."`` path  -> the imported file (line 0);
-      2. identifier resolved in local lexical scope  -> in-buffer declaration;
-      3. identifier matching a top-level symbol from an imported file  -> that
+      1. cursor on an ``import "..."`` path (flat or namespaced)  -> the file;
+      2. cursor on a namespace member ``ns.member``  -> the export in its file;
+      3. cursor on a namespace name ``ns``  -> the imported file;
+      4. identifier resolved in local lexical scope  -> in-buffer declaration;
+      5. identifier matching an exported symbol from a flat import  -> that
          file's declaration (cross-file jump).
 
     Keywords, builtins and literals return ``None``.
     """
     offset = position_to_offset(text, line, character)
 
-    # 1. Jump to file when the cursor is on an import path.
+    # 1. Jump to file when the cursor is on an import path (flat or namespaced).
     if path is not None:
         pp = preprocess(path, text)
         for import_site in pp.entry_imports:
             if import_site.offset <= offset <= import_site.offset + import_site.length:
                 if import_site.exists and import_site.resolved is not None:
-                    return {
-                        "path": import_site.resolved,
-                        "range": {
-                            "start": {"line": 0, "character": 0},
-                            "end": {"line": 0, "character": 0},
-                        },
-                    }
+                    return _file_head(import_site.resolved)
                 return None
+        for ns in pp.entry_namespaces:
+            if ns.offset <= offset <= ns.offset + ns.length:
+                if ns.exists and ns.resolved is not None:
+                    return _file_head(ns.resolved)
+                return None
+
+    namespaces = {ns.name: ns for ns in collect_namespaces(text, path)}
 
     tokens, _lex_error = tokenize(text)
     token_index = _token_index_at_offset(tokens, offset)
@@ -796,7 +1004,31 @@ def get_definition(
     if token.type != TokenType.ID:
         return None
 
-    # 2. Local lexical resolution.
+    # 2. Namespace member access: `ns.member` -> exported declaration.
+    owner = _member_owner(text, token)
+    if owner in namespaces:
+        ns = namespaces[owner]
+        member = next((m for m in ns.members if m.name == token.literal), None)
+        if member is not None and member.file is not None:
+            source = preprocess(path, text).files.get(member.file, "")
+            return {
+                "path": member.file,
+                "range": make_range(
+                    source,
+                    member.token.position,
+                    member.token.position + len(member.token.literal),
+                ),
+            }
+        return None
+
+    # 3. Namespace name itself -> the imported file.
+    if token.literal in namespaces and _is_namespace_use(text, token):
+        ns = namespaces[token.literal]
+        if ns.file:
+            return _file_head(ns.file)
+        return None
+
+    # 4. Local lexical resolution.
     scopes, token_scope = _build_scopes(tokens)
     declaration_token = _resolve_declaration(
         scopes, token_scope[token_index], token.literal
@@ -811,12 +1043,10 @@ def get_definition(
             ),
         }
 
-    # 3. Cross-file resolution against imported top-level symbols.
+    # 5. Cross-file resolution against exported symbols from flat imports.
     for symbol in collect_imported_symbols(text, path):
         if symbol.name == token.literal and symbol.file is not None:
-            source = ""
-            _pp = preprocess(path, text)
-            source = _pp.files.get(symbol.file, "")
+            source = preprocess(path, text).files.get(symbol.file, "")
             return {
                 "path": symbol.file,
                 "range": make_range(
@@ -827,6 +1057,16 @@ def get_definition(
             }
 
     return None
+
+
+def _file_head(abs_path: str) -> dict:
+    return {
+        "path": abs_path,
+        "range": {
+            "start": {"line": 0, "character": 0},
+            "end": {"line": 0, "character": 0},
+        },
+    }
 
 
 # --------------------------------------------------------------------------

@@ -44,22 +44,45 @@ python mah.py examples/strings.mh
 python mah.py examples/import_demo.mh
 ```
 
-## Imports
+## Imports and exports
 
-A file can pull in the contents of another file with an `import` directive:
+Modules are scoped: a file only shares the names it marks with `export`, and
+another file brings them in with `import`. The `.mh` extension is optional in
+import paths, which are resolved relative to the importing file.
+
+Export declarations (or a bare name declared elsewhere):
 
 ```mah
-import "mathlib.mh"
+# mathlib.mh
+export def square(n) { return n ** 2 }
+export let answer = 42
+
+def helper() { return 1 }   # private: not visible to importers
+export helper               # ...unless explicitly exported
+```
+
+Import into a namespace and access members with `.`:
+
+```mah
+import math from "mathlib"   # ".mh" optional
+
+print(math.square(4))
+print(math.answer)
+```
+
+Or import a module's exports directly into scope:
+
+```mah
+import "mathlib"
 
 print(square(4))
 ```
 
-The path is resolved relative to the importing file's directory. Imports are
-processed before compilation (like C's `#include`): the imported file is
-inlined, so its top-level `def`s and `let`s become available to the importer.
-Each file is included at most once, so diamond imports and cycles are safe.
-Errors inside an imported file are reported with their originating
-`file:line:column`.
+Only `export`ed names are reachable; referencing a private or non-exported
+member is a compile error. Each file is inlined at most once, so diamond
+imports and cycles are safe, and errors inside an imported file are reported
+with their originating `file:line:column`.
+
 
 
 ## Installing the `mah` command
@@ -115,9 +138,10 @@ provide:
 - hover docs for keywords, builtins, functions and variables, showing any
   `#` doc comment written directly above the declaration
 - go to definition (scope-aware: resolves parameters, locals, then globals),
-  working across `import`ed files and jumping to a file from its import path
-- completion for keywords, builtins, and symbols from the current and
-  imported files
+  working across imports -- including namespace members (`math.square`), the
+  namespace name itself, and the import path
+- autocomplete-on-type for keywords, builtins, in-scope symbols, imported
+  names and namespaces; typing `namespace.` lists that module's exports
 - document symbols (functions and variables)
 - a comment / uncomment code action for the selected lines
 
@@ -140,8 +164,10 @@ launches the server via `vim.lsp.start` for every Mah buffer. It uses
 
 With the server running, Neovim's built-in `vim.lsp.buf.definition` (mapped to
 `grd`, or use `gd` in older configs) jumps to the declaration of the symbol
-under the cursor, even when it lives in an imported file. Comment toggling is
-offered as a code action via `vim.lsp.buf.code_action`.
+under the cursor, even when it lives in an imported file. Completion pops up
+automatically as you type (autotrigger), comment toggling is offered as a code
+action via `vim.lsp.buf.code_action`, and the buffer's `commentstring` is set
+so built-in commenting (`gcc`) works too.
 
 `make install` installs everything: the `mah` CLI, syntax highlighting, and
 the language server.

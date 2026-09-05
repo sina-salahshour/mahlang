@@ -7,6 +7,12 @@
 -- `<nvim-config>/mah-lsp/`, so we locate it relative to this script rather
 -- than hard-coding an absolute path.
 
+-- Mah uses `#` for line comments. Set these so built-in commenting (gcc / the
+-- `vim.lsp.buf.code_action` comment toggle) and any commenting plugin work
+-- without a "commentstring is not defined" / "option not set" error.
+vim.bo.commentstring = "# %s"
+vim.bo.comments = ":#"
+
 local function script_path()
   local info = debug.getinfo(1, "S")
   return info.source:sub(2) -- strip the leading "@"
@@ -57,8 +63,21 @@ local root_markers = vim.fs.find(
 local root_dir = root_markers[1] and vim.fs.dirname(root_markers[1])
   or vim.fs.dirname(bufname)
 
-vim.lsp.start({
+local client_id = vim.lsp.start({
   name = "mah-lsp",
   cmd = { python, server_script },
   root_dir = root_dir,
 })
+
+-- Turn on autocomplete-on-type where the Neovim build supports it (0.11+).
+-- This makes the completion menu pop up automatically as you type instead of
+-- requiring a manual <C-x><C-o>.
+if client_id and vim.lsp.completion and vim.lsp.completion.enable then
+  local ok = pcall(vim.lsp.completion.enable, true, client_id, 0, {
+    autotrigger = true,
+  })
+  if not ok then
+    -- Older signature / partial support: fall back to a manual enable.
+    pcall(vim.lsp.completion.enable, true, client_id, 0)
+  end
+end

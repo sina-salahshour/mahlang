@@ -1,12 +1,18 @@
-# Demonstrates importing another file with `import "path"`.
-# The path is resolved relative to this file's directory.
+# Demonstrates scoped imports.
+#
+# Two forms are supported (the .mh extension is optional):
+#   import "mathlib"              -> brings exported names into scope directly
+#   import math from "mathlib"    -> access exports via the `math` namespace
+#
+# Only names marked with `export` in mathlib are visible here.
 
-import "./mathlib.mh"
+import math from "mathlib"
 
 let n = 4
-print(square(n))
-print(cube(n))
+print(math.square(n))
+print(math.cube(n))
+print(math.answer)
 
-if is_even(n) {
+if math.is_even(n) {
 	print("n is even")
 }

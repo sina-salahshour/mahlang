@@ -9,7 +9,7 @@ from code_interpreter import run_code
 from compiler.ir_generator import IRGenerator
 from compiler.lexer import Lexer
 from compiler.parser import Parser
-from preprocessor import preprocess
+from preprocessor import demangle_message, preprocess
 
 sys.tracebacklimit = 0
 
@@ -130,12 +130,15 @@ def main():
                 exit(-2)
     except Exception as e:
         (message, *_) = e.args
+        message = demangle_message(message)
         pos = re.findall(r"at position '?(\d+)'?", message)
         if not len(pos):
+            e.args = (message,)
             raise e
         [pos] = pos
         label = _location_label(pp, pp.entry_path, int(pos))
         if not label:
+            e.args = (message,)
             raise e
         message = message.replace(pos, label)
 

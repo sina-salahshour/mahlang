@@ -163,7 +163,16 @@ class Server:
             "documentSymbolProvider": True,
             "definitionProvider": True,
             "codeActionProvider": {"codeActionKinds": ["source.toggleComment"]},
-            "completionProvider": {"triggerCharacters": ["."]},
+            "completionProvider": {
+                # Trigger on identifier characters so completion pops up as you
+                # type (autocomplete-on-type), plus `.` for good measure.
+                "triggerCharacters": list(
+                    "abcdefghijklmnopqrstuvwxyz"
+                    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                    "_."
+                ),
+                "resolveProvider": False,
+            },
         }
         self._respond(
             request_id,
@@ -240,8 +249,14 @@ class Server:
 
     def _on_textDocument_completion(self, request_id, params: dict) -> None:
         uri = params.get("textDocument", {}).get("uri")
+        position = params.get("position", {})
         text = self._documents.get(uri, "")
-        items = analysis.get_completions(text, uri_to_path(uri))
+        items = analysis.get_completions(
+            text,
+            uri_to_path(uri),
+            position.get("line"),
+            position.get("character"),
+        )
         self._respond(request_id, {"isIncomplete": False, "items": items})
 
     def _on_textDocument_documentSymbol(self, request_id, params: dict) -> None:
