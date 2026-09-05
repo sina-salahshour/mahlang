@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import os
 import re
 import sys
 from pathlib import Path
@@ -8,6 +9,7 @@ from code_interpreter import run_code
 from compiler.ir_generator import IRGenerator
 from compiler.lexer import Lexer
 from compiler.parser import Parser
+from preprocessor import preprocess
 
 sys.tracebacklimit = 0
 
@@ -69,6 +71,18 @@ def find_error_line(input_str: str, pos: int):
             return line_number, row_number
 
 
+def _location_label(pp, entry_path: str, combined_offset: int) -> str:
+    """Render a ``#line:row`` (entry file) or ``file#line:row`` location."""
+    path, src_offset = pp.map_to_source(combined_offset)
+    line_info = find_error_line(pp.files.get(path, ""), src_offset)
+    if not line_info:
+        return None
+    line, row = line_info
+    if path == entry_path:
+        return f"#{line}:{row}"
+    return f"{os.path.basename(path)}#{line}:{row}"
+
+
 def main():
     should_save_to_file = False
     if len(sys.argv) == 3:
@@ -84,7 +98,21 @@ def main():
     else:
         print(USAGE_HELP_MESSGE)
         exit(-1)
-    file_str = read_file(file_name)
+
+    # Read the entry file, then inline any `import "..."` directives.
+    entry_str = read_file(file_name)
+    pp = preprocess(file_name, entry_str)
+
+    # Report unresolved imports before attempting to compile.
+    if pp.errors:
+        message, offset, _length = pp.errors[0]
+        line_info = find_error_line(entry_str, offset)
+        if line_info:
+            line, row = line_info
+            message = f"{message} at position #{line}:{row}"
+        raise SyntaxError(message)
+
+    file_str = pp.text
 
     try:
         match command:
@@ -102,15 +130,14 @@ def main():
                 exit(-2)
     except Exception as e:
         (message, *_) = e.args
-        pos = re.findall(r"at position (\d+)", message)
+        pos = re.findall(r"at position '?(\d+)'?", message)
         if not len(pos):
             raise e
         [pos] = pos
-        line_info = find_error_line(file_str, int(pos))
-        if not (line_info):
+        label = _location_label(pp, pp.entry_path, int(pos))
+        if not label:
             raise e
-        line, row = line_info
-        message = message.replace(pos, f"#{line}:{row}")
+        message = message.replace(pos, label)
 
         e.args = (message,)
 

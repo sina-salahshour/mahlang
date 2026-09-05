@@ -4,10 +4,12 @@
 A dependency-free (standard library only) implementation of the Language
 Server Protocol over stdio for the Mah language. It provides:
 
-  * live diagnostics (compile errors) on open/change
-  * hover information for keywords, builtins and identifiers
-  * completion for keywords, builtins and document symbols
+  * live diagnostics (compile errors, including imported files) on open/change
+  * hover information for keywords, builtins and identifiers (with doc comments)
+  * go to definition (scope-aware, and across ``import``ed files)
+  * completion for keywords, builtins and document/imported symbols
   * document symbols (functions and variables)
+  * a comment/uncomment code action
 
 The server speaks LSP `3.x` framing (``Content-Length`` headers followed by a
 JSON-RPC 2.0 body) on stdin/stdout. All logging goes to stderr so it never
@@ -23,6 +25,8 @@ from __future__ import annotations
 import json
 import os
 import sys
+from urllib.parse import unquote, urlparse
+from urllib.request import pathname2url
 
 # Allow running both as ``python -m lsp.server`` and ``python lsp/server.py``.
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -38,6 +42,21 @@ except ImportError:  # script import (python lsp/server.py)
 
 SERVER_NAME = "mah-lsp"
 SERVER_VERSION = "0.1.0"
+
+
+def uri_to_path(uri: str) -> str | None:
+    """Convert a ``file://`` URI to a local filesystem path."""
+    if not uri:
+        return None
+    parsed = urlparse(uri)
+    if parsed.scheme != "file":
+        return None
+    return unquote(parsed.path)
+
+
+def path_to_uri(path: str) -> str:
+    """Convert a local filesystem path to a ``file://`` URI."""
+    return "file://" + pathname2url(os.path.abspath(path))
 
 
 def _log(message: str) -> None:
@@ -143,6 +162,7 @@ class Server:
             "hoverProvider": True,
             "documentSymbolProvider": True,
             "definitionProvider": True,
+            "codeActionProvider": {"codeActionKinds": ["source.toggleComment"]},
             "completionProvider": {"triggerCharacters": ["."]},
         }
         self._respond(
@@ -211,14 +231,17 @@ class Server:
         position = params.get("position", {})
         text = self._documents.get(uri, "")
         hover = analysis.get_hover(
-            text, position.get("line", 0), position.get("character", 0)
+            text,
+            position.get("line", 0),
+            position.get("character", 0),
+            uri_to_path(uri),
         )
         self._respond(request_id, hover)
 
     def _on_textDocument_completion(self, request_id, params: dict) -> None:
         uri = params.get("textDocument", {}).get("uri")
         text = self._documents.get(uri, "")
-        items = analysis.get_completions(text)
+        items = analysis.get_completions(text, uri_to_path(uri))
         self._respond(request_id, {"isIncomplete": False, "items": items})
 
     def _on_textDocument_documentSymbol(self, request_id, params: dict) -> None:
@@ -230,18 +253,33 @@ class Server:
         uri = params.get("textDocument", {}).get("uri")
         position = params.get("position", {})
         text = self._documents.get(uri, "")
-        target_range = analysis.get_definition(
-            text, position.get("line", 0), position.get("character", 0)
+        target = analysis.get_definition(
+            text,
+            position.get("line", 0),
+            position.get("character", 0),
+            uri_to_path(uri),
         )
-        if target_range is None:
+        if target is None:
             self._respond(request_id, None)
             return
-        self._respond(request_id, {"uri": uri, "range": target_range})
+        # A ``path`` of None means the definition is in the current document.
+        target_path = target.get("path")
+        target_uri = path_to_uri(target_path) if target_path else uri
+        self._respond(request_id, {"uri": target_uri, "range": target["range"]})
+
+    def _on_textDocument_codeAction(self, request_id, params: dict) -> None:
+        uri = params.get("textDocument", {}).get("uri")
+        text = self._documents.get(uri, "")
+        rng = params.get("range", {})
+        start_line = rng.get("start", {}).get("line", 0)
+        end_line = rng.get("end", {}).get("line", start_line)
+        actions = analysis.get_code_actions(uri, text, start_line, end_line)
+        self._respond(request_id, actions)
 
     # -- diagnostics ------------------------------------------------------
     def _publish_diagnostics(self, uri: str, text: str) -> None:
         try:
-            diagnostics = analysis.get_diagnostics(text)
+            diagnostics = analysis.get_diagnostics(text, uri_to_path(uri))
         except Exception as error:  # noqa: BLE001
             _log(f"diagnostics failed for {uri}: {error!r}")
             diagnostics = []

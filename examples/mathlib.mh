@@ -1,0 +1,14 @@
+# A small library of reusable math helpers, meant to be imported.
+
+# a function to get the square of n
+def square(n) {
+	return n ** 2
+}
+
+def cube(n) {
+	return n ** 3
+}
+
+def is_even(n) {
+	return n % 2 == 0
+}

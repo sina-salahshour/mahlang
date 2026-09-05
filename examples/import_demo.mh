@@ -1,0 +1,12 @@
+# Demonstrates importing another file with `import "path"`.
+# The path is resolved relative to this file's directory.
+
+import "./mathlib.mh"
+
+let n = 4
+print(square(n))
+print(cube(n))
+
+if is_even(n) {
+	print("n is even")
+}

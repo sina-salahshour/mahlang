@@ -32,6 +32,7 @@ from compiler.lexer import (  # noqa: E402
     TokenType,
 )
 from compiler.parser import Parser  # noqa: E402
+from preprocessor import BUFFER_PATH, preprocess  # noqa: E402
 
 # --------------------------------------------------------------------------
 # Language metadata (used for hover + completion)
@@ -234,14 +235,36 @@ def _clean_message(message: str) -> str:
     return _POSITION_RE.sub("", message).strip()
 
 
-def get_diagnostics(text: str) -> list[dict]:
-    """Compile ``text`` and return a list of LSP diagnostics."""
-    # An empty / comment-only document is not an error while editing.
-    tokens, lex_error = tokenize(text)
-    if not tokens and lex_error is None:
-        return []
+def get_diagnostics(text: str, path: Optional[str] = None) -> list[dict]:
+    """Compile ``text`` (resolving imports) and return LSP diagnostics.
 
-    lexer = TrackingLexer(text)
+    ``path`` is the on-disk path of the buffer, used to resolve ``import``
+    directives relative to it. Errors originating in an imported file are
+    attributed to the ``import`` directive that pulled it in, since we can only
+    place diagnostics inside the file being edited.
+    """
+    pp = preprocess(path, text)
+    diagnostics: list[dict] = []
+
+    # 1. Unresolved / unreadable imports.
+    for message, offset, length in pp.errors:
+        diagnostics.append(
+            {
+                "range": make_range(text, offset, offset + max(length, 1)),
+                "severity": SEVERITY_ERROR,
+                "source": "mah",
+                "message": message,
+            }
+        )
+
+    combined = pp.text
+
+    # An empty / comment-only document (after import resolution) is fine.
+    tokens, lex_error = tokenize(combined)
+    if not tokens and lex_error is None:
+        return diagnostics
+
+    lexer = TrackingLexer(combined)
     parser = Parser(lexer)
     ir = IRGenerator(parser)
     register_actions(ir)
@@ -258,25 +281,70 @@ def get_diagnostics(text: str) -> list[dict]:
         if not isinstance(message, str):
             message = str(error)
 
-        offset = _extract_offset(message)
-        if offset is None:
+        combined_offset = _extract_offset(message)
+        if combined_offset is None:
             last = lexer.last_token
-            offset = last.position if last is not None else 0
+            combined_offset = last.position if last is not None else 0
             length = len(last.literal) if last is not None else 1
         else:
-            length = _token_length_at(text, offset)
-
+            length = _token_length_at(combined, combined_offset)
         length = max(length, 1)
-        return [
-            {
-                "range": make_range(text, offset, offset + length),
-                "severity": SEVERITY_ERROR,
-                "source": "mah",
-                "message": _clean_message(message) or message,
-            }
-        ]
 
-    return []
+        diagnostics.append(
+            _diagnostic_for_combined_offset(
+                pp, text, combined, combined_offset, length, _clean_message(message)
+            )
+        )
+
+    return diagnostics
+
+
+def _diagnostic_for_combined_offset(
+    pp, text: str, combined: str, combined_offset: int, length: int, message: str
+) -> dict:
+    """Build a diagnostic in the buffer for an error at a combined-text offset."""
+    origin_path, src_offset = pp.map_to_source(combined_offset)
+
+    if origin_path == pp.entry_path:
+        # Error is in the buffer itself; the entry source equals the buffer.
+        return {
+            "range": make_range(text, src_offset, src_offset + length),
+            "severity": SEVERITY_ERROR,
+            "source": "mah",
+            "message": message or "error",
+        }
+
+    # Error is inside an imported file: attribute it to the import directive.
+    import_site = pp.root_import_for(combined_offset)
+    origin_source = pp.files.get(origin_path, "")
+    line_info = _line_col(origin_source, src_offset)
+    where = os.path.basename(origin_path)
+    location = f"{where}:{line_info[0]}:{line_info[1]}" if line_info else where
+
+    if import_site is not None:
+        rng = make_range(
+            text, import_site.offset, import_site.offset + import_site.length
+        )
+    else:
+        rng = make_range(text, 0, 1)
+
+    return {
+        "range": rng,
+        "severity": SEVERITY_ERROR,
+        "source": "mah",
+        "message": f"in imported file {location}: {message or 'error'}",
+    }
+
+
+def _line_col(source: str, offset: int):
+    """1-based ``(line, column)`` of ``offset`` within ``source``."""
+    if offset < 0:
+        offset = 0
+    if offset > len(source):
+        offset = len(source)
+    line = source.count("\n", 0, offset) + 1
+    line_start = source.rfind("\n", 0, offset) + 1
+    return line, (offset - line_start) + 1
 
 
 # --------------------------------------------------------------------------
@@ -289,16 +357,47 @@ class Symbol:
     kind: int
     token: Token
     detail: str = ""
+    doc: str = ""
+    file: Optional[str] = None
 
 
-def collect_symbols(tokens: list[Token]) -> list[Symbol]:
+def _leading_doc_comment(text: str, token: Token) -> str:
+    """Collect contiguous ``#`` comment lines directly above a declaration.
+
+    Comments are ignored by the lexer, so they are not in the token stream;
+    we read them straight from the source. A blank or code line ends the
+    doc block.
+    """
+    line_start = text.rfind("\n", 0, token.position) + 1
+    lines_above = text[:line_start].splitlines()
+
+    collected: list[str] = []
+    for raw in reversed(lines_above):
+        stripped = raw.strip()
+        if stripped.startswith("#"):
+            collected.append(stripped[1:].strip())
+        else:
+            break
+    if not collected:
+        return ""
+    return "\n".join(reversed(collected)).strip()
+
+
+def collect_symbols(
+    tokens: list[Token], text: Optional[str] = None, file: Optional[str] = None
+) -> list[Symbol]:
     """Find top-level function and variable declarations via a token scan.
 
     This is deliberately independent of a successful compile so that symbols
-    and completions keep working while the file has errors elsewhere.
+    and completions keep working while the file has errors elsewhere. When
+    ``text`` is supplied, leading ``#`` doc comments are attached to each
+    symbol.
     """
     symbols: list[Symbol] = []
     seen_names: set[str] = set()
+
+    def doc_for(decl_token: Token) -> str:
+        return _leading_doc_comment(text, decl_token) if text is not None else ""
 
     index = 0
     count = len(tokens)
@@ -314,7 +413,14 @@ def collect_symbols(tokens: list[Token]) -> list[Symbol]:
                 if key not in seen_names:
                     seen_names.add(key)
                     symbols.append(
-                        Symbol(name_token.literal, SYMBOL_FUNCTION, name_token, detail)
+                        Symbol(
+                            name_token.literal,
+                            SYMBOL_FUNCTION,
+                            name_token,
+                            detail,
+                            doc_for(name_token),
+                            file,
+                        )
                     )
                 # expose parameters as variables for completion
                 for param, param_token in _read_param_tokens(tokens, index + 2):
@@ -322,7 +428,14 @@ def collect_symbols(tokens: list[Token]) -> list[Symbol]:
                     if pkey not in seen_names:
                         seen_names.add(pkey)
                         symbols.append(
-                            Symbol(param, SYMBOL_VARIABLE, param_token, "parameter")
+                            Symbol(
+                                param,
+                                SYMBOL_VARIABLE,
+                                param_token,
+                                "parameter",
+                                "",
+                                file,
+                            )
                         )
 
         elif token.type == TokenType.Let and index + 1 < count:
@@ -337,6 +450,8 @@ def collect_symbols(tokens: list[Token]) -> list[Symbol]:
                             SYMBOL_VARIABLE,
                             name_token,
                             f"let {name_token.literal}",
+                            doc_for(name_token),
+                            file,
                         )
                     )
 
@@ -361,6 +476,35 @@ def _read_param_tokens(tokens: list[Token], start: int):
 
 def _read_params(tokens: list[Token], start: int) -> list[str]:
     return [name for name, _token in _read_param_tokens(tokens, start)]
+
+
+def collect_imported_symbols(text: str, path: Optional[str]) -> list[Symbol]:
+    """Top-level symbols contributed by files imported from the buffer.
+
+    Returns symbols whose ``token`` positions are offsets *within their own
+    file* (``symbol.file``), suitable for building cross-file locations.
+    """
+    if path is None:
+        return []
+    pp = preprocess(path, text)
+    results: list[Symbol] = []
+    seen: set = set()
+    for import_site in pp.entry_imports:
+        if not import_site.exists or import_site.resolved is None:
+            continue
+        source = pp.files.get(import_site.resolved)
+        if source is None:
+            continue
+        file_tokens, _err = tokenize(source)
+        for symbol in collect_symbols(file_tokens, source, import_site.resolved):
+            if symbol.detail == "parameter":
+                continue
+            key = (symbol.name, symbol.kind)
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append(symbol)
+    return results
 
 
 def get_document_symbols(text: str) -> list[dict]:
@@ -390,7 +534,7 @@ def get_document_symbols(text: str) -> list[dict]:
 # Completion
 # --------------------------------------------------------------------------
 
-def get_completions(text: str) -> list[dict]:
+def get_completions(text: str, path: Optional[str] = None) -> list[dict]:
     items: list[dict] = []
 
     for keyword, doc in KEYWORD_DOCS.items():
@@ -414,19 +558,31 @@ def get_completions(text: str) -> list[dict]:
         )
 
     tokens, _lex_error = tokenize(text)
-    for symbol in collect_symbols(tokens):
+    local_symbols = collect_symbols(tokens, text)
+    imported_symbols = collect_imported_symbols(text, path)
+
+    seen: set = set()
+    for symbol in local_symbols + imported_symbols:
+        key = (symbol.name, symbol.kind)
+        if key in seen:
+            continue
+        seen.add(key)
         kind = (
             COMPLETION_FUNCTION
             if symbol.kind == SYMBOL_FUNCTION
             else COMPLETION_VARIABLE
         )
-        items.append(
-            {
-                "label": symbol.name,
-                "kind": kind,
-                "detail": symbol.detail,
-            }
-        )
+        detail = symbol.detail
+        if symbol.file is not None:
+            detail = f"{detail}  (from {os.path.basename(symbol.file)})"
+        item = {
+            "label": symbol.name,
+            "kind": kind,
+            "detail": detail,
+        }
+        if symbol.doc:
+            item["documentation"] = {"kind": "markdown", "value": symbol.doc}
+        items.append(item)
 
     return items
 
@@ -435,7 +591,7 @@ def get_completions(text: str) -> list[dict]:
 # Hover
 # --------------------------------------------------------------------------
 
-def get_hover(text: str, line: int, character: int) -> Optional[dict]:
+def get_hover(text: str, line: int, character: int, path: Optional[str] = None) -> Optional[dict]:
     tokens, _lex_error = tokenize(text)
     offset = position_to_offset(text, line, character)
     token = _token_at_offset(tokens, offset)
@@ -456,7 +612,10 @@ def get_hover(text: str, line: int, character: int) -> Optional[dict]:
             token.literal, ""
         )
     elif token.type == TokenType.ID:
-        symbols = {s.name: s for s in collect_symbols(tokens)}
+        # Prefer local declarations, then symbols pulled in via imports.
+        symbols = {s.name: s for s in collect_symbols(tokens, text)}
+        for imported in collect_imported_symbols(text, path):
+            symbols.setdefault(imported.name, imported)
         symbol = symbols.get(token.literal)
         if symbol is not None and symbol.kind == SYMBOL_FUNCTION:
             value = f"**function** `{symbol.name}`\n\n```mah\n{symbol.detail}\n```"
@@ -465,6 +624,11 @@ def get_hover(text: str, line: int, character: int) -> Optional[dict]:
             value = f"**{note}** `{token.literal}`"
         else:
             value = f"**identifier** `{token.literal}`"
+
+        if symbol is not None and symbol.file is not None:
+            value += f"\n\n*imported from `{os.path.basename(symbol.file)}`*"
+        if symbol is not None and symbol.doc:
+            value += "\n\n---\n\n" + symbol.doc
     elif token.type == TokenType.Number:
         value = f"**number** `{token.literal}`"
     elif token.type == TokenType.String:
@@ -591,13 +755,39 @@ def _resolve_declaration(scopes: list[_Scope], scope_id: int, name: str):
     return None
 
 
-def get_definition(text: str, line: int, character: int) -> Optional[dict]:
-    """Return the LSP range of the declaration for the identifier at the cursor.
+def get_definition(
+    text: str, line: int, character: int, path: Optional[str] = None
+) -> Optional[dict]:
+    """Resolve the declaration for the symbol under the cursor.
 
-    Only identifiers resolve; keywords, builtins and literals return ``None``.
+    Returns ``{"path": <abs path or None>, "range": <lsp range>}`` where a
+    ``path`` of ``None`` means "the current buffer". Resolution order:
+
+      1. cursor on an ``import "..."`` path  -> the imported file (line 0);
+      2. identifier resolved in local lexical scope  -> in-buffer declaration;
+      3. identifier matching a top-level symbol from an imported file  -> that
+         file's declaration (cross-file jump).
+
+    Keywords, builtins and literals return ``None``.
     """
-    tokens, _lex_error = tokenize(text)
     offset = position_to_offset(text, line, character)
+
+    # 1. Jump to file when the cursor is on an import path.
+    if path is not None:
+        pp = preprocess(path, text)
+        for import_site in pp.entry_imports:
+            if import_site.offset <= offset <= import_site.offset + import_site.length:
+                if import_site.exists and import_site.resolved is not None:
+                    return {
+                        "path": import_site.resolved,
+                        "range": {
+                            "start": {"line": 0, "character": 0},
+                            "end": {"line": 0, "character": 0},
+                        },
+                    }
+                return None
+
+    tokens, _lex_error = tokenize(text)
     token_index = _token_index_at_offset(tokens, offset)
     if token_index is None:
         return None
@@ -606,15 +796,140 @@ def get_definition(text: str, line: int, character: int) -> Optional[dict]:
     if token.type != TokenType.ID:
         return None
 
+    # 2. Local lexical resolution.
     scopes, token_scope = _build_scopes(tokens)
     declaration_token = _resolve_declaration(
         scopes, token_scope[token_index], token.literal
     )
-    if declaration_token is None:
-        return None
+    if declaration_token is not None:
+        return {
+            "path": None,
+            "range": make_range(
+                text,
+                declaration_token.position,
+                declaration_token.position + len(declaration_token.literal),
+            ),
+        }
 
-    return make_range(
-        text,
-        declaration_token.position,
-        declaration_token.position + len(declaration_token.literal),
+    # 3. Cross-file resolution against imported top-level symbols.
+    for symbol in collect_imported_symbols(text, path):
+        if symbol.name == token.literal and symbol.file is not None:
+            source = ""
+            _pp = preprocess(path, text)
+            source = _pp.files.get(symbol.file, "")
+            return {
+                "path": symbol.file,
+                "range": make_range(
+                    source,
+                    symbol.token.position,
+                    symbol.token.position + len(symbol.token.literal),
+                ),
+            }
+
+    return None
+
+
+# --------------------------------------------------------------------------
+# Comment toggling (code action)
+# --------------------------------------------------------------------------
+
+COMMENT_PREFIX = "#"
+
+
+def _split_lines_keepends(text: str) -> list[str]:
+    return text.splitlines(keepends=True)
+
+
+def toggle_line_comment(text: str, start_line: int, end_line: int) -> list[dict]:
+    """Return TextEdits that comment or uncomment ``[start_line, end_line]``.
+
+    Behaviour mirrors most editors: if every non-blank line in the range is
+    already commented, the whole range is uncommented; otherwise every
+    non-blank line is commented. Comments are inserted at the minimum common
+    indentation so block structure is preserved.
+    """
+    lines = _split_lines_keepends(text)
+    total = len(lines)
+    if total == 0:
+        lines = [""]
+        total = 1
+
+    if start_line > end_line:
+        start_line, end_line = end_line, start_line
+    start_line = max(0, start_line)
+    end_line = min(end_line, total - 1)
+
+    targets = list(range(start_line, end_line + 1))
+    content = {i: lines[i].rstrip("\n").rstrip("\r") for i in targets}
+    non_blank = [i for i in targets if content[i].strip()]
+    if not non_blank:
+        return []  # nothing but blank lines selected
+
+    comment_re = re.compile(r"^(\s*)" + re.escape(COMMENT_PREFIX) + r" ?")
+    all_commented = all(comment_re.match(content[i]) for i in non_blank)
+
+    edits: list[dict] = []
+    if all_commented:
+        # Uncomment: strip the first `# ` (and an optional single space).
+        for i in non_blank:
+            match = comment_re.match(content[i])
+            indent = match.group(1)
+            removed_len = match.end() - len(indent)
+            edits.append(
+                {
+                    "range": {
+                        "start": {"line": i, "character": _utf16_len(indent)},
+                        "end": {
+                            "line": i,
+                            "character": _utf16_len(indent) + removed_len,
+                        },
+                    },
+                    "newText": "",
+                }
+            )
+    else:
+        # Comment: insert `# ` at the common minimum indentation.
+        indent_width = min(
+            len(content[i]) - len(content[i].lstrip()) for i in non_blank
+        )
+        for i in non_blank:
+            edits.append(
+                {
+                    "range": {
+                        "start": {"line": i, "character": _utf16_len(content[i][:indent_width])},
+                        "end": {"line": i, "character": _utf16_len(content[i][:indent_width])},
+                    },
+                    "newText": COMMENT_PREFIX + " ",
+                }
+            )
+
+    return edits
+
+
+def get_code_actions(
+    uri: str, text: str, start_line: int, end_line: int
+) -> list[dict]:
+    """Offer a comment-toggle code action for the selected line range."""
+    edits = toggle_line_comment(text, start_line, end_line)
+    if not edits:
+        return []
+
+    lines = _split_lines_keepends(text)
+    non_blank = [
+        i
+        for i in range(start_line, min(end_line, len(lines) - 1) + 1)
+        if 0 <= i < len(lines) and lines[i].strip()
+    ]
+    comment_re = re.compile(r"^\s*" + re.escape(COMMENT_PREFIX))
+    all_commented = bool(non_blank) and all(
+        comment_re.match(lines[i]) for i in non_blank
     )
+    title = "Uncomment line(s)" if all_commented else "Comment line(s)"
+
+    return [
+        {
+            "title": title,
+            "kind": "source.toggleComment",
+            "edit": {"changes": {uri: edits}},
+        }
+    ]

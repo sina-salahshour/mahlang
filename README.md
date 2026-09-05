@@ -39,7 +39,28 @@ python mah.py examples/new_prime_numbers.mh
 
 # String operations, concatenation, comparisons, and functions
 python mah.py examples/strings.mh
+
+# Importing another file
+python mah.py examples/import_demo.mh
 ```
+
+## Imports
+
+A file can pull in the contents of another file with an `import` directive:
+
+```mah
+import "mathlib.mh"
+
+print(square(4))
+```
+
+The path is resolved relative to the importing file's directory. Imports are
+processed before compilation (like C's `#include`): the imported file is
+inlined, so its top-level `def`s and `let`s become available to the importer.
+Each file is included at most once, so diamond imports and cycles are safe.
+Errors inside an imported file are reported with their originating
+`file:line:column`.
+
 
 ## Installing the `mah` command
 
@@ -89,11 +110,16 @@ Mah ships with a language server (`lsp/`) written in pure Python (standard
 library only, no extra dependencies). It reuses the compiler pipeline to
 provide:
 
-- live diagnostics (compile errors) as you type
-- hover docs for keywords, builtins, functions and variables
-- go to definition (scope-aware: resolves parameters, locals, then globals)
-- completion for keywords, builtins and symbols in the current file
+- live diagnostics (compile errors) as you type, including errors inside
+  imported files
+- hover docs for keywords, builtins, functions and variables, showing any
+  `#` doc comment written directly above the declaration
+- go to definition (scope-aware: resolves parameters, locals, then globals),
+  working across `import`ed files and jumping to a file from its import path
+- completion for keywords, builtins, and symbols from the current and
+  imported files
 - document symbols (functions and variables)
+- a comment / uncomment code action for the selected lines
 
 ### Neovim
 
@@ -114,7 +140,8 @@ launches the server via `vim.lsp.start` for every Mah buffer. It uses
 
 With the server running, Neovim's built-in `vim.lsp.buf.definition` (mapped to
 `grd`, or use `gd` in older configs) jumps to the declaration of the symbol
-under the cursor.
+under the cursor, even when it lives in an imported file. Comment toggling is
+offered as a code action via `vim.lsp.buf.code_action`.
 
 `make install` installs everything: the `mah` CLI, syntax highlighting, and
 the language server.

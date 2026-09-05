@@ -23,7 +23,7 @@ lang:
 # real $(LIB_DIR), so the bundled modules import correctly from any directory.
 install-cli: lang
 	mkdir -p $(LIB_DIR)/compiler $(BIN_DIR)
-	cp mah.py actions.py code_interpreter.py $(LIB_DIR)/
+	cp mah.py actions.py code_interpreter.py preprocessor.py $(LIB_DIR)/
 	cp compiler/__init__.py compiler/lexer.py compiler/parser.py compiler/ir_generator.py $(LIB_DIR)/compiler/
 	chmod +x $(LIB_DIR)/mah.py
 	ln -sf $(LIB_DIR)/mah.py $(BIN_LINK)
@@ -61,7 +61,7 @@ install-lsp: lang $(FTDETECT)
 	mkdir -p $(LSP_DIR)/lsp $(LSP_DIR)/compiler $(NVIM_DIR)/ftplugin
 	cp lsp/__init__.py lsp/analysis.py lsp/server.py $(LSP_DIR)/lsp/
 	cp compiler/__init__.py compiler/lexer.py compiler/parser.py compiler/ir_generator.py $(LSP_DIR)/compiler/
-	cp actions.py $(LSP_DIR)/
+	cp actions.py preprocessor.py $(LSP_DIR)/
 	cp editors/nvim/ftplugin/mah.lua $(LSP_FTPLUGIN)
 
 uninstall-lsp:
