@@ -142,6 +142,7 @@ class Server:
             },
             "hoverProvider": True,
             "documentSymbolProvider": True,
+            "definitionProvider": True,
             "completionProvider": {"triggerCharacters": ["."]},
         }
         self._respond(
@@ -224,6 +225,18 @@ class Server:
         uri = params.get("textDocument", {}).get("uri")
         text = self._documents.get(uri, "")
         self._respond(request_id, analysis.get_document_symbols(text))
+
+    def _on_textDocument_definition(self, request_id, params: dict) -> None:
+        uri = params.get("textDocument", {}).get("uri")
+        position = params.get("position", {})
+        text = self._documents.get(uri, "")
+        target_range = analysis.get_definition(
+            text, position.get("line", 0), position.get("character", 0)
+        )
+        if target_range is None:
+            self._respond(request_id, None)
+            return
+        self._respond(request_id, {"uri": uri, "range": target_range})
 
     # -- diagnostics ------------------------------------------------------
     def _publish_diagnostics(self, uri: str, text: str) -> None:

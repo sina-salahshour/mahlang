@@ -200,16 +200,21 @@ def _token_length_at(text: str, offset: int) -> int:
 
 
 def _token_at_offset(tokens: list[Token], offset: int) -> Optional[Token]:
-    for token in tokens:
+    index = _token_index_at_offset(tokens, offset)
+    return tokens[index] if index is not None else None
+
+
+def _token_index_at_offset(tokens: list[Token], offset: int) -> Optional[int]:
+    for index, token in enumerate(tokens):
         start = token.position
         end = start + len(token.literal)
         if start <= offset < end:
-            return token
+            return index
     # Accept the position right after a token (cursor at end of word).
-    for token in tokens:
+    for index, token in enumerate(tokens):
         end = token.position + len(token.literal)
         if offset == end:
-            return token
+            return index
     return None
 
 
@@ -472,3 +477,144 @@ def get_hover(text: str, line: int, character: int) -> Optional[dict]:
         "contents": {"kind": "markdown", "value": value},
         "range": token_range,
     }
+
+
+# --------------------------------------------------------------------------
+# Go to definition (scope-aware)
+# --------------------------------------------------------------------------
+
+# A declaration is stored as ``(kind, token)`` where kind is one of
+# "var" | "param" | "fn".
+_Declaration = tuple
+
+
+@dataclass
+class _Scope:
+    id: int
+    parent: Optional[int]
+    declarations: dict  # name -> (kind, Token)
+
+
+def _build_scopes(tokens: list[Token]):
+    """Build a lexical scope tree from a token scan.
+
+    Returns ``(scopes, token_scope)`` where ``scopes`` is a list indexed by
+    scope id and ``token_scope[i]`` is the id of the scope that lexically
+    contains ``tokens[i]``.
+
+    Scoping mirrors the Mah grammar closely enough for editor navigation:
+
+      * the whole file is the global scope (id 0);
+      * every ``{ ... }`` block opens a nested scope (matching the
+        ``@scopestart`` / ``@scopeend`` actions the compiler emits);
+      * a function's parameters live in the same scope as its body;
+      * ``let`` declares a variable in the current scope and ``def`` declares
+        a function in the enclosing scope.
+
+    Known limitation: a body-level ``let x`` that shadows a same-named
+    parameter ``x`` collapses onto the parameter here (the real language nests
+    them). This is rare and does not affect ordinary navigation.
+    """
+    scopes: list[_Scope] = [_Scope(0, None, {})]
+    stack: list[int] = [0]
+    token_scope: list[int] = [0] * len(tokens)
+    reuse_next_brace = False
+
+    count = len(tokens)
+    index = 0
+    while index < count:
+        token = tokens[index]
+        current = stack[-1]
+        token_scope[index] = current
+
+        if token.type == TokenType.Def and index + 1 < count and tokens[index + 1].type == TokenType.ID:
+            name_token = tokens[index + 1]
+            scopes[current].declarations.setdefault(
+                name_token.literal, ("fn", name_token)
+            )
+            token_scope[index + 1] = current
+
+            # Open the function scope now so parameters and body share it.
+            fn_scope = _Scope(len(scopes), current, {})
+            scopes.append(fn_scope)
+            stack.append(fn_scope.id)
+            reuse_next_brace = True
+
+            # Declare parameters found in the following (...) group.
+            cursor = index + 2
+            if cursor < count and tokens[cursor].type == TokenType.ParenOpen:
+                cursor += 1
+                while cursor < count and tokens[cursor].type != TokenType.ParenClose:
+                    if tokens[cursor].type == TokenType.ID:
+                        fn_scope.declarations.setdefault(
+                            tokens[cursor].literal, ("param", tokens[cursor])
+                        )
+                    cursor += 1
+
+            index += 2
+            continue
+
+        if token.type == TokenType.Let and index + 1 < count and tokens[index + 1].type == TokenType.ID:
+            name_token = tokens[index + 1]
+            scopes[current].declarations.setdefault(
+                name_token.literal, ("var", name_token)
+            )
+            token_scope[index + 1] = current
+            index += 2
+            continue
+
+        if token.type == TokenType.BraceOpen:
+            if reuse_next_brace:
+                # Function body reuses the scope opened at `def`.
+                reuse_next_brace = False
+            else:
+                block_scope = _Scope(len(scopes), current, {})
+                scopes.append(block_scope)
+                stack.append(block_scope.id)
+        elif token.type == TokenType.BraceClose:
+            if len(stack) > 1:
+                stack.pop()
+
+        index += 1
+
+    return scopes, token_scope
+
+
+def _resolve_declaration(scopes: list[_Scope], scope_id: int, name: str):
+    """Walk from ``scope_id`` outward to global, returning the declaring token."""
+    current: Optional[int] = scope_id
+    while current is not None:
+        declaration = scopes[current].declarations.get(name)
+        if declaration is not None:
+            return declaration[1]
+        current = scopes[current].parent
+    return None
+
+
+def get_definition(text: str, line: int, character: int) -> Optional[dict]:
+    """Return the LSP range of the declaration for the identifier at the cursor.
+
+    Only identifiers resolve; keywords, builtins and literals return ``None``.
+    """
+    tokens, _lex_error = tokenize(text)
+    offset = position_to_offset(text, line, character)
+    token_index = _token_index_at_offset(tokens, offset)
+    if token_index is None:
+        return None
+
+    token = tokens[token_index]
+    if token.type != TokenType.ID:
+        return None
+
+    scopes, token_scope = _build_scopes(tokens)
+    declaration_token = _resolve_declaration(
+        scopes, token_scope[token_index], token.literal
+    )
+    if declaration_token is None:
+        return None
+
+    return make_range(
+        text,
+        declaration_token.position,
+        declaration_token.position + len(declaration_token.literal),
+    )

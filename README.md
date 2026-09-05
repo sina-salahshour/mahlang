@@ -41,6 +41,32 @@ python mah.py examples/new_prime_numbers.mh
 python mah.py examples/strings.mh
 ```
 
+## Installing the `mah` command
+
+Install the interpreter locally and expose a `mah` executable on your `PATH`:
+
+```sh
+# Installs into ~/.local/lib/mah and links ~/.local/bin/mah
+make install-cli
+
+# Remove it
+make uninstall-cli
+```
+
+The install copies the interpreter into `$(PREFIX)/lib/mah` and symlinks
+`$(PREFIX)/bin/mah` to it (`PREFIX` defaults to `~/.local`; make sure
+`~/.local/bin` is on your `PATH`). Afterwards you can run programs from
+anywhere:
+
+```sh
+mah path/to/program.mh
+mah build path/to/program.mh
+```
+
+`make install` installs everything: the `mah` CLI, Neovim syntax highlighting,
+and the language server.
+
+
 ## Syntax highlighting in neovim
 
 You can automatically install or remove the syntax highlighting for Neovim via Makefile:
@@ -65,6 +91,7 @@ provide:
 
 - live diagnostics (compile errors) as you type
 - hover docs for keywords, builtins, functions and variables
+- go to definition (scope-aware: resolves parameters, locals, then globals)
 - completion for keywords, builtins and symbols in the current file
 - document symbols (functions and variables)
 
@@ -85,7 +112,12 @@ make uninstall-lsp
 launches the server via `vim.lsp.start` for every Mah buffer. It uses
 `python3` by default; set `$MAH_LSP_PYTHON` to choose a different interpreter.
 
-`make install` installs both syntax highlighting and the language server.
+With the server running, Neovim's built-in `vim.lsp.buf.definition` (mapped to
+`grd`, or use `gd` in older configs) jumps to the declaration of the symbol
+under the cursor.
+
+`make install` installs everything: the `mah` CLI, syntax highlighting, and
+the language server.
 
 ### Other editors
 

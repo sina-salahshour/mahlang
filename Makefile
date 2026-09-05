@@ -9,8 +9,29 @@ TS_PARSER := $(NVIM_DIR)/parser/mah.so
 LSP_FTPLUGIN := $(NVIM_DIR)/ftplugin/mah.lua
 LSP_DIR := $(NVIM_DIR)/mah-lsp
 
+# CLI install layout (defaults to a user-local prefix, e.g. ~/.local).
+PREFIX ?= $(HOME)/.local
+LIB_DIR := $(PREFIX)/lib/mah
+BIN_DIR := $(PREFIX)/bin
+BIN_LINK := $(BIN_DIR)/mah
+
 lang:
 	$(PYTHON) ./compiler-generator/generate.py ./mah.lang
+
+# Install the interpreter into $(LIB_DIR) and link the executable as `mah`.
+# Running a script through the symlink makes Python resolve sys.path[0] to the
+# real $(LIB_DIR), so the bundled modules import correctly from any directory.
+install-cli: lang
+	mkdir -p $(LIB_DIR)/compiler $(BIN_DIR)
+	cp mah.py actions.py code_interpreter.py $(LIB_DIR)/
+	cp compiler/__init__.py compiler/lexer.py compiler/parser.py compiler/ir_generator.py $(LIB_DIR)/compiler/
+	chmod +x $(LIB_DIR)/mah.py
+	ln -sf $(LIB_DIR)/mah.py $(BIN_LINK)
+
+uninstall-cli:
+	rm -f $(BIN_LINK)
+	rm -rf $(LIB_DIR)
+	-rmdir $(BIN_DIR) 2>/dev/null || true
 
 # Filetype detection is shared by syntax highlighting and the LSP.
 $(FTDETECT):
@@ -53,14 +74,19 @@ uninstall-lsp:
 		rmdir $(NVIM_DIR)/ftdetect 2>/dev/null || true; \
 	fi
 
-install: install-nvim install-lsp
+install: install-cli install-nvim install-lsp
+install-all: install
 install-syntax: install-nvim
 nvim-install: install-nvim
 install-lsp-nvim: install-lsp
 lsp-install: install-lsp
 nvim-lsp: install-lsp
+install-cli-mah: install-cli
+cli-install: install-cli
+install-mah: install-cli
 
-uninstall: uninstall-lsp uninstall-nvim
+uninstall: uninstall-cli uninstall-lsp uninstall-nvim
+uninstall-all: uninstall
 remove-nvim: uninstall-nvim
 remove-syntax: uninstall-nvim
 uninstall-syntax: uninstall-nvim
@@ -69,7 +95,12 @@ nvim-remove: uninstall-nvim
 uninstall-lsp-nvim: uninstall-lsp
 lsp-uninstall: uninstall-lsp
 lsp-remove: uninstall-lsp
+cli-uninstall: uninstall-cli
+remove-cli: uninstall-cli
+uninstall-mah: uninstall-cli
 
-.PHONY: lang install install-nvim install-syntax nvim-install install-lsp install-lsp-nvim lsp-install nvim-lsp \
-	uninstall uninstall-nvim remove-nvim remove-syntax uninstall-syntax nvim-uninstall nvim-remove \
+.PHONY: lang install install-all install-cli install-cli-mah cli-install install-mah \
+	install-nvim install-syntax nvim-install install-lsp install-lsp-nvim lsp-install nvim-lsp \
+	uninstall uninstall-all uninstall-cli cli-uninstall remove-cli uninstall-mah \
+	uninstall-nvim remove-nvim remove-syntax uninstall-syntax nvim-uninstall nvim-remove \
 	uninstall-lsp uninstall-lsp-nvim lsp-uninstall lsp-remove
