@@ -46,6 +46,25 @@ New opcodes for M2 (`struct`, see docs/V2_DESIGN.md's M2 milestone):
   "dest" operands.
 `StructDecl` emits no instructions at all -- it's purely a compile-time
 declaration consumed by resolve.py's `struct_decls` registry.
+
+New opcode for M3 (`enum`, see docs/V2_DESIGN.md's M3 milestone):
+- `enum`: `arg1` = enum type name (string), `arg2` = `(variant_name,
+  field_pairs)` where `field_pairs` is a tuple of `(field_name, value_addr)`
+  pairs (empty tuple for a unit variant), `dest` = where to store the newly
+  constructed `EnumInstance`. `EnumDecl` emits no instructions, exactly
+  like `StructDecl` -- purely a compile-time declaration consumed by
+  resolve.py's `enum_decls` registry.
+`FieldAccess` codegen checks the resolver-set `expr.enum_unit_type` first:
+when set, `expr.obj` was never actually resolved as a variable (its
+`.address` is `None`, since the resolver determined this node is really a
+bare `Type.Variant` unit-variant construction, not field access -- see
+resolve.py's module docstring), so `gen_expr(expr.obj)` must NOT be called;
+instead this emits the `enum` opcode directly with zero fields. The
+built-in `none` literal is special-cased further still, to keep it a true
+reused singleton rather than a freshly allocated (if value-equal) object
+per use: `EnumLit(type_name="Option", variant="none")` emits a plain `ld`
+of the shared `runtime_values.NONE_VALUE` object instead of the generic
+`enum` construction instruction.
 """
 
 from __future__ import annotations
@@ -60,6 +79,8 @@ from .ast_nodes import (
     Call,
     ContinueStmt,
     CosExpr,
+    EnumDecl,
+    EnumLit,
     ExprStmt,
     FieldAccess,
     FnExpr,
@@ -148,6 +169,8 @@ class Codegen:
         elif isinstance(stmt, BlockStmt):
             self.gen_block(stmt.block)
         elif isinstance(stmt, StructDecl):
+            pass  # purely a resolve-time/compile-time declaration; no runtime code
+        elif isinstance(stmt, EnumDecl):
             pass  # purely a resolve-time/compile-time declaration; no runtime code
         else:
             raise AssertionError(f"unhandled statement node {stmt!r}")
@@ -268,9 +291,29 @@ class Codegen:
             self.buf.emit(("struct", expr.type_name, pairs, dest))
             return dest
         if isinstance(expr, FieldAccess):
+            if expr.enum_unit_type is not None:
+                dest = self._temp()
+                self.buf.emit(("enum", expr.enum_unit_type, (expr.field, ()), dest))
+                return dest
             obj_addr = self.gen_expr(expr.obj)
             dest = self._temp()
             self.buf.emit(("getfield", obj_addr, expr.field, dest))
+            return dest
+        if isinstance(expr, EnumLit):
+            if expr.type_name == "Option" and expr.variant == "none":
+                # Keep `none` a true, single, reused singleton (see
+                # runtime_values.NONE_VALUE and docs/V2_DESIGN.md's
+                # "Built-in `some`/`none`") rather than allocating a fresh
+                # but value-equal EnumInstance("Option", "none", {}) every
+                # time -- identity-based checks elsewhere (`val is
+                # NONE_VALUE`, e.g. the implicit-return path just below)
+                # depend on there being exactly one such object.
+                dest = self._temp()
+                self.buf.emit(("ld", NONE_VALUE, None, dest))
+                return dest
+            pairs = tuple((name, self.gen_expr(value_expr)) for name, value_expr in expr.fields)
+            dest = self._temp()
+            self.buf.emit(("enum", expr.type_name, (expr.variant, pairs), dest))
             return dest
         raise AssertionError(f"unhandled expression node {expr!r}")
 

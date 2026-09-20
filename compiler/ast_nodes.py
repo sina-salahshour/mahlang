@@ -12,8 +12,18 @@ M2 adds `struct` declarations/literals/field access (`StructDecl`,
 `AssignStmt.target` is now an expression node (`Ident` or `FieldAccess`)
 instead of a bare name string.
 
-No enums/pattern matching/blocks-as-expressions/defer yet -- those land in
-later milestones and will extend this module rather than replace it.
+M3 adds `enum` declarations/literals (`EnumDecl`, `EnumLit`) -- see
+docs/V2_DESIGN.md's M3 milestone. The built-in `none`/`some(x)` desugar
+straight into `EnumLit` at parse time (type_name="Option"), no separate AST
+nodes. `FieldAccess` gains a resolver-set `enum_unit_type` field: a bare
+`Type.Variant` (no braces) parses identically to ordinary field access
+(`FieldAccess(Ident("Type"), "Variant")`) since the two are syntactically
+indistinguishable at parse time -- the resolver disambiguates them (see
+resolve.py's module docstring) and sets `enum_unit_type` when it turns out
+to be a unit-variant construction rather than a real field access.
+
+No pattern matching/blocks-as-expressions/defer yet -- those land in later
+milestones and will extend this module rather than replace it.
 
 Every node carries `position` (a source offset into the *combined*,
 preprocessed text) so error messages can point mah.py at a `file:line:col`
@@ -96,6 +106,33 @@ class StructLit:
 class FieldAccess:
     obj: object  # an expression (an Ident, another FieldAccess, a Call, etc.)
     field: str
+    position: int
+    # set by Resolver, explicitly, on every FieldAccess node (never left at
+    # this default and hoped): None for ordinary field access (the common
+    # case, exactly as M2 produced); otherwise the enum type name (same
+    # string as `obj.name`) when this node is actually a bare enum
+    # unit-variant construction like `Shape.Empty` -- syntactically
+    # identical to `p.field` at parse time, disambiguated only once the
+    # resolver knows `obj.name` isn't a variable in scope but is a declared
+    # enum type with a matching unit variant. See resolve.py's module
+    # docstring for the full disambiguation rule.
+    enum_unit_type: Optional[str] = field(default=None, repr=False)
+
+
+@dataclass
+class EnumDecl:
+    name: str
+    variants: list  # list[tuple[str, list[str]]] -- (variant_name, field_names);
+                      # field_names is [] for a unit variant (uniform
+                      # representation, no separate None-vs-list case)
+    position: int
+
+
+@dataclass
+class EnumLit:
+    type_name: str
+    variant: str
+    fields: list  # list[tuple[str, expr]] -- [] for a unit variant literal
     position: int
 
 

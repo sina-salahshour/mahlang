@@ -23,6 +23,8 @@ from .ast_nodes import (
     Call,
     ContinueStmt,
     CosExpr,
+    EnumDecl,
+    EnumLit,
     ExprStmt,
     FieldAccess,
     FnExpr,
@@ -155,6 +157,9 @@ class Parser:
         if tok.type is TokenType.STRUCT:
             return self._parse_struct_decl()
 
+        if tok.type is TokenType.ENUM:
+            return self._parse_enum_decl()
+
         if tok.type is TokenType.IF:
             return self._parse_if()
 
@@ -232,6 +237,33 @@ class Parser:
                 fields.append(self.expect(TokenType.ID).literal)
         self.expect(TokenType.BRACE_CLOSE)
         return StructDecl(name=name_tok.literal, fields=fields, position=struct_tok.position)
+
+    def _parse_enum_decl(self) -> EnumDecl:
+        enum_tok = self.advance()  # ENUM
+        name_tok = self.expect(TokenType.ID)
+        self.expect(TokenType.BRACE_OPEN)
+        variants = []
+        if self.current.type is not TokenType.BRACE_CLOSE:
+            variants.append(self._parse_enum_variant())
+            while self.current.type is TokenType.COMMA:
+                self.advance()
+                variants.append(self._parse_enum_variant())
+        self.expect(TokenType.BRACE_CLOSE)
+        return EnumDecl(name=name_tok.literal, variants=variants, position=enum_tok.position)
+
+    def _parse_enum_variant(self):
+        name_tok = self.expect(TokenType.ID)
+        if self.current.type is TokenType.BRACE_OPEN:
+            self.advance()
+            fields = []
+            if self.current.type is TokenType.ID:
+                fields.append(self.advance().literal)
+                while self.current.type is TokenType.COMMA:
+                    self.advance()
+                    fields.append(self.expect(TokenType.ID).literal)
+            self.expect(TokenType.BRACE_CLOSE)
+            return (name_tok.literal, fields)
+        return (name_tok.literal, [])
 
     def _parse_fn_expr(self) -> FnExpr:
         fn_tok = self.advance()  # FN
@@ -372,6 +404,26 @@ class Parser:
             self.advance()
             return self._parse_postfix_from(BoolLit(value=False, position=tok.position))
 
+        if tok.type is TokenType.NONE:
+            self.advance()
+            return self._parse_postfix_from(
+                EnumLit(type_name="Option", variant="none", fields=[], position=tok.position)
+            )
+
+        if tok.type is TokenType.SOME:
+            self.advance()
+            self.expect(TokenType.PAREN_OPEN)
+            value = self.parse_expr()
+            self.expect(TokenType.PAREN_CLOSE)
+            return self._parse_postfix_from(
+                EnumLit(
+                    type_name="Option",
+                    variant="some",
+                    fields=[("value", value)],
+                    position=tok.position,
+                )
+            )
+
         raise SyntaxError(f"Invalid syntax '{tok}' at position '{tok.position}'")
 
     # -- helpers -----------------------------------------------------------
@@ -380,7 +432,22 @@ class Parser:
         while self.current.type is TokenType.DOT:
             self.advance()
             field_tok = self.expect(TokenType.ID)
-            base = FieldAccess(obj=base, field=field_tok.literal, position=field_tok.position)
+            if (
+                isinstance(base, Ident)
+                and self.current.type is TokenType.BRACE_OPEN
+                and self._struct_literal_allowed
+            ):
+                self.advance()  # BRACE_OPEN
+                fields = self._parse_field_list()
+                self.expect(TokenType.BRACE_CLOSE)
+                base = EnumLit(
+                    type_name=base.name,
+                    variant=field_tok.literal,
+                    fields=fields,
+                    position=field_tok.position,
+                )
+            else:
+                base = FieldAccess(obj=base, field=field_tok.literal, position=field_tok.position)
         return base
 
     def _parse_field_list(self):

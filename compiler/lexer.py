@@ -50,6 +50,9 @@ class TokenType(Enum):
     RETURN = "return"
     FN = "fn"
     STRUCT = "struct"
+    ENUM = "enum"
+    SOME = "some"
+    NONE = "none"
     TRUE = "true"
     FALSE = "false"
     # literals / identifiers
@@ -78,6 +81,9 @@ KEYWORDS = {
     "return": TokenType.RETURN,
     "fn": TokenType.FN,
     "struct": TokenType.STRUCT,
+    "enum": TokenType.ENUM,
+    "some": TokenType.SOME,
+    "none": TokenType.NONE,
     "true": TokenType.TRUE,
     "false": TokenType.FALSE,
 }

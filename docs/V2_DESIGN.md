@@ -681,11 +681,162 @@ node that resolved to it. Then:
    consumes/rewrites module-namespace dots (e.g. `math.square`) before the
    real lexer ever runs, so only genuine struct-field dots reach
    `compiler/lexer.py`.
-4. **M3 — enums.** Declaration (unit + struct variants), construction.
-   Register the builtin `Option` type (`none`/`some(x)`) here too, as part
-   of bringing up the `EnumInstance` machinery — it's not user-declared,
-   but it's the same representation and this is the natural point to seed
-   it (see "Built-in `some`/`none`" above).
+4. **M3 — enums. ✅ Landed.** `enum Name { Variant, Variant2 { field, ... },
+   ... }` declares a set of variants, each either a **unit** variant (no
+   payload, like `Empty`) or a **struct-shaped** variant (named fields,
+   like `Circle { r }`). `Name.Variant { field: expr, ... }` constructs a
+   heap-allocated `EnumInstance` (`runtime_values.py`) — reference
+   semantics, exactly like `StructInstance`; `Name.UnitVariant` (no braces)
+   constructs one with `fields={}`. Field read/write (`e.field`,
+   `e.field = v`) reuse the *exact same* `getfield`/`setfield` opcodes M2
+   built for structs: both handlers were generalized from
+   `isinstance(obj, StructInstance)` to
+   `isinstance(obj, (StructInstance, EnumInstance))` since both classes
+   expose the identical `.fields` dict shape — no new opcode needed for
+   enum field access at all.
+   **The built-in `Option` type** (`none`/`some(x)`) is unified into this
+   same machinery rather than staying M1's bespoke placeholder: `none` and
+   `some(x)` are `EnumInstance("Option", "none", {})` /
+   `EnumInstance("Option", "some", {"value": x})`, and `Option`'s two
+   variants are pre-seeded into `Resolver.enum_decls` at construction
+   (`{"Option": {"none": [], "some": ["value"]}}`) so they validate through
+   the identical duplicate-field/missing-field/unknown-field/unknown-variant
+   machinery a user `enum` gets, with zero special-casing in the validation
+   logic itself. `none`/`some` are **reserved keywords** (new `NONE`/`SOME`
+   tokens), not `Option.none`/`Option.some(x)` — this is the one lexer/
+   parser carve-out `some`/`none` need (per this doc's original "Built-in
+   `some`/`none`" design note); `_parse_primary` desugars them directly
+   into the general `EnumLit` shape (`type_name="Option"`), no separate
+   `SomeExpr`/`NoneExpr` AST nodes. Being reserved keywords rather than
+   `TokenType.ID` automatically means they can never be shadowed by a
+   `let`/param/field/struct/enum name — no separate enforcement needed
+   anywhere else.
+   **`none` stays a true, single, reused singleton**, not a fresh
+   value-equal object allocated per use (critical for M1 compatibility:
+   the implicit-none-return path, and any future `val is NONE_VALUE`
+   identity check, depend on it). `runtime_values.py`'s old bespoke
+   `_NoneValue` class is deleted; `NONE_VALUE` is now a genuine
+   `EnumInstance("Option", "none", {})` singleton, with `EnumInstance.
+   __bool__` itself providing the falsiness M1 established (`none` is
+   falsy; *every* enum instance other than `Option.none` — including
+   `some(x)` for any `x`, even `some(false)`/`some(0)` — is truthy, matching
+   every other language's Option/Maybe semantics: presence is truthy
+   regardless of payload). `compiler/codegen.py` special-cases the `none`
+   `EnumLit` (`type_name == "Option" and variant == "none"`) to emit a
+   plain `("ld", NONE_VALUE, None, dest)` instead of the generic `enum`
+   construction instruction used for every other enum value, specifically
+   to avoid allocating a fresh (if value-equal) `EnumInstance` on every
+   `none` literal — the same singleton produced by M1's implicit-return
+   path is reused everywhere.
+   **The parsing puzzle: unit-variant construction is syntactically
+   identical to field access.** `Shape.Circle { r: 5 }` is unambiguous at
+   parse time — the postfix-chain builder (`_parse_postfix_from`, from M2)
+   special-cases seeing `Ident DOT Ident BRACE_OPEN` (with
+   `self._struct_literal_allowed`, reusing M2's exact if/while-ambiguity
+   flag with no new plumbing) and builds an `EnumLit` node directly,
+   guarded by `isinstance(base, Ident)` so a *deeper* chain like `a.b.c{...}`
+   is never reinterpreted (only a direct `TypeName.Variant{...}` can
+   trigger it). But `Shape.Empty` (no trailing `{`) is **structurally
+   identical** to ordinary field access like `p.field` — the parser has no
+   type information at parse time to know whether `Shape` is a variable
+   holding a struct/enum or the name of a declared enum type, so it always
+   parses to a plain `FieldAccess(Ident("Shape"), "Empty")` node, exactly
+   like M2's field access. **Disambiguation is deferred to
+   `compiler/resolve.py`**, the standard solution (not a parser-level type
+   table): when resolving a `FieldAccess` whose `.obj` is a plain `Ident`,
+   try resolving it as an ordinary variable reference first — a real
+   variable in scope always wins, so there's no surprise for the common
+   case, and `let Shape = ...; Shape.whatever` binds to the variable, never
+   a hypothetical enum. Only on a `NameError` (undefined variable) does the
+   resolver check whether `expr.obj.name` names a declared enum type with a
+   *unit* variant matching `expr.field`; if so, it sets a new resolver-only
+   `FieldAccess.enum_unit_type` field (the enum type name) rather than
+   re-raising, and `compiler/codegen.py`'s `FieldAccess` case checks that
+   field first — when set, `expr.obj` was never actually resolved to an
+   address, so codegen must NOT call `gen_expr(expr.obj)` (it would read a
+   `None` address), and instead emits the `enum` opcode directly with zero
+   fields. If the name matches a *struct-shaped* variant instead (missing
+   braces, e.g. bare `Shape.Circle`), the resolver raises a clear
+   "requires fields, use `Shape.Circle { ... }`" error rather than silently
+   treating it as a unit construction or a failed field access. If neither
+   a variable nor a matching enum/variant exists, the original
+   `NameError` from the failed variable lookup propagates.
+   **Enum type names live in their own flat, unscoped registry**
+   (`Resolver.enum_decls: dict[str, dict[str, list[str]]]`, type name ->
+   {variant name -> declared field names}), separate from
+   `struct_decls` — deliberately, so a `struct Point` and an `enum Point`
+   coexist without conflict (verified by a test). Enum *literal* validation
+   (undeclared type, undeclared variant, duplicate field in the literal,
+   duplicate field in a variant's own declaration, duplicate variant name
+   in the enum declaration, exact provided-vs-declared field-set match) is
+   fully static in `resolve.py`, mirroring M2's struct-literal validation
+   exactly (the shared logic was factored into two small static helpers,
+   `_check_no_duplicate_field`/`_check_field_set_matches`, reused by both
+   `StructLit` and `EnumLit`). As with M2, no attempt is made to statically
+   validate a *non-literal* field access (`e.field` where `e`'s enum type
+   isn't known)  — that stays a runtime check in `getfield`/`setfield`, for
+   the same "no static type inference yet" reason M2 established.
+   New tokens: `ENUM`, `SOME`, `NONE` (all reserved keywords). New AST
+   nodes: `EnumDecl(name, variants: list[tuple[str, list[str]]])`,
+   `EnumLit(type_name, variant, fields: list[tuple[str, expr]])`. Changed:
+   `FieldAccess` gains a resolver-set `enum_unit_type: Optional[str]`
+   field, explicitly set on every resolution path (never left at its
+   default and hoped) — `None` for ordinary field access, the enum type
+   name when the node is actually a bare unit-variant construction. New
+   opcode: `enum` (`arg1` = type name, `arg2` = `(variant_name,
+   field_pairs)` tuple where `field_pairs` is a tuple of `(field_name,
+   value_addr)` pairs, empty for a unit variant, `dest` = new
+   `EnumInstance`) — `EnumDecl` itself emits no instructions, exactly like
+   `StructDecl`.
+   New: `tests/test_enums.py` (19 tests) covering: unit-variant
+   construction/printing (`Color.Red` → `Color.Red`); struct-shaped-variant
+   construction and field read; mixed unit + struct-shaped variants in one
+   enum, both print forms; enums interoperating with M1 closures/functions
+   (a struct-shaped-variant value passed into a function, field read
+   inside); field mutation on an enum instance (generalized `setfield`);
+   `struct`/`enum` sharing a name without conflict; `none`/`some(x)`
+   construction, printing (`none`, `some(42)`), and field read
+   (`some(42).value` → `42`); the critical truthiness contract (`none` is
+   falsy, `some(false)`/`some(0)` are both truthy); the critical M1
+   implicit-none-return regression check (`fn nothing() {}` still prints
+   `none`); and every validation error (missing/unknown/duplicate field in
+   a variant literal, duplicate field in a variant declaration, duplicate
+   variant name in an enum declaration, undeclared enum type, undeclared
+   variant, struct-shaped variant accessed without braces, redeclaring an
+   enum name, redeclaring the built-in `Option`). All pre-existing M0/M1/M2
+   tests (65) stayed green, unmodified — including `tests/test_language.py`'s
+   `NoneTests.test_implicit_return_is_none`/`test_none_is_falsy` and
+   `tests/test_examples.py`'s `prime_numbers`/`new_prime_numbers` golden
+   tests, both of which depend on a bare `return;`'s now-`EnumInstance`
+   `none` value staying falsy. New example: `examples/enums.mh`.
+   Changed: `compiler/lexer.py` (`ENUM`/`SOME`/`NONE` tokens/keywords),
+   `compiler/ast_nodes.py` (`EnumDecl`/`EnumLit`, `FieldAccess.
+   enum_unit_type`), `compiler/parser.py` (`_parse_enum_decl`/
+   `_parse_enum_variant`, `_parse_postfix_from`'s `Ident DOT Ident
+   BRACE_OPEN` special case, `_parse_primary`'s `SOME`/`NONE` branches),
+   `compiler/resolve.py` (`enum_decls` registry pre-seeded with `Option`,
+   `EnumDecl`/`EnumLit` handling, `FieldAccess`'s variable-lookup-first/
+   enum-unit-variant-fallback dispatch), `compiler/codegen.py` (`EnumLit`/
+   `FieldAccess.enum_unit_type` in `gen_expr`, `EnumDecl` emits no code,
+   the `none`-literal `NONE_VALUE`-reuse special case), `runtime_values.py`
+   (`EnumInstance` replaces the old bespoke `_NoneValue`; `NONE_VALUE` is
+   now `EnumInstance("Option", "none", {})`), `code_interpreter.py` (new
+   `enum` opcode handler, `getfield`/`setfield` generalized to
+   `(StructInstance, EnumInstance)`, `_to_str` renders an `EnumInstance` as
+   `some(v)` for `Option.some`, `TypeName.Variant { field: value, ... }`
+   for a struct-shaped variant, or bare `TypeName.Variant` for a unit
+   variant — checked before the generic numeric/`StructInstance` branches
+   so `none`/`Option.some` keep their special-cased spelling). Post-landing
+   fix (found during independent re-verification, not by the implementing
+   pass): assigning to a bare unit-variant target (`Shape.Empty = 5`) used
+   to reach codegen with an unresolved `Ident` address and fail with a raw
+   Python `TypeError`, inconsistent with every other invalid-input case
+   across M0–M3 raising a clean Mah-level error — `resolve.py`'s
+   `AssignStmt` handling now explicitly rejects an `enum_unit_type`-tagged
+   `FieldAccess` target with a clear compile-time error; covered by
+   `test_assigning_to_a_bare_unit_variant_raises_cleanly` in
+   `tests/test_enums.py`.
+   so `none`/`Option.some` keep their special-cased spelling).
 5. **M4 — pattern matching.** `match` over number/string/bool/struct/enum
    (including the builtin `some`/`none`), bindings, wildcard. Guards
    deferred — see `docs/NEXT_PHASES.md`.
@@ -716,8 +867,8 @@ M1 was built and documented that way.
 
 ## Status
 
-M0, M1, and M2 are landed (see their entries above for what changed and
+M0, M1, M2, and M3 are landed (see their entries above for what changed and
 each milestone's deliberate deviations/simplifications). `docs/NEXT_PHASES.md`
 captures what's deliberately deferred (match guards, arrays/lists,
 generics, traits, the type system, async) and what M0–M9 need to keep
-forward-compatible with. Next up: **M3 — enums.**
+forward-compatible with. Next up: **M4 — pattern matching.**

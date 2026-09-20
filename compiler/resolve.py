@@ -47,6 +47,34 @@ static, done here, since a literal always names its struct type explicitly.
 Field *access* (`p.x`) is deliberately NOT validated here -- that happens
 at runtime in code_interpreter.py, since there's no static type inference
 to know what struct type an arbitrary expression's value holds.
+
+M3 adds an equivalent flat, non-scoped `self.enum_decls` registry (enum
+type name -> {variant name -> declared field names}, `[]` for a unit
+variant) -- its own separate namespace from both variables/functions and
+struct type names, so a `struct Point` and an `enum Point` can coexist.
+Pre-seeded with the built-in `Option` type (`none`/`some(x)`) so it
+participates in the exact same validation machinery as a user `enum`.
+
+M3's parsing puzzle: `Shape.Circle { r: 5 }` is unambiguous at parse time
+(the parser directly builds an `EnumLit` when it sees `Ident DOT Ident
+BRACE_OPEN`), but a bare unit-variant construction like `Shape.Empty` is
+syntactically IDENTICAL to ordinary field access (`p.field`) -- the parser
+has no way to know whether `Shape` names a variable or a declared enum
+type. It therefore always parses to a `FieldAccess` node, and it's THIS
+resolver that disambiguates: when resolving a `FieldAccess` whose `.obj` is
+a plain `Ident`, try resolving it as an ordinary variable reference first
+(a real variable always wins, so `let Shape = ...; Shape.Empty` binds to
+the variable, not a hypothetical enum -- no surprises for the common case).
+Only if that lookup fails (`NameError`, undefined variable) do we check
+whether `expr.obj.name` is a declared enum type with a unit variant (empty
+field list) matching `expr.field`; if so, this was actually
+`Type.UnitVariant` construction all along, and we set
+`expr.enum_unit_type` so codegen knows to skip generating `expr.obj`
+(which was never actually resolved to an address in that case) and instead
+emit an enum-construction opcode with zero fields. If neither resolves, a
+clear error names whichever case applies (no such variable and no such
+enum type/variant; or the variant exists but needs braces because it's
+struct-shaped, not unit).
 """
 
 from __future__ import annotations
@@ -61,6 +89,8 @@ from .ast_nodes import (
     Call,
     ContinueStmt,
     CosExpr,
+    EnumDecl,
+    EnumLit,
     ExprStmt,
     FieldAccess,
     FnExpr,
@@ -104,6 +134,13 @@ class Resolver:
         # lexical nesting depth of the `struct` statement itself -- see
         # docs/V2_DESIGN.md's M2 milestone.
         self.struct_decls: dict = {}
+        # enum type name -> {variant name -> declared field names};
+        # []-field-list variants are unit variants. Flat/non-scoped, exactly
+        # like struct_decls, and in a separate namespace from it (a struct
+        # and an enum may share a name). Pre-seeded with the built-in
+        # `Option` type so `none`/`some(x)` validate through the same
+        # machinery as a user-declared enum -- see module docstring.
+        self.enum_decls: dict = {"Option": {"none": [], "some": ["value"]}}
 
     # -- name table helpers ----------------------------------------------
 
@@ -123,6 +160,35 @@ class Resolver:
         frame_level, slot = self._lookup(name, position)
         depth = self.frame_stack[-1].depth - frame_level.depth
         return (depth, slot)
+
+    @staticmethod
+    def _check_no_duplicate_field(label: str, fields: list, position: int) -> None:
+        """Shared by StructLit and EnumLit validation: raise if `fields`
+        (a list of (name, value_expr) pairs, as literals keep them -- an
+        ordered list rather than a dict specifically so a duplicate written
+        twice in one literal is detectable instead of silently dropped)
+        names the same field twice."""
+        seen = set()
+        for name, _value_expr in fields:
+            if name in seen:
+                raise Exception(f"Field '{name}' specified more than once in {label} at position {position}")
+            seen.add(name)
+
+    @staticmethod
+    def _check_field_set_matches(label: str, provided: set, declared: list, position: int) -> None:
+        """Shared by StructLit and EnumLit validation: raise unless
+        `provided` (the field names actually written in the literal) is
+        exactly `declared` (the field names the type/variant requires)."""
+        declared_set = set(declared)
+        missing = declared_set - provided
+        unknown = provided - declared_set
+        if missing or unknown:
+            parts = []
+            if missing:
+                parts.append(f"missing field(s) {sorted(missing)}")
+            if unknown:
+                parts.append(f"unknown field(s) {sorted(unknown)}")
+            raise Exception(f"{label} has {' and '.join(parts)} at position {position}")
 
     def _push(self) -> None:
         self.scopes.append({})
@@ -154,6 +220,19 @@ class Resolver:
                 stmt.address = slot
         elif isinstance(stmt, AssignStmt):
             self.resolve_expr(stmt.target)
+            if isinstance(stmt.target, FieldAccess) and stmt.target.enum_unit_type is not None:
+                # `stmt.target` looked like `p.field` but was actually a
+                # bare enum unit-variant construction (e.g. `Shape.Empty`)
+                # -- not a real reference to anything, so it can never be
+                # a valid assignment target. Without this check codegen
+                # would try to generate an address for `expr.obj` that was
+                # never resolved (enum-unit construction skips that), which
+                # fails with a confusing internal error instead of a clean
+                # one -- see docs/V2_DESIGN.md's M3 milestone.
+                raise Exception(
+                    f"Cannot assign to enum variant '{stmt.target.enum_unit_type}."
+                    f"{stmt.target.field}' at position {stmt.position}"
+                )
             self.resolve_expr(stmt.value)
         elif isinstance(stmt, ExprStmt):
             self.resolve_expr(stmt.value)
@@ -192,6 +271,30 @@ class Resolver:
                     f"Struct '{stmt.name}' is already declared at position {stmt.position}"
                 )
             self.struct_decls[stmt.name] = stmt.fields
+        elif isinstance(stmt, EnumDecl):
+            seen_variants = set()
+            for variant_name, variant_fields in stmt.variants:
+                if variant_name in seen_variants:
+                    raise Exception(
+                        f"Enum '{stmt.name}' declares variant '{variant_name}' more than "
+                        f"once at position {stmt.position}"
+                    )
+                seen_variants.add(variant_name)
+                seen_fields = set()
+                for field_name in variant_fields:
+                    if field_name in seen_fields:
+                        raise Exception(
+                            f"Enum '{stmt.name}' variant '{variant_name}' declares field "
+                            f"'{field_name}' more than once at position {stmt.position}"
+                        )
+                    seen_fields.add(field_name)
+            if stmt.name in self.enum_decls:
+                raise Exception(
+                    f"Enum '{stmt.name}' is already declared at position {stmt.position}"
+                )
+            self.enum_decls[stmt.name] = {
+                variant_name: variant_fields for variant_name, variant_fields in stmt.variants
+            }
         else:
             raise AssertionError(f"unhandled statement node {stmt!r}")
 
@@ -248,40 +351,64 @@ class Resolver:
                 raise NameError(
                     f"Undefined struct type '{expr.type_name}' at position {expr.position}"
                 )
-            seen = set()
-            for name, _value_expr in expr.fields:
-                if name in seen:
-                    raise Exception(
-                        f"Field '{name}' specified more than once in "
-                        f"'{expr.type_name}' literal at position {expr.position}"
-                    )
-                seen.add(name)
+            label = f"'{expr.type_name}' literal"
+            self._check_no_duplicate_field(label, expr.fields, expr.position)
             provided = {name for name, _ in expr.fields}
-            declared_set = set(declared)
-            missing = declared_set - provided
-            unknown = provided - declared_set
-            if missing or unknown:
-                parts = []
-                if missing:
-                    parts.append(f"missing field(s) {sorted(missing)}")
-                if unknown:
-                    parts.append(f"unknown field(s) {sorted(unknown)}")
+            self._check_field_set_matches(f"Struct literal for '{expr.type_name}'", provided, declared, expr.position)
+            for _name, value_expr in expr.fields:
+                self.resolve_expr(value_expr)
+            return
+        if isinstance(expr, EnumLit):
+            variants = self.enum_decls.get(expr.type_name)
+            if variants is None:
+                raise NameError(f"Undefined enum type '{expr.type_name}' at position {expr.position}")
+            declared = variants.get(expr.variant)
+            if declared is None:
                 raise Exception(
-                    f"Struct literal for '{expr.type_name}' has {' and '.join(parts)} "
+                    f"Enum '{expr.type_name}' has no variant '{expr.variant}' "
                     f"at position {expr.position}"
                 )
+            label = f"'{expr.type_name}.{expr.variant}' literal"
+            self._check_no_duplicate_field(label, expr.fields, expr.position)
+            provided = {name for name, _ in expr.fields}
+            self._check_field_set_matches(
+                f"Enum literal for '{expr.type_name}.{expr.variant}'", provided, declared, expr.position
+            )
             for _name, value_expr in expr.fields:
                 self.resolve_expr(value_expr)
             return
         if isinstance(expr, FieldAccess):
+            if isinstance(expr.obj, Ident):
+                # See module docstring for the full disambiguation rule:
+                # `Type.Variant` (no braces) parses identically to ordinary
+                # field access, so a real in-scope variable always wins
+                # first; only on an undefined-variable NameError do we
+                # check whether this is actually a bare enum unit-variant
+                # construction.
+                try:
+                    expr.obj.address = self._resolve_ident_address(expr.obj.name, expr.obj.position)
+                    expr.enum_unit_type = None
+                    return
+                except NameError:
+                    variants = self.enum_decls.get(expr.obj.name)
+                    if variants is not None and expr.field in variants:
+                        if variants[expr.field] == []:
+                            expr.enum_unit_type = expr.obj.name
+                            return
+                        raise Exception(
+                            f"Enum variant '{expr.obj.name}.{expr.field}' requires fields "
+                            f"(use '{expr.obj.name}.{expr.field} {{ ... }}') at position {expr.position}"
+                        )
+                    raise
             # Deliberate simplification: the field name itself is NOT
-            # validated here against any struct shape -- without a real
-            # type system there's no reliable way to know what struct type
-            # a given expression's value will hold at compile time (e.g. a
-            # function parameter has no static type annotation). Field
-            # names are validated at *runtime* instead, in
-            # code_interpreter.py's `getfield`/`setfield` handlers. See
+            # validated here against any struct/enum shape -- without a
+            # real type system there's no reliable way to know what
+            # struct/enum type a given expression's value will hold at
+            # compile time (e.g. a function parameter has no static type
+            # annotation). Field names are validated at *runtime* instead,
+            # in code_interpreter.py's `getfield`/`setfield` handlers. See
             # docs/V2_DESIGN.md's M2 milestone.
+            expr.enum_unit_type = None
             self.resolve_expr(expr.obj)
             return
         raise AssertionError(f"unhandled expression node {expr!r}")

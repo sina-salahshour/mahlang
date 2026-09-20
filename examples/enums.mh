@@ -1,0 +1,41 @@
+enum Shape {
+    Circle { r },
+    Square { s },
+    Empty
+}
+
+fn circle_area(c) {
+    return 3 * c.r * c.r
+}
+
+let a = Shape.Circle { r: 5 }
+let b = Shape.Square { s: 4 }
+let c = Shape.Empty
+
+print(a)
+print(b)
+print(c)
+print(circle_area(a))
+
+fn half(n) {
+    if n % 2 == 0 {
+        return some(n // 2)
+    }
+    return none
+}
+
+let ok = half(10)
+let bad = half(7)
+
+print(ok)
+print(bad)
+
+if ok {
+    print(ok.value)
+}
+
+if bad {
+    print("unreachable")
+} else {
+    print("no half for an odd number")
+}

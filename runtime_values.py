@@ -1,8 +1,8 @@
 """Shared runtime value types for Mah's heap-frame calling convention
-(see docs/V2_DESIGN.md's M1 milestone) plus M2's `StructInstance`.
-Imported by both compiler/codegen.py (only needs NONE_VALUE, to emit it as
-a literal) and code_interpreter.py (constructs Frame/Closure/StructInstance
-instances at runtime).
+(see docs/V2_DESIGN.md's M1 milestone) plus M2's `StructInstance` and M3's
+`EnumInstance`. Imported by both compiler/codegen.py (only needs
+NONE_VALUE, to emit it as a literal) and code_interpreter.py (constructs
+Frame/Closure/StructInstance/EnumInstance instances at runtime).
 """
 
 
@@ -37,31 +37,42 @@ class StructInstance:
         self.fields = fields  # dict[str, Any]
 
 
-class _NoneValue:
-    """Singleton for Mah's `none` -- a minimal stand-in ahead of the full
-    Option/some/none enum (a later milestone). Only used as the implicit
-    value of a function that falls off its end without an explicit
-    `return`. Do not add `some`/`none` syntax anywhere else -- out of
-    scope for this milestone."""
+class EnumInstance:
+    """A heap object for an `enum` value (see docs/V2_DESIGN.md's M3
+    milestone) -- reference semantics, same as Frame/Closure/StructInstance:
+    a Mah enum variable holds a reference to this object, never a copy.
+    Also backs the built-in `Option` type (`none`/`some(x)`), unified with
+    the same representation rather than a bespoke class -- see NONE_VALUE
+    below."""
 
-    _instance = None
+    __slots__ = ("type_name", "variant", "fields")
 
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
+    def __init__(self, type_name, variant, fields):
+        self.type_name = type_name
+        self.variant = variant
+        self.fields = fields  # dict[str, Any]
 
     def __repr__(self):
-        return "none"
+        return f"EnumInstance({self.type_name!r}, {self.variant!r}, {self.fields!r})"
 
     def __bool__(self):
-        # `none` is falsy -- needed so existing programs' `if is_prime(x)
-        # { ... }`-style checks against a bare/implicit `return` (which is
-        # now `none` rather than M0's `Decimal(0)`) keep behaving as they
-        # did before M1. Not mandated by any `none`/`some` semantics yet
-        # (those land in a later milestone) -- just the natural, minimal
-        # choice so a value that means "nothing" reads as false.
-        return False
+        # Only Option.none is falsy -- every other enum instance (including
+        # some(x) for ANY x, even some(false) or some(0)) is truthy. This
+        # matches every other language with an Option/Maybe type: presence
+        # (Some/some) is always truthy regardless of the wrapped value. It
+        # also preserves M1's pre-existing rule that `none` is falsy
+        # (needed so existing programs' `if is_prime(x) { ... }`-style
+        # checks against a bare/implicit `return` keep behaving as they did
+        # before M1 -- see that milestone's note in docs/V2_DESIGN.md).
+        return not (self.type_name == "Option" and self.variant == "none")
 
 
-NONE_VALUE = _NoneValue()
+# Mah's `none` -- a single shared singleton, not reallocated per use (see
+# docs/V2_DESIGN.md's "Built-in `some`/`none`" design note). Reused
+# everywhere the value `none` is produced: the implicit value of a function
+# that falls off its end without an explicit `return` (M1), and every
+# explicit `none` literal (M3) -- compiler/codegen.py special-cases the
+# `none` EnumLit to `ld` this exact object rather than emitting a generic
+# `enum` construction instruction, precisely so identity checks like
+# `val is NONE_VALUE` elsewhere keep working.
+NONE_VALUE = EnumInstance("Option", "none", {})

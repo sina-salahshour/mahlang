@@ -25,6 +25,16 @@ there's no static type system yet to check a field access against ahead of
 time (struct *literal* field validation, by contrast, is fully static and
 lives in compiler/resolve.py, since a literal always names its struct type
 explicitly).
+
+M3 adds the `enum` opcode for `EnumInstance` values (see
+docs/V2_DESIGN.md's M3 milestone), including the built-in `Option` type
+(`none`/`some(x)`) which now shares this same representation --
+`NONE_VALUE` (runtime_values.py) is a genuine `EnumInstance`, not a bespoke
+class. `getfield`/`setfield` are generalized to accept either a
+`StructInstance` or an `EnumInstance` -- both expose the identical
+`.fields` dict shape, so `some(5).value` and `some(5).value = 6` work
+through the exact same mechanism M2 built for structs, with no new opcode
+needed for enum field access/mutation.
 """
 
 from decimal import Decimal
@@ -32,7 +42,7 @@ import math
 import sys
 from typing import Any
 
-from runtime_values import Closure, Frame, NONE_VALUE, StructInstance
+from runtime_values import Closure, EnumInstance, Frame, NONE_VALUE, StructInstance
 
 
 def _to_str(val: Any) -> str:
@@ -40,13 +50,20 @@ def _to_str(val: Any) -> str:
         return "none"
     if isinstance(val, bool):
         return "true" if val else "false"
+    if isinstance(val, EnumInstance):
+        if val.type_name == "Option" and val.variant == "some":
+            return f"some({_to_str(val.fields['value'])})"
+        if val.fields:
+            inner = ", ".join(f"{k}: {_to_str(v)}" for k, v in val.fields.items())
+            return f"{val.type_name}.{val.variant} {{ {inner} }}"
+        return f"{val.type_name}.{val.variant}"
+    if isinstance(val, StructInstance):
+        inner = ", ".join(f"{k}: {_to_str(v)}" for k, v in val.fields.items())
+        return f"{val.type_name} {{ {inner} }}"
     if isinstance(val, (int, float, Decimal)):
         if val % 1 == 0:
             return str(int(val))
         return str(val)
-    if isinstance(val, StructInstance):
-        inner = ", ".join(f"{k}: {_to_str(v)}" for k, v in val.fields.items())
-        return f"{val.type_name} {{ {inner} }}"
     return str(val)
 
 
@@ -197,9 +214,13 @@ def run_code(code_block: list, global_slot_count: int):
             case ("struct", type_name, field_pairs, dest):
                 fields = {name: _read(current_frame, addr) for name, addr in field_pairs}
                 _write(current_frame, dest, StructInstance(type_name, fields))
+            case ("enum", type_name, variant_and_pairs, dest):
+                variant, field_pairs = variant_and_pairs
+                fields = {name: _read(current_frame, addr) for name, addr in field_pairs}
+                _write(current_frame, dest, EnumInstance(type_name, variant, fields))
             case ("getfield", obj_addr, field_name, dest):
                 obj = _read(current_frame, obj_addr)
-                if not isinstance(obj, StructInstance):
+                if not isinstance(obj, (StructInstance, EnumInstance)):
                     raise Exception(
                         f"Tried to access field '{field_name}' on a non-struct value at position {pc}"
                     )
@@ -208,7 +229,7 @@ def run_code(code_block: list, global_slot_count: int):
                 _write(current_frame, dest, obj.fields[field_name])
             case ("setfield", obj_addr, field_name, src_addr):
                 obj = _read(current_frame, obj_addr)
-                if not isinstance(obj, StructInstance):
+                if not isinstance(obj, (StructInstance, EnumInstance)):
                     raise Exception(
                         f"Tried to access field '{field_name}' on a non-struct value at position {pc}"
                     )
