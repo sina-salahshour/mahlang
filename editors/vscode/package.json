@@ -4,6 +4,8 @@
   "description": "Syntax highlighting and language server support (hover, go-to-definition, rename, diagnostics) for the Mah programming language.",
   "version": "0.1.0",
   "publisher": "mahlang",
+  "license": "MIT",
+  "icon": "icons/mah.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/sina-salahshour/mahlang.git",
@@ -30,8 +32,8 @@
         ],
         "configuration": "./language-configuration.json",
         "icon": {
-          "light": "./icons/mah-light.svg",
-          "dark": "./icons/mah-dark.svg"
+          "light": "./icons/mah-lang-light.svg",
+          "dark": "./icons/mah-lang-dark.svg"
         }
       }
     ],
