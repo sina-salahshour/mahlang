@@ -114,6 +114,34 @@ tail (see this milestone's writeup for why that's safe). `BlockStmt`'s old
 `gen_stmt` case is retired -- a bare block used as a statement is now
 `ExprStmt(value=Block(...))`, compiled via the ordinary `ExprStmt`
 dispatch (`gen_expr` on a `Block` with a throwaway temp, discarded).
+
+New opcodes for M9 (`defer`, see docs/V2_DESIGN.md's M9 milestone): a
+`DeferStmt` is compiled as the body of a synthesized zero-arg `FnExpr`
+(parser-built), so `defer <stmt>` codegen is just `gen_expr` on that
+closure followed by `deferadd` (push it onto the current runtime defer
+scope). `gen_block` conditionally emits `deferpush`/drains-and-pops a
+defer scope around a block's normal statement/tail codegen -- but ONLY
+when that block directly contains at least one `DeferStmt` in
+`block.stmts` (not nested inside a sub-block), so a block with no direct
+defer costs zero extra instructions (important: `CODE_LIMIT` is 400 and
+no pre-M9 example uses `defer`). `_emit_drain_one_defer_scope` emits a
+small runtime loop around three new opcodes -- `deferpeek` (any pending
+closures left?), `deferpopclosure` (pop the most-recently-pushed one),
+`deferscopepop` (discard the now-empty scope) -- and invokes each popped
+closure through the ordinary `call`/`retval` opcodes, discarding its
+return value, so no new call mechanism is needed. A compile-time counter,
+`self._defer_depth`, tracks how many defer-scopes are open relative to
+the start of the current function's (or top-level program's) own body;
+`return`/`break`/`continue` call `_emit_defer_unwind` to drain exactly
+the right number of scopes (all of them for `return`; only the ones
+opened since loop entry for `break`/`continue`, via each loop context's
+saved `defer_depth_at_entry`) before actually jumping, since either can
+jump out of multiple nested blocks at once. `_gen_fn_expr` saves/resets/
+restores `_defer_depth` around a function's own body, parallel to
+`frame_stack`/`_fn_depth`, so a nested function's `return` never unwinds
+an enclosing function's or loop's scopes. `generate` (the top-level
+entry point) applies the same conditional push/drain to the top-level
+statement list, so a top-level `defer` runs at program end.
 """
 
 from __future__ import annotations
@@ -128,6 +156,7 @@ from .ast_nodes import (
     Call,
     ContinueStmt,
     CosExpr,
+    DeferStmt,
     EnumDecl,
     EnumLit,
     EnumPat,
@@ -184,13 +213,28 @@ class Codegen:
         self.frame_stack = [global_frame_level]
         self._while_stack: list[dict] = []
         self._fn_depth = 0
+        # M9: how many defer-scopes are currently open, relative to the
+        # start of the current function's (or the top-level program's) own
+        # body -- see `_emit_defer_unwind`/`gen_block`/`_gen_fn_expr`.
+        self._defer_depth = 0
 
     def _temp(self) -> tuple:
         return (0, self.frame_stack[-1].alloc())
 
     def generate(self, stmts: list) -> CodeBuffer:
+        # M9: the top-level statement list is treated exactly like a
+        # block's own `stmts` -- push/drain a defer scope only when a
+        # top-level `defer` is directly present, so a top-level defer
+        # correctly runs at program end, right before the halt sentinel.
+        has_defer = any(isinstance(s, DeferStmt) for s in stmts)
+        if has_defer:
+            self.buf.emit(("deferpush", None, None, None))
+            self._defer_depth += 1
         for stmt in stmts:
             self.gen_stmt(stmt)
+        if has_defer:
+            self._emit_defer_unwind(1)
+            self._defer_depth -= 1
         self.buf.emit((None, None, None, None))
         self.buf.global_slot_count = self.frame_stack[-1].next_slot
         return self.buf
@@ -226,6 +270,9 @@ class Codegen:
             pass  # purely a resolve-time/compile-time declaration; no runtime code
         elif isinstance(stmt, EnumDecl):
             pass  # purely a resolve-time/compile-time declaration; no runtime code
+        elif isinstance(stmt, DeferStmt):
+            closure_addr = self.gen_expr(stmt.closure_expr)
+            self.buf.emit(("deferadd", closure_addr, None, None))
         else:
             raise AssertionError(f"unhandled statement node {stmt!r}")
 
@@ -234,12 +281,60 @@ class Codegen:
         -- for its side effects, whether or not the caller cares about the
         resulting value. Returns the tail's resulting address if there is
         one, else None (existing statement-position callers that don't
-        care about a value can keep ignoring the return value unchanged)."""
+        care about a value can keep ignoring the return value unchanged).
+
+        M9: conditionally pushes/drains a defer scope around the above --
+        only when this block DIRECTLY contains at least one `DeferStmt` in
+        `block.stmts` (not nested inside a sub-block), so a block with no
+        direct defer costs nothing (see `CODE_LIMIT`/no-regression
+        requirement in docs/V2_DESIGN.md's M9 milestone). When present, a
+        `deferpush` runs on entry and the block's own scope is drained via
+        `_emit_defer_unwind(1)` on normal fallthrough exit; a `return`/
+        `break`/`continue` that jumps out of this block drains it (and any
+        other currently-open scopes) via `_gen_return`/`_gen_break`/
+        `_gen_continue` instead, before actually jumping."""
+        has_defer = any(isinstance(s, DeferStmt) for s in block.stmts)
+        if has_defer:
+            self.buf.emit(("deferpush", None, None, None))
+            self._defer_depth += 1
         for stmt in block.stmts:
             self.gen_stmt(stmt)
+        tail_addr = None
         if block.tail is not None:
-            return self.gen_expr(block.tail)
-        return None
+            tail_addr = self.gen_expr(block.tail)
+        if has_defer:
+            self._emit_defer_unwind(1)
+            self._defer_depth -= 1
+        return tail_addr
+
+    def _emit_defer_unwind(self, count: int) -> None:
+        """M9: emit code to drain and discard `count` currently-open defer
+        scopes, innermost (most recently pushed) first -- used before a
+        `return`/`break`/`continue` jumps past that many block boundaries,
+        and by `gen_block`'s own normal-fallthrough exit (count=1, its own
+        scope)."""
+        for _ in range(count):
+            self._emit_drain_one_defer_scope()
+
+    def _emit_drain_one_defer_scope(self) -> None:
+        """M9: emit a small runtime loop: while the top defer scope has a
+        pending closure, pop and call it (LIFO within the scope); once
+        empty, discard the scope entirely. Reuses the ordinary
+        call/ret/retval opcodes -- a deferred closure is invoked exactly
+        like any other zero-arg call, its return value simply discarded."""
+        loop_start = self.buf.code_pointer
+        has_more = self._temp()
+        self.buf.emit(("deferpeek", None, None, has_more))
+        jmpf_placeholder = self.buf.emit((None, None, None, None))
+        closure_addr = self._temp()
+        self.buf.emit(("deferpopclosure", None, None, closure_addr))
+        self.buf.emit(("call", closure_addr, (), None))
+        discard = self._temp()
+        self.buf.emit(("retval", None, None, discard))
+        self.buf.emit(("jmp", None, None, loop_start))
+        end_target = self.buf.code_pointer
+        self.buf.emit(("jmpf", has_more, None, end_target), address=jmpf_placeholder)
+        self.buf.emit(("deferscopepop", None, None, None))
 
     def _gen_block_into(self, block: Block, dest) -> None:
         """Like gen_block, but always writes the block's value (defaulting
@@ -278,7 +373,16 @@ class Codegen:
 
     def _gen_while(self, stmt: WhileStmt) -> None:
         cond_check_addr = self.buf.code_pointer
-        loop_ctx = {"continue_target": cond_check_addr, "break_placeholders": []}
+        # M9: snapshot the defer depth as of loop entry (before the body's
+        # own possible push) so break/continue know exactly how many
+        # scopes opened *inside* this loop iteration need draining --
+        # never more than that, and never scopes belonging to an
+        # enclosing block/function.
+        loop_ctx = {
+            "continue_target": cond_check_addr,
+            "break_placeholders": [],
+            "defer_depth_at_entry": self._defer_depth,
+        }
         self._while_stack.append(loop_ctx)
         cond_addr = self.gen_expr(stmt.cond)
         jmpf_placeholder = self.buf.emit((None, None, None, None))
@@ -346,12 +450,14 @@ class Codegen:
     def _gen_break(self, stmt: BreakStmt) -> None:
         if not self._while_stack:
             raise Exception(f"'break' used outside a loop at position {stmt.position}")
+        self._emit_defer_unwind(self._defer_depth - self._while_stack[-1]["defer_depth_at_entry"])
         placeholder = self.buf.emit((None, None, None, None))
         self._while_stack[-1]["break_placeholders"].append(placeholder)
 
     def _gen_continue(self, stmt: ContinueStmt) -> None:
         if not self._while_stack:
             raise Exception(f"'continue' used outside a loop at position {stmt.position}")
+        self._emit_defer_unwind(self._defer_depth - self._while_stack[-1]["defer_depth_at_entry"])
         target = self._while_stack[-1]["continue_target"]
         self.buf.emit(("jmp", None, None, target))
 
@@ -363,6 +469,12 @@ class Codegen:
         else:
             src = self._temp()
             self.buf.emit(("ld", NONE_VALUE, None, src))
+        # M9: unwind ALL currently-open scopes, relative to the current
+        # function, after computing the return value but before actually
+        # returning -- `self._defer_depth` is reset to 0 at the start of
+        # each function's own body by `_gen_fn_expr`, so this never tries
+        # to unwind an outer function's or enclosing while-loop's scopes.
+        self._emit_defer_unwind(self._defer_depth)
         self.buf.emit(("ret", src, None, None))
 
     # -- expressions -------------------------------------------------------
@@ -470,6 +582,29 @@ class Codegen:
         code_address = self.buf.code_pointer
         self.frame_stack.append(fn.frame_level)
         self._fn_depth += 1
+        # M9: save/reset/restore the defer-depth counter around compiling
+        # this function's own body, exactly parallel to frame_stack/
+        # _fn_depth above -- essential so a nested function's own return
+        # never tries to unwind an OUTER function's or enclosing
+        # while-loop's defer scopes.
+        saved_defer_depth = self._defer_depth
+        self._defer_depth = 0
+        # Pre-existing gap, found and fixed while landing M9: `break`/
+        # `continue` compiled `self._while_stack[-1]` without ever
+        # resetting that stack across a function boundary, so a `break`/
+        # `continue` inside a nested `fn`'s body (already legal syntax
+        # before M9 -- e.g. `let f = fn() { break; }; f();` inside a
+        # `while`) silently targeted the ENCLOSING loop's jump target,
+        # corrupting execution at runtime (the jump lands in the outer
+        # loop's code with the inner closure's frame still current,
+        # never popped via `ret`) instead of raising a clean error. A
+        # loop can never actually span a function boundary in Mah, so
+        # resetting to `[]` here (parallel to `_defer_depth` above) is
+        # correct, not just defensive: it turns that silent corruption
+        # into `_gen_break`/`_gen_continue`'s existing clean
+        # "used outside a loop" error.
+        saved_while_stack = self._while_stack
+        self._while_stack = []
         # M5: implicit return of the body block's tail value if it falls
         # off the end -- `none` when there's no tail, a strict superset of
         # M1's "always none" trailer (unconditionally appended, dead code
@@ -479,6 +614,8 @@ class Codegen:
             tail_addr = self._temp()
             self.buf.emit(("ld", NONE_VALUE, None, tail_addr))
         self.buf.emit(("ret", tail_addr, None, None))
+        self._while_stack = saved_while_stack
+        self._defer_depth = saved_defer_depth
         self._fn_depth -= 1
         slot_count = self.frame_stack.pop().next_slot
         self.buf.emit(("jmp", None, None, self.buf.code_pointer), address=skip_placeholder)

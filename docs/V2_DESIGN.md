@@ -1781,11 +1781,97 @@ node that resolved to it. Then:
    `runtime_values.py`, `code_interpreter.py`, `preprocessor.py`,
    `tests/`, `examples/`, `mah.lang`, `compiler-generator/`,
    `syntax-highlight/bindings/*`.
-10. **M9 — `defer`.** Block-scoped `defer`, per "`defer`" above. Only
-    depends on M0 (blocks, `return`/`break`/`continue`) and M1 (closures,
-    for the "compile a defer body as a zero-arg closure" codegen
-    approach) — listed last for documentation tidiness, but could be
-    scheduled as early as right after M1 if that's more convenient.
+10. **M9 — `defer`. ✅ Landed.** Block-scoped, Zig-style `defer`, per
+    "`defer`" above. `defer <stmt>` desugars at parse time into a
+    synthesized, always-anonymous, zero-param `FnExpr` wrapping `<stmt>`'s
+    body (`DeferStmt(closure_expr, position)`, `compiler/ast_nodes.py`) —
+    accepted forms are a `_STATEMENT_LEADING` statement (`defer print(...)`
+    being the most common — `print` can't be parsed via `parse_expr` at
+    all, it's a dedicated statement form, so this branch is load-bearing,
+    not just convenience), a single expression-statement (`defer foo()`),
+    a single assignment (`defer x = 5`), or a full `{ ... }` block for
+    multiple deferred actions. `resolve.py` needs exactly one line
+    (`resolve_expr(stmt.closure_expr)`) — the existing `FnExpr` resolution
+    path gives correct by-reference variable capture for free, no new
+    logic. At runtime there's one `defer_stack: list[list[Closure]]`
+    (`code_interpreter.py`) — a stack of "scopes," each scope the pending
+    closures for one currently *open* block that directly contains a
+    `defer`. Four new opcodes drive it: `deferpush` (open a scope),
+    `deferadd` (register a closure onto the top scope — only an
+    *executed* `defer` reaches this, so an untaken branch's `defer` never
+    registers, matching ordinary execution order), `deferpeek`/
+    `deferpopclosure` (drain one scope, LIFO), `deferscopepop` (discard
+    the emptied scope). Deferred closures run through the ordinary
+    `call`/`ret`/`retval` opcodes — no new call mechanism.
+
+    `compiler/codegen.py`'s `gen_block` conditionally emits
+    `deferpush`/drains-and-pops around a block's normal codegen — **only**
+    when that block *directly* contains a `DeferStmt` in `block.stmts`
+    (not nested inside a sub-block), so a block with no direct defer costs
+    zero extra instructions; `generate` (the top-level program) gets the
+    same conditional treatment, so a top-level `defer` runs at program
+    end. A compile-time counter, `self._defer_depth`, tracks how many
+    scopes are open relative to the start of the current function's (or
+    top-level program's) own body; `_gen_return` unwinds *all* of them
+    before jumping (computing the return value first, so a deferred
+    closure's own temps — a fresh frame, never touching the caller's —
+    can't alias it), `_gen_break`/`_gen_continue` unwind only the ones
+    opened since the nearest enclosing loop's entry (via that loop
+    context's saved `defer_depth_at_entry`), and `_gen_fn_expr`
+    saves/resets/restores `_defer_depth` around a function's own body
+    (parallel to `frame_stack`/`_fn_depth`) so a nested function's
+    `return` never unwinds an enclosing function's or loop's scopes.
+    Multi-level unwinds (`return` several blocks deep) drain innermost
+    scope first, verified directly with a 3-level nested
+    fn/while-body/if-block stress case beyond the delegated spec's own
+    tests.
+
+    **Bug found and fixed while landing this milestone (pre-existing, not
+    introduced by M9):** `self._while_stack` was never saved/reset across
+    a `_gen_fn_expr` call, so `break`/`continue` written inside a nested
+    `fn`'s own body (already legal syntax before M9 — e.g.
+    `let f = fn() { break }; f()` inside a `while`) silently targeted the
+    *enclosing* loop's jump placeholder instead of raising — the jump
+    landed in the outer loop's code with the inner closure's own frame
+    still current (never popped via `ret`), corrupting execution rather
+    than erroring. `defer break`/`defer continue` reach the exact same
+    code path (the deferred body is itself compiled via `_gen_fn_expr`)
+    and made this bug trivially reachable through M9's own new syntax, so
+    it was fixed as part of this milestone rather than deferred: `
+    _gen_fn_expr` now also saves/resets (`[]`)/restores `_while_stack`
+    around a function's own body, parallel to `_defer_depth` — a loop can
+    never actually span a function boundary in Mah, so this turns the
+    silent corruption into `_gen_break`/`_gen_continue`'s existing clean
+    "used outside a loop" error. Regression tests added in both
+    `tests/test_language.py` (the general nested-fn case) and
+    `tests/test_defer.py` (the `defer break`/`defer continue` case
+    specifically).
+
+    Verified independently (not just the delegated report): re-ran the
+    full suite myself (176/176 — 162 pre-M9 + 10 new `tests/test_defer.py`
+    scenarios + 4 new regression tests for the bug above), re-derived and
+    matched the exact expected stdout for the trickiest scenario
+    (`break`/`continue` mid-loop draining: `normal, cleanup, cleanup,
+    cleanup, done`), independently re-measured instruction counts for 6
+    pre-existing non-defer examples (`structs.mh`=52, `match.mh`=183,
+    `enums.mh`=69, `prime_numbers.mh`=68, `strings.mh`=72,
+    `expr_blocks.mh`=112) and confirmed byte-for-byte identical counts to
+    before this milestone (the "zero overhead when defer is unused"
+    property actually holds), ran `examples/defer.mh` directly and
+    confirmed its resource-open/process/close-with-early-return output,
+    and wrote my own additional stress test (3 levels of nested
+    fn/while-body/if-block unwinding on one `return`) beyond what was
+    delegated. Changed: `compiler/lexer.py` (new `DEFER` token/keyword),
+    `compiler/ast_nodes.py` (`DeferStmt`), `compiler/parser.py`
+    (`_parse_defer_stmt`, `DEFER` added to `_STATEMENT_LEADING`),
+    `compiler/resolve.py` (one dispatch line), `compiler/codegen.py`
+    (`_defer_depth`, `_emit_defer_unwind`/`_emit_drain_one_defer_scope`,
+    updates to `gen_block`/`generate`/`_gen_while`/`_gen_break`/
+    `_gen_continue`/`_gen_return`/`_gen_fn_expr`), `code_interpreter.py`
+    (`defer_stack` + 5 opcodes, including `deferadd` which the original
+    spec initially missed), `tests/test_defer.py` (new, 12 tests),
+    `tests/test_language.py` (2 new regression tests for the
+    `_while_stack` fix), `examples/defer.mh` (new).
 
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
@@ -1798,8 +1884,10 @@ M1 was built and documented that way.
 
 ## Status
 
-M0, M1, M2, M3, M4, M5, M6, M7, and M8 are landed (see their entries above
-for what changed and each milestone's deliberate deviations/simplifications).
+M0 through M9 are all landed (see their entries above for what changed and
+each milestone's deliberate deviations/simplifications) — every milestone in
+the original plan is now complete; everything remaining lives in
+`docs/NEXT_PHASES.md` as deferred future work, not a scheduled milestone.
 `docs/NEXT_PHASES.md` captures what's deliberately deferred (match guards,
 arrays/lists, generics, traits, the type system, async) and what M0–M9
 need to keep forward-compatible with. M7 added a real symbol table to
@@ -1812,5 +1900,10 @@ from M6, as a focused follow-up. M8 rewrote `syntax-highlight/grammar.js`
 and `highlights.scm` (stale since M0) to cover v2's actual syntax --
 structs, enums, `match`, closures, expression-blocks, `some`/`none`, field
 access, `fn` -- touching nothing under `compiler/`/`lsp/`; every
-`examples/*.mh` file now parses with zero `(ERROR)` nodes. Next up:
-**M9 — `defer`**.
+`examples/*.mh` file now parses with zero `(ERROR)` nodes. M9 added
+block-scoped `defer` (desugared to a zero-arg closure registered on a
+runtime `defer_stack`, drained at every block exit) plus, as a
+side-finding, a fix for a pre-existing bug where `break`/`continue`
+inside a nested `fn`'s body silently corrupted execution instead of
+raising. All planned milestones (M0–M9) are now complete; see
+`docs/NEXT_PHASES.md` for what's next.

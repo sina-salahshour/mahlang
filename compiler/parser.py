@@ -23,6 +23,7 @@ from .ast_nodes import (
     Call,
     ContinueStmt,
     CosExpr,
+    DeferStmt,
     EnumDecl,
     EnumLit,
     EnumPat,
@@ -89,6 +90,7 @@ _STATEMENT_LEADING = {
     TokenType.CONTINUE,
     TokenType.WHILE,
     TokenType.PRINT,
+    TokenType.DEFER,
 }
 
 # M6: recovery points `_synchronize` will stop at after a syntax error --
@@ -405,7 +407,51 @@ class Parser:
             value = self.parse_expr()
             return ReturnStmt(value=value, position=tok.position)
 
+        if tok.type is TokenType.DEFER:
+            return self._parse_defer_stmt()
+
         raise SyntaxError(f"Invalid syntax '{tok}' at position '{tok.position}'")
+
+    def _parse_defer_stmt(self) -> DeferStmt:
+        """M9: `defer <stmt>` desugars into pushing a synthesized, always-
+        anonymous, zero-param `FnExpr` wrapping the deferred statement's
+        body -- see docs/V2_DESIGN.md's M9 milestone (whose grammar sketch
+        is `defer_stmt := "defer" stmt`, a general statement). Surface
+        forms: a `_STATEMENT_LEADING` statement (most commonly
+        `defer print(...)`, but any of `let`/`return`/`break`/`continue`/
+        `while`/`print`/`struct`/`enum` parse the same way any of those do
+        elsewhere), a single expression-statement (`defer foo()`), a
+        single assignment (`defer x = 5`), or a full `{ ... }` block for
+        multiple deferred actions (which can itself contain nested
+        `defer`/`if`/etc. via the normal `parse_block`). `print` in
+        particular can't be parsed via `parse_expr()` at all (it's a
+        dedicated statement form, not an expression) -- hence the
+        dedicated `_STATEMENT_LEADING` branch below, rather than just
+        expr/assign/block."""
+        defer_tok = self.advance()  # DEFER
+        if self.current.type is TokenType.BRACE_OPEN:
+            inner_block = self.parse_block()
+        elif self.current.type in _STATEMENT_LEADING:
+            inner_stmt = self.parse_stmt()
+            inner_block = Block(stmts=[inner_stmt], position=inner_stmt.position, tail=None)
+        else:
+            expr = self.parse_expr()
+            if self.current.type is TokenType.ASSIGN and isinstance(expr, (Ident, FieldAccess)):
+                self.advance()
+                value = self.parse_expr()
+                inner_stmt = AssignStmt(target=expr, value=value, position=expr.position)
+            else:
+                inner_stmt = ExprStmt(value=expr, position=expr.position)
+            inner_block = Block(stmts=[inner_stmt], position=inner_stmt.position, tail=None)
+        closure_expr = FnExpr(
+            name=None,
+            params=[],
+            body=inner_block,
+            position=defer_tok.position,
+            name_position=None,
+            param_positions=[],
+        )
+        return DeferStmt(closure_expr=closure_expr, position=defer_tok.position)
 
     def _parse_if(self) -> IfStmt:
         if_tok = self.advance()  # IF

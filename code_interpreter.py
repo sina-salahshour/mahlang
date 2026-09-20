@@ -43,6 +43,22 @@ variant), writing a boolean result that compiler/codegen.py's
 backpatched jump chain then branches on; `matchfail` is reached only when
 no arm's pattern matched (M4 does no exhaustiveness checking) and always
 raises a clean runtime error naming the source position.
+
+M9 adds `defer_stack: list[list[Closure]]` -- a stack of "scopes," each
+scope a list of pending zero-arg `Closure`s for one currently-active
+block that directly contains a `defer` (see docs/V2_DESIGN.md's M9
+milestone and compiler/codegen.py's module docstring). Four small
+opcodes drive it: `deferpush` opens a new empty scope; `deferadd` (whose
+`case` lives in the ordinary opcode dispatch below, right next to these)
+pushes one closure onto the top scope; `deferpeek` writes whether the top
+scope is non-empty; `deferpopclosure` pops and returns its
+most-recently-pushed closure; `deferscopepop` discards the (by then
+empty) top scope. Deferred closures are invoked through the ordinary
+`call`/`ret`/`retval` opcodes already implemented above (M1's calling
+convention, unchanged) -- `compiler/codegen.py`'s
+`_emit_drain_one_defer_scope` emits a small loop of `deferpeek` /
+`deferpopclosure` / `call` / `retval` (return value discarded) /
+`deferscopepop`, so no new call mechanism exists here at all.
 """
 
 from decimal import Decimal
@@ -93,6 +109,7 @@ def run_code(code_block: list, global_slot_count: int):
     current_frame = Frame(slots=[None] * global_slot_count, static_parent=None)
     return_stack = []  # list[tuple[int, Frame]]  (return_pc, caller_frame)
     return_register = NONE_VALUE
+    defer_stack: list = []  # list[list[Closure]] -- see compiler/codegen.py's M9 note
     pc = 0
     while True:
         operation = code_block[pc]
@@ -258,5 +275,20 @@ def run_code(code_block: list, global_slot_count: int):
                 _write(current_frame, dest, matched)
             case ("matchfail", None, None, position):
                 raise Exception(f"No pattern in 'match' matched the value at position {position}")
+            case ("deferpush", None, None, None):
+                defer_stack.append([])
+            case ("deferadd", closure_addr, None, None):
+                # Registers the closure compiled from a `defer <stmt>`'s
+                # body onto the innermost currently-open defer scope --
+                # only actually-executed `defer`s reach here at runtime,
+                # matching ordinary execution order (see
+                # compiler/codegen.py's module docstring).
+                defer_stack[-1].append(_read(current_frame, closure_addr))
+            case ("deferpeek", None, None, dest):
+                _write(current_frame, dest, bool(defer_stack[-1]))
+            case ("deferpopclosure", None, None, dest):
+                _write(current_frame, dest, defer_stack[-1].pop())
+            case ("deferscopepop", None, None, None):
+                defer_stack.pop()
             case catchall:
                 raise RuntimeError(f"invalid operation {catchall}")

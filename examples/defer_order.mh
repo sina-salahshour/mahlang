@@ -1,0 +1,48 @@
+# Multiple `defer`s in the same block run in LIFO order: the LAST
+# `defer` written runs FIRST once the block they're in actually exits.
+# Think of it like stacking plates -- you take the top one off first.
+
+fn demo() {
+    print("start")
+
+    defer print("first deferred")
+    defer print("second deferred")
+    defer print("third deferred")
+
+    print("end of body")
+}
+
+demo()
+
+# Expected output:
+#   start
+#   end of body
+#   third deferred
+#   second deferred
+#   first deferred
+
+# Each block gets its OWN set of defers, and a `return`/`break`/
+# `continue` runs the current block's defers (still LIFO) before
+# actually jumping -- see this second function, which mixes an outer
+# and an inner (nested) block:
+
+fn nested_demo() {
+    defer print("outer defer")
+
+    if true {
+        defer print("inner defer A")
+        defer print("inner defer B")
+        print("inside the if-block")
+    }
+
+    print("back in the function body")
+}
+
+nested_demo()
+
+# Expected output:
+#   inside the if-block
+#   inner defer B      <- registered last inside the if-block, runs first
+#   inner defer A      <- registered first inside the if-block, runs second
+#   back in the function body
+#   outer defer        <- belongs to the outer block, only runs when IT exits

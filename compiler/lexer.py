@@ -49,6 +49,7 @@ class TokenType(Enum):
     BREAK = "break"
     CONTINUE = "continue"
     RETURN = "return"
+    DEFER = "defer"
     FN = "fn"
     STRUCT = "struct"
     ENUM = "enum"
@@ -81,6 +82,7 @@ KEYWORDS = {
     "break": TokenType.BREAK,
     "continue": TokenType.CONTINUE,
     "return": TokenType.RETURN,
+    "defer": TokenType.DEFER,
     "fn": TokenType.FN,
     "struct": TokenType.STRUCT,
     "enum": TokenType.ENUM,

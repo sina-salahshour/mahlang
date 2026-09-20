@@ -42,8 +42,10 @@ vs. used as an expression/tail) -- see docs/V2_DESIGN.md's M5 milestone.
 M6 adds `ErrorNode` (see its own docstring below) -- the parser's forgiving-
 error-recovery mechanism, usable wherever an expression is expected.
 
-`defer` yet to come -- lands in a later milestone and will extend this
-module rather than replace it.
+M9 adds `DeferStmt` (see docs/V2_DESIGN.md's M9 milestone) -- its
+`closure_expr` is always a synthesized, anonymous, zero-param `FnExpr`
+wrapping the deferred statement's body, letting M1's existing closure
+machinery handle capture with no new resolve logic.
 
 Every node carries `position` (a source offset into the *combined*,
 preprocessed text) so error messages can point mah.py at a `file:line:col`
@@ -278,6 +280,20 @@ class ContinueStmt:
 @dataclass
 class ReturnStmt:
     value: Optional[object]
+    position: int
+
+
+@dataclass
+class DeferStmt:
+    """M9: `defer <stmt>` -- see docs/V2_DESIGN.md's M9 milestone and this
+    module's docstring. `closure_expr` is a synthesized, always-anonymous,
+    zero-param `FnExpr` wrapping the deferred statement's body (built by
+    the parser's `_parse_defer_stmt`), reusing M1's closure/frame
+    machinery entirely unchanged for correct by-reference variable
+    capture, with zero new resolve logic."""
+
+    closure_expr: object  # a synthesized, always-anonymous, zero-param FnExpr
+                           # wrapping the deferred statement's body
     position: int
 
 

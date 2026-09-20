@@ -114,6 +114,13 @@ see docs/V2_DESIGN.md's M7 milestone. Struct/enum type names and field
 names are NOT part of this symbol table -- they live in the separate
 `struct_decls`/`enum_decls` registries above and are out of scope for M7's
 rename (a distinct, larger piece of work; see the milestone entry).
+
+M9 adds `DeferStmt` (see docs/V2_DESIGN.md's M9 milestone): its body is
+already packaged by the parser as a synthesized, anonymous, zero-param
+`FnExpr`, so resolving it is just `resolve_expr(stmt.closure_expr)` --
+the existing `FnExpr` case creates a new frame level and resolves the
+body, giving correct by-reference capture of enclosing variables with no
+new resolve logic at all.
 """
 
 from __future__ import annotations
@@ -128,6 +135,7 @@ from .ast_nodes import (
     Call,
     ContinueStmt,
     CosExpr,
+    DeferStmt,
     EnumDecl,
     EnumLit,
     EnumPat,
@@ -348,6 +356,13 @@ class Resolver:
         elif isinstance(stmt, ReturnStmt):
             if stmt.value is not None:
                 self.resolve_expr(stmt.value)
+        elif isinstance(stmt, DeferStmt):
+            # M9: the deferred body is a synthesized zero-param FnExpr --
+            # resolve_expr's existing FnExpr case gives it a new frame
+            # level and correct by-reference capture of enclosing
+            # variables for free, with zero new resolve logic. See
+            # docs/V2_DESIGN.md's M9 milestone.
+            self.resolve_expr(stmt.closure_expr)
         elif isinstance(stmt, StructDecl):
             seen = set()
             for name in stmt.fields:

@@ -197,6 +197,40 @@ class ErrorTests(unittest.TestCase):
         with self.assertRaises(Exception):
             run_source("continue")
 
+    def test_break_inside_nested_fn_body_raises_cleanly(self):
+        # Found while landing M9 (defer): a loop can never actually span a
+        # function boundary in Mah, so `break`/`continue` written inside a
+        # nested `fn`'s own body -- always legal syntax, even before M9 --
+        # must raise the same clean "used outside a loop" error as a
+        # top-level bare `break`, not silently target the ENCLOSING loop's
+        # jump (which used to corrupt execution: the jump landed in the
+        # outer loop's code with the inner closure's own frame still
+        # current, never popped via `ret`).
+        src = """
+        let i = 0
+        while i < 5 {
+            let f = fn() { break }
+            f()
+            i = i + 1
+        }
+        print(i)
+        """
+        with self.assertRaises(Exception):
+            run_source(src)
+
+    def test_continue_inside_nested_fn_body_raises_cleanly(self):
+        src = """
+        let i = 0
+        while i < 5 {
+            let f = fn() { continue }
+            f()
+            i = i + 1
+        }
+        print(i)
+        """
+        with self.assertRaises(Exception):
+            run_source(src)
+
     def test_return_outside_function_raises(self):
         with self.assertRaises(Exception):
             run_source("return 1")

@@ -1,0 +1,27 @@
+struct Resource { name, open }
+
+fn open_resource(name) {
+    print("opening " + name)
+    return Resource { name: name, open: true }
+}
+
+fn close_resource(r) {
+    r.open = false
+    print("closing " + r.name)
+}
+
+fn process(name) {
+    let r = open_resource(name)
+    defer close_resource(r)
+
+    if r.name == "bad" {
+        print("skipping " + r.name)
+        return
+    }
+
+    print("processing " + r.name)
+}
+
+process("alpha")
+process("bad")
+process("beta")
