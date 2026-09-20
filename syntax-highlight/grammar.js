@@ -7,120 +7,400 @@
 /// <reference types="tree-sitter-cli/dsl" />
 // @ts-check
 
+// Precedence levels for `expr`'s binary/unary/postfix forms, loosest to
+// tightest binding -- mirrors compiler/parser.py's hand-written recursive
+// descent chain (_parse_or_and -> _parse_compare -> _parse_additive ->
+// _parse_multiplicative -> _parse_unary -> _parse_pow -> _parse_primary),
+// re-expressed the idiomatic tree-sitter way (one left-recursive
+// `binary_expr`/`unary_expr` rule per level) instead of mirroring the
+// parser's nested nonterminal layers. Field access is a postfix applied to
+// any primary and binds tighter than everything, including `**` and unary
+// `-` (`-p.x` is `-(p.x)`, `p.x ** 2` is `(p.x) ** 2`).
+const PREC = {
+  ASSIGN: 0,
+  OR_AND: 1,
+  COMPARE: 2,
+  ADDITIVE: 3,
+  MULTIPLICATIVE: 4,
+  UNARY: 5,
+  POW: 6,
+  POSTFIX: 7,
+};
+
 module.exports = grammar({
   name: "mah",
 
-  // Define lexical tokens
-  extras: ($) => [/\s/, $.comment],
+  word: ($) => $.identifier,
 
-  conflicts: ($) => [[$.return_stmt]],
+  extras: ($) => [/\s/, $.comment, ";"],
+
+  conflicts: ($) => [
+    // A bare identifier immediately followed by `{` is genuinely ambiguous
+    // to a context-free grammar: it could be the start of a struct literal
+    // (`Point { x: 1 }`) OR just a plain identifier value immediately
+    // followed by an unrelated `{ ... }` block belonging to an enclosing
+    // construct (most commonly `if`/`while`/`match`'s condition/subject,
+    // e.g. `while flag { ... }`, where `flag` must NOT swallow the loop
+    // body as if it were struct fields). compiler/parser.py resolves this
+    // with a stateful flag (`_struct_literal_allowed`, disabled specifically
+    // in condition/subject position -- see docs/V2_DESIGN.md's M2
+    // milestone) that a context-free GLR grammar can't cheaply replicate
+    // (see this milestone's scope note). Declaring the conflict here
+    // instead lets GLR fork both interpretations at parse time and keep
+    // whichever one is actually well-formed -- in practice the struct
+    // literal branch dies immediately whenever the `{ ... }` isn't
+    // field-init-shaped (the overwhelmingly common case: any real loop/if
+    // body), and the plain-identifier branch dies whenever it IS
+    // field-init-shaped but a bare identifier was expected to end there.
+    // The one truly-ambiguous case (both branches parse successfully, e.g.
+    // the deliberately out-of-scope `if Point { x: 1 } { ... }`) is broken
+    // by `struct_literal`'s default (tied, first-listed-wins) precedence,
+    // which is an accepted, documented cosmetic imprecision here.
+    [$.expr, $.struct_literal],
+    // The same shape of ambiguity, one token earlier: `identifier '.'
+    // identifier` is the shared prefix of both `field_access` (built by
+    // reducing the first identifier to a complete `expr`, then extending it
+    // with `.field`) and `enum_literal` (a flat, un-reduced
+    // `type '.' variant '{' ... '}'` sequence). Without this being a tied,
+    // declared conflict, the parser statically commits to the enum_literal
+    // reading the moment it sees the `.` (since that shift's implied
+    // precedence otherwise beats reducing the bare identifier), which then
+    // hard-fails on completely ordinary code like `a.x + b.x` the instant
+    // no `{` turns up after the second identifier. Declaring it lets GLR
+    // keep the `field_access` branch alive as a fallback.
+    [$.expr, $.enum_literal],
+  ],
+
   rules: {
-    source_file: ($) => repeat($.stmt),
+    source_file: ($) => repeat($._stmt),
 
-    stmt: ($) =>
+    comment: ($) => /#.*/,
+
+    // -- statements -------------------------------------------------------
+
+    _stmt: ($) =>
       choice(
-        $.print_stmt,
-        $.declaration,
-        $.assignment_or_call,
-        $.if_stmt,
-        $.while_stmt,
+        $.import_stmt,
+        $.export_stmt,
+        $.let_stmt,
+        $.struct_decl,
+        $.enum_decl,
+        $.return_stmt,
         $.break_stmt,
         $.continue_stmt,
-        $.return_stmt,
-        $.function_def,
+        $.while_stmt,
+        $.print_stmt,
+        $.expr_stmt,
       ),
 
-    print_stmt: ($) => seq("print", "(", optional($.args), ")"),
-
-    declaration: ($) => seq("let", $.identifier, "=", $.expr),
-
-    assignment_or_call: ($) => seq($.identifier, choice($.assignment, $.call)),
-
-    assignment: ($) => seq("=", $.expr),
-
-    call: ($) => seq("(", optional($.args), ")"),
-
-    if_stmt: ($) =>
+    // Sugar handled entirely by preprocessor.py (never reaches the real
+    // lexer/parser) but real syntax that appears in on-disk .mh files
+    // (see examples/import_demo.mh, examples/mathlib.mh) -- included here
+    // purely so those files highlight correctly, not because
+    // compiler/lexer.py or compiler/parser.py know about it.
+    import_stmt: ($) =>
       seq(
-        "if",
-        $.expr,
-        $.code_block,
-        repeat($.elif_block),
-        optional($.else_block),
+        "import",
+        optional(seq(field("alias", $.identifier), "from")),
+        field("path", $.string),
       ),
 
-    elif_block: ($) => seq("elif", $.expr, $.code_block),
+    export_stmt: ($) =>
+      seq("export", choice($.let_stmt, $.fn_stmt, $.identifier)),
 
-    else_block: ($) => seq("else", $.code_block),
+    let_stmt: ($) =>
+      seq("let", field("name", $.identifier), "=", field("value", $.expr)),
 
-    while_stmt: ($) => seq("while", $.expr, $.code_block),
+    struct_decl: ($) =>
+      seq(
+        "struct",
+        field("name", $.identifier),
+        "{",
+        optional($._name_list),
+        "}",
+      ),
+
+    _name_list: ($) => seq($.identifier, repeat(seq(",", $.identifier))),
+
+    enum_decl: ($) =>
+      seq(
+        "enum",
+        field("name", $.identifier),
+        "{",
+        optional($._enum_variants),
+        "}",
+      ),
+
+    _enum_variants: ($) => seq($.enum_variant, repeat(seq(",", $.enum_variant))),
+
+    enum_variant: ($) =>
+      seq(
+        field("name", $.identifier),
+        optional(seq("{", optional($._name_list), "}")),
+      ),
+
+    return_stmt: ($) => prec.right(seq("return", optional($.expr))),
 
     break_stmt: ($) => "break",
 
     continue_stmt: ($) => "continue",
 
-    return_stmt: ($) => seq("return", optional($.expr)),
-
-    function_def: ($) => seq("def", $.identifier, "(", ")", $.code_block),
-
-    code_block: ($) => seq("{", repeat($.stmt), "}"),
-
-    args: ($) => seq($.expr, repeat(seq(",", $.expr))),
-
-    expr: ($) => $.condition,
-
-    condition: ($) =>
+    while_stmt: ($) =>
       seq(
-        $.compare,
-        repeat(choice(seq("||", $.compare), seq("&&", $.compare))),
+        "while",
+        field("condition", $.expr),
+        field("body", $.block),
       ),
 
-    compare: ($) => seq($.term, optional($.compare_op)),
+    print_stmt: ($) => seq("print", "(", optional($._args), ")"),
 
-    compare_op: ($) => choice("==", "!=", "<", ">"),
+    expr_stmt: ($) => $.expr,
 
-    term: ($) =>
+    block: ($) => seq("{", repeat($._stmt), "}"),
+
+    // A bare, named `fn` declaration used as a statement (sugar for
+    // `let NAME = fn NAME(...) { ... }` -- see docs/V2_DESIGN.md's M1
+    // milestone). Also the form `export fn ...` wraps.
+    fn_stmt: ($) =>
       seq(
-        $.unary,
-        repeat(
-          choice(
-            seq("+", $.unary),
-            seq("-", $.unary),
-            seq("%", $.unary),
-            seq("//", $.unary),
-            seq("/", $.unary),
-            seq("*", $.unary),
-          ),
+        "fn",
+        field("name", $.identifier),
+        "(",
+        optional($._params),
+        ")",
+        field("body", $.block),
+      ),
+
+    fn_expr: ($) =>
+      seq(
+        "fn",
+        optional(field("name", $.identifier)),
+        "(",
+        optional($._params),
+        ")",
+        field("body", $.block),
+      ),
+
+    _params: ($) => seq($.identifier, repeat(seq(",", $.identifier))),
+
+    if_expr: ($) =>
+      seq(
+        "if",
+        field("condition", $.expr),
+        field("then", $.block),
+        repeat($.elif_clause),
+        optional($.else_clause),
+      ),
+
+    elif_clause: ($) =>
+      seq("elif", field("condition", $.expr), field("body", $.block)),
+
+    else_clause: ($) => seq("else", field("body", $.block)),
+
+    match_expr: ($) =>
+      seq("match", field("subject", $.expr), "{", repeat($.match_arm), "}"),
+
+    match_arm: ($) =>
+      seq(field("pattern", $._pattern), "=>", field("body", $.block)),
+
+    // -- patterns -----------------------------------------------------
+    //
+    // A completely separate grammar from expressions, exactly like
+    // compiler/parser.py's dedicated `_parse_pattern` family -- `ID {`
+    // inside a pattern is never ambiguous with anything else, unlike the
+    // scrutinee expression, so no precedence gymnastics are needed here.
+
+    _pattern: ($) =>
+      choice(
+        $.number,
+        $.string,
+        $.true,
+        $.false,
+        $.wildcard_pattern,
+        $.some_pattern,
+        $.none_pattern,
+        $.struct_pattern,
+        $.enum_pattern,
+        $.identifier,
+      ),
+
+    wildcard_pattern: ($) => "_",
+
+    some_pattern: ($) => seq("some", "(", $._pattern, ")"),
+
+    none_pattern: ($) => "none",
+
+    struct_pattern: ($) =>
+      seq(
+        field("type", $.identifier),
+        "{",
+        optional($._pattern_fields),
+        "}",
+      ),
+
+    enum_pattern: ($) =>
+      seq(
+        field("type", $.identifier),
+        ".",
+        field("variant", $.identifier),
+        optional(seq("{", optional($._pattern_fields), "}")),
+      ),
+
+    _pattern_fields: ($) =>
+      seq($._pattern_field, repeat(seq(",", $._pattern_field))),
+
+    _pattern_field: ($) =>
+      seq(field("name", $.identifier), optional(seq(":", $._pattern))),
+
+    // -- expressions --------------------------------------------------
+
+    expr: ($) =>
+      choice(
+        $.assignment_expr,
+        $.if_expr,
+        $.match_expr,
+        $.fn_expr,
+        $.block,
+        $.binary_expr,
+        $.unary_expr,
+        $.field_access,
+        $.call_expr,
+        $.struct_literal,
+        $.enum_literal,
+        $.some_expr,
+        $.none_expr,
+        $.sin_call,
+        $.cos_call,
+        $.input_call,
+        $.paren_expr,
+        $.identifier,
+        $.number,
+        $.string,
+        $.true,
+        $.false,
+      ),
+
+    // Assignment (`place = expr` / `place.field = expr`) is real Mah
+    // syntax only at statement level (compiler/parser.py's
+    // `_parse_block_items` special-cases `ID`/`FieldAccess` immediately
+    // followed by `=`), never as a nested sub-expression value. Folding it
+    // into `expr` as its own lowest-precedence alternative -- rather than
+    // a separate `_place "=" expr` statement form sharing the
+    // `field_access`/`identifier` nodes with `expr` -- sidesteps a classic
+    // GLR node-sharing conflict; it is a deliberately more permissive
+    // grammar than the real language (accepting assignment nested inside
+    // a larger expression), matching this milestone's documented
+    // "more permissive is fine" scope allowance.
+    assignment_expr: ($) =>
+      prec.right(
+        PREC.ASSIGN,
+        seq(
+          field("target", choice($.identifier, $.field_access)),
+          "=",
+          field("value", $.expr),
         ),
       ),
 
-    unary: ($) => choice(seq("-", $.unary), $.power),
+    paren_expr: ($) => seq("(", $.expr, ")"),
 
-    power: ($) => seq($.factor, optional(seq("**", $.power))),
+    unary_expr: ($) => prec(PREC.UNARY, seq("-", $.expr)),
 
-    factor: ($) =>
+    binary_expr: ($) =>
       choice(
-        seq("(", $.expr, ")"),
-        $.identifier,
-        $.sin_call,
-        $.cos_call,
-        $.number,
-        $.string,
-        $.input_call,
+        prec.left(PREC.OR_AND, seq($.expr, choice("&", "|"), $.expr)),
+        prec.left(
+          PREC.COMPARE,
+          seq($.expr, choice("==", "!=", "<", ">"), $.expr),
+        ),
+        prec.left(PREC.ADDITIVE, seq($.expr, choice("+", "-", "%"), $.expr)),
+        prec.left(
+          PREC.MULTIPLICATIVE,
+          seq($.expr, choice("*", "/", "//"), $.expr),
+        ),
+        prec.right(PREC.POW, seq($.expr, "**", $.expr)),
       ),
 
-    sin_call: ($) => seq("sin", "(", optional($.args), ")"),
+    field_access: ($) =>
+      prec(PREC.POSTFIX, seq($.expr, ".", field("field", $.identifier))),
 
-    cos_call: ($) => seq("cos", "(", optional($.args), ")"),
+    // compiler/parser.py's real `Call.callee` is always a bare identifier
+    // -- but `field("function", ...)` also accepts a `field_access` chain
+    // here, purely to highlight the namespaced-import call sugar
+    // (`math.square(n)`, see preprocessor.py and examples/import_demo.mh)
+    // that's rewritten away to a plain identifier call before the real
+    // lexer/parser ever sees it. More permissive than the core language,
+    // matching this milestone's documented scope allowance.
+    call_expr: ($) =>
+      prec(
+        PREC.POSTFIX,
+        seq(
+          field("function", choice($.identifier, $.field_access)),
+          "(",
+          optional($._args),
+          ")",
+        ),
+      ),
+
+    _args: ($) => seq($.expr, repeat(seq(",", $.expr))),
+
+    // Deliberately NOT wrapped in `prec(PREC.POSTFIX, ...)` -- see the
+    // `conflicts` entry above. Left at the default precedence so it ties
+    // with the plain-`$.identifier` alternative in `expr`'s choice list
+    // (rather than statically out-ranking it, which would make the parser
+    // always commit to "struct literal" and never even attempt the
+    // plain-identifier reading, breaking every `while`/`if` whose body
+    // isn't field-init-shaped).
+    struct_literal: ($) =>
+      seq(field("type", $.identifier), "{", optional($._field_inits), "}"),
+
+    _field_inits: ($) => seq($._field_init, repeat(seq(",", $._field_init))),
+
+    _field_init: ($) =>
+      seq(field("name", $.identifier), ":", field("value", $.expr)),
+
+    // `TypeName.Variant` (unit, e.g. `Shape.Empty`) is deliberately NOT part
+    // of this rule -- it's indistinguishable, without type information, from
+    // an ordinary `field_access` chain (`a.b`), and compiler/parser.py
+    // itself resolves that same way: `_parse_postfix_from` only builds an
+    // `EnumLit`/enum-literal node when a struct-shaped `{ ... }` immediately
+    // follows a `.member`; a bare `TypeName.Variant` with nothing after it
+    // is parsed as, and IS, a `FieldAccess` node in the real AST too. So
+    // `enum_literal` here only ever matches the struct-shaped form (braces
+    // mandatory), and a bare unit-variant reference like `Shape.Empty` is
+    // covered by `field_access` below, exactly matching real Mah semantics
+    // -- not just a convenient tree-sitter simplification.
+    // Also deliberately left at default precedence (not wrapped in
+    // `prec(PREC.POSTFIX, ...)`) -- see the `conflicts` entry above; it
+    // needs to tie with `field_access`'s claim on the shared
+    // `identifier '.' identifier` prefix, not out-rank it.
+    enum_literal: ($) =>
+      seq(
+        field("type", $.identifier),
+        ".",
+        field("variant", $.identifier),
+        "{",
+        optional($._field_inits),
+        "}",
+      ),
+
+    some_expr: ($) => seq("some", "(", $.expr, ")"),
+
+    none_expr: ($) => "none",
+
+    sin_call: ($) => seq("sin", "(", $.expr, ")"),
+
+    cos_call: ($) => seq("cos", "(", $.expr, ")"),
 
     input_call: ($) => seq("input", "(", ")"),
 
-    identifier: ($) => /[a-zA-Z_]\w*/,
+    true: ($) => "true",
+
+    false: ($) => "false",
+
+    identifier: ($) => /[a-zA-Z_$]\w*/,
 
     number: ($) => /\d+(\.\d+)?/,
 
     string: ($) => /"([^"\\]|\\.)*"/,
-
-    comment: ($) => /#.*/,
   },
 });

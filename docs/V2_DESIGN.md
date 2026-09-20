@@ -1638,9 +1638,149 @@ node that resolved to it. Then:
      was unaffected). Every `examples/*.mh` file's output confirmed
      unchanged (this follow-up only touches LSP navigation, not
      compilation/execution).
-9. **M8 — tooling sync.** `syntax-highlight/grammar.js` +
-   `highlights.scm` updated for the new syntax; `mah.py build`'s IR dump
-   and any new opcodes.
+9. **M8 — tooling sync. ✅ Landed.** `syntax-highlight/grammar.js` (the
+   hand-maintained tree-sitter grammar backing editor syntax highlighting,
+   e.g. Neovim) hadn't been touched since M0 and still reflected v1's
+   original syntax -- no structs, enums, `match`, closures-as-values,
+   expression-blocks, `some`/`none`, or field access, and still the v1
+   `def` keyword instead of `fn`. Real v2 Mah code highlighted incorrectly
+   in any editor using it. This milestone is entirely scoped to
+   `syntax-highlight/`: it does not touch `compiler/`, `lsp/`, or how Mah
+   programs actually run.
+   **Grammar rewrite, precedence-table approach.** Rather than mirror
+   `compiler/parser.py`'s six nested recursive-descent layers
+   (`_parse_or_and` -> `_parse_compare` -> `_parse_additive` ->
+   `_parse_multiplicative` -> `_parse_unary` -> `_parse_pow` ->
+   `_parse_primary`) as six separate tree-sitter rules, `grammar.js` uses
+   the idiomatic tree-sitter pattern instead: one left-recursive
+   `binary_expr` rule with a numbered `prec.left`/`prec.right` per
+   precedence level (`or`/`and` = 1, comparison = 2, additive = 3,
+   multiplicative = 4, unary `-` = 5, `**` = 6, postfix
+   field-access/call/struct-and-enum-literal = 7 -- matching the real
+   parser's precedence chain exactly, confirmed against it token-for-token
+   including the non-standard choices it preserves from v1: `or`/`and`
+   sharing one precedence level via `&`/`|`, `%` grouped with `+`/`-`, and
+   `**` binding tighter than unary minus so `-x ** 2` is `-(x ** 2)`).
+   `assignment_expr` (`place = expr` / `place.field = expr`) is folded into
+   `expr` itself as its own lowest-precedence alternative instead of a
+   separate `_place "=" expr` statement rule sharing `field_access`/
+   `identifier` nodes with `expr` -- the latter shape is a classic
+   GLR-conflict generator; folding it into `expr` sidesteps it entirely, at
+   the cost of also (harmlessly) accepting assignment nested inside a
+   larger expression, which the real language doesn't. Import/export
+   syntax (`import "path"`, `import ns from "path"`, `export fn`/`export
+   let`/bare `export name`) is real syntax that appears in on-disk `.mh`
+   files (`examples/import_demo.mh`, `examples/mathlib.mh`) but is pure
+   `preprocessor.py` sugar rewritten away before the real lexer/parser ever
+   runs -- `compiler/lexer.py` has no `import`/`export`/`from` keywords at
+   all. Added `import_stmt`/`export_stmt` grammar rules anyway, purely so
+   those files highlight correctly; similarly, `call_expr`'s `function`
+   field accepts a `field_access` chain in addition to a bare identifier,
+   solely to highlight the namespaced-call sugar `math.square(n)` (whereas
+   `compiler/parser.py`'s real `Call.callee` is always a bare identifier).
+   Both are deliberately more permissive than the core language, per this
+   milestone's documented scope allowance for such gaps.
+   **Struct/enum-literal-in-condition-position gap (the deliberate,
+   documented one).** `compiler/parser.py` forbids a bare struct/enum
+   literal directly in an `if`/`while`/`match`-subject condition position
+   (`_struct_literal_allowed`, a stateful flag disabled specifically there
+   and re-enabled inside parens -- see M2) to resolve the classic
+   `if x { ... }` ambiguity between "struct literal on `x`" and "if-body
+   block." A context-free GLR grammar can't cheaply replicate a
+   context-sensitive flag like that, and per this milestone's scope this
+   restriction was deliberately **not** attempted; the grammar is instead
+   more permissive here, accepting e.g. `if Point { x: 1 } { ... }` as a
+   struct literal used as an if-condition. Getting even that much right
+   took real iteration against `tree-sitter generate`, not just the
+   scope note's easy example: a first pass wrapped `struct_literal` (and,
+   separately, `enum_literal`) in `prec(POSTFIX, ...)`, unconditionally
+   out-ranking the plain-`$.identifier` alternative in `expr`'s choice
+   list -- `tree-sitter generate` accepted this silently (no conflict
+   warning), but it turned out to *always* statically commit to the
+   struct/enum-literal reading the instant an identifier was followed by
+   `{` or `identifier '.' identifier` was followed by anything, with no
+   runtime fallback -- breaking completely ordinary code with zero
+   relation to the scope gap, e.g. `while flag { print(x) }` (the loop body
+   isn't field-init-shaped) and even `a.x + b.x` (plain field access,
+   no braces at all, since `enum_literal`'s own `.` shift out-ranked
+   reducing `a` to a complete `expr` before `field_access` could ever
+   claim the `.`). Fixed by deliberately leaving `struct_literal` and
+   `enum_literal` at *default* (untied) precedence so they genuinely tie
+   with the alternatives they compete with, declaring those ties via
+   `conflicts: [[$.expr, $.struct_literal], [$.expr, $.enum_literal]]`,
+   and letting GLR fork both readings at parse time -- in every real case
+   one branch dies structurally (the loop/if body isn't field-shaped, or
+   no `{` follows the dotted path) and the other survives; only the
+   genuinely-ambiguous, out-of-scope case has both branches parse
+   successfully, broken by `struct_literal`'s tied (first-listed-wins)
+   precedence, an accepted cosmetic imprecision. Also discovered along the
+   way and worth noting as a correctness win, not just a workaround: a
+   bare `TypeName.Variant` (no trailing `{ ... }`) is deliberately **not**
+   part of `enum_literal` at all -- it's indistinguishable without type
+   information from an ordinary `field_access` chain, and
+   `compiler/parser.py` resolves it the exact same way (`_parse_postfix_from`
+   only builds an `EnumLit` node when a struct-shaped `{ ... }` immediately
+   follows a `.member`; a bare `Shape.Empty` really is a `FieldAccess` node
+   in the real AST too) -- so `enum_literal` here requires braces
+   unconditionally, matching real Mah semantics exactly rather than just
+   being a convenient simplification.
+   **`highlights.scm` rewrite.** Entirely tied to the retired grammar's
+   node names (`if_stmt`, `function_def`, etc., none of which exist
+   anymore) -- rewritten against the new node/field names, covering
+   keywords (`let struct enum return break continue while fn if elif else
+   match some none true false print sin cos input`, plus the
+   preprocessor-sugar `import export from`), operators, bracket/delimiter
+   punctuation, `@boolean` for `true`/`false`, `@function.builtin` for
+   `print`/`sin`/`cos`/`input`, and, using the fields added to the grammar
+   above, `@type` for struct/enum declaration and literal/pattern type
+   names, `@property` for struct/enum field and variant names, and
+   `@function` for `fn` declarations and call sites (including the
+   `math.square(...)`-shaped namespaced-call sugar). Two tree-sitter
+   quirks worth recording since they cost real debugging time: (1) a rule
+   whose *entire* body is a single bare string (`break_stmt: $ =>
+   "break"`, and likewise `continue_stmt`/`none_expr`/`none_pattern`/
+   `true`/`false`/`wildcard_pattern`) produces no separate anonymous token
+   node -- the named node itself is the leaf -- so querying it as a string
+   literal (`"break" @keyword`) is a query *compile error*; it must be
+   queried by node type (`(break_stmt) @keyword`) instead. (2) a hidden
+   rule (leading `_`, e.g. `_field_init`/`_pattern_field`) has its own
+   `field(...)`-tagged children hoisted directly onto the *enclosing*
+   visible node (`struct_literal`/`struct_pattern`/etc.) rather than
+   appearing on a node of its own, so those fields must be queried there,
+   not on a `(_field_init ...)` pattern (which is itself invalid -- hidden
+   rules aren't valid node types in a query at all). The generic
+   `(identifier) @variable` catch-all is placed *before* the more specific
+   `@type`/`@property`/`@function` overrides in the file, per tree-sitter's
+   highlight-query convention that later patterns win ties for the same
+   node.
+   **Verification.** `tree-sitter generate` runs clean (no errors, no
+   conflict warnings) from `syntax-highlight/`. Every `.mh` file under
+   `examples/` (`binary_to_decimal.mh`, `decimal_to_binary.mh`,
+   `enums.mh`, `expr_blocks.mh`, `import_demo.mh`, `match.mh`,
+   `mathlib.mh`, `new_decimal_to_binary.mh`, `new_prime_numbers.mh`,
+   `prime_numbers.mh`, `strings.mh`, `structs.mh` -- all twelve) parses via
+   `tree-sitter parse` with zero `(ERROR)` nodes; `tree-sitter query
+   queries/mah/highlights.scm <file>` also compiles and runs cleanly
+   against every one of them. Ad hoc snippets additionally confirmed
+   correct precedence/associativity (`-a ** 2` parses as `-(a ** 2)`,
+   `2 * -3 ** 2` as `2 * (-(3 ** 2))`, `-p.x` as `-(p.x)`, `p.x ** 2` as
+   `(p.x) ** 2`), assignment through a field-access chain
+   (`l.end.x = 100`), closures (`let f = fn(x) { x }`), and both
+   `some`/`none` and struct match-arm patterns. `make test` from the repo
+   root: all 162 pre-existing tests green, unaffected (this milestone
+   touches nothing under `compiler/`, `lsp/`, or `tests/`). Also rolled
+   into this milestone: a small, separately-applied IR-dump readability
+   fix to `mah.py`'s `print_code_block` (`_dump_cell`/`_DUMP_MAX_CELL`),
+   truncating an over-wide cell value (e.g. an `EnumInstance`/
+   `StructInstance` repr) instead of letting it blow out the dump's
+   fixed-width table. Changed: `syntax-highlight/grammar.js`,
+   `syntax-highlight/queries/mah/highlights.scm`, `mah.py`
+   (`print_code_block`). Generated (via `tree-sitter generate`, not
+   hand-edited): `syntax-highlight/src/{parser.c,grammar.json,
+   node-types.json}`. Not touched: `compiler/`, `lsp/`,
+   `runtime_values.py`, `code_interpreter.py`, `preprocessor.py`,
+   `tests/`, `examples/`, `mah.lang`, `compiler-generator/`,
+   `syntax-highlight/bindings/*`.
 10. **M9 — `defer`.** Block-scoped `defer`, per "`defer`" above. Only
     depends on M0 (blocks, `return`/`break`/`continue`) and M1 (closures,
     for the "compile a defer body as a zero-arg closure" codegen
@@ -1658,8 +1798,8 @@ M1 was built and documented that way.
 
 ## Status
 
-M0, M1, M2, M3, M4, M5, M6, and M7 are landed (see their entries above for
-what changed and each milestone's deliberate deviations/simplifications).
+M0, M1, M2, M3, M4, M5, M6, M7, and M8 are landed (see their entries above
+for what changed and each milestone's deliberate deviations/simplifications).
 `docs/NEXT_PHASES.md` captures what's deliberately deferred (match guards,
 arrays/lists, generics, traits, the type system, async) and what M0–M9
 need to keep forward-compatible with. M7 added a real symbol table to
@@ -1668,6 +1808,9 @@ of it, retiring the independent token-scope model
 (`_build_scopes`/`_resolve_declaration`/`_Scope`) `lsp/analysis.py` used to
 depend on; `get_hover`/`get_completions`/`get_document_symbols`/
 `get_code_actions` remain deliberately disabled/unadvertised, unchanged
-from M6, as a focused follow-up. Next up: **M8 — tooling sync**
-(`syntax-highlight/grammar.js` + `highlights.scm` updated for the current
-syntax; `mah.py build`'s IR dump and any new opcodes).
+from M6, as a focused follow-up. M8 rewrote `syntax-highlight/grammar.js`
+and `highlights.scm` (stale since M0) to cover v2's actual syntax --
+structs, enums, `match`, closures, expression-blocks, `some`/`none`, field
+access, `fn` -- touching nothing under `compiler/`/`lsp/`; every
+`examples/*.mh` file now parses with zero `(ERROR)` nodes. Next up:
+**M9 — `defer`**.

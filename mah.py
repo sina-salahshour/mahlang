@@ -18,12 +18,29 @@ USAGE_HELP_MESSGE = """Usage:
     mah build\t <input file>\t\t# to see the program instructions"""
 
 
+_DUMP_COLUMN_WIDTH = 9
+_DUMP_MAX_CELL = 24  # M8: some M1-M4 opcode payloads (closure/struct/enum/
+# matchtag's nested-tuple args, an EnumInstance/StructInstance repr for a
+# literal `ld`) are far wider than the fixed 9-char column this dump was
+# designed around -- truncate instead of letting one long cell blow out a
+# single row's alignment; still readable, just not necessarily complete.
+
+
+def _dump_cell(value) -> str:
+    if value is None:
+        return " ".center(_DUMP_COLUMN_WIDTH)
+    text = str(value)
+    if len(text) > _DUMP_MAX_CELL:
+        text = text[: _DUMP_MAX_CELL - 1] + "…"
+    return text.center(_DUMP_COLUMN_WIDTH)
+
+
 def print_code_block(buf: CodeBuffer, should_save_to_file=False):
     code_block = "\n"
     for index, code in enumerate(buf.code[:400]):
         if not code:
             break
-        code_block += f"{index}:\t{'|'.join(map(lambda x: ' '.center(9) if x is None else str(x).center(9),code))}\n"
+        code_block += f"{index}:\t{'|'.join(map(_dump_cell, code))}\n"
         code_block += ("\t " + "-" * 36) + "\n"
 
     if not should_save_to_file:
