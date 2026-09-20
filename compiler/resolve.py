@@ -100,6 +100,20 @@ that declared shape," shared by literals and patterns alike. Each match
 arm gets its own scope layer (pushed/popped around
 `resolve_pattern`+`resolve_block`) so one arm's bindings never leak into
 the next arm's checks or a sibling arm's body.
+
+M7 adds a real symbol table, built directly into this same resolve pass
+instead of as a second, independent scope-scanning implementation: every
+scope entry now also carries a `Symbol` (name, declaration position, kind
+-- "let"/"fn"/"param"/"binding" -- and a list of every reference position
+that resolved to it), and `self.position_index` maps any source position
+straight to the `Symbol` declared or referenced there. `_declare`/`_lookup`
+populate both. This is the resolver's own authoritative record of "this
+identifier occurrence resolved to that declaration," which the LSP's
+go-to-definition and rename features (lsp/analysis.py) read directly --
+see docs/V2_DESIGN.md's M7 milestone. Struct/enum type names and field
+names are NOT part of this symbol table -- they live in the separate
+`struct_decls`/`enum_decls` registries above and are out of scope for M7's
+rename (a distinct, larger piece of work; see the milestone entry).
 """
 
 from __future__ import annotations
@@ -152,6 +166,23 @@ class FrameLevel:
         return slot
 
 
+class Symbol:
+    """M7: one entry in the resolver's symbol table -- a single declaration
+    plus every position that resolved to it. Built directly into the normal
+    resolve pass (`_declare`/`_lookup`) rather than as a second, independent
+    scope-scanning implementation, so it can never drift from the compiler's
+    own actual scoping rules -- see docs/V2_DESIGN.md's M7 milestone and its
+    "LSP rename" design section."""
+
+    __slots__ = ("name", "decl_position", "kind", "references")
+
+    def __init__(self, name: str, decl_position: int, kind: str):
+        self.name = name
+        self.decl_position = decl_position
+        self.kind = kind  # "let" | "fn" | "param" | "binding"
+        self.references: list = []  # positions (ints) of every Ident that resolved here
+
+
 class Resolver:
     def __init__(self):
         self.global_frame = FrameLevel(depth=0, parent=None)
@@ -171,19 +202,31 @@ class Resolver:
         # `Option` type so `none`/`some(x)` validate through the same
         # machinery as a user-declared enum -- see module docstring.
         self.enum_decls: dict = {"Option": {"none": [], "some": ["value"]}}
+        # M7: source position -> Symbol, for every position that either
+        # declared or referenced a variable/parameter/function-binding/
+        # match-binding name. Gives the LSP's go-to-definition/rename
+        # features an O(1) "what symbol is at this exact position" lookup
+        # without re-walking the AST -- see docs/V2_DESIGN.md's M7
+        # milestone.
+        self.position_index: dict = {}
 
     # -- name table helpers ----------------------------------------------
 
-    def _declare(self, name: str, slot: int, position: int) -> None:
+    def _declare(self, name: str, slot: int, position: int, kind: str = "let") -> None:
         scope = self.scopes[-1]
         if name in scope:
             raise NameError(f"Error at position {position}: variable is already defined {name}")
-        scope[name] = (self.frame_stack[-1], slot)
+        symbol = Symbol(name, position, kind)
+        self.position_index[position] = symbol
+        scope[name] = (self.frame_stack[-1], slot, symbol)
 
     def _lookup(self, name: str, position: int):
         for scope in reversed(self.scopes):
             if name in scope:
-                return scope[name]
+                frame_level, slot, symbol = scope[name]
+                symbol.references.append(position)
+                self.position_index[position] = symbol
+                return frame_level, slot
         raise NameError(f"Undefined variable '{name}' at position {position}")
 
     def _resolve_ident_address(self, name: str, position: int) -> tuple:
@@ -236,17 +279,24 @@ class Resolver:
 
     def resolve_stmt(self, stmt) -> None:
         if isinstance(stmt, LetStmt):
+            # M7: symbol-table registration uses the *name*'s own position
+            # (`name_position`), not `stmt.position` (the leading `let`/`fn`
+            # keyword) -- go-to-definition/rename need the identifier's
+            # exact span to build a correct edit range. Falls back to
+            # `stmt.position` if `name_position` was never set (shouldn't
+            # happen via the parser, but keeps this defensive).
+            name_position = stmt.name_position if stmt.name_position is not None else stmt.position
             if isinstance(stmt.value, FnExpr):
                 # Declare before resolving the body -- enables self-reference
                 # (recursion) for named function bindings. See module docstring.
                 slot = self.frame_stack[-1].alloc()
-                self._declare(stmt.name, slot, stmt.position)
+                self._declare(stmt.name, slot, name_position, kind="fn")
                 stmt.address = slot
                 self._resolve_fn_expr(stmt.value)
             else:
                 self.resolve_expr(stmt.value)
                 slot = self.frame_stack[-1].alloc()
-                self._declare(stmt.name, slot, stmt.position)
+                self._declare(stmt.name, slot, name_position, kind="let")
                 stmt.address = slot
         elif isinstance(stmt, AssignStmt):
             self.resolve_expr(stmt.target)
@@ -353,9 +403,12 @@ class Resolver:
         new_frame = FrameLevel(depth=self.frame_stack[-1].depth + 1, parent=self.frame_stack[-1])
         self.frame_stack.append(new_frame)
         self._push()
-        for param_name in fn.params:
+        for index, param_name in enumerate(fn.params):
             slot = new_frame.alloc()
-            self._declare(param_name, slot, fn.position)
+            param_position = (
+                fn.param_positions[index] if index < len(fn.param_positions) else fn.position
+            )
+            self._declare(param_name, slot, param_position, kind="param")
             fn.param_slots.append(slot)
         self.resolve_block(fn.body)
         self._pop()
@@ -492,7 +545,7 @@ class Resolver:
             return
         if isinstance(pattern, BindPat):
             slot = self.frame_stack[-1].alloc()
-            self._declare(pattern.name, slot, pattern.position)
+            self._declare(pattern.name, slot, pattern.position, kind="binding")
             pattern.address = slot
             return
         if isinstance(pattern, StructPat):

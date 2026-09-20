@@ -23,7 +23,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from compiler.codegen import Codegen  # noqa: E402
-from compiler.lexer import Lexer, Token, TokenType  # noqa: E402
+from compiler.lexer import KEYWORDS, Lexer, Token, TokenType  # noqa: E402
 from compiler.parser import Parser  # noqa: E402
 from compiler.resolve import Resolver  # noqa: E402
 from preprocessor import BUFFER_PATH, demangle_message, preprocess  # noqa: E402
@@ -68,9 +68,24 @@ KEYWORD_DOCS = {
     "continue": "Skip to the next iteration of the innermost `while` loop.",
     "return": "Return from a function, optionally with a value.\n\n"
     "```mah\nreturn expr\n```",
-    "def": "Define a function.\n\n```mah\ndef name(a, b) {\n\treturn a + b\n}\n```",
+    "fn": "Define a function. With a name, it's sugar for binding a closure "
+    "value to that name; without one, it's an anonymous closure expression "
+    "usable anywhere (assigned, returned, passed as an argument).\n\n"
+    "```mah\nfn name(a, b) {\n\treturn a + b\n}\n\nlet add = fn(a, b) { a + b }\n```",
+    "struct": "Declare a fixed-shape struct type (field names only, no types).\n\n"
+    "```mah\nstruct Point { x, y }\nlet p = Point { x: 1, y: 2 }\n```",
+    "enum": "Declare an enum type: each variant is either a unit (no payload) "
+    "or struct-shaped (named fields).\n\n"
+    "```mah\nenum Shape {\n\tCircle { r },\n\tEmpty\n}\n```",
+    "match": "Pattern-match a value against a sequence of patterns, running "
+    "the first arm whose pattern matches.\n\n"
+    "```mah\nmatch value {\n\tsome(x) => { print(x) }\n\tnone => { print(\"nothing\") }\n}\n```",
+    "some": "Construct a value wrapping `x` in the built-in `Option` type -- "
+    "the `Some`-equivalent, always truthy regardless of `x`.\n\n`some(x)`",
+    "none": "The built-in `Option` type's empty value -- Mah's null "
+    "equivalent. Falsy (the only enum value that is).\n\n`none`",
     "export": "Make a top-level declaration visible to files that `import` this "
-    "one.\n\n```mah\nexport def name(a) { ... }\nexport let value = 1\nexport name  # export something declared elsewhere\n```",
+    "one.\n\n```mah\nexport fn name(a) { ... }\nexport let value = 1\nexport name  # export something declared elsewhere\n```",
     "import": "Inline another file's `export`ed declarations. The path is "
     "resolved relative to this file.\n\n```mah\nimport \"lib.mh\"\n```",
 }
@@ -84,6 +99,14 @@ BUILTIN_DOCS = {
 
 # LSP enum values ----------------------------------------------------------
 SEVERITY_ERROR = 1
+
+# Used by get_definition's import-directive handling: jumping to a whole
+# imported *file* has no specific symbol position to point at, so land at
+# the very top of it -- a zero-width range at line 0, character 0.
+_FILE_START_RANGE = {
+    "start": {"line": 0, "character": 0},
+    "end": {"line": 0, "character": 0},
+}
 
 COMPLETION_KEYWORD = 14
 COMPLETION_FUNCTION = 3
@@ -262,7 +285,7 @@ def _is_soft_keyword(token: Token, tokens: list[Token]) -> bool:
         return False
     nxt = tokens[pos + 1] if pos + 1 < len(tokens) else None
     if token.literal == "import":
-        if nxt is not None and nxt.type == TokenType.String:
+        if nxt is not None and nxt.type == TokenType.STRING:
             return True
         # import <ns> from "..."
         return (
@@ -271,12 +294,12 @@ def _is_soft_keyword(token: Token, tokens: list[Token]) -> bool:
             and pos + 3 < len(tokens)
             and tokens[pos + 2].type == TokenType.ID
             and tokens[pos + 2].literal == "from"
-            and tokens[pos + 3].type == TokenType.String
+            and tokens[pos + 3].type == TokenType.STRING
         )
     # export
     return nxt is not None and nxt.type in (
-        TokenType.Def,
-        TokenType.Let,
+        TokenType.FN,
+        TokenType.LET,
         TokenType.ID,
     )
 
@@ -780,75 +803,58 @@ def get_completions(
 # --------------------------------------------------------------------------
 
 def get_hover(text: str, line: int, character: int, path: Optional[str] = None) -> Optional[dict]:
+    """Hover text for the token under the cursor.
+
+    Keyword/builtin/soft-keyword/literal hover is a lightweight, tokenize-
+    only lookup (no need to resolve anything). Identifier hover is built on
+    the resolver's real symbol table (`compiler/resolve.py`'s `Symbol`/
+    `position_index`, see docs/V2_DESIGN.md's M7 milestone) -- the same
+    source of truth go-to-definition/rename already use -- rather than the
+    old `collect_symbols`/`collect_namespaces`/`collect_imported_symbols`
+    token-scanning helpers below, which predate M0's pipeline and are no
+    longer maintained (left as dead code; do not call them from here).
+
+    Scope, matching M7's go-to-definition (not rename): identifier hover
+    covers variables/parameters/function bindings only, and *is* allowed to
+    describe a symbol whose declaration lives in an imported file (unlike
+    rename, which refuses cross-file symbols outright) -- it just notes
+    where the declaration actually lives. Struct/enum type names and field
+    names, and doc-comment extraction, are not covered (future work, see
+    docs/NEXT_PHASES.md)."""
     tokens, _lex_error = tokenize(text)
     offset = position_to_offset(text, line, character)
     token = _token_at_offset(tokens, offset)
     if token is None:
         return None
 
-    token_range = make_range(
-        text, token.position, token.position + len(token.literal)
-    )
+    token_range = make_range(text, token.position, token.position + len(token.literal))
 
-    namespaces = {ns.name: ns for ns in collect_namespaces(text, path)}
-
-    value: Optional[str] = None
     if token.type in KEYWORD_TOKENS:
-        value = f"**keyword** `{token.literal}`\n\n" + KEYWORD_DOCS.get(
-            token.literal, ""
-        )
+        value = f"**keyword** `{token.literal}`\n\n" + KEYWORD_DOCS.get(token.literal, "")
     elif token.type in BUILTIN_TOKENS:
-        value = f"**builtin** `{token.literal}`\n\n" + BUILTIN_DOCS.get(
-            token.literal, ""
-        )
-    elif token.type == TokenType.ID and _is_soft_keyword(token, tokens):
-        value = f"**keyword** `{token.literal}`\n\n" + KEYWORD_DOCS.get(
-            token.literal, ""
-        )
-    elif token.type == TokenType.ID and _member_owner(text, token) in namespaces:
-        # Cursor on `member` in `ns.member`.
-        ns = namespaces[_member_owner(text, token)]
-        member = next((m for m in ns.members if m.name == token.literal), None)
-        if member is not None and member.kind == SYMBOL_FUNCTION:
-            value = f"**function** `{ns.name}.{member.name}`\n\n```mah\n{member.detail}\n```"
-        elif member is not None:
-            value = f"**variable** `{ns.name}.{member.name}`"
-        else:
-            value = f"`{token.literal}` is not exported by `{ns.name}`"
-        value += f"\n\n*from `{os.path.basename(ns.file)}`*"
-        if member is not None and member.doc:
-            value += "\n\n---\n\n" + member.doc
-    elif token.type == TokenType.ID and token.literal in namespaces and _is_namespace_use(text, token):
-        ns = namespaces[token.literal]
-        exports = ", ".join(sorted(m.name for m in ns.members)) or "(nothing)"
-        value = (
-            f"**namespace** `{token.literal}`\n\n"
-            f"*from `{os.path.basename(ns.file)}`*\n\nExports: {exports}"
-        )
-    elif token.type == TokenType.ID:
-        # Prefer local declarations, then symbols pulled in via imports.
-        symbols = {s.name: s for s in collect_symbols(tokens, text)}
-        for imported in collect_imported_symbols(text, path):
-            symbols.setdefault(imported.name, imported)
-        symbol = symbols.get(token.literal)
-        if symbol is not None and symbol.kind == SYMBOL_FUNCTION:
-            value = f"**function** `{symbol.name}`\n\n```mah\n{symbol.detail}\n```"
-        elif symbol is not None:
-            note = "parameter" if symbol.detail == "parameter" else "variable"
-            value = f"**{note}** `{token.literal}`"
-        else:
-            value = f"**identifier** `{token.literal}`"
-
-        if symbol is not None and symbol.file is not None:
-            value += f"\n\n*imported from `{os.path.basename(symbol.file)}`*"
-        if symbol is not None and symbol.doc:
-            value += "\n\n---\n\n" + symbol.doc
-    elif token.type == TokenType.Number:
+        value = f"**builtin** `{token.literal}`\n\n" + BUILTIN_DOCS.get(token.literal, "")
+    elif token.type is TokenType.ID and _is_soft_keyword(token, tokens):
+        value = f"**keyword** `{token.literal}`\n\n" + KEYWORD_DOCS.get(token.literal, "")
+    elif token.type is TokenType.NUMBER:
         value = f"**number** `{token.literal}`"
-    elif token.type == TokenType.String:
+    elif token.type is TokenType.STRING:
         value = f"**string** `{token.literal}`"
-
-    if value is None:
+    elif token.type is TokenType.ID:
+        found = _symbol_at_position(text, line, character, path)
+        if found is None:
+            return None
+        pp, _resolver, symbol = found
+        kind_label = {
+            "let": "variable",
+            "fn": "function",
+            "param": "parameter",
+            "binding": "binding",
+        }.get(symbol.kind, symbol.kind)
+        value = f"**{kind_label}** `{symbol.name}`"
+        decl_path, _decl_offset = pp.map_to_source(symbol.decl_position)
+        if decl_path != pp.entry_path:
+            value += f"\n\n*declared in `{os.path.basename(decl_path)}`*"
+    else:
         return None
 
     return {
@@ -883,224 +889,260 @@ def _is_namespace_use(text: str, token: Token) -> bool:
 
 
 # --------------------------------------------------------------------------
-# Go to definition (scope-aware)
+# Go to definition + rename (M7: built on the resolver's real symbol table)
 # --------------------------------------------------------------------------
+#
+# M7 retires the independent token-scanning scope model that used to live
+# here (`_build_scopes`/`_resolve_declaration`/`_Scope`) in favor of running
+# the real compiler pipeline through `Resolver` and reading its
+# `position_index`/`Symbol` records directly -- see compiler/resolve.py's
+# module docstring and docs/V2_DESIGN.md's M7 milestone. This is the single
+# source of truth for "what does this identifier occurrence refer to," so
+# it can never drift from the compiler's own actual scoping rules the way
+# the old re-derived scope tree could.
+#
+# Scope, deliberately not covered here (see docs/V2_DESIGN.md's M7 entry):
+#   - struct/enum type names and struct/enum field names are NOT part of
+#     the resolver's symbol table (they live in `Resolver.struct_decls`/
+#     `enum_decls`, a separate namespace with different reference-tracking
+#     needs) -- renaming them is a distinct, larger future piece of work.
+#   - rename is single-file only: a symbol whose declaration or any
+#     reference falls outside the entry file's own text segment (i.e. it
+#     touches an inlined import) is refused outright rather than performed
+#     partially -- see `get_rename_edits` below.
+#   - hover/completion/document-symbols are NOT revived by this milestone;
+#     `get_hover`/`get_completions`/`get_document_symbols` above are left
+#     exactly as M6 found them (disabled/non-advertised, still referencing
+#     the old `TokenType` spellings).
 
-# A declaration is stored as ``(kind, token)`` where kind is one of
-# "var" | "param" | "fn".
-_Declaration = tuple
 
+def _resolve_for_navigation(text: str, path: Optional[str]):
+    """Run the full pipeline through resolve for navigation features
+    (go-to-definition, rename).
 
-@dataclass
-class _Scope:
-    id: int
-    parent: Optional[int]
-    declarations: dict  # name -> (kind, Token)
-
-
-def _build_scopes(tokens: list[Token]):
-    """Build a lexical scope tree from a token scan.
-
-    Returns ``(scopes, token_scope)`` where ``scopes`` is a list indexed by
-    scope id and ``token_scope[i]`` is the id of the scope that lexically
-    contains ``tokens[i]``.
-
-    Scoping mirrors the Mah grammar closely enough for editor navigation:
-
-      * the whole file is the global scope (id 0);
-      * every ``{ ... }`` block opens a nested scope (matching the
-        ``@scopestart`` / ``@scopeend`` actions the compiler emits);
-      * a function's parameters live in the same scope as its body;
-      * ``let`` declares a variable in the current scope and ``def`` declares
-        a function in the enclosing scope.
-
-    Known limitation: a body-level ``let x`` that shadows a same-named
-    parameter ``x`` collapses onto the parameter here (the real language nests
-    them). This is rare and does not affect ordinary navigation.
+    Returns ``(pp, resolver, combined_tokens)``, or ``None`` if the file
+    doesn't resolve cleanly enough to have a usable symbol table -- resolve
+    errors are NOT forgiving (only parsing is, since M6), so a file with
+    e.g. a reference to an undefined variable anywhere has no symbol table
+    available at all, not a partial one.
     """
-    scopes: list[_Scope] = [_Scope(0, None, {})]
-    stack: list[int] = [0]
-    token_scope: list[int] = [0] * len(tokens)
-    reuse_next_brace = False
-
-    count = len(tokens)
-    index = 0
-    while index < count:
-        token = tokens[index]
-        current = stack[-1]
-        token_scope[index] = current
-
-        if token.type == TokenType.Def and index + 1 < count and tokens[index + 1].type == TokenType.ID:
-            name_token = tokens[index + 1]
-            scopes[current].declarations.setdefault(
-                name_token.literal, ("fn", name_token)
-            )
-            token_scope[index + 1] = current
-
-            # Open the function scope now so parameters and body share it.
-            fn_scope = _Scope(len(scopes), current, {})
-            scopes.append(fn_scope)
-            stack.append(fn_scope.id)
-            reuse_next_brace = True
-
-            # Declare parameters found in the following (...) group.
-            cursor = index + 2
-            if cursor < count and tokens[cursor].type == TokenType.ParenOpen:
-                cursor += 1
-                while cursor < count and tokens[cursor].type != TokenType.ParenClose:
-                    if tokens[cursor].type == TokenType.ID:
-                        fn_scope.declarations.setdefault(
-                            tokens[cursor].literal, ("param", tokens[cursor])
-                        )
-                    cursor += 1
-
-            index += 2
-            continue
-
-        if token.type == TokenType.Let and index + 1 < count and tokens[index + 1].type == TokenType.ID:
-            name_token = tokens[index + 1]
-            scopes[current].declarations.setdefault(
-                name_token.literal, ("var", name_token)
-            )
-            token_scope[index + 1] = current
-            index += 2
-            continue
-
-        if token.type == TokenType.BraceOpen:
-            if reuse_next_brace:
-                # Function body reuses the scope opened at `def`.
-                reuse_next_brace = False
-            else:
-                block_scope = _Scope(len(scopes), current, {})
-                scopes.append(block_scope)
-                stack.append(block_scope.id)
-        elif token.type == TokenType.BraceClose:
-            if len(stack) > 1:
-                stack.pop()
-
-        index += 1
-
-    return scopes, token_scope
+    pp = preprocess(path, text)
+    if pp.errors:
+        return None
+    combined = pp.text
+    lexer = Lexer(combined)
+    parser = Parser(lexer)
+    program = parser.parse_program()
+    resolver = Resolver()
+    try:
+        resolver.resolve_program(program)
+    except Exception:  # noqa: BLE001 - any resolve failure means "no symbol table"
+        return None
+    tokens, _lex_error = tokenize(combined)
+    return pp, resolver, tokens
 
 
-def _resolve_declaration(scopes: list[_Scope], scope_id: int, name: str):
-    """Walk from ``scope_id`` outward to global, returning the declaring token."""
-    current: Optional[int] = scope_id
-    while current is not None:
-        declaration = scopes[current].declarations.get(name)
-        if declaration is not None:
-            return declaration[1]
-        current = scopes[current].parent
-    return None
+def _combined_offset_for_position(pp, text: str, line: int, character: int) -> Optional[int]:
+    """Convert an LSP (line, character) position in the *buffer* (entry-file)
+    text into an offset in the preprocessor's combined text, via the same
+    entry<->combined segment mapping `preprocessor.py` already exposes.
+    Returns ``None`` when the position doesn't land inside any entry-file
+    segment of the combined text (e.g. it's inside an `import` directive's
+    own text, which is dropped from the combined output entirely)."""
+    entry_offset = position_to_offset(text, line, character)
+    return pp.entry_to_combined(entry_offset)
+
+
+def _symbol_at_position(text: str, line: int, character: int, path: Optional[str]):
+    """Shared lookup for go-to-definition and rename: run the pipeline,
+    locate the combined-text token under the cursor, and resolve it to its
+    `Symbol` via the resolver's `position_index`. Returns
+    ``(pp, resolver, symbol)`` or ``None``."""
+    result = _resolve_for_navigation(text, path)
+    if result is None:
+        return None
+    pp, resolver, tokens = result
+
+    combined_offset = _combined_offset_for_position(pp, text, line, character)
+    if combined_offset is None:
+        return None
+
+    token = _token_at_offset(tokens, combined_offset)
+    if token is None or token.type is not TokenType.ID:
+        return None
+
+    symbol = resolver.position_index.get(token.position)
+    if symbol is None:
+        return None
+
+    return pp, resolver, symbol
+
+
+def _identifier_length_at(source: str, offset: int) -> int:
+    """Length of the identifier written in `source` starting at `offset`
+    (mirrors `compiler/lexer.py`'s identifier-scanning rule). Used instead
+    of `len(symbol.name)` when locating a symbol's span in a *source* file's
+    own original text: `symbol.name` reflects the combined/preprocessed
+    text, which the preprocessor mangles for declarations (and some
+    references) belonging to an imported (non-entry) file
+    (`__mah_m{idx}_{name}`, see preprocessor.py's module docstring) -- using
+    its length against the original, un-mangled source text would overshoot
+    past the real identifier. Falls back to `0` (caller should then fall
+    back to `len(symbol.name)`) if `offset` doesn't actually sit on an
+    identifier's first character -- shouldn't happen for a resolved decl/
+    reference position, but this is a navigation feature, not the compiler
+    itself, so it degrades gracefully rather than raising."""
+    n = len(source)
+    if offset >= n:
+        return 0
+    ch = source[offset]
+    if not (ch.isalpha() or ch in "_$"):
+        return 0
+    end = offset + 1
+    while end < n and (source[end].isalnum() or source[end] in "_$"):
+        end += 1
+    return end - offset
 
 
 def get_definition(
     text: str, line: int, character: int, path: Optional[str] = None
 ) -> Optional[dict]:
-    """Resolve the declaration for the symbol under the cursor.
+    """Resolve the declaration for the variable/parameter/function symbol
+    under the cursor, using the resolver's real symbol table.
 
     Returns ``{"path": <abs path or None>, "range": <lsp range>}`` where a
-    ``path`` of ``None`` means "the current buffer". Resolution order:
+    ``path`` of ``None`` means "the current document" -- the shape
+    `lsp/server.py`'s `_on_textDocument_definition` handler expects.
+    Covers variables/parameters/function bindings only (not struct/enum
+    type or field names, which aren't in the symbol table at all -- see
+    module notes above). Returns ``None`` when the file doesn't resolve
+    cleanly, the cursor isn't on an identifier, or that identifier never
+    resolved to anything (a keyword, a struct/enum name, a field name, ...).
 
-      1. cursor on an ``import "..."`` path (flat or namespaced)  -> the file;
-      2. cursor on a namespace member ``ns.member``  -> the export in its file;
-      3. cursor on a namespace name ``ns``  -> the imported file;
-      4. identifier resolved in local lexical scope  -> in-buffer declaration;
-      5. identifier matching an exported symbol from a flat import  -> that
-         file's declaration (cross-file jump).
-
-    Keywords, builtins and literals return ``None``.
+    Also handles the cursor sitting on an `import` directive itself -- the
+    path string (`import "mathlib"`) or the namespace identifier
+    (`import math from "mathlib"`) -- jumping straight to the imported
+    file, using `preprocessor.py`'s own already-computed `entry_imports`/
+    entry_namespaces` (an `ImportSite`/`NamespaceImport` per directive,
+    with the resolved path and the directive's own entry-file position),
+    checked before falling through to the symbol-table lookup above since
+    import directives aren't part of the real grammar at all (the
+    preprocessor consumes them before the real lexer ever runs) and so
+    could never resolve to a `Symbol`.
     """
-    offset = position_to_offset(text, line, character)
-
-    # 1. Jump to file when the cursor is on an import path (flat or namespaced).
-    if path is not None:
-        pp = preprocess(path, text)
-        for import_site in pp.entry_imports:
-            if import_site.offset <= offset <= import_site.offset + import_site.length:
-                if import_site.exists and import_site.resolved is not None:
-                    return _file_head(import_site.resolved)
+    pp_for_imports = preprocess(path, text)
+    entry_offset = position_to_offset(text, line, character)
+    for imp in pp_for_imports.entry_imports:
+        if imp.offset <= entry_offset < imp.offset + imp.length:
+            if imp.resolved is None:
+                return None  # unresolved import path -- nothing to jump to
+            return {"path": imp.resolved, "range": _FILE_START_RANGE}
+    for ns in pp_for_imports.entry_namespaces:
+        in_path_string = ns.offset <= entry_offset < ns.offset + ns.length
+        in_namespace_name = ns.name_offset <= entry_offset < ns.name_offset + ns.name_length
+        if in_path_string or in_namespace_name:
+            if ns.resolved is None:
                 return None
-        for ns in pp.entry_namespaces:
-            if ns.offset <= offset <= ns.offset + ns.length:
-                if ns.exists and ns.resolved is not None:
-                    return _file_head(ns.resolved)
-                return None
+            return {"path": ns.resolved, "range": _FILE_START_RANGE}
 
-    namespaces = {ns.name: ns for ns in collect_namespaces(text, path)}
-
-    tokens, _lex_error = tokenize(text)
-    token_index = _token_index_at_offset(tokens, offset)
-    if token_index is None:
+    found = _symbol_at_position(text, line, character, path)
+    if found is None:
         return None
+    pp, _resolver, symbol = found
 
-    token = tokens[token_index]
-    if token.type != TokenType.ID:
-        return None
-
-    # 2. Namespace member access: `ns.member` -> exported declaration.
-    owner = _member_owner(text, token)
-    if owner in namespaces:
-        ns = namespaces[owner]
-        member = next((m for m in ns.members if m.name == token.literal), None)
-        if member is not None and member.file is not None:
-            source = preprocess(path, text).files.get(member.file, "")
-            return {
-                "path": member.file,
-                "range": make_range(
-                    source,
-                    member.token.position,
-                    member.token.position + len(member.token.literal),
-                ),
-            }
-        return None
-
-    # 3. Namespace name itself -> the imported file.
-    if token.literal in namespaces and _is_namespace_use(text, token):
-        ns = namespaces[token.literal]
-        if ns.file:
-            return _file_head(ns.file)
-        return None
-
-    # 4. Local lexical resolution.
-    scopes, token_scope = _build_scopes(tokens)
-    declaration_token = _resolve_declaration(
-        scopes, token_scope[token_index], token.literal
-    )
-    if declaration_token is not None:
+    decl_path, decl_offset = pp.map_to_source(symbol.decl_position)
+    source = text if decl_path == pp.entry_path else pp.files.get(decl_path, "")
+    length = _identifier_length_at(source, decl_offset) or len(symbol.name)
+    if decl_path == pp.entry_path:
         return {
             "path": None,
-            "range": make_range(
-                text,
-                declaration_token.position,
-                declaration_token.position + len(declaration_token.literal),
-            ),
+            "range": make_range(text, decl_offset, decl_offset + length),
         }
-
-    # 5. Cross-file resolution against exported symbols from flat imports.
-    for symbol in collect_imported_symbols(text, path):
-        if symbol.name == token.literal and symbol.file is not None:
-            source = preprocess(path, text).files.get(symbol.file, "")
-            return {
-                "path": symbol.file,
-                "range": make_range(
-                    source,
-                    symbol.token.position,
-                    symbol.token.position + len(symbol.token.literal),
-                ),
-            }
-
-    return None
-
-
-def _file_head(abs_path: str) -> dict:
+    # Declaration lives in an inlined import -- still a valid jump for
+    # go-to-definition (unlike rename, which refuses cross-file symbols
+    # outright, see `get_rename_edits`): build the range against that
+    # file's own source text.
     return {
-        "path": abs_path,
-        "range": {
-            "start": {"line": 0, "character": 0},
-            "end": {"line": 0, "character": 0},
-        },
+        "path": decl_path,
+        "range": make_range(source, decl_offset, decl_offset + length),
     }
+
+
+def _is_valid_mah_identifier(name: str) -> bool:
+    """Mirrors `compiler/lexer.py`'s identifier-scanning rule exactly:
+    first character a letter/`_`/`$`, remaining characters alphanumeric/
+    `_`/`$`. Does not check for a scope collision with an existing binding
+    -- that's a known, documented limitation of M7's rename (see
+    docs/V2_DESIGN.md's M7 milestone)."""
+    if not name:
+        return False
+    first = name[0]
+    if not (first.isalpha() or first in "_$"):
+        return False
+    return all(ch.isalnum() or ch in "_$" for ch in name[1:])
+
+
+def get_rename_edits(
+    text: str,
+    line: int,
+    character: int,
+    new_name: str,
+    path: Optional[str] = None,
+) -> Optional[dict]:
+    """Rename the variable/parameter/function symbol under the cursor.
+
+    Returns ``{"changes": {<key>: [TextEdit, ...]}}`` where ``<key>`` is the
+    entry file's own path (or `preprocessor.BUFFER_PATH` for an unsaved,
+    path-less buffer) -- `lsp/server.py`'s rename handler swaps this for the
+    real document URI before responding to the client, the same way
+    `get_definition`'s ``path`` key is translated to a URI there. Returns
+    ``None`` (refusing the rename outright) when:
+
+      - the file doesn't resolve cleanly (no symbol table available at all);
+      - the cursor isn't on an identifier that resolved to a symbol;
+      - `new_name` isn't a syntactically valid Mah identifier, or is a
+        reserved keyword;
+      - the symbol's declaration or ANY of its references falls outside the
+        entry file's own text (i.e. it touches an inlined import) --
+        renaming it correctly would require rewriting the preprocessor's
+        name-mangling across multiple files in one atomic edit, which is
+        out of scope for this milestone (see module notes above and
+        docs/V2_DESIGN.md's M7 milestone). A partial, single-file-only
+        rename that silently leaves other files using the old name would be
+        worse than refusing outright.
+
+    Does not check whether `new_name` would collide with an unrelated
+    existing binding already in scope -- a known, documented limitation.
+    Covers variables/parameters/function bindings only, not struct/enum
+    type or field names (see module notes above).
+    """
+    if not _is_valid_mah_identifier(new_name) or new_name in KEYWORDS:
+        return None
+
+    found = _symbol_at_position(text, line, character, path)
+    if found is None:
+        return None
+    pp, _resolver, symbol = found
+
+    positions = [symbol.decl_position] + list(symbol.references)
+    edits = []
+    for position in positions:
+        src_path, src_offset = pp.map_to_source(position)
+        if src_path != pp.entry_path:
+            # Cross-file: refuse the whole rename rather than perform a
+            # partial, single-file-only edit that silently misses other
+            # files -- see docstring above.
+            return None
+        length = _identifier_length_at(text, src_offset) or len(symbol.name)
+        edits.append(
+            {
+                "range": make_range(text, src_offset, src_offset + length),
+                "newText": new_name,
+            }
+        )
+
+    key = pp.entry_path
+    return {"changes": {key: edits}}
 
 
 # --------------------------------------------------------------------------

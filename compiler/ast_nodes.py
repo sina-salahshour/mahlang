@@ -209,7 +209,18 @@ class Block:
 class LetStmt:
     name: str
     value: object
-    position: int
+    position: int  # position of the leading `let`/`fn` keyword token -- kept
+                    # as-is (pre-M7 error messages point here); NOT the name's
+                    # own position, see `name_position` below.
+    # set by the parser: the source position of the name token itself
+    # (`name_tok.position` for a plain `let`, or the desugared `fn`'s own
+    # name-token position for a named `fn foo(...) { ... }` binding) --
+    # M7 needs this exact span for go-to-definition/rename (`position`
+    # above points at the `let`/`fn` keyword, not the identifier, so it
+    # can't be used to compute a correct rename TextEdit range). Falls
+    # back to `position` when unset (should not happen via the parser, but
+    # keeps any other LetStmt construction site safe).
+    name_position: Optional[int] = field(default=None, repr=False)
     # set by Resolver: the slot number within the frame level this
     # LetStmt was declared in (depth is always implicitly 0 from its own
     # declaration site).
@@ -275,7 +286,22 @@ class FnExpr:
     name: Optional[str]
     params: list  # list[str]
     body: Block
-    position: int
+    position: int  # position of the leading `fn` keyword token, NOT the
+                    # name token -- see `name_position` below.
+    # set by the parser: the source position of `name`'s own token (`None`
+    # for an anonymous `fn`) -- when the parser desugars a named
+    # `fn foo(...) { ... }` into `LetStmt(name="foo", value=FnExpr(...))`
+    # (see `_parse_block_items`), the wrapping `LetStmt` needs this exact
+    # position (not `position` above, the `fn` keyword's) for its own
+    # `name_position` -- M7's go-to-definition/rename need the identifier's
+    # exact span, the same reasoning `param_positions` below exists for.
+    name_position: Optional[int] = field(default=None, repr=False)
+    # set by the parser: the source position of each parameter token, in
+    # the same order as `params` -- M7 needs each parameter's own
+    # declaration position to register it in the resolver's symbol table
+    # (see resolve.py's `_resolve_fn_expr`), which `params` alone (bare
+    # strings) can't provide.
+    param_positions: list = field(default_factory=list, repr=False)
     # set by Resolver: slot numbers (within the fn's own frame level) for
     # each parameter, in order.
     param_slots: list = field(default_factory=list, repr=False)

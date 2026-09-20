@@ -1385,7 +1385,259 @@ node that resolved to it. Then:
    covered pure-punctuation garbage, not unclosed-block EOF-runoff) --
    covered by `test_unclosed_nested_blocks_terminate` in
    `tests/test_error_recovery.py`. All 138 tests green afterward.
-8. **M7 — LSP rename** (+ retire the independent token-scope model).
+8. **M7 — LSP rename. ✅ Landed.** (+ retired the independent token-scope
+   model.) Adds a real symbol table, built directly into the resolver's
+   normal resolve pass, and two LSP features on top of it:
+   go-to-definition (rebuilt) and rename (new).
+   **The symbol table.** `compiler/resolve.py` gains a `Symbol` class
+   (`__slots__ = ("name", "decl_position", "kind", "references")` --
+   `kind` is one of `"let"`/`"fn"`/`"param"`/`"binding"`) and
+   `Resolver.position_index: dict` (source position -> `Symbol`, an O(1)
+   "what symbol is at this exact position" lookup with no AST re-walk).
+   `_declare(name, slot, position, kind="let")` now creates a `Symbol`,
+   registers it in `position_index` at its declaration position, and
+   stores it as a third element of each scope-dict entry
+   (`(frame_level, slot, symbol)`); `_lookup` appends the referencing
+   position to `symbol.references` and also registers it in
+   `position_index`, so *every* position that resolved to a given
+   declaration -- the declaration itself and every subsequent reference --
+   is reachable both from the `Symbol` (`.references`) and from the
+   position (`position_index.get(position)`). Every existing `_declare`
+   call site now passes its `kind`: `LetStmt` (`"fn"` when the value is a
+   `FnExpr` -- covers both `let foo = fn(...) {...}` and the desugared
+   `fn foo(...) {...}`, `"let"` otherwise), function parameters (`"param"`),
+   and `BindPat` (`"binding"`). Struct/enum type names and field names are
+   deliberately **not** part of this table -- they live in the separate,
+   flat `struct_decls`/`enum_decls` registries with different
+   reference-tracking needs (a field name appears in declarations,
+   literals, patterns, and field-access syntax, each shaped differently),
+   and renaming them is out of scope for this milestone (see below).
+   **A found, fixed bug during implementation, the same class M2 already
+   fixed once for parameters.** The naive approach -- reusing each
+   declaring statement's existing `.position` field as `decl_position` --
+   is wrong for `LetStmt`: `LetStmt.position` (and `FnExpr.position`) is
+   the position of the leading `let`/`fn` *keyword* token, not the name
+   token, a pre-M7 design choice that was fine for that field's original
+   purpose (pointing an "already defined" error at the statement) but
+   produces a corrupted rename edit if reused as a symbol's declaration
+   position: `make_range(text, decl_position, decl_position + len(name))`
+   would then span from the `l` of `let` (or the `f` of `fn`) for
+   `len(name)` characters -- never the actual identifier. Fixed the same
+   way M1-era `FnExpr` params needed fixing for this same reason: a new
+   parser-populated position field alongside the existing one --
+   `LetStmt.name_position`/`FnExpr.name_position` (the name token's own
+   position; `position` is kept as-is, unchanged, for the pre-existing
+   "already declared" error path) -- populated in `parse_stmt`'s `LET`
+   branch, `_parse_fn_expr`, and the named-`fn`-desugars-to-`LetStmt` site
+   in `_parse_block_items`. `resolve.py`'s `LetStmt` handling declares
+   using `name_position` (falling back to `position` defensively). This
+   deviates from a literal reading of the milestone's own design sketch
+   (which suggested reusing `stmt.position` outright); verified empirically
+   (a go-to-definition/rename smoke test against `let x = 5`) rather than
+   assumed, before committing to the fix.
+   **`FnExpr.param_positions`.** `FnExpr.params` was `list[str]` (names,
+   no positions) -- ordinary parameter go-to-definition/rename needs each
+   parameter's own declaration site, not the enclosing `fn`'s position.
+   Added `param_positions: list` (parallel to `params`, by index),
+   populated by `_parse_fn_expr` capturing each parameter token's position
+   before discarding it to its `.literal` (the same pattern every other
+   position-tracking field in the parser already uses). `_resolve_fn_expr`
+   passes `fn.param_positions[i]` into `_declare` for each parameter
+   (falling back to `fn.position` if the list is short, for safety against
+   any other `FnExpr` construction site).
+   **Scope dict shape change.** Every `self.scopes[-1][name]` entry grew a
+   third element (the `Symbol`); the two call sites that destructure it
+   (`_declare`'s duplicate check, `_lookup`) were updated together --
+   confirmed (via a whole-file search, not assumed) that nothing outside
+   `resolve.py` reads this shape directly (codegen.py only ever receives
+   `FrameLevel`/`param_slots` objects, never a scope dict).
+   **`lsp/analysis.py`: go-to-definition rebuilt, rename added.** A shared
+   `_resolve_for_navigation(text, path)` runs preprocess -> lex -> parse ->
+   resolve once (reusing `get_diagnostics`'s exact wiring) and returns
+   `(pp, resolver, combined_tokens)`, or `None` if `pp.errors` is non-empty
+   or `resolver.resolve_program` raises -- resolve stays single-exception/
+   stop-at-first (M6's own boundary, untouched here), so a file with e.g.
+   one undefined variable anywhere has **no** symbol table available at
+   all, not a partial one (verified: `get_definition`/`get_rename_edits`
+   both return `None`, not raise, for such a file). A second shared helper,
+   `_symbol_at_position`, converts an LSP `(line, character)` in the
+   *buffer* (entry-file) text to a combined-text offset via
+   `pp.entry_to_combined(position_to_offset(...))`, finds the `ID` token
+   there (`_token_at_offset`), and looks it up in
+   `resolver.position_index` -- both `get_definition` and
+   `get_rename_edits` are built on this one lookup, exactly as the design
+   doc's "LSP rename" section anticipated ("go-to-definition... for free").
+   `get_definition` maps `symbol.decl_position` back to a source file+offset
+   via `pp.map_to_source` and returns the `{"path": ... or None, "range":
+   ...}` shape `_on_textDocument_definition` already expected -- unlike
+   rename, a cross-file jump (the declaration living in an inlined import)
+   is allowed here, since it's a read-only navigation, not an edit.
+   **A second found-and-fixed bug**: naively sizing the returned range as
+   `len(symbol.name)` is wrong whenever the declaration lives in an
+   imported (non-entry) file, because `symbol.name` reflects the
+   *combined/preprocessed* text, where the preprocessor mangles every
+   non-entry top-level name to `__mah_m{idx}_{name}` -- using that length
+   against the *original* file's un-mangled source text overshoots past
+   the real identifier (confirmed empirically with a two-file `export
+   let`/`import` scenario before fixing, not assumed safe). Fixed with
+   `_identifier_length_at(source, offset)`, which scans the actual source
+   text at that offset for an identifier span (mirroring
+   `compiler/lexer.py`'s own identifier rule) instead of trusting
+   `symbol.name`'s length; used by both `get_definition` and
+   `get_rename_edits` for every range they build.
+   **Rename (`get_rename_edits`)**: validates `new_name` against Mah's
+   identifier lexical rule (`_is_valid_mah_identifier`, mirroring
+   `compiler/lexer.py`'s scanning rule exactly) and rejects it if it's one
+   of `compiler/lexer.py`'s `KEYWORDS`; does **not** check whether
+   `new_name` would collide with an unrelated existing binding already in
+   scope -- a known, documented limitation, not attempted here. Builds the
+   candidate edit set from `[symbol.decl_position] + symbol.references`;
+   for *every* position, maps it back to source via `pp.map_to_source` and
+   refuses the rename outright (`return None`) the moment any position --
+   the declaration or any single reference -- maps to a file other than
+   `pp.entry_path`. This is the milestone's core safety strategy for
+   cross-file symbols: Mah's module system works by the preprocessor
+   textually inlining and alpha-renaming imported files *before* lex/parse/
+   resolve ever run, so from the resolver's point of view an imported
+   symbol is just an ordinary declaration with a mangled combined-text
+   name, with no marker distinguishing "lives in another file" -- correctly
+   renaming across files would mean reverse-engineering that mangling and
+   editing multiple files in one atomic edit, a distinct, larger feature.
+   Detecting the boundary and refusing outright (verified with a real
+   two-file import scenario) was judged clearly better than a partial,
+   single-file-only rename that silently leaves other files using the old
+   name with no indication anything was missed. Returns `{"changes":
+   {<entry path or BUFFER_PATH>: [TextEdit, ...]}}` -- keyed by the entry
+   file's own path/placeholder, not a URI (matching `get_definition`'s
+   existing convention of returning a `path`, not a URI, and letting
+   `lsp/server.py` translate it) -- one `TextEdit` per position, including
+   the declaration itself, each `{"range": ..., "newText": new_name}`.
+   **`lsp/server.py`**: added `_on_textDocument_rename`, which calls
+   `get_rename_edits` with `uri_to_path(uri)` and, on a non-`None` result,
+   swaps the single `changes` key (the entry path/placeholder) for the
+   real document `uri` before responding -- the same translation
+   `_on_textDocument_definition` already does for `get_definition`'s
+   `path` key, applied to rename's `changes` dict instead. `_on_initialize`
+   now advertises `"definitionProvider": True` and `"renameProvider":
+   True`; `hoverProvider`/`completionProvider`/`documentSymbolProvider`/
+   `codeActionProvider` remain deliberately unadvertised.
+   **Retired**: `_build_scopes`, `_resolve_declaration`, and the `_Scope`
+   class -- the old independent token-scanning scope model `get_definition`
+   used to run, now fully superseded (confirmed nothing else in
+   `lsp/analysis.py` called them before deleting). `get_hover`/
+   `get_completions`/`get_document_symbols`/`get_code_actions` are left
+   **exactly** as M6 found them: disabled (not advertised), still
+   referencing the old pre-M0 `TokenType` spellings, dead code from a
+   compliant client's perspective. Reviving them needs additional
+   rendering/formatting work beyond "find the symbol at this position"
+   (hover's markdown, completion's item list, document-symbol's outline
+   shape) and is intentionally left as a focused follow-up, not attempted
+   here even though the same `position_index` lookup would jump-start it.
+   **Four deliberate scope boundaries** (all called out up front, not
+   discovered as gaps after the fact):
+   1. Rename covers variables, function parameters, and function names only
+      -- anything going through `Resolver`'s `scopes`/`_declare`/`_lookup`
+      machinery. Struct/enum type names and struct/enum field names are a
+      distinct, larger piece of work (separate registries, different
+      reference shapes) and are not attempted.
+   2. Rename is single-file only, by explicit detection-and-refusal (see
+      above), not a partial best-effort.
+   3. Hover/completion/document-symbols stay deliberately deferred --
+      go-to-definition is included only because it falls out for free from
+      the same lookup rename needs anyway.
+   4. Rename does not check for a new-name collision with an unrelated
+      existing binding in scope -- documented, not fixed.
+   **Tests**: new `tests/test_lsp_rename.py` (13 tests, calling
+   `lsp.analysis.get_definition`/`get_rename_edits` directly, no JSON-RPC
+   plumbing) covering: go-to-definition on a variable use, a function call,
+   and a parameter use inside its own function body (specifically
+   exercising `param_positions`); rename of a multiply-referenced variable
+   (asserting the resulting source text after applying all edits, not just
+   edit count); rename of a function (declaration + both call sites, `name`
+   untouched); shadowing correctness in both directions (renaming the inner
+   shadowing `let` leaves the outer untouched, and vice versa); invalid new
+   names (a reserved keyword, a digit-leading identifier) refused; a
+   cross-file symbol (a two-file `export`/`import` scenario, built ad hoc
+   with `tempfile`) refusing rename outright while go-to-definition still
+   correctly jumps into the imported file (proving the refusal is
+   rename-specific, not a lookup failure); a file with an undefined-variable
+   resolve error yielding `None` from both functions, not raising; and
+   confirming `_build_scopes`/`_resolve_declaration`/`_Scope` are actually
+   gone (source-text grep) and `lsp.analysis`/`lsp.server` still import
+   cleanly. **Regression**: all 138 pre-existing tests plus the 13 new ones
+   (151 total) green via `make test`; every `examples/*.mh` file's output
+   confirmed byte-identical before/after this milestone's changes (compared
+   programmatically via `tests/support.py`'s `run_file`, in-process, with a
+   `git stash`/re-run/`stash pop` round trip -- not assumed from "this
+   milestone doesn't touch codegen").
+   Changed: `compiler/ast_nodes.py` (`FnExpr.name_position`/
+   `param_positions`, `LetStmt.name_position`), `compiler/parser.py`
+   (`_parse_fn_expr`, `parse_stmt`'s `LET` branch, the named-`fn`
+   desugaring site in `_parse_block_items`), `compiler/resolve.py`
+   (`Symbol`, `Resolver.position_index`, `_declare`/`_lookup`, every
+   `_declare` call site's new `kind`), `lsp/analysis.py`
+   (`_resolve_for_navigation`, `_symbol_at_position`,
+   `_identifier_length_at`, `_is_valid_mah_identifier`, `get_definition`
+   rewritten, `get_rename_edits` added; `_build_scopes`/
+   `_resolve_declaration`/`_Scope`/`_file_head`/`_Declaration` removed),
+   `lsp/server.py` (`_on_textDocument_rename`, `_on_initialize`'s
+   capabilities). New: `tests/test_lsp_rename.py`. `preprocessor.py`,
+   `code_interpreter.py`, `runtime_values.py`, `compiler/codegen.py`, and
+   `mah.py` were **not** touched.
+
+   **Follow-up, same milestone** (user tried the LSP directly after this
+   landed and asked for two more things): hover, and go-to-definition on
+   an `import` directive itself.
+   - **Hover revived** on the same `Symbol`/`position_index` table
+     go-to-definition/rename already use, rather than the old
+     `collect_symbols`/`collect_namespaces`/`collect_imported_symbols`
+     token-scanning helpers (which M6/M7 had left in place but broken --
+     still referencing pre-M0 `TokenType` spellings like `TokenType.Def`/
+     `.Let`/`.String`/`.Number`). `get_hover` now: (a) answers
+     keyword/builtin/soft-keyword (`import`/`export`)/number/string hover
+     with a lightweight tokenize-only lookup exactly as before, fixing the
+     same stale-spelling bug in `_is_soft_keyword` along the way, and (b)
+     for an identifier, looks up its `Symbol` via `_symbol_at_position`
+     (the same helper `get_definition`/`get_rename_edits` use) and reports
+     its kind (`variable`/`function`/`parameter`/`binding`) and, if its
+     declaration lives in an imported file, which file -- matching
+     go-to-definition's own scope (cross-file *reads* are fine; only
+     cross-file *rename* is refused). `KEYWORD_DOCS` was also updated:
+     `"def"` renamed to `"fn"` (stale since M1) and entries added for
+     `struct`/`enum`/`match`/`some`/`none` (missing since M2-M4). Function
+     signatures and doc-comment extraction (both present in the pre-M0
+     hover) are **not** restored -- `Symbol` doesn't carry a reference to
+     its declaring AST node, only a position, so showing e.g. a full `fn
+     add(a, b)` signature would need a small further extension; noted as a
+     natural, cheap future enhancement, not done here to keep this
+     follow-up scoped to "make hover work correctly again," which is what
+     was actually reported broken. `get_completions`/`get_document_symbols`/
+     `get_code_actions` remain untouched/disabled, unaffected by this.
+   - **Import go-to-definition**: `get_definition` now checks, before its
+     symbol-table lookup, whether the cursor sits on an import directive's
+     path string (`import "mathlib"`) or namespace identifier (`import
+     math from "mathlib"`) using data `preprocessor.py` already computes
+     for every entry-file import (`pp.entry_imports`/`entry_namespaces`,
+     each carrying the resolved file path and the directive's own
+     entry-file text position) -- nothing in the preprocessor needed to
+     change, this was already-computed information nothing had read for
+     navigation purposes. Jumps to line 0/character 0 of the resolved
+     file (no specific symbol to target for "go to this whole module").
+     An unresolved import path (file not found) returns `None` rather
+     than a broken jump.
+   - `hoverProvider: True` re-added to `lsp/server.py`'s advertised
+     capabilities (`_on_textDocument_hover`'s handler method was already
+     in place, untouched since M6, and needed no changes).
+   - New: `tests/test_lsp_hover_and_import_nav.py` (11 tests: hover on a
+     keyword, a variable use, a function use, a parameter use, a builtin,
+     struct/enum/match keywords, and an undefined identifier degrading to
+     `None`; import go-to-definition for the namespaced form's path
+     string and namespace identifier using the real `examples/
+     import_demo.mh` fixture, the flat form, and an unresolved import
+     path). All 162 tests green (151 prior + 11 new -- `test_lsp_rename.py`
+     was unaffected). Every `examples/*.mh` file's output confirmed
+     unchanged (this follow-up only touches LSP navigation, not
+     compilation/execution).
 9. **M8 — tooling sync.** `syntax-highlight/grammar.js` +
    `highlights.scm` updated for the new syntax; `mah.py build`'s IR dump
    and any new opcodes.
@@ -1406,11 +1658,16 @@ M1 was built and documented that way.
 
 ## Status
 
-M0, M1, M2, M3, M4, M5, and M6 are landed (see their entries above for what
-changed and each milestone's deliberate deviations/simplifications).
+M0, M1, M2, M3, M4, M5, M6, and M7 are landed (see their entries above for
+what changed and each milestone's deliberate deviations/simplifications).
 `docs/NEXT_PHASES.md` captures what's deliberately deferred (match guards,
 arrays/lists, generics, traits, the type system, async) and what M0–M9
-need to keep forward-compatible with. Next up: **M7 — LSP rename** (+
-retire the independent token-scope model `lsp/analysis.py`'s
-hover/completion/go-to-definition/document-symbols/code-actions still
-depend on, left deliberately broken/unadvertised as of M6).
+need to keep forward-compatible with. M7 added a real symbol table to
+`compiler/resolve.py` and rebuilt go-to-definition + added rename on top
+of it, retiring the independent token-scope model
+(`_build_scopes`/`_resolve_declaration`/`_Scope`) `lsp/analysis.py` used to
+depend on; `get_hover`/`get_completions`/`get_document_symbols`/
+`get_code_actions` remain deliberately disabled/unadvertised, unchanged
+from M6, as a focused follow-up. Next up: **M8 — tooling sync**
+(`syntax-highlight/grammar.js` + `highlights.scm` updated for the current
+syntax; `mah.py build`'s IR dump and any new opcodes).

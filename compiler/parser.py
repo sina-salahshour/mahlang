@@ -194,7 +194,12 @@ class Parser:
                     fn_expr = self._parse_fn_expr()
                     if fn_expr.name is not None:
                         stmts.append(
-                            LetStmt(name=fn_expr.name, value=fn_expr, position=fn_expr.position)
+                            LetStmt(
+                                name=fn_expr.name,
+                                value=fn_expr,
+                                position=fn_expr.position,
+                                name_position=fn_expr.name_position,
+                            )
                         )
                         continue
                     expr = fn_expr  # anonymous fn: falls through to the general handling below
@@ -366,7 +371,12 @@ class Parser:
             name_tok = self.expect(TokenType.ID)
             self.expect(TokenType.ASSIGN)
             value = self.parse_expr()
-            return LetStmt(name=name_tok.literal, value=value, position=tok.position)
+            return LetStmt(
+                name=name_tok.literal,
+                value=value,
+                position=tok.position,
+                name_position=name_tok.position,
+            )
 
         if tok.type is TokenType.STRUCT:
             return self._parse_struct_decl()
@@ -581,18 +591,33 @@ class Parser:
     def _parse_fn_expr(self) -> FnExpr:
         fn_tok = self.advance()  # FN
         name = None
+        name_position = None
         if self.current.type is TokenType.ID:
-            name = self.advance().literal
+            name_tok = self.advance()
+            name = name_tok.literal
+            name_position = name_tok.position
         self.expect(TokenType.PAREN_OPEN)
         params = []
+        param_positions = []
         if self.current.type is TokenType.ID:
-            params.append(self.advance().literal)
+            param_tok = self.advance()
+            params.append(param_tok.literal)
+            param_positions.append(param_tok.position)
             while self.current.type is TokenType.COMMA:
                 self.advance()
-                params.append(self.expect(TokenType.ID).literal)
+                param_tok = self.expect(TokenType.ID)
+                params.append(param_tok.literal)
+                param_positions.append(param_tok.position)
         self.expect(TokenType.PAREN_CLOSE)
         body = self.parse_block()
-        return FnExpr(name=name, params=params, body=body, position=fn_tok.position)
+        return FnExpr(
+            name=name,
+            params=params,
+            body=body,
+            position=fn_tok.position,
+            name_position=name_position,
+            param_positions=param_positions,
+        )
 
     # -- expressions (precedence chain, lowest to highest binding) --------
 

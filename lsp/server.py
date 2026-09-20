@@ -154,16 +154,16 @@ class Server:
 
     # -- lifecycle --------------------------------------------------------
     def _on_initialize(self, request_id, params: dict) -> None:
-        # M6: hover/completion/go-to-definition/document-symbols/code-actions
-        # are deliberately NOT advertised -- they're built on
-        # `analysis.py`'s old token-scope model (`_build_scopes` and
-        # friends), which was already broken by M0 (see
-        # docs/V2_DESIGN.md's M6 milestone) and is specifically scheduled
-        # to be replaced, not patched, by M7 ("LSP rename (+ retire the
-        # independent token-scope model)"). Advertising them now would
-        # invite a well-behaved client to call handlers that either raise
-        # or (once M7 lands) get quietly replaced -- better to just not
-        # claim the capability until it's real. Diagnostics need no
+        # M7: go-to-definition and rename are now advertised -- both are
+        # built on `Resolver`'s real symbol table (see
+        # `lsp/analysis.py`'s `get_definition`/`get_rename_edits`), not the
+        # retired independent token-scope model (`_build_scopes` and
+        # friends), which M7 deleted. hover/completion/document-symbols/
+        # code-actions remain deliberately NOT advertised: they're still
+        # built on `analysis.py`'s old, pre-M0 `TokenType` spellings (a
+        # focused follow-up, not part of M7 -- see docs/V2_DESIGN.md's M7
+        # milestone). Advertising them now would invite a well-behaved
+        # client to call handlers that raise. Diagnostics need no
         # capability flag: they're pushed via
         # `textDocument/publishDiagnostics` notifications on open/change/
         # save, unconditionally.
@@ -172,6 +172,9 @@ class Server:
                 "openClose": True,
                 "change": 1,  # full document sync
             },
+            "definitionProvider": True,
+            "renameProvider": True,
+            "hoverProvider": True,
         }
         self._respond(
             request_id,
@@ -280,6 +283,30 @@ class Server:
         target_path = target.get("path")
         target_uri = path_to_uri(target_path) if target_path else uri
         self._respond(request_id, {"uri": target_uri, "range": target["range"]})
+
+    def _on_textDocument_rename(self, request_id, params: dict) -> None:
+        uri = params.get("textDocument", {}).get("uri")
+        position = params.get("position", {})
+        new_name = params.get("newName", "")
+        text = self._documents.get(uri, "")
+        result = analysis.get_rename_edits(
+            text,
+            position.get("line", 0),
+            position.get("character", 0),
+            new_name,
+            uri_to_path(uri),
+        )
+        if result is None:
+            self._respond(request_id, None)  # None is a valid "can't rename this" response
+            return
+        # `analysis.get_rename_edits` returns its edits keyed by the entry
+        # file's own filesystem path (or BUFFER_PATH for a path-less
+        # buffer) -- rename is single-file only (see analysis.py), so
+        # there's always exactly one key here. Translate it to the real
+        # document URI the same way `_on_textDocument_definition` above
+        # translates `get_definition`'s ``path`` key.
+        edits = next(iter(result["changes"].values()), [])
+        self._respond(request_id, {"changes": {uri: edits}})
 
     def _on_textDocument_codeAction(self, request_id, params: dict) -> None:
         uri = params.get("textDocument", {}).get("uri")
