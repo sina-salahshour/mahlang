@@ -18,7 +18,6 @@ from .ast_nodes import (
     Binary,
     BindPat,
     Block,
-    BlockStmt,
     BoolLit,
     BreakStmt,
     Call,
@@ -72,6 +71,25 @@ _MULTIPLICATIVE_OPS = {
 # which only *accepts* strictly more valid-v1-equivalent programs.
 _EXPR_STOPPERS = {TokenType.SEMICOLON, TokenType.BRACE_CLOSE, TokenType.EOF}
 
+# M5: statement-leading tokens still handled by parse_stmt's own dedicated
+# logic, unchanged. IF/MATCH are deliberately NOT here any more -- they
+# must flow through the general expression path (parse_expr ->
+# _parse_primary) so they can be used as expressions/tails, with
+# _parse_block_items below handling the "semicolon required unless
+# block-shaped or last in the block" disambiguation. WHILE stays here: it's
+# never expression-capable (no meaningful "value" for a loop), so it's
+# parsed exactly as before, always appended directly to `stmts`.
+_STATEMENT_LEADING = {
+    TokenType.LET,
+    TokenType.STRUCT,
+    TokenType.ENUM,
+    TokenType.RETURN,
+    TokenType.BREAK,
+    TokenType.CONTINUE,
+    TokenType.WHILE,
+    TokenType.PRINT,
+}
+
 
 class Parser:
     def __init__(self, lexer: Lexer) -> None:
@@ -101,29 +119,100 @@ class Parser:
     # -- program / blocks -------------------------------------------------
 
     def parse_program(self) -> list:
-        stmts = self._parse_stmts_until(TokenType.EOF)
+        stmts, tail = self._parse_block_items(TokenType.EOF)
+        if tail is not None:
+            # A top-level program has no caller to hand a "value" to --
+            # fold a trailing tail into an ordinary discarded ExprStmt.
+            stmts.append(ExprStmt(value=tail, position=tail.position))
         self.expect(TokenType.EOF)
         return stmts
 
-    def _parse_stmts_until(self, end_type: TokenType) -> list:
+    def parse_block(self) -> Block:
+        open_tok = self.expect(TokenType.BRACE_OPEN)
+        stmts, tail = self._parse_block_items(TokenType.BRACE_CLOSE)
+        self.expect(TokenType.BRACE_CLOSE)
+        return Block(stmts=stmts, tail=tail, position=open_tok.position)
+
+    def _parse_block_items(self, end_type: TokenType) -> tuple:
+        """Shared item-parsing loop for both a top-level program and a
+        `{ }` block -- see docs/V2_DESIGN.md's M5 milestone for the exact
+        disambiguation rule this implements (matching Rust's): a
+        block-shaped statement (`if`/`match`/bare `{ }`) needs no trailing
+        `;` unless it's the last item in its enclosing block, in which case
+        presence/absence of `;` decides tail-vs-discarded; any other
+        expression still needs an explicit `;` to be "just a statement"
+        when it isn't the block's last item. Returns `(stmts, tail)` --
+        `tail` is `None` unless the last item was an expression with no
+        trailing `;` immediately before `end_type`."""
         stmts = []
+        tail = None
         while True:
             while self.current.type is TokenType.SEMICOLON:
                 self.advance()
             if self.current.type is end_type:
                 break
-            stmts.append(self.parse_stmt())
-        return stmts
 
-    def parse_block(self) -> Block:
-        open_tok = self.expect(TokenType.BRACE_OPEN)
-        stmts = self._parse_stmts_until(TokenType.BRACE_CLOSE)
-        self.expect(TokenType.BRACE_CLOSE)
-        return Block(stmts=stmts, position=open_tok.position)
+            if self.current.type in _STATEMENT_LEADING:
+                stmts.append(self.parse_stmt())
+                continue
+
+            if self.current.type is TokenType.FN:
+                fn_expr = self._parse_fn_expr()
+                if fn_expr.name is not None:
+                    stmts.append(
+                        LetStmt(name=fn_expr.name, value=fn_expr, position=fn_expr.position)
+                    )
+                    continue
+                expr = fn_expr  # anonymous fn: falls through to the general handling below
+            else:
+                expr = self.parse_expr()  # handles IF, MATCH, bare `{`, ID (ident/call/
+                # field-chain/struct-lit/enum-lit), literals, etc. via
+                # _parse_primary.
+
+            if self.current.type is TokenType.ASSIGN and isinstance(expr, (Ident, FieldAccess)):
+                self.advance()
+                value = self.parse_expr()
+                stmts.append(AssignStmt(target=expr, value=value, position=expr.position))
+                continue
+            if self.current.type is TokenType.SEMICOLON:
+                self.advance()
+                stmts.append(ExprStmt(value=expr, position=expr.position))
+                continue
+            if self.current.type is end_type:
+                tail = expr
+                break  # nothing may follow a tail -- it must be the last item
+            if isinstance(expr, (IfStmt, MatchStmt, Block, Call, FnExpr)):
+                # Block-shaped (if/match/bare block): no semicolon required
+                # when not last (Rust's rule). Call/anonymous-FnExpr are
+                # ALSO exempted here for a Mah-specific reason, not Rust's:
+                # pre-M5, `parse_stmt`'s dedicated ID-led-call and FN
+                # branches made a bare call statement (`foo(1)`) and a bare
+                # anonymous-fn statement free-standing, needing no trailing
+                # `;` regardless of what followed (the enclosing loop never
+                # required one between statements) -- see e.g.
+                # examples/match.mh's `describe_number(0)` / `(1)` / `(42)`
+                # sequence, with no semicolons, which must keep working
+                # byte-for-byte. This does not affect Call/FnExpr in *tail*
+                # position (the `end_type` branch above already handles
+                # that before this check ever runs), only "statement,
+                # followed immediately by more code, no semicolon."
+                stmts.append(ExprStmt(value=expr, position=expr.position))
+                continue
+            raise SyntaxError(
+                f"Invalid syntax '{self.current}' at position '{self.current.position}'"
+            )
+        return stmts, tail
 
     # -- statements ---------------------------------------------------------
 
     def parse_stmt(self):
+        """M5: only handles the statement forms in `_STATEMENT_LEADING` --
+        `let`/`struct`/`enum`/`return`/`break`/`continue`/`while`/`print`.
+        Everything else (a bare identifier/call/field-chain, `if`, `match`,
+        a bare `{ }` block, `fn`, assignment, and any other expression) is
+        now handled directly by `_parse_block_items`, which is the only
+        caller of this method -- see that method and its module-level
+        `_STATEMENT_LEADING` set for why."""
         tok = self.current
 
         if tok.type is TokenType.PRINT:
@@ -138,39 +227,11 @@ class Parser:
             value = self.parse_expr()
             return LetStmt(name=name_tok.literal, value=value, position=tok.position)
 
-        if tok.type is TokenType.ID:
-            self.advance()
-            if self.current.type is TokenType.ASSIGN:
-                self.advance()
-                value = self.parse_expr()
-                target = Ident(name=tok.literal, position=tok.position)
-                return AssignStmt(target=target, value=value, position=tok.position)
-            if self.current.type is TokenType.DOT:
-                base = Ident(name=tok.literal, position=tok.position)
-                target = self._parse_postfix_from(base)
-                self.expect(TokenType.ASSIGN)
-                value = self.parse_expr()
-                return AssignStmt(target=target, value=value, position=tok.position)
-            if self.current.type is TokenType.PAREN_OPEN:
-                args = self._parse_paren_args()
-                callee = Ident(name=tok.literal, position=tok.position)
-                call = Call(callee=callee, args=args, position=tok.position)
-                return ExprStmt(value=call, position=tok.position)
-            raise SyntaxError(
-                f"Invalid syntax '{self.current}' at position '{self.current.position}'"
-            )
-
         if tok.type is TokenType.STRUCT:
             return self._parse_struct_decl()
 
         if tok.type is TokenType.ENUM:
             return self._parse_enum_decl()
-
-        if tok.type is TokenType.IF:
-            return self._parse_if()
-
-        if tok.type is TokenType.MATCH:
-            return self._parse_match()
 
         if tok.type is TokenType.WHILE:
             self.advance()
@@ -192,16 +253,6 @@ class Parser:
                 return ReturnStmt(value=None, position=tok.position)
             value = self.parse_expr()
             return ReturnStmt(value=value, position=tok.position)
-
-        if tok.type is TokenType.FN:
-            fn_expr = self._parse_fn_expr()
-            if fn_expr.name is not None:
-                return LetStmt(name=fn_expr.name, value=fn_expr, position=fn_expr.position)
-            return ExprStmt(value=fn_expr, position=fn_expr.position)
-
-        if tok.type is TokenType.BRACE_OPEN:
-            block = self.parse_block()
-            return BlockStmt(block=block, position=tok.position)
 
         raise SyntaxError(f"Invalid syntax '{tok}' at position '{tok.position}'")
 
@@ -471,6 +522,15 @@ class Parser:
                 self._struct_literal_allowed = old
             self.expect(TokenType.PAREN_CLOSE)
             return self._parse_postfix_from(expr)
+
+        if tok.type is TokenType.IF:
+            return self._parse_postfix_from(self._parse_if())
+
+        if tok.type is TokenType.MATCH:
+            return self._parse_postfix_from(self._parse_match())
+
+        if tok.type is TokenType.BRACE_OPEN:
+            return self._parse_postfix_from(self.parse_block())
 
         if tok.type is TokenType.ID:
             self.advance()

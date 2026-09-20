@@ -966,11 +966,165 @@ node that resolved to it. Then:
    (`matchtag`/`matchfail` opcode handlers). `runtime_values.py` was **not**
    touched — `match` only ever tests/reads existing `StructInstance`/
    `EnumInstance` shapes, it doesn't need a new heap object kind.
-6. **M5 — expression-blocks.** `if`/`match`/bare blocks as values
-   everywhere (destination-slot threading described above). This is where
-   "no tail expression / semicolon-terminated block" starts producing
-   `none` instead of a placeholder zero — see "Built-in `some`/`none`" and
-   "Blocks/if/match as expressions" above.
+6. **M5 — expression-blocks. ✅ Landed.** `if`/`match`/bare `{ }` blocks are
+   now expressions that produce a value, not just statements: a block's
+   value is its trailing expression (when the last item has no trailing
+   `;`) or `none` (when the last item is semicolon-terminated, or the
+   block is empty). Function bodies are blocks too, so this also gives
+   functions **implicit return**: a body that falls off the end without an
+   explicit `return` now returns its body block's tail value (`none` if
+   there is none) — a strict superset of M1's "always `none`" trailer, not
+   a contradiction of it, since M0–M4 had no syntax that could produce a
+   non-`None` tail (see below for why).
+   **The core algorithm — block-item parsing, unified.** `compiler/parser.py`
+   replaces the old `_parse_stmts_until` (used by both `parse_program` and
+   `parse_block`) with `_parse_block_items(end_type)`, returning
+   `(stmts, tail)` instead of a bare list. Per item: statement-leading
+   tokens (`_STATEMENT_LEADING` = `LET`/`STRUCT`/`ENUM`/`RETURN`/`BREAK`/
+   `CONTINUE`/`WHILE`/`PRINT`) still go through `parse_stmt`'s existing
+   dedicated logic, unchanged. **`IF` and `MATCH` are deliberately removed
+   from that set** — they now flow through the general expression grammar
+   (`parse_expr` → `_parse_primary`, which gains `IF`/`MATCH`/`BRACE_OPEN`
+   cases reusing the existing `_parse_if`/`_parse_match`/`parse_block`
+   unchanged) so they can appear as sub-expressions (a `let`'s value, a
+   call argument, a block's tail, ...), not just as statements. `WHILE`
+   stays in `_STATEMENT_LEADING` untouched — it's never expression-capable
+   (no meaningful "value" for a loop), not in scope for this milestone.
+   Everything parsed as a general expression is then disambiguated exactly
+   the way Rust does it: a **block-shaped** construct (`if`/`match`/bare
+   `{ }`) needs no trailing `;` to be "just a statement" *unless* it's the
+   last item in its enclosing block, in which case presence/absence of `;`
+   decides tail-vs-discarded; any other plain expression (a call, `x + 1`,
+   a literal, ...) still needs an explicit `;` when it isn't the block's
+   last item. A trailing `;` after the true last item, or an empty block,
+   always means "no tail" (`None`). A top-level program's own trailing tail
+   (if any) is folded into a plain discarded `ExprStmt` — nothing consumes
+   a program's value.
+   **Why this is safe.** M0–M4's statement grammar never had a way to write
+   "a bare expression immediately before a function's closing `}`, with no
+   `return` and no semicolon" for anything *except* two specific forms the
+   old dedicated `parse_stmt` branches already special-cased as
+   free-standing (needing no trailing `;` regardless of what followed):
+   a bare call statement (`foo(1)`, via the old ID-led-call branch) and an
+   anonymous `fn(...) { ... }` statement. Naively applying Rust's rule
+   verbatim would have *regressed* those two (real code — e.g.
+   `examples/match.mh`'s `describe_number(0)` / `(1)` / `(42)` sequence,
+   with no semicolons between them — would stop parsing). `_parse_block_items`
+   therefore extends the "no semicolon needed unless last" exemption to
+   also cover `Call` and (anonymous) `FnExpr`, alongside the Rust-derived
+   `IfStmt`/`MatchStmt`/`Block` cases — this is a Mah-specific addition
+   *documented as a deliberate deviation from the literal Rust rule*, not
+   an oversight: it only affects "statement, not last, no semicolon" (a
+   `Call`/`FnExpr` in true tail position was already handled by the
+   end-of-block check first, so the new implicit-return behavior for a
+   trailing bare call is unaffected). With that one addition, every
+   existing example/test was re-verified to produce byte-identical output
+   (see "Tests" below) — the empirical check this milestone's scoping
+   assumed turned out to need this one correction, found and fixed during
+   implementation rather than assumed away.
+   **`BlockStmt` is retired entirely** — a bare `{ }` block used as a
+   statement is now just `ExprStmt(value=Block(...))`, produced naturally
+   by the algorithm above (block-shaped, not last → wrapped in `ExprStmt`;
+   block-shaped and last with no trailing `;` → becomes the tail). Removed
+   from `ast_nodes.py`, `parser.py` (`parse_stmt`'s old `BRACE_OPEN` case),
+   `resolve.py` (`resolve_stmt`'s old case), and `codegen.py` (`gen_stmt`'s
+   old case) — `Block.tail` (reserved since M0) is the only shape change,
+   now actually populated.
+   **`parse_stmt` shrinks** to exactly the eight `_STATEMENT_LEADING` forms
+   — its old `ID`, `IF`, `MATCH`, `FN`, and `BRACE_OPEN` branches are gone,
+   fully absorbed into `_parse_block_items` (for `FN`/assignment-vs-call
+   disambiguation) and `_parse_primary` (for `IF`/`MATCH`/`BRACE_OPEN` as
+   expressions).
+   **`resolve.py`**: `resolve_block` resolves a populated `Block.tail` last,
+   in the same pushed scope, after the block's own statements (so the tail
+   can see locals declared earlier in the block). `resolve_expr` gains
+   `IfStmt`/`MatchStmt`/`Block` cases that simply delegate to
+   `resolve_stmt`/`resolve_block` — resolving one of these nodes never
+   depended on statement-vs-expression context, so there's exactly one
+   resolution implementation for each, reachable from both dispatches.
+   `BlockStmt`'s old `resolve_stmt` case is removed (unreachable now).
+   **`codegen.py`**: `_gen_if`/`_gen_match` (M2/M4's statement-only
+   versions) are replaced by destination-threading `_gen_if_into(stmt,
+   dest)`/`_gen_match_into(stmt, dest)` — structurally identical
+   branch/jump-patching, just writing each branch's/arm's value into `dest`
+   via a new `_gen_block_into(block, dest)` (a block's tail value, or
+   `none` via `ld NONE_VALUE` if there's none) instead of only running for
+   side effects. `gen_stmt`'s `IfStmt`/`MatchStmt` cases become thin
+   callers passing a throwaway `self._temp()` as `dest`; `gen_expr` gains
+   matching `IfStmt`/`MatchStmt`/`Block` cases that do the same but return
+   the `dest` address. This one shared implementation handles arbitrary
+   nesting for free (an `if` inside a `match` arm's tail, a block inside an
+   `if` branch, an `if` used as another `if`'s tail, ...) — `gen_expr`/
+   `_gen_block_into`/`_gen_if_into`/`_gen_match_into` all recursively call
+   back into each other as needed, no nesting-depth special-casing
+   anywhere. `_gen_fn_expr`'s implicit-return trailer changes from
+   unconditionally loading `NONE_VALUE` before the final `ret`, to using
+   `gen_block`'s returned tail address when there is one (falling back to
+   `NONE_VALUE` only when there isn't) — this is the entire semantic core
+   of "implicit return via tail." An explicit `return` inside the body is
+   completely untouched (`_gen_return`), including as dead code after —
+   matches M1's existing precedent for the old unconditional trailer.
+   `BlockStmt`'s old `gen_stmt` case is removed (unreachable now).
+   **`code_interpreter.py`: unchanged.** M5 is entirely a parser/resolve/
+   codegen-level change in *what code gets emitted* — `matchfail`,
+   `matchtag`, `getfield`/`setfield`, `closure`/`call`/`ret`/`retval`, and
+   every arithmetic/control opcode already do exactly what destination-
+   threaded `if`/`match`/block codegen needs; no new runtime capability.
+   **Two deliberate, additive widenings of accepted syntax** (documented
+   the same way M0's more permissive `return` was, not treated as bugs):
+   (1) a bare expression can now be a statement on its own with an
+   explicit semicolon (`x + 1;`, `5 + 3;`) — previously a syntax error,
+   since only specific ID-led forms were statement-parseable at all; falls
+   out naturally from unifying ID-led parsing with the general expression
+   path. (2) `some_call();`/bare `foo()` and similar were already valid
+   before M5 (via the old dedicated `parse_stmt` branches) and remain valid
+   now (reached via the unified path instead, plus the `Call`/`FnExpr`
+   exemption described above) — same observable behavior, different code
+   path.
+   **Tests**: new `tests/test_expr_blocks.py` (14 tests) covering: a bare
+   block's tail value; an empty block and a semicolon-terminated block both
+   evaluating to `none`; `if`-expressions (both branches, and no-`else`
+   with a false condition); a `match`-expression; implicit return via a
+   plain tail expression, via an `if`-expression tail, and via recursion
+   with no explicit `return` anywhere (`fact`); the two critical
+   pre-M5-regression checks (a block-shaped statement not last needing no
+   semicolon, both bare and followed by an explicit `return` in a function
+   body); a `match` arm's tail being an `if`-expression (deep composition);
+   and both deliberate widenings. `tests/test_parser.py` gains
+   `ExprBlockParsingTests` (6 tests) pinning the parser/AST-shape layer
+   specifically (block-shaped-not-last wraps in `ExprStmt`, `Block.tail`
+   populated/not populated correctly, `if` reachable via `_parse_primary`,
+   the semicolon-required-unless-last error case and its allowed
+   with-semicolon counterpart). **All 108 pre-existing tests stayed green,
+   unmodified**, except `tests/test_parser.py`'s pre-existing
+   `MatchParsingTests`, which needed a narrow, explicitly-justified update:
+   those tests parse a bare top-level `match` as the *sole* program
+   statement with no trailing code/semicolon, which — now that `match`
+   flows through the expression grammar — makes it the program's tail,
+   folded into a discarded `ExprStmt` by `parse_program` (rather than
+   appearing unwrapped in `stmts` the way a pre-M5 statement-only `match`
+   always did). This is not a behavior change (the runtime output of every
+   `match`-using example/test is byte-for-byte identical — verified by
+   diffing every `examples/*.mh` file's output before and after this
+   milestone) and not a bug being papered over — it's a `MatchStmt` still
+   showing up exactly where the algorithm says it must, just one node
+   deeper in the tree in this one shape-inspecting corner case. Fixed by
+   adding a small `parse_match_stmt` helper that unwraps the `ExprStmt`
+   before asserting on `.arms`, with a comment explaining why, rather than
+   deleting or weakening any assertion. New example: `examples/expr_blocks.mh`.
+   Changed: `compiler/ast_nodes.py` (`BlockStmt` removed, `Block.tail`'s
+   doc comment updated to reflect it's now populated), `compiler/parser.py`
+   (`_STATEMENT_LEADING`, `_parse_block_items` replacing
+   `_parse_stmts_until`, `parse_program`/`parse_block` updated, `parse_stmt`
+   shrunk, `_parse_primary`'s new `IF`/`MATCH`/`BRACE_OPEN` cases),
+   `compiler/resolve.py` (`resolve_block` resolves `.tail`, `resolve_expr`'s
+   new `IfStmt`/`MatchStmt`/`Block` cases, `BlockStmt` case removed),
+   `compiler/codegen.py` (`gen_block` returns the tail address,
+   `_gen_block_into`, `_gen_if_into`/`_gen_match_into` replacing
+   `_gen_if`/`_gen_match`, `gen_expr`'s new `IfStmt`/`MatchStmt`/`Block`
+   cases, `_gen_fn_expr`'s implicit-return change, `BlockStmt` case
+   removed). `code_interpreter.py` and `runtime_values.py` were **not**
+   touched.
 7. **M6 — forgiving parse errors** in the LSP diagnostics path.
 8. **M7 — LSP rename** (+ retire the independent token-scope model).
 9. **M8 — tooling sync.** `syntax-highlight/grammar.js` +
@@ -993,10 +1147,9 @@ M1 was built and documented that way.
 
 ## Status
 
-M0, M1, M2, M3, and M4 are landed (see their entries above for what changed
-and each milestone's deliberate deviations/simplifications). `docs/NEXT_PHASES.md`
-captures what's deliberately deferred (match guards, arrays/lists,
-generics, traits, the type system, async) and what M0–M9 need to keep
-forward-compatible with. Next up: **M5 — expression-blocks** (`if`/`match`/
-bare blocks as values everywhere, including finally letting `match` be
-assigned/passed/returned like an ordinary expression).
+M0, M1, M2, M3, M4, and M5 are landed (see their entries above for what
+changed and each milestone's deliberate deviations/simplifications).
+`docs/NEXT_PHASES.md` captures what's deliberately deferred (match guards,
+arrays/lists, generics, traits, the type system, async) and what M0–M9
+need to keep forward-compatible with. Next up: **M6 — forgiving parse
+errors** in the LSP diagnostics path.

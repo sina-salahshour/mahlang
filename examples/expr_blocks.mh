@@ -1,0 +1,49 @@
+# Demonstrates M5: if/match/bare blocks as expressions, and the implicit
+# return this gives function bodies (see docs/V2_DESIGN.md's M5 milestone).
+
+# 1. Bare block as an expression -- its value is its trailing expression
+# (no semicolon on the last line means "this is the value").
+let sum = {
+	let a = 5
+	let b = 6
+	a + b
+}
+print(sum)
+
+# 2. if-expression: both branches must agree on being usable as a value;
+# with no matching branch (or no `else`), the result is `none`.
+let bigger = if 3 > 2 { "three" } else { "two" }
+print(bigger)
+
+let maybe = if false { "never" }
+print(maybe)
+
+# 3. match-expression: assign the result directly instead of `print`-ing
+# from inside each arm.
+fn classify(n) {
+	match n {
+		0 => { "zero" }
+		_ => {
+			if n < 0 { "negative" } else { "positive" }
+		}
+	}
+}
+print(classify(0))
+print(classify(-5))
+print(classify(5))
+
+# 4. Implicit return: a function body is a block too, so its tail
+# expression -- with no `return` at all -- becomes the return value.
+fn add(a, b) { a + b }
+print(add(2, 3))
+
+fn abs(n) {
+	if n < 0 { -n } else { n }
+}
+print(abs(-7))
+print(abs(7))
+
+fn fact(n) {
+	if n == 0 { 1 } else { n * fact(n - 1) }
+}
+print(fact(5))

@@ -90,6 +90,30 @@ use -- no new control-flow mechanism. If no arm's pattern matches, control
 falls through to a `matchfail` instruction emitted once at the end of the
 whole `match` (M4 has no exhaustiveness checking -- see docs/NEXT_PHASES.md
 -- so this is a genuine runtime possibility, not just a safety net).
+
+M5 (see docs/V2_DESIGN.md's M5 milestone) unifies `_gen_if`/`_gen_match`
+into destination-threading `_gen_if_into`/`_gen_match_into`: every branch/
+arm body writes its value into a caller-supplied `dest` address via the new
+`_gen_block_into` (a block's tail value, or `none` if it has none) instead
+of only running for side effects. `gen_stmt`'s `IfStmt`/`MatchStmt` cases
+are now thin callers of these, passing a throwaway `self._temp()` as
+`dest`; `gen_expr` gains matching `IfStmt`/`MatchStmt`/`Block` cases that
+do the same but return the `dest` address, so `if`/`match`/bare blocks work
+as expressions (let value, call argument, function tail, ...) via the
+exact same codegen, with no special-casing of nesting depth -- an `if`
+inside a `match` arm's tail, a block inside an `if` branch, etc., all fall
+out for free from `gen_expr`/`_gen_block_into`/`_gen_if_into`/
+`_gen_match_into` recursively calling back into each other as needed.
+`_gen_fn_expr`'s implicit-return trailer changes from unconditionally
+loading `NONE_VALUE` to using `gen_block`'s returned tail address when
+there is one -- generalizing "a function that falls off the end always
+returns `none`" (M1) to "a function that falls off the end returns its
+body block's tail value, which is `none` if there is none," a strict
+superset since M0-M4 never had syntax that could produce a non-`None`
+tail (see this milestone's writeup for why that's safe). `BlockStmt`'s old
+`gen_stmt` case is retired -- a bare block used as a statement is now
+`ExprStmt(value=Block(...))`, compiled via the ordinary `ExprStmt`
+dispatch (`gen_expr` on a `Block` with a throwaway temp, discarded).
 """
 
 from __future__ import annotations
@@ -99,7 +123,6 @@ from .ast_nodes import (
     Binary,
     BindPat,
     Block,
-    BlockStmt,
     BoolLit,
     BreakStmt,
     Call,
@@ -187,19 +210,17 @@ class Codegen:
                 addr = self.gen_expr(arg)
                 self.buf.emit(("print", addr, None, None))
         elif isinstance(stmt, IfStmt):
-            self._gen_if(stmt)
+            self._gen_if_into(stmt, self._temp())
         elif isinstance(stmt, WhileStmt):
             self._gen_while(stmt)
         elif isinstance(stmt, MatchStmt):
-            self._gen_match(stmt)
+            self._gen_match_into(stmt, self._temp())
         elif isinstance(stmt, BreakStmt):
             self._gen_break(stmt)
         elif isinstance(stmt, ContinueStmt):
             self._gen_continue(stmt)
         elif isinstance(stmt, ReturnStmt):
             self._gen_return(stmt)
-        elif isinstance(stmt, BlockStmt):
-            self.gen_block(stmt.block)
         elif isinstance(stmt, StructDecl):
             pass  # purely a resolve-time/compile-time declaration; no runtime code
         elif isinstance(stmt, EnumDecl):
@@ -207,9 +228,26 @@ class Codegen:
         else:
             raise AssertionError(f"unhandled statement node {stmt!r}")
 
-    def gen_block(self, block: Block) -> None:
+    def gen_block(self, block: Block):
+        """Compile a block's statements, then its tail expression (if any)
+        -- for its side effects, whether or not the caller cares about the
+        resulting value. Returns the tail's resulting address if there is
+        one, else None (existing statement-position callers that don't
+        care about a value can keep ignoring the return value unchanged)."""
         for stmt in block.stmts:
             self.gen_stmt(stmt)
+        if block.tail is not None:
+            return self.gen_expr(block.tail)
+        return None
+
+    def _gen_block_into(self, block: Block, dest) -> None:
+        """Like gen_block, but always writes the block's value (defaulting
+        to `none` if there's no tail) into `dest`."""
+        tail_addr = self.gen_block(block)
+        if tail_addr is not None:
+            self.buf.emit(("=", tail_addr, None, dest))
+        else:
+            self.buf.emit(("ld", NONE_VALUE, None, dest))
 
     def _gen_store(self, target, src_addr) -> None:
         if isinstance(target, Ident):
@@ -220,17 +258,19 @@ class Codegen:
         else:
             raise AssertionError(f"unhandled assignment target {target!r}")
 
-    def _gen_if(self, stmt: IfStmt) -> None:
+    def _gen_if_into(self, stmt: IfStmt, dest) -> None:
         end_jumps = []
         branches = [(stmt.cond, stmt.then)] + list(stmt.elifs)
         for cond, block in branches:
             cond_addr = self.gen_expr(cond)
             jmpf_placeholder = self.buf.emit((None, None, None, None))
-            self.gen_block(block)
+            self._gen_block_into(block, dest)
             end_jumps.append(self.buf.emit((None, None, None, None)))
             self.buf.emit(("jmpf", cond_addr, None, self.buf.code_pointer), address=jmpf_placeholder)
         if stmt.else_ is not None:
-            self.gen_block(stmt.else_)
+            self._gen_block_into(stmt.else_, dest)
+        else:
+            self.buf.emit(("ld", NONE_VALUE, None, dest))  # no else -> none if nothing matched
         end_target = self.buf.code_pointer
         for addr in end_jumps:
             self.buf.emit(("jmp", None, None, end_target), address=addr)
@@ -249,13 +289,13 @@ class Codegen:
             self.buf.emit(("jmp", None, None, end_target), address=addr)
         self._while_stack.pop()
 
-    def _gen_match(self, stmt: MatchStmt) -> None:
+    def _gen_match_into(self, stmt: MatchStmt, dest) -> None:
         scrutinee_addr = self.gen_expr(stmt.scrutinee)
         end_jumps = []
         for arm in stmt.arms:
             failure_jumps = []  # list[(cond_addr, placeholder_addr)]
             self._gen_pattern_check(arm.pattern, scrutinee_addr, failure_jumps)
-            self.gen_block(arm.body)
+            self._gen_block_into(arm.body, dest)
             end_jumps.append(self.buf.emit((None, None, None, None)))
             next_arm_target = self.buf.code_pointer
             for cond_addr, placeholder in failure_jumps:
@@ -400,6 +440,18 @@ class Codegen:
             dest = self._temp()
             self.buf.emit(("enum", expr.type_name, (expr.variant, pairs), dest))
             return dest
+        if isinstance(expr, IfStmt):
+            dest = self._temp()
+            self._gen_if_into(expr, dest)
+            return dest
+        if isinstance(expr, MatchStmt):
+            dest = self._temp()
+            self._gen_match_into(expr, dest)
+            return dest
+        if isinstance(expr, Block):
+            dest = self._temp()
+            self._gen_block_into(expr, dest)
+            return dest
         raise AssertionError(f"unhandled expression node {expr!r}")
 
     def _gen_fn_expr(self, fn: FnExpr) -> tuple:
@@ -407,13 +459,15 @@ class Codegen:
         code_address = self.buf.code_pointer
         self.frame_stack.append(fn.frame_level)
         self._fn_depth += 1
-        self.gen_block(fn.body)
-        # Implicit `return none` if the body falls off the end,
-        # unconditionally appended -- dead code after an explicit early
-        # return included (matches M0's equivalent trailer).
-        none_addr = self._temp()
-        self.buf.emit(("ld", NONE_VALUE, None, none_addr))
-        self.buf.emit(("ret", none_addr, None, None))
+        # M5: implicit return of the body block's tail value if it falls
+        # off the end -- `none` when there's no tail, a strict superset of
+        # M1's "always none" trailer (unconditionally appended, dead code
+        # after an explicit early return included, exactly as before).
+        tail_addr = self.gen_block(fn.body)
+        if tail_addr is None:
+            tail_addr = self._temp()
+            self.buf.emit(("ld", NONE_VALUE, None, tail_addr))
+        self.buf.emit(("ret", tail_addr, None, None))
         self._fn_depth -= 1
         slot_count = self.frame_stack.pop().next_slot
         self.buf.emit(("jmp", None, None, self.buf.code_pointer), address=skip_placeholder)

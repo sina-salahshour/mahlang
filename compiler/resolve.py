@@ -76,6 +76,18 @@ clear error names whichever case applies (no such variable and no such
 enum type/variant; or the variant exists but needs braces because it's
 struct-shaped, not unit).
 
+M5 makes `if`/`match`/bare `{ }` blocks resolvable as expressions, not just
+statements: `resolve_block` now also resolves a populated `Block.tail`
+(in the same pushed scope, after the block's own statements, so the tail
+can see locals declared earlier in the block), and `resolve_expr` gains
+`IfStmt`/`MatchStmt`/`Block` cases that simply delegate to `resolve_stmt`/
+`resolve_block` -- resolving one of these node's structure never depended
+on whether it appears in statement or expression position, so there is
+exactly one resolution implementation for each, reachable from both
+dispatches. `BlockStmt` (the old dedicated "bare block used as a
+statement" wrapper) is retired: that's now just `ExprStmt(value=Block(...))`,
+handled by the existing `ExprStmt` case.
+
 M4 adds `MatchStmt`/pattern resolution (`resolve_pattern`, parallel to
 `resolve_expr`). A `BindPat` allocates a fresh slot in the *current* frame
 level exactly like a `LetStmt` would -- patterns never start a new frame
@@ -97,7 +109,6 @@ from .ast_nodes import (
     Binary,
     BindPat,
     Block,
-    BlockStmt,
     BoolLit,
     BreakStmt,
     Call,
@@ -286,8 +297,6 @@ class Resolver:
         elif isinstance(stmt, ReturnStmt):
             if stmt.value is not None:
                 self.resolve_expr(stmt.value)
-        elif isinstance(stmt, BlockStmt):
-            self.resolve_block(stmt.block)
         elif isinstance(stmt, StructDecl):
             seen = set()
             for name in stmt.fields:
@@ -333,6 +342,10 @@ class Resolver:
         self._push()
         for stmt in block.stmts:
             self.resolve_stmt(stmt)
+        if block.tail is not None:
+            # M5: resolve the tail last, in the same pushed scope, so it can
+            # see locals declared earlier in this same block.
+            self.resolve_expr(block.tail)
         self._pop()
 
     def _resolve_fn_expr(self, fn: FnExpr) -> None:
@@ -441,6 +454,20 @@ class Resolver:
             # docs/V2_DESIGN.md's M2 milestone.
             expr.enum_unit_type = None
             self.resolve_expr(expr.obj)
+            return
+        if isinstance(expr, IfStmt):
+            # M5: if/match/bare-block are usable as expressions (a let's
+            # value, a block's tail, a call argument, ...) -- resolving
+            # their structure doesn't depend on statement-vs-expression
+            # context at all, so delegate to the exact same resolution
+            # logic already used when they appear as statements.
+            self.resolve_stmt(expr)
+            return
+        if isinstance(expr, MatchStmt):
+            self.resolve_stmt(expr)
+            return
+        if isinstance(expr, Block):
+            self.resolve_block(expr)
             return
         raise AssertionError(f"unhandled expression node {expr!r}")
 

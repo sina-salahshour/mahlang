@@ -31,8 +31,16 @@ patterns reuse `NumberLit`/`StringLit`/`BoolLit` directly, and
 `some(pattern)`/`none` in pattern position desugar straight into `EnumPat`
 at parse time, exactly mirroring `some(x)`/`none` in expression position.
 
-Blocks-as-expressions/defer yet to come -- those land in later milestones
-and will extend this module rather than replace it.
+M5 makes `if`/`match`/bare `{ }` blocks into expressions: `Block.tail`
+(reserved since M0) is now actually populated by the parser, and a bare
+`{ }` block used as a statement is just `ExprStmt(value=Block(...), ...)`
+-- the old dedicated `BlockStmt` wrapper node is retired, since it added
+nothing `ExprStmt` doesn't already say. `IfStmt`/`MatchStmt` are unchanged
+structurally; only their *codegen* differs by context (statement position
+vs. used as an expression/tail) -- see docs/V2_DESIGN.md's M5 milestone.
+
+`defer` yet to come -- lands in a later milestone and will extend this
+module rather than replace it.
 
 Every node carries `position` (a source offset into the *combined*,
 preprocessed text) so error messages can point mah.py at a `file:line:col`
@@ -169,9 +177,11 @@ class InputExpr:
 class Block:
     stmts: list
     position: int
-    # Reserved for M5 (expression-blocks) -- a block is not yet a value in
-    # M0, so the parser never populates this; kept here so the shape
-    # doesn't need to change again later.
+    # M5: a block's value is this trailing expression (populated by the
+    # parser whenever the last item in the block has no trailing `;`), or
+    # `None` when the block ends in a semicolon-terminated statement or is
+    # empty -- codegen treats a `None` tail as `none` (see
+    # docs/V2_DESIGN.md's M5 milestone).
     tail: Optional[object] = None
 
 
@@ -252,12 +262,6 @@ class FnExpr:
     # set by Resolver: the resolve.FrameLevel for this function's body --
     # codegen.py continues allocating temp slots from this same object.
     frame_level: object = field(default=None, repr=False)
-
-
-@dataclass
-class BlockStmt:
-    block: Block
-    position: int
 
 
 @dataclass
