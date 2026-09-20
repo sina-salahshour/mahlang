@@ -19,7 +19,7 @@ if greeting != target {
 }
 
 # 4. Strings in functions
-def format_user(title, name) {
+fn format_user(title, name) {
 	return title + " " + name
 }
 

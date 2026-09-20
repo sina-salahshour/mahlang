@@ -2,7 +2,7 @@ let x = 0;
 let x_res = 0;
 # this is a comment
 
-def is_x_prime() {
+fn is_x_prime() {
 	if x % 2 == 0 {
 		x_res = 0;
 		return;

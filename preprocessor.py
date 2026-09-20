@@ -1,9 +1,10 @@
 """Import/export preprocessor for the Mah language.
 
-Mah's compiler is a single-pass, order-dependent, syntax-directed translator
-generated from ``mah.lang``. It has no ``.`` token and no ``import`` / ``export``
-keywords, so module support is implemented here as a source-to-source
-preprocessor that runs *before* the lexer. Two import forms are supported:
+Mah's compiler has no ``.`` token and no ``import`` / ``export`` keywords,
+so module support is implemented here as a source-to-source preprocessor
+that runs *before* the lexer -- true regardless of which compiler pipeline
+sits behind it (see docs/V2_DESIGN.md's M0 milestone; this file didn't need
+to change for that port). Two import forms are supported:
 
     import "mathlib.mh"                 # flat: bring exported names into scope
     import math from "mathlib.mh"       # namespaced: access via math.answer
@@ -11,7 +12,7 @@ preprocessor that runs *before* the lexer. Two import forms are supported:
 
 Only names a file marks with ``export`` are visible to importers:
 
-    export def square(n) { return n ** 2 }
+    export fn square(n) { return n ** 2 }
     export let answer = 42
     export helper                       # export a name declared elsewhere
 
@@ -34,8 +35,8 @@ The result is a single combined source string plus a per-segment *source map*
 translating a combined-text offset back to the original ``(file, offset)`` --
 enabling cross-file diagnostics and go-to-definition.
 
-Dependency-free apart from the generated ``compiler`` package (used only for
-its ``TokenType`` constants).
+Dependency-free -- it has its own tolerant scanner (below) and never
+imports the ``compiler`` package.
 """
 
 from __future__ import annotations
@@ -252,7 +253,7 @@ def analyze_module(tokens: list) -> ModuleInfo:
 
         if depth == 0 and tok.kind == "id" and tok.value == "export":
             nxt = tokens[i + 1] if i + 1 < count else None
-            if nxt is not None and nxt.kind == "id" and nxt.value in ("def", "let"):
+            if nxt is not None and nxt.kind == "id" and nxt.value in ("fn", "let"):
                 if i + 2 < count and tokens[i + 2].kind == "id":
                     name = tokens[i + 2].value
                     exported.add(name)
@@ -266,7 +267,7 @@ def analyze_module(tokens: list) -> ModuleInfo:
             i += 1
             continue
 
-        if depth == 0 and tok.kind == "id" and tok.value in ("def", "let"):
+        if depth == 0 and tok.kind == "id" and tok.value in ("fn", "let"):
             if i + 1 < count and tokens[i + 1].kind == "id":
                 top_level.add(tokens[i + 1].value)
 
@@ -462,7 +463,7 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
             # -- export keyword (depth 0) -----------------------------------
             if depth == 0 and tok.kind == "id" and tok.value == "export":
                 nxt = tokens[i + 1] if i + 1 < count else None
-                if nxt is not None and nxt.kind == "id" and nxt.value in ("def", "let"):
+                if nxt is not None and nxt.kind == "id" and nxt.value in ("fn", "let"):
                     emit_gap(tok.start)
                     cursor = tok.end  # drop the `export` keyword only
                     i += 1

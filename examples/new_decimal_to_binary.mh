@@ -1,5 +1,5 @@
 # # we don't need this because language supports pow now
-# def pow(a,b) {
+# fn pow(a,b) {
 # 	let res = 1
 # 	while b {
 # 		res = res * a

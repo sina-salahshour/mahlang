@@ -4,11 +4,11 @@ import re
 import sys
 from pathlib import Path
 
-from actions import register_actions
 from code_interpreter import run_code
-from compiler.ir_generator import IRGenerator
+from compiler.codegen import Codegen, CodeBuffer
 from compiler.lexer import Lexer
 from compiler.parser import Parser
+from compiler.resolve import Resolver
 from preprocessor import demangle_message, preprocess
 
 sys.tracebacklimit = 0
@@ -18,9 +18,9 @@ USAGE_HELP_MESSGE = """Usage:
     mah build\t <input file>\t\t# to see the program instructions"""
 
 
-def print_code_block(ir: IRGenerator, should_save_to_file=False):
+def print_code_block(buf: CodeBuffer, should_save_to_file=False):
     code_block = "\n"
-    for index, code in enumerate(ir.sstack[:400]):
+    for index, code in enumerate(buf.code[:400]):
         if not code:
             break
         code_block += f"{index}:\t{'|'.join(map(lambda x: ' '.center(9) if x is None else str(x).center(9),code))}\n"
@@ -44,18 +44,16 @@ def read_file(file_name):
     return input_str
 
 
-def generate_code(input_str: str):
+def generate_code(input_str: str) -> CodeBuffer:
     lexer = Lexer(input_str)
     parser = Parser(lexer)
-    ir = IRGenerator(parser)
+    program = parser.parse_program()
 
-    register_actions(ir)
+    resolver = Resolver()
+    resolver.resolve_program(program)
 
-    ir.generate()
-
-    assert len(ir.stack) == 0, "Error: Stack is not empty" + str(ir.stack)
-
-    return ir
+    codegen = Codegen(resolver.global_frame)
+    return codegen.generate(program)
 
 
 def find_error_line(input_str: str, pos: int):
@@ -117,11 +115,11 @@ def main():
     try:
         match command:
             case "build":
-                ir = generate_code(file_str)
-                print_code_block(ir, should_save_to_file=should_save_to_file)
+                buf = generate_code(file_str)
+                print_code_block(buf, should_save_to_file=should_save_to_file)
             case "run":
-                ir = generate_code(file_str)
-                run_code(ir.sstack[:400])
+                buf = generate_code(file_str)
+                run_code(buf.code[:400], buf.global_slot_count)
             case unknown_command:
                 print(
                     f"Error: command not found '{unknown_command}'.\navailable commands are 'build' and 'run'\n"

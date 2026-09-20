@@ -1,0 +1,23 @@
+struct Point { x, y }
+
+fn make_point(x, y) {
+    return Point { x: x, y: y }
+}
+
+fn add_points(a, b) {
+    return Point { x: a.x + b.x, y: a.y + b.y }
+}
+
+let p1 = make_point(1, 2)
+let p2 = make_point(3, 4)
+let p3 = add_points(p1, p2)
+
+print(p3.x)
+print(p3.y)
+print(p3)
+
+struct Line { start, end }
+let l = Line { start: Point { x: 0, y: 0 }, end: p3 }
+l.end.x = 100
+print(l.end.x)
+print(p3.x)

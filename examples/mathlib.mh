@@ -2,16 +2,16 @@
 # Only names marked with `export` are visible to files that import this one.
 
 # squares a number
-export def square(n) {
+export fn square(n) {
 	return n ** 2
 }
 
 # cubes a number
-export def cube(n) {
+export fn cube(n) {
 	return n ** 3
 }
 
-export def is_even(n) {
+export fn is_even(n) {
 	return n % 2 == 0
 }
 
@@ -19,7 +19,7 @@ export def is_even(n) {
 export let answer = 42
 
 # a private helper: NOT exported, so importers can't see or clash with it.
-def clamp_positive(n) {
+fn clamp_positive(n) {
 	if n < 0 {
 		return 0
 	}

@@ -1,5 +1,12 @@
 # The `.lang` grammar DSL
 
+> **Historical, describes v1 (pre-M0).** As of `docs/V2_DESIGN.md`'s M0
+> milestone, `mah.lang` is no longer used to generate `compiler/` (`make
+> lang` is a no-op) -- the lexer and parser are hand-written. This
+> document remains an accurate description of the retired DSL and the
+> LL(1) constraints it enforced, kept for historical reference and
+> because `compiler-generator/` itself is untouched.
+
 `mah.lang` (Mah's own grammar) and `compiler-generator/compiler.lang` (the
 grammar *of* this DSL, used to bootstrap the tool that reads `mah.lang`) are
 both written in the same small format. This is the file `generate.py` turns

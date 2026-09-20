@@ -1,5 +1,16 @@
 # Mah Architecture
 
+> **Historical, describes v1 (pre-M0).** `docs/V2_DESIGN.md`'s M0 milestone
+> has landed: `compiler/` is now a hand-written lexer/parser/AST/resolve/
+> codegen pipeline, not the grammar-DSL-generated one described below, and
+> `actions.py` is gone. This document (and `GRAMMAR_DSL.md`) are kept as an
+> accurate record of v1 and of the `.lang` meta-compiler
+> (`compiler-generator/`, still present but no longer used to build
+> `compiler/` — see the M0 section of `V2_DESIGN.md` and the `lang` target
+> in `Makefile`). `RUNTIME.md`'s IR/memory-model section still describes
+> the current system accurately (M0 deliberately kept the same IR shape);
+> only its "no AST" framing is now specific to v1.
+
 Mah is a from-scratch language: a hand-rolled grammar-description language
 generates the lexer/parser/IR-generator, a flat-memory interpreter executes
 the IR, and a pure-stdlib LSP + a tree-sitter grammar sit on top for editor

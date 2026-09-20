@@ -484,21 +484,203 @@ node that resolved to it. Then:
 
 ## Milestones (proposed order — nothing starts until you approve this doc)
 
-1. **M0 — AST port, no new features.** Hand-written lexer/parser producing
-   the AST above for exactly v1's current feature set (numbers, strings,
-   real booleans, `if`/`elif`/`else`, `while`/`break`/`continue`, `fn`/
-   `return`, `print`/`input`/`sin`/`cos`, imports unchanged). Resolve +
-   codegen passes emit the *same* IR shape v1 uses today. Goal: prove the
-   new pipeline against `examples/*.mh` (updated for real booleans) before
-   any new semantics land — a pure refactor milestone.
-2. **M1 — heap frames + calling convention.** Replace fixed-address
-   variables/params with `Frame`/static-chain/`Closure` as above. Unlocks
-   recursion and first-class functions (`fn` expressions, closures as
-   values) for the first time. A function running off its body without an
-   explicit `return` now produces `none` (needs at least a minimal builtin
-   `Option`/`none` value to exist — see M3's note — but doesn't need user
-   `enum`s or pattern matching).
-3. **M2 — structs (`struct`).** Declaration, literal, field access/assign.
+1. **M0 — AST port, no new features. ✅ Landed.** Hand-written lexer/parser
+   producing the AST above for exactly v1's current feature set (numbers,
+   strings, real booleans, `if`/`elif`/`else`, `while`/`break`/`continue`,
+   `fn`/`return`, `print`/`input`/`sin`/`cos`, imports unchanged). Resolve +
+   codegen passes emit the *same* IR shape v1 uses today. Verified against
+   all of `examples/*.mh` (renamed `def` → `fn`) plus targeted checks for
+   precedence/associativity, real booleans, recursion still correctly
+   rejected (no self-reference until M1), and import/export privacy.
+   New: `compiler/ast_nodes.py`, `compiler/resolve.py`, `compiler/codegen.py`;
+   rewrote `compiler/lexer.py`, `compiler/parser.py` by hand. Removed:
+   `actions.py`, `compiler/ir_generator.py`. `mah.lang`/`compiler-generator/`
+   left in place but archived — `make lang` is now a no-op (see Makefile).
+   `.gitignore`'s `/compiler/` entry (correct when it was pure generated
+   output) is removed, since `compiler/` is source now.
+   Deliberate deviations from bug-for-bug v1 fidelity (judgment calls, not
+   requested — flagging in case any should be reverted): `let x = x + 1`
+   now resolves the right-hand side in the *outer* scope (sane shadowing)
+   rather than v1's accidental self-reference onto the fresh, uninitialized
+   slot; a bare `return` no longer requires a literal trailing `;` (any
+   token that can't start an expression works, which only accepts strictly
+   more programs than v1 did); binary-op IR tuples are stored
+   `(op, left, right, dest)` instead of v1's reversed `(op, rhs, lhs,
+   dest)` (pure internal convention, not user-visible).
+   **Known regression, expected per this plan:** `lsp/` now fails to import
+   (`actions.py`/`compiler.ir_generator` gone) — LSP functionality is
+   unavailable until M6–M8 rework it, as flagged when this doc was written.
+2. **M1 — heap frames + calling convention. ✅ Landed.** Replaced M0's
+   single flat shared-array/fixed-address model with heap-allocated
+   `Frame`s (`slots` + `static_parent`) linked into a static chain, plus
+   a first-class `Closure` value (`code_address`, `defining_frame`,
+   `slot_count`, `param_count`, `name`) -- see `runtime_values.py`. Every
+   IR operand is now a `(depth, slot)` pair instead of a bare address;
+   `resolve.py` assigns slots per *frame level* (one per `fn` nesting,
+   not per lexical block) and computes each reference's static-chain
+   `depth`; `codegen.py` continues allocating temporaries from the same
+   `FrameLevel` objects the resolver used. Calls push
+   `(return_pc, caller_frame)` onto an explicit return stack and switch
+   to a brand-new `Frame` per call (never reused/aliased, which is what
+   makes recursion safe); `ret` copies into an interpreter-local return
+   register and a new `retval` opcode copies it into the caller's
+   destination slot once the caller's frame is current again. `fn` is no
+   longer its own statement: it is one AST node, `FnExpr` (optional
+   name), usable as an expression anywhere; `fn foo(...) { ... }` at
+   statement level is now parsed as sugar for
+   `let foo = fn(...) { ... }`. `Call.callee` is a full expression (in
+   practice always an `Ident`) instead of a bare name string, so a call
+   resolves its callee like any other identifier reference -- this is
+   what lets a closure stored in a variable be called.
+   Verified against all of `examples/*.mh` (unchanged output) plus:
+   recursion (`fact(5)` → `120`); closures capturing an outer variable by
+   reference, with two calls to the same outer function producing two
+   independent captured frames (`make_counter`/`c1`/`c2` → `1`, `2`, `1`,
+   `3`); an anonymous `fn(...)` expression assigned to a variable and
+   called (`add(2, 3)` → `5`); a function falling off its end implicitly
+   returning `none` (prints as the string `"none"`); a runtime arity
+   mismatch raising a clean `Argument Count is invalid` error instead of
+   a Python traceback; `mah.py build`'s IR dump still working structurally
+   (addresses just print as `(depth, slot)` tuples now); and the M0
+   operator-precedence/associativity checks (`-2**2` → `-4`,
+   `2**3**2` → `512`, etc.) still holding.
+   New: `runtime_values.py` (`Frame`, `Closure`, the `NONE_VALUE`
+   singleton). Rewrote: `compiler/resolve.py` (frame-level-aware,
+   `FunctionInfo`/`FIRST_ADDRESS` removed), `compiler/codegen.py`
+   (`(depth, slot)` addressing, `closure`/`call`/`ret`/`retval` opcodes,
+   `FIRST_TEMP`/per-function `return_address` bookkeeping removed),
+   `code_interpreter.py` (`Frame`-based `run_code`, flat `stack`/`sp`
+   model removed). Updated `compiler/ast_nodes.py` (`FnDeclStmt` removed
+   in favor of `FnExpr`; `Ident.address`/`AssignStmt.target_address` are
+   now `(depth, slot)` tuples; `Call.info` removed) and
+   `compiler/parser.py` (one `_parse_fn_expr()` used from both statement
+   and expression position). `mah.py`'s `generate_code` now passes
+   `resolver.global_frame` into `Codegen`, and `run_code` takes the
+   compiled `global_slot_count` to size the initial frame. `Makefile`'s
+   `install-cli`/`install-lsp` now also copy `runtime_values.py`.
+   Deliberate design choices worth flagging: arity is now checked at
+   **runtime** inside the `call` opcode rather than at resolve time,
+   since a call's callee is not always statically known to be a specific
+   function any more (it can be a closure value passed around or
+   returned from elsewhere) -- consequently an arity-mismatch error names
+   the function only when the closure happens to have a `name` (an
+   anonymous closure's error just says "function"). M0's deliberate
+   "prevent self-reference" trick (`FunctionInfo`'s early-duplicate-check
+   / late-scope-insert timing, so a function could never see its own
+   name) is gone and *replaced by* the opposite, deliberately-enabled
+   behavior: a named `let`/`fn` binding whose value is a `FnExpr` is
+   declared in its own frame level *before* its body is resolved, so it
+   can call itself -- recursion is the entire point of M1. One thing not
+   spelled out by the M1 design doc that the implementation had to
+   decide: `none` (the `_NoneValue` singleton) is falsy (`__bool__`
+   returns `False`) -- without this, existing examples like
+   `new_prime_numbers.mh`, which use a bare `return;` (now `none` instead
+   of M0's `Decimal(0)`) as a falsy early-exit inside an `if` condition,
+   would regress (every number would test "truthy"/prime). Making `none`
+   falsy was the minimal fix and is a natural reading of "no value" even
+   ahead of the full `Option`/`some`/`none` enum landing in M3.
+3. **M2 — structs (`struct`). ✅ Landed.** `struct Name { field, ... }`
+   declares a fixed field shape (names only, no types); `Name { field: expr,
+   ... }` constructs a heap-allocated `StructInstance` (`runtime_values.py`)
+   -- a struct is just another heap object, so Mah variables holding one are
+   references, never copies, exactly like M1's `Frame`/`Closure`. `p.x`
+   reads a field, `p.x = v` writes it (mutating the same heap object --
+   visible through any alias); both are chainable (`a.b.c`, `o.inner.v =
+   99`) via a single `FieldAccess` AST node applied uniformly as a postfix
+   to every primary expression, so it binds tighter than unary `-` and `**`
+   (`-p.x` is `-(p.x)`, `p.x ** 2` is `(p.x) ** 2`).
+   **The if/while struct-literal ambiguity** (same one Rust and Go hit):
+   since `if EXPR { ... }` and `while EXPR { ... }` both have `EXPR`
+   immediately followed by a required `{`, a bare struct literal directly
+   in that condition position is genuinely ambiguous with the
+   if/while-body block (`if x { ... }` -- is `{` starting a struct literal
+   on `x`, or the body?). Solved the same way Rust/Go solve it: a bare
+   struct literal is syntactically disallowed directly in an `if`/`while`
+   (and `elif`) condition -- parenthesizing re-enables it. Implemented as a
+   parser instance flag, `self._struct_literal_allowed`, consulted only at
+   the one decision point (seeing `ID` then `{` in `_parse_primary`) and
+   temporarily forced back to `True` inside `(...)` grouping and each
+   call/paren-arg expression, where the ambiguity can't occur (a matching
+   `)`/`,` unambiguously ends the expression) -- a purely syntactic,
+   parse-time restriction, not a semantic one; `if x { print("hi") }`
+   always parses `x` as a plain identifier regardless of what it holds at
+   runtime.
+   **Compile-time literal validation vs. runtime access validation**
+   (a deliberate split, not an oversight): a struct *literal* always names
+   its struct type explicitly right there in the syntax, so
+   `compiler/resolve.py` fully validates it statically -- undeclared struct
+   type, duplicate field in the literal, duplicate field in the
+   declaration itself, and an exact match between provided and declared
+   field names (any missing and/or unknown field is a compile-time error
+   naming the specific field(s)) -- all raised during `resolve_expr`/
+   `resolve_stmt`, before codegen ever runs. Field *access* via a variable
+   (`p.x`) is, by contrast, validated only at **runtime**, in
+   `code_interpreter.py`'s new `getfield`/`setfield` opcode handlers: since
+   there's no static type system yet, there's no reliable way to know what
+   struct type an arbitrary expression's value will hold at compile time
+   (e.g. a function parameter has no static type annotation at all) --
+   this mirrors the same pattern M1 already established for call arity
+   (also moved to runtime for the same "callee isn't always statically
+   known" reason). `docs/NEXT_PHASES.md`'s future type system is what
+   would eventually let field access move back to compile time, as this
+   doc's original sketch aspired to.
+   **Struct type names live in a flat, unscoped registry**
+   (`Resolver.struct_decls: dict[str, list[str]]`), separate from
+   `self.scopes`/frame levels entirely -- a struct type isn't a first-class
+   value yet (can't be passed around), so it doesn't need real lexical
+   scoping: once declared, a struct name is visible program-wide regardless
+   of the lexical nesting depth of the `struct` statement itself, and a
+   struct type name and a variable of the same name coexist without
+   conflict (different namespaces).
+   New tokens: `STRUCT` (keyword), `DOT` (`.`), `COLON` (`:`). New AST
+   nodes: `StructDecl(name, fields: list[str])`, `StructLit(type_name,
+   fields: list[tuple[str, expr]])` (an ordered list, not a dict, so a
+   literal's own duplicate field can be detected instead of silently
+   dropped), `FieldAccess(obj, field)`. Changed: `AssignStmt.target` is now
+   an AST expression node (`Ident` or `FieldAccess`) instead of a bare
+   name string, and `AssignStmt.target_address` is removed entirely -- an
+   `Ident` target reuses its own resolver-set `.address`, and a
+   `FieldAccess` target's codegen (`Codegen._gen_store`) reads
+   `target.obj`/`target.field` directly to emit a `setfield`. New opcodes:
+   `struct` (`arg1`=type name, `arg2`=tuple of `(field_name, value_addr)`
+   pairs, `dest`=new `StructInstance`), `getfield` (`arg1`=struct address,
+   `arg2`=field name, `dest`=read value), `setfield` (`arg1`=struct
+   address, `arg2`=field name, and the 4th slot -- `dest` for every other
+   opcode -- repurposed to hold the address of the value being stored,
+   since there's no actual destination: the mutation happens in place on
+   the heap object).
+   New: `tests/test_structs.py` (19 tests) covering: basic
+   declaration/literal/field-read; field mutation visible through an
+   alias (reference semantics); nested struct literals + chained field
+   access; structs interoperating with M1 closures/functions (passed in,
+   returned, computed from other structs' fields); nested (2-level) field
+   assignment; field access binding tighter than unary `-`/`**`; `print`
+   on a whole struct (`Point { x: 1, y: 2 }`); the if/while
+   struct-literal-ambiguity restriction (bare literal in an `if` condition
+   raises; parenthesized works); struct-literal validation errors (missing
+   field, extra field, duplicate field in the literal, duplicate field in
+   the declaration, redeclaring a struct name, undeclared struct type); and
+   runtime field-access errors (unknown field read, field access on a
+   non-struct value, field assignment to an unknown field) -- all raised as
+   clean exceptions via `mah.py run`, never a bare Python traceback. All
+   pre-existing M0/M1 tests (46) stayed green, unmodified. New example:
+   `examples/structs.mh`.
+   Changed: `compiler/lexer.py` (new tokens), `compiler/ast_nodes.py` (new
+   nodes, `AssignStmt.target` type change), `compiler/parser.py`
+   (`_parse_condition_expr`/`_struct_literal_allowed`, `_parse_postfix_from`
+   applied to every primary, `_parse_struct_decl`/`_parse_struct_lit`/
+   `_parse_field_list`, `parse_stmt`'s `ID` branch gains a `.`-chain
+   field-assignment case), `compiler/resolve.py` (`struct_decls` registry,
+   `StructDecl`/`StructLit`/`FieldAccess` handling, `AssignStmt` now just
+   resolves `stmt.target` through the same `Ident`/`FieldAccess` dispatch),
+   `compiler/codegen.py` (`StructLit`/`FieldAccess` in `gen_expr`,
+   `_gen_store` helper, `StructDecl` emits no code), `runtime_values.py`
+   (new `StructInstance`), `code_interpreter.py` (new opcode handlers,
+   `_to_str` renders a `StructInstance` as `TypeName { field: value, ... }`).
+   `preprocessor.py` was **not** touched -- its own tolerant scanner already
+   consumes/rewrites module-namespace dots (e.g. `math.square`) before the
+   real lexer ever runs, so only genuine struct-field dots reach
+   `compiler/lexer.py`.
 4. **M3 — enums.** Declaration (unit + struct variants), construction.
    Register the builtin `Option` type (`none`/`some(x)`) here too, as part
    of bringing up the `EnumInstance` machinery — it's not user-declared,
@@ -523,14 +705,19 @@ node that resolved to it. Then:
     approach) — listed last for documentation tidiness, but could be
     scheduled as early as right after M1 if that's more convenient.
 
-Each milestone should land with its own `examples/*.mh` additions and keep
-prior milestones' examples running.
+Each milestone should land with its own `examples/*.mh` additions, keep
+prior milestones' examples running, **and add automated tests covering
+it** (`make test` must stay green) — see `docs/TESTING.md` for where
+tests live and what's expected; an example file alone doesn't get
+checked by anything and won't catch a regression. See
+`docs/DEVELOPMENT_WORKFLOW.md` for how to split a milestone's design vs.
+implementation vs. verification across model tiers when delegating —
+M1 was built and documented that way.
 
 ## Status
 
-All prior open questions are resolved (see "Summary of decisions" above);
-`docs/NEXT_PHASES.md` captures what's deliberately deferred (match guards,
-arrays/lists, generics, traits, the type system) and what M0–M9 need to
-keep forward-compatible with while implementing. Implementation starts at
-**M0** — a bounded, behavior-preserving port to the new hand-written
-lexer/parser/AST pipeline — once this doc is approved.
+M0, M1, and M2 are landed (see their entries above for what changed and
+each milestone's deliberate deviations/simplifications). `docs/NEXT_PHASES.md`
+captures what's deliberately deferred (match guards, arrays/lists,
+generics, traits, the type system, async) and what M0–M9 need to keep
+forward-compatible with. Next up: **M3 — enums.**

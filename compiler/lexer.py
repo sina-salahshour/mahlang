@@ -1,0 +1,193 @@
+"""Hand-written lexer for Mah (replaces the LL(1)-generator's output --
+see docs/V2_DESIGN.md's M0 milestone and docs/GRAMMAR_DSL.md, which
+describes the now-retired mah.lang/compiler-generator pipeline this
+replaces).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+
+
+class TokenType(Enum):
+    # punctuation
+    SEMICOLON = ";"
+    BRACE_OPEN = "{"
+    BRACE_CLOSE = "}"
+    PAREN_OPEN = "("
+    PAREN_CLOSE = ")"
+    COMMA = ","
+    ASSIGN = "="
+    DOT = "."
+    COLON = ":"
+    # operators
+    ADD = "+"
+    SUB = "-"
+    MUL = "*"
+    POW = "**"
+    DIV = "/"
+    TRUEDIV = "//"
+    MOD = "%"
+    EQ = "=="
+    NEQ = "!="
+    LT = "<"
+    GT = ">"
+    AND = "&"
+    OR = "|"
+    # keywords
+    LET = "let"
+    PRINT = "print"
+    INPUT = "input"
+    SIN = "sin"
+    COS = "cos"
+    IF = "if"
+    ELIF = "elif"
+    ELSE = "else"
+    WHILE = "while"
+    BREAK = "break"
+    CONTINUE = "continue"
+    RETURN = "return"
+    FN = "fn"
+    STRUCT = "struct"
+    TRUE = "true"
+    FALSE = "false"
+    # literals / identifiers
+    STRING = "STRING"
+    NUMBER = "NUMBER"
+    ID = "ID"
+    # internal
+    EOF = "EOF"
+
+    def __str__(self) -> str:
+        return self.name
+
+
+KEYWORDS = {
+    "let": TokenType.LET,
+    "print": TokenType.PRINT,
+    "input": TokenType.INPUT,
+    "sin": TokenType.SIN,
+    "cos": TokenType.COS,
+    "if": TokenType.IF,
+    "elif": TokenType.ELIF,
+    "else": TokenType.ELSE,
+    "while": TokenType.WHILE,
+    "break": TokenType.BREAK,
+    "continue": TokenType.CONTINUE,
+    "return": TokenType.RETURN,
+    "fn": TokenType.FN,
+    "struct": TokenType.STRUCT,
+    "true": TokenType.TRUE,
+    "false": TokenType.FALSE,
+}
+
+_SINGLE_CHAR = {
+    ";": TokenType.SEMICOLON,
+    "{": TokenType.BRACE_OPEN,
+    "}": TokenType.BRACE_CLOSE,
+    "(": TokenType.PAREN_OPEN,
+    ")": TokenType.PAREN_CLOSE,
+    ",": TokenType.COMMA,
+    ".": TokenType.DOT,
+    ":": TokenType.COLON,
+    "+": TokenType.ADD,
+    "-": TokenType.SUB,
+    "*": TokenType.MUL,
+    "/": TokenType.DIV,
+    "%": TokenType.MOD,
+    "=": TokenType.ASSIGN,
+    "<": TokenType.LT,
+    ">": TokenType.GT,
+    "&": TokenType.AND,
+    "|": TokenType.OR,
+}
+
+_TWO_CHAR = {
+    "**": TokenType.POW,
+    "//": TokenType.TRUEDIV,
+    "==": TokenType.EQ,
+    "!=": TokenType.NEQ,
+}
+
+
+@dataclass
+class Token:
+    type: TokenType
+    literal: str
+    position: int
+
+    def __str__(self) -> str:
+        return f"<{self.type},'{self.literal}'>"
+
+
+class Lexer:
+    def __init__(self, input_str: str) -> None:
+        self.input_str = input_str
+        self.position = 0
+
+    def _skip_trivia(self) -> None:
+        text = self.input_str
+        n = len(text)
+        while self.position < n:
+            ch = text[self.position]
+            if ch.isspace():
+                self.position += 1
+            elif ch == "#":
+                while self.position < n and text[self.position] != "\n":
+                    self.position += 1
+            else:
+                break
+
+    def get_next_token(self) -> Token:
+        self._skip_trivia()
+        text = self.input_str
+        n = len(text)
+        start = self.position
+        if start >= n:
+            return Token(TokenType.EOF, "$", start)
+
+        ch = text[start]
+
+        if ch.isdigit():
+            end = start
+            while end < n and text[end].isdigit():
+                end += 1
+            if end < n and text[end] == "." and end + 1 < n and text[end + 1].isdigit():
+                end += 1
+                while end < n and text[end].isdigit():
+                    end += 1
+            self.position = end
+            return Token(TokenType.NUMBER, text[start:end], start)
+
+        if ch == '"':
+            end = start + 1
+            while end < n and text[end] != '"':
+                if text[end] == "\\" and end + 1 < n:
+                    end += 2
+                else:
+                    end += 1
+            if end >= n:
+                raise SyntaxError(f"Unterminated string literal at position {start}")
+            end += 1  # consume closing quote
+            self.position = end
+            return Token(TokenType.STRING, text[start:end], start)
+
+        if ch.isalpha() or ch in "_$":
+            end = start
+            while end < n and (text[end].isalnum() or text[end] in "_$"):
+                end += 1
+            self.position = end
+            literal = text[start:end]
+            return Token(KEYWORDS.get(literal, TokenType.ID), literal, start)
+
+        two = text[start : start + 2]
+        if two in _TWO_CHAR:
+            self.position += 2
+            return Token(_TWO_CHAR[two], two, start)
+
+        if ch in _SINGLE_CHAR:
+            self.position += 1
+            return Token(_SINGLE_CHAR[ch], ch, start)
+
+        raise SyntaxError(f"Invalid token at position {start}: '{ch}'")

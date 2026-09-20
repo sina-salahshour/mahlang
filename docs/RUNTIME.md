@@ -1,9 +1,20 @@
 # IR and runtime
 
+> **Note: still current, with one exception.** M0 (`docs/V2_DESIGN.md`)
+> replaced `actions.py`'s inline-during-parsing emission with a real AST
+> and separate resolve/codegen passes (`compiler/resolve.py`,
+> `compiler/codegen.py`) — but deliberately kept this exact IR shape and
+> memory model, so everything below except the words "`actions.py`" and
+> "no AST" (M0 added a real one) is still an accurate description of
+> `code_interpreter.py` today. One implementation detail did change:
+> binary-op tuples are now plain `(op, left, right, dest)` — v1 stored
+> operands reversed as an artifact of its parsing-time operand stack; see
+> `codegen.py`'s module docstring.
+
 Companion to [ARCHITECTURE.md](ARCHITECTURE.md). This is the instruction
-format `actions.py` emits and `code_interpreter.py` executes, and the memory
-model behind it — the part of the system a v2 redesign (heap, closures,
-recursion, structs/enums) most directly replaces.
+format `code_interpreter.py` executes, and the memory model behind it —
+the part of the system a v2 redesign (heap, closures, recursion,
+structs/enums) most directly replaces.
 
 ## Instruction format
 
