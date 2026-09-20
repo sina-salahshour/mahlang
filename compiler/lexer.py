@@ -31,6 +31,7 @@ class TokenType(Enum):
     MOD = "%"
     EQ = "=="
     NEQ = "!="
+    FAT_ARROW = "=>"
     LT = "<"
     GT = ">"
     AND = "&"
@@ -51,6 +52,7 @@ class TokenType(Enum):
     FN = "fn"
     STRUCT = "struct"
     ENUM = "enum"
+    MATCH = "match"
     SOME = "some"
     NONE = "none"
     TRUE = "true"
@@ -82,6 +84,7 @@ KEYWORDS = {
     "fn": TokenType.FN,
     "struct": TokenType.STRUCT,
     "enum": TokenType.ENUM,
+    "match": TokenType.MATCH,
     "some": TokenType.SOME,
     "none": TokenType.NONE,
     "true": TokenType.TRUE,
@@ -114,6 +117,7 @@ _TWO_CHAR = {
     "//": TokenType.TRUEDIV,
     "==": TokenType.EQ,
     "!=": TokenType.NEQ,
+    "=>": TokenType.FAT_ARROW,
 }
 
 

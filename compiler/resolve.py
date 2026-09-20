@@ -75,6 +75,19 @@ emit an enum-construction opcode with zero fields. If neither resolves, a
 clear error names whichever case applies (no such variable and no such
 enum type/variant; or the variant exists but needs braces because it's
 struct-shaped, not unit).
+
+M4 adds `MatchStmt`/pattern resolution (`resolve_pattern`, parallel to
+`resolve_expr`). A `BindPat` allocates a fresh slot in the *current* frame
+level exactly like a `LetStmt` would -- patterns never start a new frame
+level, only `fn` bodies do. `StructPat`/`EnumPat` field validation
+(undeclared type, undeclared variant, duplicate/missing/unknown field)
+reuses the exact same `_check_no_duplicate_field`/`_check_field_set_matches`
+helpers M2/M3's `StructLit`/`EnumLit` validation already established, so
+there's exactly one implementation of "does this field list exactly match
+that declared shape," shared by literals and patterns alike. Each match
+arm gets its own scope layer (pushed/popped around
+`resolve_pattern`+`resolve_block`) so one arm's bindings never leak into
+the next arm's checks or a sibling arm's body.
 """
 
 from __future__ import annotations
@@ -82,6 +95,7 @@ from __future__ import annotations
 from .ast_nodes import (
     AssignStmt,
     Binary,
+    BindPat,
     Block,
     BlockStmt,
     BoolLit,
@@ -91,6 +105,7 @@ from .ast_nodes import (
     CosExpr,
     EnumDecl,
     EnumLit,
+    EnumPat,
     ExprStmt,
     FieldAccess,
     FnExpr,
@@ -98,6 +113,7 @@ from .ast_nodes import (
     IfStmt,
     InputExpr,
     LetStmt,
+    MatchStmt,
     NumberLit,
     PrintStmt,
     ReturnStmt,
@@ -105,8 +121,10 @@ from .ast_nodes import (
     StringLit,
     StructDecl,
     StructLit,
+    StructPat,
     Unary,
     WhileStmt,
+    WildcardPat,
 )
 
 
@@ -250,6 +268,19 @@ class Resolver:
         elif isinstance(stmt, WhileStmt):
             self.resolve_expr(stmt.cond)
             self.resolve_block(stmt.body)
+        elif isinstance(stmt, MatchStmt):
+            self.resolve_expr(stmt.scrutinee)
+            for arm in stmt.arms:
+                # Each arm's pattern bindings and its body share one scope
+                # layer directly enclosing the arm -- resolve_block below
+                # pushes its own additional nested scope for the body's own
+                # statements, exactly like a function's params get their own
+                # scope layer directly enclosing the body's block scope (M1
+                # precedent).
+                self._push()
+                self.resolve_pattern(arm.pattern)
+                self.resolve_block(arm.body)
+                self._pop()
         elif isinstance(stmt, (BreakStmt, ContinueStmt)):
             pass
         elif isinstance(stmt, ReturnStmt):
@@ -412,3 +443,61 @@ class Resolver:
             self.resolve_expr(expr.obj)
             return
         raise AssertionError(f"unhandled expression node {expr!r}")
+
+    # -- patterns (M4) -----------------------------------------------------
+    #
+    # Parallel to resolve_expr, but a separate dispatch since pattern node
+    # types (WildcardPat/BindPat/StructPat/EnumPat) don't otherwise exist as
+    # expressions -- NumberLit/StringLit/BoolLit are the one overlap,
+    # reused as-is for literal patterns (equality, no name to resolve).
+
+    def resolve_pattern(self, pattern) -> None:
+        if isinstance(pattern, WildcardPat):
+            return
+        if isinstance(pattern, (NumberLit, StringLit, BoolLit)):
+            return
+        if isinstance(pattern, BindPat):
+            slot = self.frame_stack[-1].alloc()
+            self._declare(pattern.name, slot, pattern.position)
+            pattern.address = slot
+            return
+        if isinstance(pattern, StructPat):
+            declared = self.struct_decls.get(pattern.type_name)
+            if declared is None:
+                raise NameError(
+                    f"Undefined struct type '{pattern.type_name}' at position {pattern.position}"
+                )
+            label = f"'{pattern.type_name}' pattern"
+            self._check_no_duplicate_field(label, pattern.fields, pattern.position)
+            provided = {name for name, _ in pattern.fields}
+            self._check_field_set_matches(
+                f"Struct pattern for '{pattern.type_name}'", provided, declared, pattern.position
+            )
+            for _name, sub in pattern.fields:
+                self.resolve_pattern(sub)
+            return
+        if isinstance(pattern, EnumPat):
+            variants = self.enum_decls.get(pattern.type_name)
+            if variants is None:
+                raise NameError(
+                    f"Undefined enum type '{pattern.type_name}' at position {pattern.position}"
+                )
+            declared = variants.get(pattern.variant)
+            if declared is None:
+                raise Exception(
+                    f"Enum '{pattern.type_name}' has no variant '{pattern.variant}' "
+                    f"at position {pattern.position}"
+                )
+            label = f"'{pattern.type_name}.{pattern.variant}' pattern"
+            self._check_no_duplicate_field(label, pattern.fields, pattern.position)
+            provided = {name for name, _ in pattern.fields}
+            self._check_field_set_matches(
+                f"Enum pattern for '{pattern.type_name}.{pattern.variant}'",
+                provided,
+                declared,
+                pattern.position,
+            )
+            for _name, sub in pattern.fields:
+                self.resolve_pattern(sub)
+            return
+        raise AssertionError(f"unhandled pattern node {pattern!r}")

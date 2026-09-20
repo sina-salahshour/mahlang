@@ -1,0 +1,65 @@
+struct Point { x, y }
+enum Shape {
+    Circle { r },
+    Square { s },
+    Empty
+}
+enum List { Cons { value, next }, Nil }
+
+fn describe_number(n) {
+    match n {
+        0 => { print("zero") }
+        1 => { print("one") }
+        _ => { print("many") }
+    }
+}
+
+describe_number(0)
+describe_number(1)
+describe_number(42)
+
+let p = Point { x: 3, y: 4 }
+match p {
+    Point { x, y } => { print(x); print(y) }
+}
+
+fn describe_shape(s) {
+    match s {
+        Shape.Circle { r } => { print(3 * r * r) }
+        Shape.Square { s } => { print(s * s) }
+        Shape.Empty => { print("empty") }
+    }
+}
+
+describe_shape(Shape.Circle { r: 5 })
+describe_shape(Shape.Square { s: 4 })
+describe_shape(Shape.Empty)
+
+fn half(n) {
+    if n % 2 == 0 { return some(n // 2) }
+    return none
+}
+
+fn describe_option(opt) {
+    match opt {
+        some(v) => { print(v) }
+        none => { print("nothing") }
+    }
+}
+
+describe_option(half(10))
+describe_option(half(7))
+
+fn make_list(n) {
+    if n == 0 { return List.Nil }
+    return List.Cons { value: n, next: make_list(n - 1) }
+}
+
+fn sum_list(lst) {
+    match lst {
+        List.Cons { value, next } => { return value + sum_list(next) }
+        List.Nil => { return 0 }
+    }
+}
+
+print(sum_list(make_list(5)))

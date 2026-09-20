@@ -837,9 +837,135 @@ node that resolved to it. Then:
    `test_assigning_to_a_bare_unit_variant_raises_cleanly` in
    `tests/test_enums.py`.
    so `none`/`Option.some` keep their special-cased spelling).
-5. **M4 — pattern matching.** `match` over number/string/bool/struct/enum
-   (including the builtin `some`/`none`), bindings, wildcard. Guards
-   deferred — see `docs/NEXT_PHASES.md`.
+5. **M4 — pattern matching. ✅ Landed.** `match EXPR { pattern => block ... }`
+   over number/string/bool literals, wildcard (`_`), a bare binding
+   (any other identifier), struct patterns (`Point { x, y }` /
+   `Point { x: 1, y: sub_pattern }`), enum patterns (`Shape.Circle { r }` /
+   bare `Shape.Empty` for a unit variant), and the built-in `some(pattern)`/
+   `none` (the same reserved keywords used in expression position) —
+   patterns nest arbitrarily (a struct pattern's field can itself be
+   another struct/enum pattern, however deep).
+   **Scope deviations from this doc's original aspirational grammar
+   sketch** (that sketch was written assuming M5's expression-blocks
+   already existed; M4 actually landed before M5, so three things had to
+   be decided differently, each the right call for M4's real, statement-
+   only scope rather than a shortcut):
+   - **`match` is a statement, not an expression** — exactly like `if`/
+     `while` still are as of M4. It cannot be assigned
+     (`let x = match ... ` is **not** supported), passed as a call
+     argument, etc. Making `if`/`while`/`match`/blocks all real
+     expressions is M5's job specifically ("blocks as expressions") —
+     doing it piecemeal for `match` alone here would mean redoing its
+     codegen shape again in M5 for no benefit now.
+   - **Each arm's body is a `Block`** (`pattern => { stmt* }`), not a
+     single expression (`pattern => expr`, the original sketch's
+     `match_arm` grammar) — a block is the only sensible arm-body shape
+     while `match` itself produces no value, and it's exactly what
+     `if`/`while` bodies already are, so nothing new was invented.
+   - **No comma separators between arms.** The original sketch had
+     `match_arm ("," match_arm)*`; Mah's actual established convention
+     (statement sequences, top-level and inside any block, already need no
+     separator between them — semicolons are optional everywhere) makes a
+     required comma between arms an arbitrary inconsistency once arm
+     bodies are unambiguously-terminated `{ }` blocks. Arms parse as a
+     plain sequence until the closing `}`, the same way a block's
+     statement list already does.
+   Also, per this doc's original M4 note and `docs/NEXT_PHASES.md`: **no
+   match guards** (`pattern if cond => ...`, deferred, see that doc's
+   "Match guards" section for how it composes in later) and **no
+   exhaustiveness checking** (also deferred as a nice-to-have, not
+   required) — if no arm's pattern matches at runtime, a clean runtime
+   error is raised (the new `matchfail` opcode) rather than falling through
+   silently or refusing to compile.
+   **The scrutinee's struct-literal-vs-block-opener ambiguity** is the
+   exact same one M2/M3 already solved for `if`/`while` conditions
+   (`match Point { x: 1, y: 2 } { ... }` is ambiguous the same way
+   `if x { ... }` was) — M4 reuses `_parse_condition_expr`
+   (`compiler/parser.py`) directly, no new suppression mechanism.
+   **Patterns themselves need no such suppression at all**, though:
+   pattern parsing is a wholly separate recursive-descent grammar
+   (`_parse_pattern` and friends), never routed through `parse_expr`/
+   `_parse_primary`, so `ID {` inside a pattern always means "struct
+   pattern," unconditionally, with no ambiguity to guard against.
+   **No separate `LiteralPat`/`SomePat`/`NonePat` AST nodes**: a literal
+   pattern reuses `NumberLit`/`StringLit`/`BoolLit` directly (structurally
+   identical to a literal pattern — a value to compare against), and
+   `some(pattern)`/`none` in pattern position desugar straight into
+   `EnumPat(type_name="Option", variant="some"/"none", ...)` at parse time,
+   exactly mirroring how `some(x)`/`none` already desugar into `EnumLit` in
+   expression position (M3).
+   **Field-set validation for struct/enum patterns reuses M2/M3's exact
+   helpers** (`Resolver._check_no_duplicate_field`/`_check_field_set_matches`)
+   rather than a third reimplementation — a struct/enum pattern's field
+   list is validated with the identical missing/unknown/duplicate-field
+   logic a struct/enum *literal* already gets, just fed pattern fields
+   instead of literal value-expr fields (the helpers don't care which).
+   **Codegen: `_gen_pattern_check`'s one shared `failure_jumps` list per
+   arm.** `_gen_match` compiles each arm's pattern via a recursive
+   `_gen_pattern_check(pattern, value_addr, failure_jumps)`, threading a
+   *single* `failure_jumps` list (of `(cond_addr, placeholder_addr)` pairs)
+   through the *entire* recursive walk of one arm's pattern — including
+   every nested struct/enum sub-pattern check, however deep. Only once the
+   whole pattern has been checked and the arm's body compiled does codegen
+   learn `next_arm_target` (the address right after that arm's
+   jump-to-end), at which point every placeholder collected anywhere in
+   that arm's pattern (top-level or nested) gets backpatched to jump there.
+   This gives correct short-circuit AND semantics at arbitrary nesting
+   depth — an earlier failing check (say, the outer enum tag) skips
+   straight past every later check (a nested struct tag, a literal field
+   comparison) without ever reaching them or the body — using exactly the
+   same emit-placeholder-then-backpatch primitive `_gen_if`/`_gen_while`
+   already established, no new control-flow mechanism invented. `break`/
+   `continue` inside a match arm's body are untouched by any of this
+   bookkeeping — they still resolve against `Codegen._while_stack` exactly
+   as before, since a match arm shares its enclosing function's frame level
+   and isn't itself a loop construct.
+   New tokens: `MATCH` (keyword), `FAT_ARROW` (`=>`, added to `_TWO_CHAR`
+   alongside `**`/`//`/`==`/`!=`). New AST nodes: `WildcardPat()`,
+   `BindPat(name, address)` (address set by the resolver, a fresh slot in
+   the *current* frame level — patterns never start a new frame level, only
+   `fn` bodies do), `StructPat(type_name, fields)`, `EnumPat(type_name,
+   variant, fields)`, `MatchArm(pattern, body)`, `MatchStmt(scrutinee,
+   arms)`. New opcodes: `matchtag` (`arg1` = value address, `arg2` =
+   `(kind, type_name, variant_or_none)` with `kind` `"struct"`/`"enum"`,
+   `dest` = boolean match result) and `matchfail` (`arg1`/`arg2` = `None`,
+   4th slot repurposed to hold the source position for the error message —
+   same repurposing precedent as `setfield`'s no-real-destination 4th
+   slot). `resolve.py` gains a `resolve_pattern` dispatch (parallel to
+   `resolve_expr`, since pattern node types mostly don't overlap with
+   expression node types) and a `MatchStmt` case in `resolve_stmt` that
+   pushes one scope per arm around `resolve_pattern` + `resolve_block`
+   (mirroring how a function's params get their own scope layer directly
+   enclosing the body's own block scope).
+   New: `tests/test_match.py` (16 tests) covering: literal number patterns
+   + wildcard; a bare binding pattern capturing the whole matched value;
+   boolean and string literal patterns; struct patterns (shorthand field +
+   explicit sub-pattern, in the same match); enum patterns (struct-shaped
+   and unit variants); `some`/`none` matching (the canonical Option use
+   case this milestone exists for); a deeply nested pattern (enum
+   containing a struct field, matched in one pattern); the payoff
+   end-to-end test — recursion + enums + pattern matching summing a
+   linked list built via `Cons`/`Nil`, a composition literally impossible
+   before M4 since M3 alone had no way to branch on which variant an enum
+   value holds; a non-exhaustive match with no matching arm raising a
+   clean runtime error; `break` inside a match arm correctly targeting the
+   enclosing `while` loop, not anything match-specific; the scrutinee
+   struct-literal-ambiguity restriction (parenthesizing works, mirroring
+   M2/M3's if/while restriction); and match/pattern validation errors
+   (struct pattern missing/unknown field, undeclared struct type in a
+   pattern, undeclared enum type in a pattern, undeclared variant of a
+   declared enum type). All pre-existing tests (85 as of M3) stayed green,
+   unmodified. New example: `examples/match.mh`.
+   Changed: `compiler/lexer.py` (`MATCH`/`FAT_ARROW`), `compiler/ast_nodes.py`
+   (new pattern/match nodes), `compiler/parser.py` (`_parse_match`/
+   `_parse_match_arm`/`_parse_pattern`/`_parse_struct_pat`/
+   `_parse_pattern_field_list`/`_parse_pattern_field`, `parse_stmt`'s new
+   `MATCH` branch), `compiler/resolve.py` (`resolve_pattern`, `MatchStmt`
+   handling in `resolve_stmt`), `compiler/codegen.py` (`_gen_match`/
+   `_gen_pattern_check`, `MatchStmt` in `gen_stmt`), `code_interpreter.py`
+   (`matchtag`/`matchfail` opcode handlers). `runtime_values.py` was **not**
+   touched — `match` only ever tests/reads existing `StructInstance`/
+   `EnumInstance` shapes, it doesn't need a new heap object kind.
 6. **M5 — expression-blocks.** `if`/`match`/bare blocks as values
    everywhere (destination-slot threading described above). This is where
    "no tail expression / semicolon-terminated block" starts producing
@@ -867,8 +993,10 @@ M1 was built and documented that way.
 
 ## Status
 
-M0, M1, M2, and M3 are landed (see their entries above for what changed and
-each milestone's deliberate deviations/simplifications). `docs/NEXT_PHASES.md`
+M0, M1, M2, M3, and M4 are landed (see their entries above for what changed
+and each milestone's deliberate deviations/simplifications). `docs/NEXT_PHASES.md`
 captures what's deliberately deferred (match guards, arrays/lists,
 generics, traits, the type system, async) and what M0–M9 need to keep
-forward-compatible with. Next up: **M4 — pattern matching.**
+forward-compatible with. Next up: **M5 — expression-blocks** (`if`/`match`/
+bare blocks as values everywhere, including finally letting `match` be
+assigned/passed/returned like an ordinary expression).

@@ -22,8 +22,17 @@ indistinguishable at parse time -- the resolver disambiguates them (see
 resolve.py's module docstring) and sets `enum_unit_type` when it turns out
 to be a unit-variant construction rather than a real field access.
 
-No pattern matching/blocks-as-expressions/defer yet -- those land in later
-milestones and will extend this module rather than replace it.
+M4 adds `match` statements and patterns (`WildcardPat`, `BindPat`,
+`StructPat`, `EnumPat`, `MatchArm`, `MatchStmt`) -- see docs/V2_DESIGN.md's
+M4 milestone. `match` is a **statement** in M4 (like `if`/`while` still
+are), not yet an expression -- each arm's body is a `Block`, not a single
+expression. No separate `LiteralPat`/`SomePat`/`NonePat` nodes: literal
+patterns reuse `NumberLit`/`StringLit`/`BoolLit` directly, and
+`some(pattern)`/`none` in pattern position desugar straight into `EnumPat`
+at parse time, exactly mirroring `some(x)`/`none` in expression position.
+
+Blocks-as-expressions/defer yet to come -- those land in later milestones
+and will extend this module rather than replace it.
 
 Every node carries `position` (a source offset into the *combined*,
 preprocessed text) so error messages can point mah.py at a `file:line:col`
@@ -255,4 +264,57 @@ class BlockStmt:
 class StructDecl:
     name: str
     fields: list  # list[str] -- declared field names, in declaration order
+    position: int
+
+
+# -- M4: patterns / match ------------------------------------------------
+#
+# No separate LiteralPat node: NumberLit/StringLit/BoolLit are reused
+# directly as patterns (they're structurally identical -- a literal value
+# to compare against). No separate SomePat/NonePat either: `some(pattern)`/
+# `none` in pattern position desugar straight into EnumPat(type_name=
+# "Option", ...) at parse time, mirroring how docs/V2_DESIGN.md already
+# documents `some(x)`/`none` desugaring into EnumLit in expression position.
+
+
+@dataclass
+class WildcardPat:
+    position: int
+
+
+@dataclass
+class BindPat:
+    name: str
+    position: int
+    # set by Resolver: the slot number (within the enclosing frame level)
+    # this binding's value is stored into.
+    address: Optional[int] = field(default=None, repr=False)
+
+
+@dataclass
+class StructPat:
+    type_name: str
+    fields: list  # list[tuple[str, pattern]]
+    position: int
+
+
+@dataclass
+class EnumPat:
+    type_name: str
+    variant: str
+    fields: list  # list[tuple[str, pattern]] -- [] for a unit variant
+    position: int
+
+
+@dataclass
+class MatchArm:
+    pattern: object
+    body: Block
+    position: int
+
+
+@dataclass
+class MatchStmt:
+    scrutinee: object  # Expr
+    arms: list  # list[MatchArm]
     position: int

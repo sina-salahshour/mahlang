@@ -10,7 +10,22 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from compiler.ast_nodes import Binary, Call, ExprStmt, FnExpr, Ident, LetStmt, Unary
+from compiler.ast_nodes import (
+    Binary,
+    BindPat,
+    BoolLit,
+    Call,
+    EnumPat,
+    ExprStmt,
+    FnExpr,
+    Ident,
+    LetStmt,
+    MatchStmt,
+    NumberLit,
+    StructPat,
+    Unary,
+    WildcardPat,
+)
 from compiler.lexer import Lexer
 from compiler.parser import Parser
 
@@ -68,6 +83,74 @@ class FnDesugaringTests(unittest.TestCase):
         self.assertIsInstance(stmt, LetStmt)
         self.assertIsInstance(stmt.value, FnExpr)
         self.assertIsNone(stmt.value.name)  # anonymous here -- LetStmt carries the name
+
+
+class MatchParsingTests(unittest.TestCase):
+    def test_match_arms_need_no_comma_separator(self):
+        (stmt,) = parse(
+            """
+            match n {
+                0 => { print(0) }
+                _ => { print(1) }
+            }
+            """
+        )
+        self.assertIsInstance(stmt, MatchStmt)
+        self.assertEqual(len(stmt.arms), 2)
+        self.assertIsInstance(stmt.arms[0].pattern, NumberLit)
+        self.assertIsInstance(stmt.arms[1].pattern, WildcardPat)
+
+    def test_wildcard_vs_bind_pattern(self):
+        (stmt,) = parse("match n { _ => { } }")
+        self.assertIsInstance(stmt.arms[0].pattern, WildcardPat)
+
+        (stmt,) = parse("match n { x => { } }")
+        self.assertIsInstance(stmt.arms[0].pattern, BindPat)
+        self.assertEqual(stmt.arms[0].pattern.name, "x")
+
+    def test_literal_patterns_reuse_expression_literal_nodes(self):
+        (stmt,) = parse("match n { true => { } }")
+        self.assertIsInstance(stmt.arms[0].pattern, BoolLit)
+        self.assertTrue(stmt.arms[0].pattern.value)
+
+    def test_struct_pattern_shorthand_field_desugars_to_bind_pat(self):
+        (stmt,) = parse("match p { Point { x } => { } }")
+        pattern = stmt.arms[0].pattern
+        self.assertIsInstance(pattern, StructPat)
+        self.assertEqual(pattern.type_name, "Point")
+        (field_name, sub) = pattern.fields[0]
+        self.assertEqual(field_name, "x")
+        self.assertIsInstance(sub, BindPat)
+        self.assertEqual(sub.name, "x")
+
+    def test_struct_pattern_explicit_field_pattern(self):
+        (stmt,) = parse("match p { Point { x: 1 } => { } }")
+        pattern = stmt.arms[0].pattern
+        (field_name, sub) = pattern.fields[0]
+        self.assertEqual(field_name, "x")
+        self.assertIsInstance(sub, NumberLit)
+
+    def test_enum_pattern_unit_variant_has_no_fields(self):
+        (stmt,) = parse("match s { Shape.Empty => { } }")
+        pattern = stmt.arms[0].pattern
+        self.assertIsInstance(pattern, EnumPat)
+        self.assertEqual(pattern.type_name, "Shape")
+        self.assertEqual(pattern.variant, "Empty")
+        self.assertEqual(pattern.fields, [])
+
+    def test_some_none_desugar_to_option_enum_pat(self):
+        (stmt,) = parse("match opt { some(v) => { } }")
+        pattern = stmt.arms[0].pattern
+        self.assertIsInstance(pattern, EnumPat)
+        self.assertEqual(pattern.type_name, "Option")
+        self.assertEqual(pattern.variant, "some")
+        (field_name, sub) = pattern.fields[0]
+        self.assertEqual(field_name, "value")
+        self.assertIsInstance(sub, BindPat)
+
+        (stmt,) = parse("match opt { none => { } }")
+        pattern = stmt.arms[0].pattern
+        self.assertEqual((pattern.type_name, pattern.variant, pattern.fields), ("Option", "none", []))
 
 
 class CallTests(unittest.TestCase):

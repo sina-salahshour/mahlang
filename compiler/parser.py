@@ -16,6 +16,7 @@ from decimal import Decimal
 from .ast_nodes import (
     AssignStmt,
     Binary,
+    BindPat,
     Block,
     BlockStmt,
     BoolLit,
@@ -25,6 +26,7 @@ from .ast_nodes import (
     CosExpr,
     EnumDecl,
     EnumLit,
+    EnumPat,
     ExprStmt,
     FieldAccess,
     FnExpr,
@@ -32,6 +34,8 @@ from .ast_nodes import (
     IfStmt,
     InputExpr,
     LetStmt,
+    MatchArm,
+    MatchStmt,
     NumberLit,
     PrintStmt,
     ReturnStmt,
@@ -39,8 +43,10 @@ from .ast_nodes import (
     StringLit,
     StructDecl,
     StructLit,
+    StructPat,
     Unary,
     WhileStmt,
+    WildcardPat,
 )
 from .lexer import Lexer, Token, TokenType
 
@@ -163,6 +169,9 @@ class Parser:
         if tok.type is TokenType.IF:
             return self._parse_if()
 
+        if tok.type is TokenType.MATCH:
+            return self._parse_match()
+
         if tok.type is TokenType.WHILE:
             self.advance()
             cond = self._parse_condition_expr()
@@ -224,6 +233,118 @@ class Parser:
             return self.parse_expr()
         finally:
             self._struct_literal_allowed = old
+
+    def _parse_match(self) -> MatchStmt:
+        match_tok = self.advance()  # MATCH
+        # Same struct-literal-vs-block-opener ambiguity M2/M3 solved for
+        # if/while conditions (`match Point { x: 1, y: 2 } { ... }`) --
+        # reuse the exact same suppression helper, no new mechanism needed.
+        scrutinee = self._parse_condition_expr()
+        self.expect(TokenType.BRACE_OPEN)
+        arms = []
+        while self.current.type is not TokenType.BRACE_CLOSE:
+            arms.append(self._parse_match_arm())
+        self.expect(TokenType.BRACE_CLOSE)
+        return MatchStmt(scrutinee=scrutinee, arms=arms, position=match_tok.position)
+
+    def _parse_match_arm(self) -> MatchArm:
+        pattern = self._parse_pattern()
+        arrow_tok = self.expect(TokenType.FAT_ARROW)
+        body = self.parse_block()
+        return MatchArm(pattern=pattern, body=body, position=arrow_tok.position)
+
+    # -- patterns ------------------------------------------------------
+    #
+    # Pattern parsing is a completely separate grammar from expressions --
+    # its own dedicated recursive-descent functions, never routed through
+    # parse_expr/_parse_primary -- so `ID {` inside a pattern is never
+    # ambiguous with anything (unlike the scrutinee expression above): it
+    # always means "struct pattern," unconditionally, no suppression flag
+    # needed here.
+
+    def _parse_pattern(self):
+        tok = self.current
+
+        if tok.type is TokenType.NONE:
+            self.advance()
+            return EnumPat(type_name="Option", variant="none", fields=[], position=tok.position)
+
+        if tok.type is TokenType.SOME:
+            self.advance()
+            self.expect(TokenType.PAREN_OPEN)
+            inner = self._parse_pattern()
+            self.expect(TokenType.PAREN_CLOSE)
+            return EnumPat(
+                type_name="Option", variant="some", fields=[("value", inner)], position=tok.position
+            )
+
+        if tok.type is TokenType.NUMBER:
+            self.advance()
+            return NumberLit(value=Decimal(tok.literal), position=tok.position)
+
+        if tok.type is TokenType.STRING:
+            self.advance()
+            raw = tok.literal[1:-1]
+            value = bytes(raw, "utf-8").decode("unicode_escape")
+            return StringLit(value=value, position=tok.position)
+
+        if tok.type is TokenType.TRUE:
+            self.advance()
+            return BoolLit(value=True, position=tok.position)
+
+        if tok.type is TokenType.FALSE:
+            self.advance()
+            return BoolLit(value=False, position=tok.position)
+
+        if tok.type is TokenType.ID:
+            self.advance()
+            if tok.literal == "_":
+                return WildcardPat(position=tok.position)
+            if self.current.type is TokenType.BRACE_OPEN:
+                return self._parse_struct_pat(tok)
+            if self.current.type is TokenType.DOT:
+                self.advance()
+                variant_tok = self.expect(TokenType.ID)
+                fields = []
+                if self.current.type is TokenType.BRACE_OPEN:
+                    self.advance()
+                    fields = self._parse_pattern_field_list()
+                    self.expect(TokenType.BRACE_CLOSE)
+                return EnumPat(
+                    type_name=tok.literal,
+                    variant=variant_tok.literal,
+                    fields=fields,
+                    position=tok.position,
+                )
+            return BindPat(name=tok.literal, position=tok.position)
+
+        raise SyntaxError(f"Invalid syntax '{tok}' at position '{tok.position}'")
+
+    def _parse_struct_pat(self, name_tok: Token) -> StructPat:
+        self.expect(TokenType.BRACE_OPEN)
+        fields = self._parse_pattern_field_list()
+        self.expect(TokenType.BRACE_CLOSE)
+        return StructPat(type_name=name_tok.literal, fields=fields, position=name_tok.position)
+
+    def _parse_pattern_field_list(self) -> list:
+        fields = []
+        if self.current.type is not TokenType.BRACE_CLOSE:
+            fields.append(self._parse_pattern_field())
+            while self.current.type is TokenType.COMMA:
+                self.advance()
+                fields.append(self._parse_pattern_field())
+        return fields
+
+    def _parse_pattern_field(self):
+        name_tok = self.expect(TokenType.ID)
+        if self.current.type is TokenType.COLON:
+            self.advance()
+            sub = self._parse_pattern()
+        else:
+            # Shorthand `x` means `x: x` -- bind field x's value to a fresh
+            # local variable named x.
+            sub = BindPat(name=name_tok.literal, position=name_tok.position)
+        return (name_tok.literal, sub)
 
     def _parse_struct_decl(self) -> StructDecl:
         struct_tok = self.advance()  # STRUCT

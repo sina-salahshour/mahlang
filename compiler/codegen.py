@@ -65,6 +65,31 @@ reused singleton rather than a freshly allocated (if value-equal) object
 per use: `EnumLit(type_name="Option", variant="none")` emits a plain `ld`
 of the shared `runtime_values.NONE_VALUE` object instead of the generic
 `enum` construction instruction.
+
+New opcodes for M4 (`match`, see docs/V2_DESIGN.md's M4 milestone):
+- `matchtag`: `arg1` = address of the value being tested, `arg2` =
+  `(kind, type_name, variant_or_none)` where `kind` is `"struct"` or
+  `"enum"` (`variant_or_none` is `None` for a struct pattern), `dest` =
+  boolean result (matched or not).
+- `matchfail`: `arg1` = `None`, `arg2` = `None`, and the 4th slot -- `dest`
+  for every other opcode -- is repurposed to hold the source position (for
+  the error message), mirroring `setfield`'s precedent of repurposing that
+  slot when there's no real destination: `matchfail` never writes anywhere,
+  it always raises.
+`_gen_match`/`_gen_pattern_check` compile each arm's pattern into a chain
+of checks that all thread into one shared `failure_jumps` list per arm
+(collected across arbitrarily nested sub-patterns, via one `failure_jumps`
+list passed down the recursion) -- once every check in that arm's pattern
+has been emitted and the arm's body compiled, every one of that arm's
+placeholders gets patched to jump to the next arm's first instruction. This
+gives correct short-circuit AND semantics (an earlier failing check skips
+straight to the next arm, never reaching later checks in the same pattern
+or the body) at arbitrary nesting depth, using the exact same
+emit-placeholder-then-backpatch primitive `_gen_if`/`_gen_while` already
+use -- no new control-flow mechanism. If no arm's pattern matches, control
+falls through to a `matchfail` instruction emitted once at the end of the
+whole `match` (M4 has no exhaustiveness checking -- see docs/NEXT_PHASES.md
+-- so this is a genuine runtime possibility, not just a safety net).
 """
 
 from __future__ import annotations
@@ -72,6 +97,7 @@ from __future__ import annotations
 from .ast_nodes import (
     AssignStmt,
     Binary,
+    BindPat,
     Block,
     BlockStmt,
     BoolLit,
@@ -81,6 +107,7 @@ from .ast_nodes import (
     CosExpr,
     EnumDecl,
     EnumLit,
+    EnumPat,
     ExprStmt,
     FieldAccess,
     FnExpr,
@@ -88,6 +115,7 @@ from .ast_nodes import (
     IfStmt,
     InputExpr,
     LetStmt,
+    MatchStmt,
     NumberLit,
     PrintStmt,
     ReturnStmt,
@@ -95,8 +123,10 @@ from .ast_nodes import (
     StringLit,
     StructDecl,
     StructLit,
+    StructPat,
     Unary,
     WhileStmt,
+    WildcardPat,
 )
 from runtime_values import NONE_VALUE
 
@@ -160,6 +190,8 @@ class Codegen:
             self._gen_if(stmt)
         elif isinstance(stmt, WhileStmt):
             self._gen_while(stmt)
+        elif isinstance(stmt, MatchStmt):
+            self._gen_match(stmt)
         elif isinstance(stmt, BreakStmt):
             self._gen_break(stmt)
         elif isinstance(stmt, ContinueStmt):
@@ -216,6 +248,59 @@ class Codegen:
         for addr in loop_ctx["break_placeholders"]:
             self.buf.emit(("jmp", None, None, end_target), address=addr)
         self._while_stack.pop()
+
+    def _gen_match(self, stmt: MatchStmt) -> None:
+        scrutinee_addr = self.gen_expr(stmt.scrutinee)
+        end_jumps = []
+        for arm in stmt.arms:
+            failure_jumps = []  # list[(cond_addr, placeholder_addr)]
+            self._gen_pattern_check(arm.pattern, scrutinee_addr, failure_jumps)
+            self.gen_block(arm.body)
+            end_jumps.append(self.buf.emit((None, None, None, None)))
+            next_arm_target = self.buf.code_pointer
+            for cond_addr, placeholder in failure_jumps:
+                self.buf.emit(("jmpf", cond_addr, None, next_arm_target), address=placeholder)
+        self.buf.emit(("matchfail", None, None, stmt.position))
+        end_target = self.buf.code_pointer
+        for addr in end_jumps:
+            self.buf.emit(("jmp", None, None, end_target), address=addr)
+
+    def _gen_pattern_check(self, pattern, value_addr, failure_jumps: list) -> None:
+        """Emit checks for `pattern` against the value at `value_addr`,
+        appending `(cond_addr, placeholder_addr)` to `failure_jumps` for
+        every check that can fail. Recurses into struct/enum sub-patterns
+        using the SAME `failure_jumps` list threaded through the whole
+        walk of one arm's pattern -- see this module's docstring for why
+        that single shared list is what gives correct short-circuit AND
+        semantics at arbitrary nesting depth."""
+        if isinstance(pattern, WildcardPat):
+            return
+        if isinstance(pattern, BindPat):
+            self.buf.emit(("=", value_addr, None, (0, pattern.address)))
+            return
+        if isinstance(pattern, (NumberLit, StringLit, BoolLit)):
+            lit_addr = self.gen_expr(pattern)
+            cond = self._temp()
+            self.buf.emit(("eq", value_addr, lit_addr, cond))
+            placeholder = self.buf.emit((None, None, None, None))
+            failure_jumps.append((cond, placeholder))
+            return
+        if isinstance(pattern, (StructPat, EnumPat)):
+            cond = self._temp()
+            if isinstance(pattern, StructPat):
+                self.buf.emit(("matchtag", value_addr, ("struct", pattern.type_name, None), cond))
+            else:
+                self.buf.emit(
+                    ("matchtag", value_addr, ("enum", pattern.type_name, pattern.variant), cond)
+                )
+            placeholder = self.buf.emit((None, None, None, None))
+            failure_jumps.append((cond, placeholder))
+            for field_name, sub_pattern in pattern.fields:
+                field_addr = self._temp()
+                self.buf.emit(("getfield", value_addr, field_name, field_addr))
+                self._gen_pattern_check(sub_pattern, field_addr, failure_jumps)
+            return
+        raise AssertionError(f"unhandled pattern node {pattern!r}")
 
     def _gen_break(self, stmt: BreakStmt) -> None:
         if not self._while_stack:

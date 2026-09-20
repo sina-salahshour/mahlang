@@ -35,6 +35,14 @@ class. `getfield`/`setfield` are generalized to accept either a
 `.fields` dict shape, so `some(5).value` and `some(5).value = 6` work
 through the exact same mechanism M2 built for structs, with no new opcode
 needed for enum field access/mutation.
+
+M4 adds `matchtag`/`matchfail` for `match` statements (see
+docs/V2_DESIGN.md's M4 milestone): `matchtag` tests whether a value is a
+`StructInstance`/`EnumInstance` of the expected type (and, for an enum,
+variant), writing a boolean result that compiler/codegen.py's
+backpatched jump chain then branches on; `matchfail` is reached only when
+no arm's pattern matched (M4 does no exhaustiveness checking) and always
+raises a clean runtime error naming the source position.
 """
 
 from decimal import Decimal
@@ -236,5 +244,19 @@ def run_code(code_block: list, global_slot_count: int):
                 if field_name not in obj.fields:
                     raise Exception(f"'{obj.type_name}' has no field '{field_name}' at position {pc}")
                 obj.fields[field_name] = _read(current_frame, src_addr)
+            case ("matchtag", value_addr, tag_info, dest):
+                kind, type_name, variant = tag_info
+                val = _read(current_frame, value_addr)
+                if kind == "struct":
+                    matched = isinstance(val, StructInstance) and val.type_name == type_name
+                else:
+                    matched = (
+                        isinstance(val, EnumInstance)
+                        and val.type_name == type_name
+                        and val.variant == variant
+                    )
+                _write(current_frame, dest, matched)
+            case ("matchfail", None, None, position):
+                raise Exception(f"No pattern in 'match' matched the value at position {position}")
             case catchall:
                 raise RuntimeError(f"invalid operation {catchall}")
