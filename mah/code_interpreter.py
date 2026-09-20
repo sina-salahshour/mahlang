@@ -66,7 +66,7 @@ import math
 import sys
 from typing import Any
 
-from runtime_values import Closure, EnumInstance, Frame, NONE_VALUE, StructInstance
+from .runtime_values import Closure, EnumInstance, Frame, NONE_VALUE, StructInstance
 
 
 def _to_str(val: Any) -> str:

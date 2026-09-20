@@ -10,7 +10,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from compiler.ast_nodes import (
+from mah.compiler.ast_nodes import (
     Binary,
     BindPat,
     Block,
@@ -30,8 +30,8 @@ from compiler.ast_nodes import (
     Unary,
     WildcardPat,
 )
-from compiler.lexer import Lexer
-from compiler.parser import Parser
+from mah.compiler.lexer import Lexer
+from mah.compiler.parser import Parser
 
 
 def parse(source: str):

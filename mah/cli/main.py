@@ -1,21 +1,19 @@
 #!/usr/bin/env python3
+import argparse
 import os
 import re
 import sys
-from pathlib import Path
 
-from code_interpreter import run_code
-from compiler.codegen import Codegen, CodeBuffer
-from compiler.lexer import Lexer
-from compiler.parser import Parser
-from compiler.resolve import Resolver
-from preprocessor import demangle_message, preprocess
+from ..code_interpreter import run_code
+from ..compiler.codegen import Codegen, CodeBuffer
+from ..compiler.lexer import Lexer
+from ..compiler.parser import Parser
+from ..compiler.resolve import Resolver
+from ..preprocessor import demangle_message, preprocess
 
 sys.tracebacklimit = 0
 
-USAGE_HELP_MESSGE = """Usage:
-    mah run\t <input file>\t\t# to run file
-    mah build\t <input file>\t\t# to see the program instructions"""
+_SUBCOMMANDS = {"run", "build", "lsp"}
 
 
 _DUMP_COLUMN_WIDTH = 9
@@ -35,7 +33,7 @@ def _dump_cell(value) -> str:
     return text.center(_DUMP_COLUMN_WIDTH)
 
 
-def print_code_block(buf: CodeBuffer, should_save_to_file=False):
+def print_code_block(buf: CodeBuffer, output_path: str | None = None):
     code_block = "\n"
     for index, code in enumerate(buf.code[:400]):
         if not code:
@@ -43,10 +41,10 @@ def print_code_block(buf: CodeBuffer, should_save_to_file=False):
         code_block += f"{index}:\t{'|'.join(map(_dump_cell, code))}\n"
         code_block += ("\t " + "-" * 36) + "\n"
 
-    if not should_save_to_file:
+    if output_path is None:
         print(code_block)
     else:
-        with open("output.txt", "w") as f:
+        with open(output_path, "w") as f:
             f.write(code_block)
 
 
@@ -55,9 +53,8 @@ def read_file(file_name):
         with open(file_name) as f:
             input_str = f.read()
     except FileNotFoundError:
-        print(f"Error: file not found '{file_name}'\n")
-        print(USAGE_HELP_MESSGE)
-        exit(-3)
+        print(f"Error: file not found '{file_name}'", file=sys.stderr)
+        sys.exit(2)
     return input_str
 
 
@@ -128,27 +125,62 @@ def _location_label(pp, entry_path: str, combined_offset: int) -> str:
     return f"{os.path.basename(path)}#{line}:{row}"
 
 
-def main():
-    should_save_to_file = False
-    if len(sys.argv) == 3:
-        command = sys.argv[1]
-        file_name = sys.argv[2]
-    elif len(sys.argv) == 2:
-        command = "run"
-        file_name = sys.argv[1]
-    elif len(sys.argv) == 1 and Path("input.txt"):
-        command = "build"
-        file_name = "input.txt"
-        should_save_to_file = True
-    else:
-        print(USAGE_HELP_MESSGE)
-        exit(-1)
+def _build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="mah",
+        description="The Mah programming language toolchain.",
+    )
+    subparsers = parser.add_subparsers(dest="command")
 
-    # Read the entry file, then inline any `import "..."` directives.
-    entry_str = read_file(file_name)
-    pp = preprocess(file_name, entry_str)
+    run_parser = subparsers.add_parser("run", help="compile and run a .mh file")
+    run_parser.add_argument("file", help="path to the .mh file to run")
 
-    # Report unresolved imports before attempting to compile.
+    build_parser = subparsers.add_parser("build", help="compile a .mh file and print its bytecode")
+    build_parser.add_argument("file", help="path to the .mh file to compile")
+    build_parser.add_argument(
+        "-o", "--output", metavar="PATH",
+        help="write the bytecode dump to PATH instead of printing it",
+    )
+
+    lsp_parser = subparsers.add_parser("lsp", help="start the Mah language server (speaks LSP over stdio)")
+    lsp_parser.add_argument(
+        "--version", action="store_true",
+        help="print the language server's version and exit",
+    )
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point -- see bin/mah (installed) and mah/__main__.py
+    (`python -m mah`, e.g. from a repo checkout) for how this gets
+    invoked.
+
+    Preserves one piece of the old CLI's UX: a bare file argument with no
+    subcommand word (`mah foo.mh`) is shorthand for `mah run foo.mh` --
+    only kicks in when the first token isn't a known subcommand name or a
+    help/version flag, so it never shadows `mah run ...` etc. (Known,
+    accepted limitation: a real file literally named `run`/`build`/`lsp`
+    can't be run via this shorthand -- use `mah run ./run` instead.)
+    """
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] not in _SUBCOMMANDS and argv[0] not in ("-h", "--help", "--version"):
+        argv = ["run", *argv]
+
+    parser = _build_arg_parser()
+    args = parser.parse_args(argv)
+
+    if args.command is None:
+        parser.print_help()
+        return 1
+
+    if args.command == "lsp":
+        from ..lsp.server import main as lsp_main
+        return lsp_main(["--version"] if args.version else [])
+
+    entry_str = read_file(args.file)
+    pp = preprocess(args.file, entry_str)
+
     if pp.errors:
         message, offset, _length = pp.errors[0]
         line_info = find_error_line(entry_str, offset)
@@ -160,19 +192,12 @@ def main():
     file_str = pp.text
 
     try:
-        match command:
-            case "build":
-                buf = generate_code(file_str, pp)
-                print_code_block(buf, should_save_to_file=should_save_to_file)
-            case "run":
-                buf = generate_code(file_str, pp)
-                run_code(buf.code[:400], buf.global_slot_count)
-            case unknown_command:
-                print(
-                    f"Error: command not found '{unknown_command}'.\navailable commands are 'build' and 'run'\n"
-                )
-                print(USAGE_HELP_MESSGE)
-                exit(-2)
+        if args.command == "build":
+            buf = generate_code(file_str, pp)
+            print_code_block(buf, output_path=args.output)
+        elif args.command == "run":
+            buf = generate_code(file_str, pp)
+            run_code(buf.code[:400], buf.global_slot_count)
     except Exception as e:
         (message, *_) = e.args
         message = demangle_message(message)
@@ -186,11 +211,11 @@ def main():
             e.args = (message,)
             raise e
         message = message.replace(pos, label)
-
         e.args = (message,)
-
         raise e
+
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

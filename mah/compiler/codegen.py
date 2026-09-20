@@ -181,7 +181,7 @@ from .ast_nodes import (
     WhileStmt,
     WildcardPat,
 )
-from runtime_values import NONE_VALUE
+from ..runtime_values import NONE_VALUE
 
 CODE_LIMIT = 400
 

@@ -22,11 +22,11 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from compiler.codegen import Codegen  # noqa: E402
-from compiler.lexer import KEYWORDS, Lexer, Token, TokenType  # noqa: E402
-from compiler.parser import Parser  # noqa: E402
-from compiler.resolve import Resolver  # noqa: E402
-from preprocessor import BUFFER_PATH, demangle_message, preprocess  # noqa: E402
+from ..compiler.codegen import Codegen  # noqa: E402
+from ..compiler.lexer import KEYWORDS, Lexer, Token, TokenType  # noqa: E402
+from ..compiler.parser import Parser  # noqa: E402
+from ..compiler.resolve import Resolver  # noqa: E402
+from ..preprocessor import BUFFER_PATH, demangle_message, preprocess  # noqa: E402
 
 # --------------------------------------------------------------------------
 # Language metadata (used for hover + completion)

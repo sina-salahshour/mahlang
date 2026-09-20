@@ -28,7 +28,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lsp import analysis  # noqa: E402
+from mah.lsp import analysis  # noqa: E402
 
 
 # --------------------------------------------------------------------------
@@ -281,7 +281,7 @@ class ResolveErrorTests(unittest.TestCase):
 class RetiredScopeModelTests(unittest.TestCase):
     def test_old_scope_functions_and_class_removed(self):
         analysis_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lsp", "analysis.py"
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "mah", "lsp", "analysis.py"
         )
         with open(analysis_path, encoding="utf-8") as handle:
             source = handle.read()
@@ -290,8 +290,8 @@ class RetiredScopeModelTests(unittest.TestCase):
         self.assertNotIn("class _Scope", source)
 
     def test_lsp_modules_import_cleanly(self):
-        from lsp import analysis as analysis_mod  # noqa: F401
-        from lsp import server as server_mod  # noqa: F401
+        from mah.lsp import analysis as analysis_mod  # noqa: F401
+        from mah.lsp import server as server_mod  # noqa: F401
 
         self.assertTrue(hasattr(analysis_mod, "get_definition"))
         self.assertTrue(hasattr(analysis_mod, "get_rename_edits"))

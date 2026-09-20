@@ -18,13 +18,15 @@ make lang
 
 # then get the result how ever you want
 
-python ./mah.py ./examples/input.mh
+python -m mah run ./examples/input.mh      # from a repo checkout
+mah run ./examples/input.mh                # after `make install-cli`
 
 # or you can see the generated code with
-python ./mah.py build ./examples/input.mh
+python -m mah build ./examples/input.mh
 
-# or to read from input.txt and write to output.txt, simply run:
-python mah.py
+# `build` takes an explicit output flag if you want the dump written to a
+# file instead of stdout:
+python -m mah build ./examples/input.mh -o output.txt
 
 
 ```
@@ -35,13 +37,13 @@ To see the language in action, you can check out the `examples` folder.
 
 ```sh
 # Prime numbers calculation
-python mah.py examples/new_prime_numbers.mh
+python -m mah run examples/new_prime_numbers.mh
 
 # String operations, concatenation, comparisons, and functions
-python mah.py examples/strings.mh
+python -m mah run examples/strings.mh
 
 # Importing another file
-python mah.py examples/import_demo.mh
+python -m mah run examples/import_demo.mh
 ```
 
 ## Imports and exports

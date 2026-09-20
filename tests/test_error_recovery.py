@@ -26,11 +26,11 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from compiler.ast_nodes import ErrorNode, ExprStmt, LetStmt, PrintStmt
-from preprocessor import preprocess
+from mah.compiler.ast_nodes import ErrorNode, ExprStmt, LetStmt, PrintStmt
+from mah.preprocessor import preprocess
 from tests.support import parse_source
 
-import mah  # noqa: E402 -- the repo-root CLI module, for generate_code
+from mah.cli import main as mah  # noqa: E402 -- the CLI module, for generate_code
 
 
 class OneErrorRecoveryTests(unittest.TestCase):
@@ -143,11 +143,11 @@ class LspDiagnosticsSmokeTests(unittest.TestCase):
         # Import in a subprocess-free way: just exercise the import here.
         # This used to raise ModuleNotFoundError (actions.py deleted in M0)
         # / ImportError (compiler.ir_generator gone) before M6's fix.
-        from lsp import analysis  # noqa: F401
-        from lsp import server  # noqa: F401
+        from mah.lsp import analysis  # noqa: F401
+        from mah.lsp import server  # noqa: F401
 
     def test_get_diagnostics_reports_multiple_parse_errors(self):
-        from lsp import analysis
+        from mah.lsp import analysis
 
         source = "let a = )\nlet b = ,\nprint(1)"
         diagnostics = analysis.get_diagnostics(source)

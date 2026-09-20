@@ -17,7 +17,7 @@ corrupts the protocol stream.
 
 Run it directly for a quick sanity check:
 
-    python -m lsp.server --version
+    python -m mah lsp --version
 """
 
 from __future__ import annotations
@@ -28,17 +28,7 @@ import sys
 from urllib.parse import unquote, urlparse
 from urllib.request import pathname2url
 
-# Allow running both as ``python -m lsp.server`` and ``python lsp/server.py``.
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_REPO_ROOT = os.path.dirname(_HERE)
-for _path in (_REPO_ROOT, _HERE):
-    if _path not in sys.path:
-        sys.path.insert(0, _path)
-
-try:  # package-relative import (python -m lsp.server)
-    from . import analysis
-except ImportError:  # script import (python lsp/server.py)
-    import analysis  # type: ignore
+from . import analysis
 
 SERVER_NAME = "mah-lsp"
 SERVER_VERSION = "0.1.0"

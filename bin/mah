@@ -1,0 +1,24 @@
+#!/usr/bin/env python3
+"""Installed entry point for the `mah` command (see the Makefile's
+`install-cli` target). Deliberately kept OUTSIDE the `mah` package
+itself and named without a `.py` extension: a file literally named
+`mah.py` sitting in the same directory as the `mah/` package directory
+would be ambiguous to Python's import system (which one does
+`import mah` mean?), so this lives as a separate small launcher instead.
+
+Resolves its own real path explicitly (so running it through
+`install-cli`'s BIN_DIR -> LIB_DIR symlink finds the right install
+directory regardless of any particular sys.path[0]-from-symlink
+behavior) and delegates straight to `mah.cli.main.main`.
+"""
+import os
+import sys
+
+_LIB_DIR = os.path.dirname(os.path.realpath(__file__))
+if _LIB_DIR not in sys.path:
+    sys.path.insert(0, _LIB_DIR)
+
+from mah.cli.main import main
+
+if __name__ == "__main__":
+    raise SystemExit(main())

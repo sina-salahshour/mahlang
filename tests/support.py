@@ -22,12 +22,12 @@ if _REPO_ROOT not in sys.path:
 
 EXAMPLES_DIR = os.path.join(_REPO_ROOT, "examples")
 
-from code_interpreter import run_code  # noqa: E402
-from compiler.codegen import Codegen  # noqa: E402
-from compiler.lexer import Lexer  # noqa: E402
-from compiler.parser import Parser  # noqa: E402
-from compiler.resolve import Resolver  # noqa: E402
-from preprocessor import preprocess  # noqa: E402
+from mah.code_interpreter import run_code  # noqa: E402
+from mah.compiler.codegen import Codegen  # noqa: E402
+from mah.compiler.lexer import Lexer  # noqa: E402
+from mah.compiler.parser import Parser  # noqa: E402
+from mah.compiler.resolve import Resolver  # noqa: E402
+from mah.preprocessor import preprocess  # noqa: E402
 
 
 def compile_source(*, path: str | None = None, text: str | None = None):

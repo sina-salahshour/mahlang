@@ -90,9 +90,9 @@ the `_read`/`_write` helpers for any `(depth, slot)` operand — never index
 file.** Concretely:
 
 ```sh
-make test                                   # must stay green
-python mah.py build examples/your_test.mh   # eyeball the generated IR
-python mah.py examples/your_test.mh         # run it
+make test                                       # must stay green
+python -m mah build examples/your_test.mh       # eyeball the generated IR
+python -m mah run examples/your_test.mh         # run it
 ```
 
 - Add test cases to `tests/test_language.py` (happy path + the feature's

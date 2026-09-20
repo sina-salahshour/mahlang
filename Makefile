@@ -7,7 +7,6 @@ PYTHON ?= python3
 FTDETECT := $(NVIM_DIR)/ftdetect/mah.vim
 TS_PARSER := $(NVIM_DIR)/parser/mah.so
 LSP_FTPLUGIN := $(NVIM_DIR)/ftplugin/mah.lua
-LSP_DIR := $(NVIM_DIR)/mah-lsp
 
 # CLI install layout (defaults to a user-local prefix, e.g. ~/.local).
 PREFIX ?= $(HOME)/.local
@@ -28,95 +27,102 @@ lang:
 test:
 	$(PYTHON) -m unittest discover -s tests -t . -v
 
+# ---------------------------------------------------------------------------
+# mah -- the CLI (which also ships the language server as `mah lsp`)
+# ---------------------------------------------------------------------------
+#
 # Install the interpreter into $(LIB_DIR) and link the executable as `mah`.
-# Running a script through the symlink makes Python resolve sys.path[0] to the
-# real $(LIB_DIR), so the bundled modules import correctly from any directory.
-install-cli:
-	mkdir -p $(LIB_DIR)/compiler $(BIN_DIR)
-	cp mah.py code_interpreter.py preprocessor.py runtime_values.py $(LIB_DIR)/
-	cp compiler/__init__.py compiler/lexer.py compiler/parser.py compiler/ast_nodes.py compiler/resolve.py compiler/codegen.py $(LIB_DIR)/compiler/
-	chmod +x $(LIB_DIR)/mah.py
-	ln -sf $(LIB_DIR)/mah.py $(BIN_LINK)
+# bin/mah resolves its own real path explicitly and does
+# `from mah.cli.main import main`, so this works from any invoking directory
+# regardless of how sys.path[0] gets set for a script run through a symlink.
+install-mah:
+	mkdir -p $(LIB_DIR) $(BIN_DIR)
+	rm -rf $(LIB_DIR)/mah
+	cp -r mah $(LIB_DIR)/mah
+	cp bin/mah $(LIB_DIR)/mah-launcher
+	chmod +x $(LIB_DIR)/mah-launcher
+	ln -sf $(LIB_DIR)/mah-launcher $(BIN_LINK)
 
-uninstall-cli:
+uninstall-mah:
 	rm -f $(BIN_LINK)
 	rm -rf $(LIB_DIR)
 	-rmdir $(BIN_DIR) 2>/dev/null || true
 
-# Filetype detection is shared by syntax highlighting and the LSP.
+# ---------------------------------------------------------------------------
+# nvim -- editor integration: tree-sitter highlighting + the LSP ftplugin
+# (which just shells out to the already-installed `mah lsp` -- see
+# install-mah above). Both pieces share one filetype-detection file and are
+# installed/removed together now that neither is independently useful
+# without the other for a real editing setup.
+# ---------------------------------------------------------------------------
 $(FTDETECT):
 	mkdir -p $(NVIM_DIR)/ftdetect
 	printf 'au BufRead,BufNewFile *.mh set filetype=mah\n' > $(FTDETECT)
 
 install-nvim: $(FTDETECT)
-	mkdir -p $(NVIM_DIR)/parser $(NVIM_DIR)/queries/mah
+	mkdir -p $(NVIM_DIR)/parser $(NVIM_DIR)/queries/mah $(NVIM_DIR)/ftplugin
 	$(CC) $(CFLAGS) ./syntax-highlight/src/parser.c -o $(TS_PARSER)
 	cp ./syntax-highlight/queries/mah/highlights.scm $(NVIM_DIR)/queries/mah/highlights.scm
+	cp editors/nvim/ftplugin/mah.lua $(LSP_FTPLUGIN)
 
 uninstall-nvim:
 	rm -f $(TS_PARSER)
 	rm -f $(NVIM_DIR)/queries/mah/highlights.scm
+	rm -f $(LSP_FTPLUGIN)
 	-rmdir $(NVIM_DIR)/queries/mah 2>/dev/null || true
 	-rmdir $(NVIM_DIR)/queries 2>/dev/null || true
 	-rmdir $(NVIM_DIR)/parser 2>/dev/null || true
-	@# remove shared filetype detection only if the LSP is not installed
-	@if [ ! -f "$(LSP_FTPLUGIN)" ]; then \
-		rm -f "$(FTDETECT)"; \
-		rmdir $(NVIM_DIR)/ftdetect 2>/dev/null || true; \
-	fi
-
-# Bundle the language server (and the compiler modules it needs) next to the
-# Neovim config, then drop in the ftplugin that starts it for *.mh buffers.
-#
-# NOTE: lsp/analysis.py still targets the pre-M0 compiler package (old
-# TokenType set, actions.py's register_actions, etc. -- see
-# docs/V2_DESIGN.md's M0 milestone) and will not run correctly against the
-# hand-written pipeline until the LSP itself is reworked (M6-M8). This
-# target just avoids failing on missing files in the meantime.
-install-lsp: $(FTDETECT)
-	mkdir -p $(LSP_DIR)/lsp $(LSP_DIR)/compiler $(NVIM_DIR)/ftplugin
-	cp lsp/__init__.py lsp/analysis.py lsp/server.py $(LSP_DIR)/lsp/
-	cp compiler/__init__.py compiler/lexer.py compiler/parser.py compiler/ast_nodes.py compiler/resolve.py compiler/codegen.py $(LSP_DIR)/compiler/
-	cp preprocessor.py runtime_values.py $(LSP_DIR)/
-	cp editors/nvim/ftplugin/mah.lua $(LSP_FTPLUGIN)
-
-uninstall-lsp:
-	rm -f $(LSP_FTPLUGIN)
-	rm -rf $(LSP_DIR)
 	-rmdir $(NVIM_DIR)/ftplugin 2>/dev/null || true
-	@# remove shared filetype detection only if highlighting is not installed
-	@if [ ! -f "$(TS_PARSER)" ]; then \
-		rm -f "$(FTDETECT)"; \
-		rmdir $(NVIM_DIR)/ftdetect 2>/dev/null || true; \
-	fi
+	rm -f $(FTDETECT)
+	-rmdir $(NVIM_DIR)/ftdetect 2>/dev/null || true
 
-install: install-cli install-nvim install-lsp
+# ---------------------------------------------------------------------------
+# vscode -- editor integration (not written yet)
+# ---------------------------------------------------------------------------
+#
+# Placeholder so there's already a dedicated build step to grow into once
+# editors/vscode/ exists. Packaging a .vsix (npm install && npm run compile
+# && npx vsce package) is a fundamentally different kind of step -- building
+# a distributable artifact -- than copying files into a config directory, so
+# it gets its own command rather than folding into install-mah/install-nvim.
+build-vscode:
+	@echo "No VSCode extension yet -- editors/vscode/ doesn't exist. Nothing to build."
+
+install: install-mah install-nvim
 install-all: install
+uninstall: uninstall-mah uninstall-nvim
+uninstall-all: uninstall
+
+# ---------------------------------------------------------------------------
+# Back-compat aliases (old target names from before mah/nvim were split out
+# this way) -- kept so nobody's muscle memory or scripts break.
+# ---------------------------------------------------------------------------
+install-cli: install-mah
+install-cli-mah: install-mah
+cli-install: install-mah
+uninstall-cli: uninstall-mah
+cli-uninstall: uninstall-mah
+remove-cli: uninstall-mah
+
 install-syntax: install-nvim
 nvim-install: install-nvim
-install-lsp-nvim: install-lsp
-lsp-install: install-lsp
-nvim-lsp: install-lsp
-install-cli-mah: install-cli
-cli-install: install-cli
-install-mah: install-cli
+install-lsp: install-nvim
+install-lsp-nvim: install-nvim
+lsp-install: install-nvim
+nvim-lsp: install-nvim
 
-uninstall: uninstall-cli uninstall-lsp uninstall-nvim
-uninstall-all: uninstall
-remove-nvim: uninstall-nvim
-remove-syntax: uninstall-nvim
 uninstall-syntax: uninstall-nvim
+remove-syntax: uninstall-nvim
 nvim-uninstall: uninstall-nvim
-nvim-remove: uninstall-nvim
-uninstall-lsp-nvim: uninstall-lsp
-lsp-uninstall: uninstall-lsp
-lsp-remove: uninstall-lsp
-cli-uninstall: uninstall-cli
-remove-cli: uninstall-cli
-uninstall-mah: uninstall-cli
+remove-nvim: uninstall-nvim
+uninstall-lsp: uninstall-nvim
+uninstall-lsp-nvim: uninstall-nvim
+lsp-uninstall: uninstall-nvim
+lsp-remove: uninstall-nvim
 
-.PHONY: lang test install install-all install-cli install-cli-mah cli-install install-mah \
-	install-nvim install-syntax nvim-install install-lsp install-lsp-nvim lsp-install nvim-lsp \
-	uninstall uninstall-all uninstall-cli cli-uninstall remove-cli uninstall-mah \
-	uninstall-nvim remove-nvim remove-syntax uninstall-syntax nvim-uninstall nvim-remove \
+.PHONY: lang test install install-all uninstall uninstall-all \
+	install-mah uninstall-mah install-nvim uninstall-nvim build-vscode \
+	install-cli install-cli-mah cli-install uninstall-cli cli-uninstall remove-cli \
+	install-syntax nvim-install install-lsp install-lsp-nvim lsp-install nvim-lsp \
+	uninstall-syntax remove-syntax nvim-uninstall remove-nvim \
 	uninstall-lsp uninstall-lsp-nvim lsp-uninstall lsp-remove

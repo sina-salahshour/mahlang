@@ -6,7 +6,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from compiler.lexer import Lexer, TokenType
+from mah.compiler.lexer import Lexer, TokenType
 
 
 def token_types(source: str) -> list:
