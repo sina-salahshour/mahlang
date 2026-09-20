@@ -117,6 +117,7 @@ from .ast_nodes import (
     EnumDecl,
     EnumLit,
     EnumPat,
+    ErrorNode,
     ExprStmt,
     FieldAccess,
     FnExpr,
@@ -364,6 +365,12 @@ class Resolver:
     # -- expressions -----------------------------------------------------
 
     def resolve_expr(self, expr) -> None:
+        if isinstance(expr, ErrorNode):
+            # M6: a syntax error the parser already recorded and recovered
+            # from -- nothing to resolve. mah.py refuses to run/build a
+            # program with any parser.errors regardless, so resolve never
+            # needs to do anything smarter here than "skip it."
+            return
         if isinstance(expr, (NumberLit, StringLit, BoolLit)):
             return
         if isinstance(expr, Ident):

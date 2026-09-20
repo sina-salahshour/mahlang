@@ -39,6 +39,9 @@ nothing `ExprStmt` doesn't already say. `IfStmt`/`MatchStmt` are unchanged
 structurally; only their *codegen* differs by context (statement position
 vs. used as an expression/tail) -- see docs/V2_DESIGN.md's M5 milestone.
 
+M6 adds `ErrorNode` (see its own docstring below) -- the parser's forgiving-
+error-recovery mechanism, usable wherever an expression is expected.
+
 `defer` yet to come -- lands in a later milestone and will extend this
 module rather than replace it.
 
@@ -167,6 +170,23 @@ class CosExpr:
 
 @dataclass
 class InputExpr:
+    position: int
+
+
+@dataclass
+class ErrorNode:
+    """M6: produced by the parser in place of an expression it couldn't
+    parse, instead of aborting the whole parse -- see docs/V2_DESIGN.md's
+    M6 milestone ("Forgiving errors"). Always arrives wrapped in an
+    `ExprStmt` (the parser's per-item recovery granularity is a whole
+    top-level item, never a sub-expression -- see `Parser._parse_block_items`),
+    so `resolve.py`/`codegen.py` only need a case in their expression
+    dispatch, not a separate statement dispatch. Both passes treat it
+    exactly like a missing/implicit `none` (the same default already used
+    for a function's implicit return and a semicolon-terminated block's
+    value)."""
+
+    message: str
     position: int
 
 

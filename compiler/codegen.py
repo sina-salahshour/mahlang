@@ -131,6 +131,7 @@ from .ast_nodes import (
     EnumDecl,
     EnumLit,
     EnumPat,
+    ErrorNode,
     ExprStmt,
     FieldAccess,
     FnExpr,
@@ -367,6 +368,16 @@ class Codegen:
     # -- expressions -------------------------------------------------------
 
     def gen_expr(self, expr) -> tuple:
+        if isinstance(expr, ErrorNode):
+            # M6: substitute `none`, the same default already used for a
+            # function's implicit return and a semicolon-terminated block's
+            # value -- mah.py never actually reaches codegen with a
+            # non-empty parser.errors list (it refuses to build/run first),
+            # so this only matters for a caller (the LSP) that compiles
+            # past parse errors on purpose for other analysis.
+            tmp = self._temp()
+            self.buf.emit(("ld", NONE_VALUE, None, tmp))
+            return tmp
         if isinstance(expr, NumberLit):
             tmp = self._temp()
             self.buf.emit(("ld", expr.value, None, tmp))

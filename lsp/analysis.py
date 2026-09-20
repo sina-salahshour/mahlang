@@ -22,16 +22,10 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from actions import register_actions  # noqa: E402
-from compiler.ir_generator import IRGenerator  # noqa: E402
-from compiler.lexer import (  # noqa: E402
-    IGNORED_TOKENS,
-    TOKEN_RULES,
-    Lexer,
-    Token,
-    TokenType,
-)
+from compiler.codegen import Codegen  # noqa: E402
+from compiler.lexer import Lexer, Token, TokenType  # noqa: E402
 from compiler.parser import Parser  # noqa: E402
+from compiler.resolve import Resolver  # noqa: E402
 from preprocessor import BUFFER_PATH, demangle_message, preprocess  # noqa: E402
 
 # --------------------------------------------------------------------------
@@ -39,22 +33,27 @@ from preprocessor import BUFFER_PATH, demangle_message, preprocess  # noqa: E402
 # --------------------------------------------------------------------------
 
 KEYWORD_TOKENS = {
-    TokenType.Let,
-    TokenType.If,
-    TokenType.Elif,
-    TokenType.Else,
-    TokenType.While,
-    TokenType.Break,
-    TokenType.Continue,
-    TokenType.Return,
-    TokenType.Def,
+    TokenType.LET,
+    TokenType.IF,
+    TokenType.ELIF,
+    TokenType.ELSE,
+    TokenType.WHILE,
+    TokenType.BREAK,
+    TokenType.CONTINUE,
+    TokenType.RETURN,
+    TokenType.FN,
+    TokenType.STRUCT,
+    TokenType.ENUM,
+    TokenType.MATCH,
+    TokenType.SOME,
+    TokenType.NONE,
 }
 
 BUILTIN_TOKENS = {
-    TokenType.Print,
-    TokenType.Input,
-    TokenType.Sin,
-    TokenType.Cos,
+    TokenType.PRINT,
+    TokenType.INPUT,
+    TokenType.SIN,
+    TokenType.COS,
 }
 
 KEYWORD_DOCS = {
@@ -206,15 +205,26 @@ def tokenize(text: str):
 
 
 def _token_length_at(text: str, offset: int) -> int:
-    """Length of the token that starts at ``offset`` (mirrors the lexer)."""
+    """Length of the token that starts at ``offset`` (mirrors the lexer).
+
+    M6 note: the old generated lexer exposed a `TOKEN_RULES` regex table
+    this used to scan directly; the current hand-written `Lexer` has no
+    such table, so this drives the real lexer instead -- seek it to
+    `offset` and read one token. Falls back to a length of 1 (a single
+    character diagnostic underline) for anything the lexer can't tokenize
+    there, or when `offset` actually sits on skipped trivia (whitespace/a
+    comment) rather than a real token's first character."""
     if offset >= len(text):
         return 0
-    remaining = text[offset:]
-    for _token_type, pattern in TOKEN_RULES.items():
-        match = re.match(pattern, remaining)
-        if match and match.end() > 0:
-            return match.end()
-    return 1
+    lexer = Lexer(text)
+    lexer.position = offset
+    try:
+        token = lexer.get_next_token()
+    except SyntaxError:
+        return 1
+    if token.position != offset:
+        return 1
+    return max(len(token.literal), 1)
 
 
 def _token_at_offset(tokens: list[Token], offset: int) -> Optional[Token]:
@@ -294,11 +304,20 @@ def get_diagnostics(text: str, path: Optional[str] = None) -> list[dict]:
     directives relative to it. Errors originating in an imported file are
     attributed to the ``import`` directive that pulled it in, since we can only
     place diagnostics inside the file being edited.
+
+    M6: this reports *every* diagnostic the current pipeline can find in
+    one pass -- unresolved imports, every collected parse error (the whole
+    point of the parser now being forgiving instead of stopping at the
+    first mistake), and, only when parsing was completely clean, the
+    first resolve-time error (resolve stays single-exception/stop-at-first
+    on purpose -- see docs/V2_DESIGN.md's M6 milestone; making resolve
+    forgiving too is explicitly out of scope here). Codegen is never run:
+    diagnostics only need parse + resolve, not full compilation.
     """
     pp = preprocess(path, text)
     diagnostics: list[dict] = []
 
-    # 1. Unresolved / unreadable imports.
+    # 1. Unresolved / unreadable imports (unchanged from pre-M6).
     for message, offset, length in pp.errors:
         diagnostics.append(
             {
@@ -316,42 +335,57 @@ def get_diagnostics(text: str, path: Optional[str] = None) -> list[dict]:
     if not tokens and lex_error is None:
         return diagnostics
 
-    lexer = TrackingLexer(combined)
+    lexer = Lexer(combined)
     parser = Parser(lexer)
-    ir = IRGenerator(parser)
-    register_actions(ir)
+    program = parser.parse_program()
 
-    try:
-        ir.generate()
-        if len(ir.stack) != 0:
-            raise AssertionError("internal error: expression stack is not empty")
-    except SystemExit:
-        raise
-    except BaseException as error:  # noqa: BLE001 - report every compiler error
-        args = getattr(error, "args", None)
-        message = args[0] if args else str(error)
-        if not isinstance(message, str):
-            message = str(error)
-
-        combined_offset = _extract_offset(message)
-        if combined_offset is None:
-            last = lexer.last_token
-            combined_offset = last.position if last is not None else 0
-            length = len(last.literal) if last is not None else 1
-        else:
-            length = _token_length_at(combined, combined_offset)
-        length = max(length, 1)
-
+    # 2. Every syntax error the parser collected, not just the first --
+    # this is the M6 feature: the parser recovers and keeps going instead
+    # of aborting on the first mistake, so an editor can show every
+    # mistake in the file in one round trip.
+    for message, offset in parser.errors:
+        length = _token_length_at(combined, offset)
         diagnostics.append(
             _diagnostic_for_combined_offset(
-                pp,
-                text,
-                combined,
-                combined_offset,
-                length,
-                demangle_message(_clean_message(message)),
+                pp, text, combined, offset, length, demangle_message(_clean_message(message))
             )
         )
+
+    # 3. Resolve-time error -- only attempted when parsing itself was
+    # completely clean. A program with parser.errors has structural holes
+    # (ErrorNodes) resolve can't meaningfully diagnose past, and mah.py
+    # refuses to build/run such a program regardless -- so there is
+    # nothing extra to gain by resolving it anyway, matching today's
+    # non-forgiving resolve behavior of reporting exactly one error.
+    if not parser.errors:
+        try:
+            Resolver().resolve_program(program)
+        except SystemExit:
+            raise
+        except BaseException as error:  # noqa: BLE001 - report the one resolve error
+            args = getattr(error, "args", None)
+            message = args[0] if args else str(error)
+            if not isinstance(message, str):
+                message = str(error)
+
+            combined_offset = _extract_offset(message)
+            if combined_offset is None:
+                combined_offset = 0
+                length = 1
+            else:
+                length = _token_length_at(combined, combined_offset)
+            length = max(length, 1)
+
+            diagnostics.append(
+                _diagnostic_for_combined_offset(
+                    pp,
+                    text,
+                    combined,
+                    combined_offset,
+                    length,
+                    demangle_message(_clean_message(message)),
+                )
+            )
 
     return diagnostics
 

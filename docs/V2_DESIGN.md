@@ -1125,7 +1125,266 @@ node that resolved to it. Then:
    cases, `_gen_fn_expr`'s implicit-return change, `BlockStmt` case
    removed). `code_interpreter.py` and `runtime_values.py` were **not**
    touched.
-7. **M6 — forgiving parse errors** in the LSP diagnostics path.
+7. **M6 — forgiving parse errors. ✅ Landed.** The hand-written parser no
+   longer aborts the entire parse on the first syntax error: it now
+   recovers and keeps going, collecting *multiple* diagnostics from one
+   parse instead of stopping at the first mistake -- a purely
+   **parser-level** feature (resolve/codegen are untouched and stay
+   single-exception/stop-at-first, on purpose, see below), of direct value
+   to the LSP (an editor can show every syntax mistake in a file, not just
+   the first) and incidentally lets `mah.py` report multiple problems in
+   one run too.
+   **The mechanism.** A new AST node, `ErrorNode(message, position)`
+   (`compiler/ast_nodes.py`), is usable wherever an expression is
+   expected. `Parser` gains a `self.errors: list[tuple[str, int]] = []`
+   instance attribute; the shared per-item parsing loop M5 built
+   (`_parse_block_items`, used by both `parse_program` and `parse_block`)
+   wraps its attempt to parse one item in `try`/`except SyntaxError`. On
+   failure it records `(str(exc), self.current.position)` into
+   `self.errors` -- `self.current.position` at the moment of the catch is
+   used rather than re-parsing the message string for an embedded "at
+   position 'N'", since every raise site in the parser leaves `self.current`
+   sitting at (or immediately after) the offending token; this also
+   sidesteps two raise sites (`sin`/`cos`'s "can only have one argument")
+   that don't embed a position in their message at all -- appends
+   `ExprStmt(value=ErrorNode(...), position=...)` to `stmts` (so every
+   downstream consumer -- resolve, codegen -- has something structurally
+   valid to walk past instead of a hole), and calls `self._synchronize(end_type)`
+   to skip to a safe resumption point. **Recovery granularity is per
+   top-level item, not finer-grained**: a syntax error partway through
+   parsing, say, a `let`'s value expression aborts the *whole* `let`
+   statement (one `ErrorNode`), not just the broken sub-expression; a
+   malformed `match` arm pattern similarly aborts the whole `match`
+   statement. This matches the design doc's original sketch and keeps the
+   mechanism simple -- per-arm/per-sub-expression recovery was considered
+   and deliberately not built.
+   **`_synchronize(end_type)`** discards tokens until reaching a safe
+   resumption point: a statement-leading keyword (`_SYNC_TOKENS` =
+   `_STATEMENT_LEADING` plus `FN`/`IF`/`MATCH`, since those also start
+   recognizable constructs but flow through the expression path since M5),
+   a `;` (consumed, since it's a natural statement boundary), the
+   *current call's own* `end_type` (left alone -- `_parse_block_items`'s
+   own `if self.current.type is end_type: break` check is what actually
+   reacts to it), or `EOF` (always a hard stop regardless of `end_type`,
+   in case a block never gets closed at all).
+   **Termination, and a real bug the design's original proof missed.**
+   The mechanism's termination argument (in `_synchronize`'s own
+   docstring) is: `_parse_block_items`'s outer loop already checks
+   `if self.current.type is end_type: break` *before* attempting to parse
+   an item, so `self.current` is never already `end_type`/`EOF` when an
+   item-parse is attempted; every dispatch branch for a recognized
+   construct consumes its leading token before a deeper sub-parse can
+   fail, so the only way a parse attempt fails without consuming anything
+   is when the current token starts no recognized construct at all (falls
+   through to `_parse_primary`'s final `raise`), and such a token is by
+   definition not a sync point either -- so `_synchronize` always consumes
+   at least one token in that case. **This milestone's own
+   pathological-input termination test caught a real gap in that
+   reasoning during implementation**, not by inspection: the design's
+   original sketch had `_synchronize` treat `}` as *always* special
+   ("leave it alone, some enclosing check needs it"), which is only true
+   when the *current* call's own `end_type` actually is `BRACE_CLOSE` (an
+   error inside a `{ }` block). At the *top level* (`parse_program`,
+   `end_type=EOF`), a stray, unmatched `}` has no enclosing block waiting
+   to consume it -- with the original "always leave `}` alone" rule,
+   `_synchronize` would do nothing on every attempt, and even the
+   belt-and-suspenders check (below) would keep mistaking "sitting on a
+   `}`" for "already safely resynced," producing a genuine infinite loop
+   on input like a stray top-level `}`. The fix: `_synchronize` takes the
+   caller's own `end_type` as a parameter and checks `current.type is
+   end_type` instead of hardcoding `BRACE_CLOSE` -- at top level a stray
+   `}` is then just more garbage to skip over like any other token, while
+   inside a real `{ }` block (`end_type=BRACE_CLOSE`) the original,
+   correct "leave it for the enclosing check" behavior is unchanged. Found
+   and fixed during implementation, exactly the way M5's
+   `Call`/`FnExpr`-semicolon-exemption gap was found and fixed during
+   *its* implementation -- verified with a dedicated termination test
+   (`tests/test_error_recovery.py`'s `TerminationSafetyTests`, a
+   punctuation-only file with no valid statement anywhere) that would hang
+   without this fix.
+   **The belt-and-suspenders check.** Despite the termination proof, a
+   language server must never hang on a bug in that reasoning, so after
+   calling `_synchronize`, `_parse_block_items` force-advances one token if
+   the parser's position didn't move *and* it isn't already sitting at a
+   legitimate sync point (`_not_at_sync_point(end_type)` -- the same
+   predicate `_synchronize`'s own loop uses). That second condition matters:
+   a naive "position didn't move -> force advance" check (checked, then
+   reverted during implementation) is actively wrong for a real, common
+   case -- an expression that needed a semicolon, immediately followed by
+   a token that's already a valid statement start (e.g. `5 + 3\nprint(...)`,
+   see `tests/test_parser.py`'s updated `test_bare_expression_statement_
+   requires_semicolon_unless_last`): here `_synchronize` correctly does
+   zero work because we're already resynced, and force-advancing anyway
+   would wrongly eat the `print` token, corrupting the next statement.
+   **`resolve.py`/`codegen.py`**: both treat `ErrorNode` as "a value that
+   couldn't be parsed, substitute `none`" -- exactly the same pattern
+   already used for a function's implicit `none` return and a
+   semicolon-terminated block's `none` value (M1/M5), just one more
+   producer of that same default. `ErrorNode` always arrives wrapped in an
+   `ExprStmt`, so no separate `resolve_stmt`/`gen_stmt` case is needed --
+   the existing `ExprStmt` handling already routes into these new
+   `resolve_expr`/`gen_expr` cases.
+   **`mah.py`**: `generate_code` gains a `pp` parameter and, right after
+   `parser.parse_program()`, checks `if parser.errors: raise SyntaxError(...)`
+   -- a new `_format_parser_errors(pp, errors)` helper renders every
+   collected `(message, position)` pair with its position already
+   substituted for a real `file#line:col` label (via the same
+   `_location_label` helper the single-exception path already used) and
+   joins them with newlines into one message, so it composes cleanly with
+   `main()`'s existing single-exception `except` block (which finds no
+   more bare `at position <digits>` patterns to substitute in an
+   already-labeled message, and just passes it through unchanged -- the
+   same fallback path it already took for a message with no position at
+   all). **`mah.py build`/`run` still refuse outright if there are any
+   parse errors, now *any* of the collected ones, not just the first** --
+   forgiving parsing is for the LSP's benefit, not a license to run broken
+   programs; resolve-time errors are completely untouched, propagating as
+   a single exception exactly as before. This semantic boundary is
+   unchanged from the design doc's original "Forgiving errors" section and
+   is the one thing this milestone was most explicit about *not* changing.
+   **LSP scope -- what was revived and what deliberately wasn't.**
+   `lsp/analysis.py` has failed to import at all since M0 (`from actions
+   import register_actions` -- `actions.py` was deleted in M0; `from
+   compiler.ir_generator import IRGenerated` -- doesn't exist; every
+   `TokenType.Xxx` reference used the old generated lexer's PascalCase
+   names, e.g. `TokenType.Let`, which don't match the current hand-written
+   lexer's ALL-CAPS names, e.g. `TokenType.LET`). This milestone:
+   - Fixed the module's imports to the current modules
+     (`compiler.lexer.{Lexer, Token, TokenType}`, `compiler.parser.Parser`,
+     `compiler.resolve.Resolver`, `compiler.codegen.Codegen`; no more
+     `actions`/`compiler.ir_generator`).
+   - Fixed the one module-level (import-time-evaluated) `TokenType.Xxx`
+     reference, `KEYWORD_TOKENS` (plus `BUILTIN_TOKENS`), to the current
+     spellings, and added the new keyword tokens that didn't exist before
+     (`STRUCT`, `ENUM`, `MATCH`, `SOME`, `NONE`) alongside the mechanical
+     renames (`Def` -> `FN`, etc.) -- this constant is only consumed by
+     `get_hover` (untouched, see below), so this was a straightforward
+     "make it valid Python again," not a design decision.
+   - **Rewrote `get_diagnostics`** to run the real pipeline (lex + parse +,
+     only when parsing was completely clean, resolve) instead of the old,
+     already-broken `IRGenerator`/`register_actions` path: unresolved-
+     import diagnostics are unchanged; every entry in `parser.errors` (not
+     just whether there was one) becomes its own diagnostic, reusing the
+     existing `make_range`/`pp.map_to_source`/`_diagnostic_for_combined_offset`
+     position-mapping machinery, adapted to run once per collected error
+     instead of once for a single caught exception; a resolve-time error
+     is only attempted when `parser.errors` is empty, and still reports
+     at most one (resolve stays single-exception/stop-at-first --
+     deliberately **not** made forgiving in this milestone, matching the
+     design doc's explicit scoping: "forgiving *parse* errors," not
+     forgiving errors in general). `Codegen`/`run_code` are never invoked
+     here -- diagnostics only need parse + resolve. `_token_length_at` (a
+     diagnostics-only helper, not one of the hover/completion helpers
+     left untouched) was rewritten to drive the real `Lexer` directly
+     instead of a `TOKEN_RULES` regex table the current lexer doesn't
+     expose.
+   - Updated `lsp/server.py`'s `_on_initialize` capabilities to advertise
+     only `textDocumentSync` -- `hoverProvider`, `documentSymbolProvider`,
+     `definitionProvider`, `codeActionProvider`, and `completionProvider`
+     are removed. Diagnostics need no capability flag (pushed via
+     `textDocument/publishDiagnostics` notifications unconditionally).
+   - **Deliberately left broken/untouched**: hover, completion,
+     go-to-definition, document symbols, and code actions
+     (`get_hover`/`get_completions`/`get_definition`/
+     `get_document_symbols`/`get_code_actions`/`_build_scopes` and their
+     helpers) -- their *bodies* still reference the old `TokenType`
+     spellings and will raise if actually called, but a client can no
+     longer reach them since the server stopped advertising the
+     capabilities. These are built entirely on `analysis.py`'s own
+     hand-rolled token-scope model (`_build_scopes`), which M7 ("LSP
+     rename (+ retire the independent token-scope model)") is specifically
+     scheduled to replace with the real resolver's symbol table, not patch
+     in place -- mechanically updating `TokenType` spellings there now
+     would be effort thrown away the moment M7 replaces the whole
+     mechanism. Confirmed (not assumed) that leaving them broken doesn't
+     block the module from importing: Python doesn't validate names inside
+     a function body until it runs, so a function-body-only stale
+     reference is inert until called, unlike the module-level
+     `KEYWORD_TOKENS` case above.
+   **Tests**: new `tests/test_error_recovery.py` (9 tests) covering: one
+   syntax error with valid code both before and after it in the same block
+   (parsing succeeds, exactly one collected error, the surrounding
+   statements survive structurally intact); multiple independent syntax
+   errors all collected (not just the first); `mah.py`'s `generate_code`
+   still refusing to build/run a program with parse errors even though the
+   parser itself didn't raise, with the raised message naming every
+   collected error; a clean, error-free program still parsing with
+   `parser.errors == []`; an LSP diagnostics smoke test (`lsp.analysis.
+   get_diagnostics` reporting multiple parse errors from one buffer, plus
+   confirming `from lsp import analysis, server` now imports cleanly,
+   which used to raise `ModuleNotFoundError`); and a direct termination-
+   safety test on pathological punctuation-only input (see above -- this
+   is the test that caught the `_synchronize`/stray-`}` bug during
+   implementation). `tests/support.py` gained a `parse_source(text)`
+   helper (parse-only, returns `(program, parser)`) since the existing
+   `run_source`/`compile_source` helpers only return stdout or raise,
+   neither of which exposes `parser.errors` for inspection.
+   `tests/test_parser.py`'s pre-existing
+   `test_bare_expression_statement_requires_semicolon_unless_last` needed
+   a narrow, explicitly-justified update (the same kind M5's
+   `MatchParsingTests` needed): it used to assert `parse(...)` *raises* on
+   this mistake, which is no longer true now that the parser is forgiving
+   -- the underlying rule (a bare expression statement not last in its
+   block needs a `;`) is unchanged, only how the mistake is surfaced
+   changed (collected into `parser.errors` instead of raised), and the
+   updated test also pins the specific recovery edge case that motivated
+   the `_not_at_sync_point`/`end_type` design (the token right after the
+   mistake, `print`, is itself a valid statement start and must survive
+   recovery intact, not be swallowed as part of "skip to safety"). **All
+   128 pre-existing tests stayed green** with that one documented
+   exception, and every `examples/*.mh` file's output is byte-for-byte
+   unaffected (none of them have syntax errors, so `parser.errors` is
+   always empty for them -- confirmed by re-running the full suite,
+   including `tests/test_examples.py`'s golden-output tests, unmodified).
+   Changed: `compiler/ast_nodes.py` (`ErrorNode`), `compiler/parser.py`
+   (`self.errors`, `_SYNC_TOKENS`, `_parse_block_items`'s per-item
+   `try`/`except`, `_synchronize`/`_not_at_sync_point` now parameterized by
+   `end_type`), `compiler/resolve.py` (`ErrorNode` case in `resolve_expr`),
+   `compiler/codegen.py` (`ErrorNode` case in `gen_expr`), `mah.py`
+   (`_format_parser_errors`, `generate_code`'s new `pp` parameter and
+   early `parser.errors` check, both `main()` call sites updated),
+   `lsp/analysis.py` (imports, `KEYWORD_TOKENS`/`BUILTIN_TOKENS`,
+   `get_diagnostics` rewritten, `_token_length_at` rewritten),
+   `lsp/server.py` (`_on_initialize`'s advertised capabilities). New:
+   `tests/test_error_recovery.py`. `code_interpreter.py`,
+   `runtime_values.py`, and `preprocessor.py` were **not** touched.
+   **Second post-landing fix** (found during independent re-verification,
+   not by the implementing pass's own required termination test): an
+   *unclosed* block -- source ending before its `}` ever appears, e.g.
+   `fn f() { let x = 1 { { { {` with no matching closes at all -- hung.
+   `_parse_block_items`'s "have I reached the end?" check only ever
+   compared against its own `end_type` (e.g. `BRACE_CLOSE` for a nested
+   block), never against `EOF`, so once source ran out mid-block the loop
+   kept re-attempting to parse "one more item" out of nothing forever;
+   `_synchronize` correctly refused to touch `EOF` (it's meant to be a
+   hard stop), so neither it nor the belt-and-suspenders forced-advance
+   could break the cycle either. This is the mirror case of the *stray
+   closing* `}` bug the implementing pass already found and fixed for
+   `end_type=EOF` at the top level -- both are instances of the same
+   underlying lesson: "is this a safe stop" must always be judged relative
+   to *this call's own* `end_type`, and `EOF` additionally needs to be a
+   universal stop regardless of `end_type`, since a block can end up
+   unclosed at any nesting depth. Fixed by also breaking on `EOF`
+   unconditionally in `_parse_block_items`'s loop-continuation check.
+   Perhaps-surprising result, verified empirically rather than assumed:
+   this does **not** degrade to a hard, uncaught parse failure the way a
+   first read of the fix suggests -- the resulting `expect(end_type)`
+   failure in `parse_block` gets caught by whichever *enclosing*
+   `_parse_block_items`'s own `try` is on the call stack, which records
+   one more `ErrorNode` and breaks cleanly in turn (same `EOF` check);
+   for N levels of unclosed nesting this cascades N times, each
+   contributing a same-position `ErrorNode`, and `parse_program()` itself
+   always returns normally once `EOF` is reached -- verbose (duplicate-
+   looking messages for what a person would call "one" missing brace) but
+   never a hang and never an uncaught exception. Deduplicating cascaded
+   same-position messages is a reasonable future LSP polish item, not a
+   correctness requirement, and is not done here. Found via manual
+   `timeout`-wrapped adversarial testing (unmatched opens at several
+   nesting depths, an unclosed `if`, an unclosed `struct` declaration) that
+   went beyond the milestone's own required termination test (which only
+   covered pure-punctuation garbage, not unclosed-block EOF-runoff) --
+   covered by `test_unclosed_nested_blocks_terminate` in
+   `tests/test_error_recovery.py`. All 138 tests green afterward.
 8. **M7 — LSP rename** (+ retire the independent token-scope model).
 9. **M8 — tooling sync.** `syntax-highlight/grammar.js` +
    `highlights.scm` updated for the new syntax; `mah.py build`'s IR dump
@@ -1147,9 +1406,11 @@ M1 was built and documented that way.
 
 ## Status
 
-M0, M1, M2, M3, M4, and M5 are landed (see their entries above for what
+M0, M1, M2, M3, M4, M5, and M6 are landed (see their entries above for what
 changed and each milestone's deliberate deviations/simplifications).
 `docs/NEXT_PHASES.md` captures what's deliberately deferred (match guards,
 arrays/lists, generics, traits, the type system, async) and what M0–M9
-need to keep forward-compatible with. Next up: **M6 — forgiving parse
-errors** in the LSP diagnostics path.
+need to keep forward-compatible with. Next up: **M7 — LSP rename** (+
+retire the independent token-scope model `lsp/analysis.py`'s
+hover/completion/go-to-definition/document-symbols/code-actions still
+depend on, left deliberately broken/unadvertised as of M6).

@@ -154,24 +154,23 @@ class Server:
 
     # -- lifecycle --------------------------------------------------------
     def _on_initialize(self, request_id, params: dict) -> None:
+        # M6: hover/completion/go-to-definition/document-symbols/code-actions
+        # are deliberately NOT advertised -- they're built on
+        # `analysis.py`'s old token-scope model (`_build_scopes` and
+        # friends), which was already broken by M0 (see
+        # docs/V2_DESIGN.md's M6 milestone) and is specifically scheduled
+        # to be replaced, not patched, by M7 ("LSP rename (+ retire the
+        # independent token-scope model)"). Advertising them now would
+        # invite a well-behaved client to call handlers that either raise
+        # or (once M7 lands) get quietly replaced -- better to just not
+        # claim the capability until it's real. Diagnostics need no
+        # capability flag: they're pushed via
+        # `textDocument/publishDiagnostics` notifications on open/change/
+        # save, unconditionally.
         capabilities = {
             "textDocumentSync": {
                 "openClose": True,
                 "change": 1,  # full document sync
-            },
-            "hoverProvider": True,
-            "documentSymbolProvider": True,
-            "definitionProvider": True,
-            "codeActionProvider": {"codeActionKinds": ["source.toggleComment"]},
-            "completionProvider": {
-                # Trigger on identifier characters so completion pops up as you
-                # type (autocomplete-on-type), plus `.` for good measure.
-                "triggerCharacters": list(
-                    "abcdefghijklmnopqrstuvwxyz"
-                    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-                    "_."
-                ),
-                "resolveProvider": False,
             },
         }
         self._respond(

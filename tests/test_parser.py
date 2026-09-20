@@ -17,6 +17,7 @@ from compiler.ast_nodes import (
     BoolLit,
     Call,
     EnumPat,
+    ErrorNode,
     ExprStmt,
     FnExpr,
     IfStmt,
@@ -24,6 +25,7 @@ from compiler.ast_nodes import (
     LetStmt,
     MatchStmt,
     NumberLit,
+    PrintStmt,
     StructPat,
     Unary,
     WildcardPat,
@@ -209,8 +211,27 @@ class ExprBlockParsingTests(unittest.TestCase):
         self.assertIsInstance(let_stmt.value, IfStmt)
 
     def test_bare_expression_statement_requires_semicolon_unless_last(self):
-        with self.assertRaises(SyntaxError):
-            parse('5 + 3\nprint("x")')
+        # M6 update (deliberate, not a bug being papered over -- see
+        # docs/V2_DESIGN.md's M6 milestone): `parse()` (a bare
+        # `parse_program()` call) no longer *raises* on this mistake --
+        # the parser is now forgiving, so a missing-semicolon error is
+        # collected into `parser.errors` instead of aborting the parse.
+        # The underlying rule this test pins down is unchanged (a bare
+        # expression statement not last in its block still needs a `;`);
+        # only how the mistake is reported changed. Recovery here also
+        # exercises a real edge case `_synchronize` has to get right: the
+        # very next token (`print`) is itself a valid statement-leading
+        # token, so recovery must leave it alone rather than discard it --
+        # confirmed below by `print("x")` surviving as a real `PrintStmt`,
+        # not swallowed as part of "skip to the next safe point."
+        lexer = Lexer('5 + 3\nprint("x")')
+        parser = Parser(lexer)
+        program = parser.parse_program()  # must not raise
+        self.assertEqual(len(parser.errors), 1)
+        self.assertEqual(len(program), 2)
+        self.assertIsInstance(program[0], ExprStmt)
+        self.assertIsInstance(program[0].value, ErrorNode)
+        self.assertIsInstance(program[1], PrintStmt)
 
     def test_bare_expression_statement_allowed_with_explicit_semicolon(self):
         (expr_stmt, print_stmt) = parse('5 + 3;\nprint("x")')

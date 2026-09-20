@@ -51,6 +51,21 @@ def compile_source(*, path: str | None = None, text: str | None = None):
     return codegen.generate(program)
 
 
+def parse_source(text: str):
+    """Lex + parse an in-memory snippet and return `(program, parser)`.
+
+    Unlike `run_source`/`compile_source`, this stops after parsing and
+    hands back the `Parser` instance itself -- needed for M6's
+    forgiving-parser tests, which inspect `parser.errors` directly (a list
+    collected during parsing, not raised) rather than only observing
+    stdout or a raised exception. No import resolution (no `path`): a
+    snippet-only helper, matching `run_source`."""
+    lexer = Lexer(text)
+    parser = Parser(lexer)
+    program = parser.parse_program()
+    return program, parser
+
+
 def run_source(text: str, stdin: str = "") -> str:
     """Compile and run an in-memory Mah snippet, returning everything it
     printed to stdout."""

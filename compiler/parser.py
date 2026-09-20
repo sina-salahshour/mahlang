@@ -26,6 +26,7 @@ from .ast_nodes import (
     EnumDecl,
     EnumLit,
     EnumPat,
+    ErrorNode,
     ExprStmt,
     FieldAccess,
     FnExpr,
@@ -90,6 +91,13 @@ _STATEMENT_LEADING = {
     TokenType.PRINT,
 }
 
+# M6: recovery points `_synchronize` will stop at after a syntax error --
+# `_STATEMENT_LEADING` plus FN/IF/MATCH (which also start recognizable
+# constructs but are handled through the expression path, not
+# `_STATEMENT_LEADING`, since M5). See `_synchronize`'s docstring for the
+# termination argument.
+_SYNC_TOKENS = _STATEMENT_LEADING | {TokenType.FN, TokenType.IF, TokenType.MATCH}
+
 
 class Parser:
     def __init__(self, lexer: Lexer) -> None:
@@ -103,6 +111,12 @@ class Parser:
         # temporarily restored to True inside `(...)`/call-argument
         # positions where the ambiguity can't occur.
         self._struct_literal_allowed = True
+        # M6: syntax errors collected during parsing instead of raised --
+        # `(message, position)` per error, in the order encountered. Kept
+        # separate from `Resolver`'s errors on purpose (resolve stays
+        # single-exception, stop-at-first-error -- see docs/V2_DESIGN.md's
+        # M6 milestone for why forgiving-ness is parser-only).
+        self.errors: list[tuple[str, int]] = []
 
     def advance(self) -> Token:
         tok = self.current
@@ -143,65 +157,192 @@ class Parser:
         expression still needs an explicit `;` to be "just a statement"
         when it isn't the block's last item. Returns `(stmts, tail)` --
         `tail` is `None` unless the last item was an expression with no
-        trailing `;` immediately before `end_type`."""
+        trailing `;` immediately before `end_type`.
+
+        M6 note: also stops on `EOF` even when `end_type` is `BRACE_CLOSE`
+        -- an unclosed block (source ends before its `}` ever appears) must
+        not loop forever re-attempting to parse "one more item" out of
+        nothing. Breaking here means the caller's own `self.expect(end_type)`
+        (in `parse_block`) then fails against `EOF` and raises -- but that
+        raise does NOT escape all the way out uncaught the way a first
+        glance suggests: it propagates to whichever *enclosing*
+        `_parse_block_items` call's `try` is on the stack (the one that was
+        parsing the expression/statement that contained this block), which
+        catches it exactly like any other item failure, records one more
+        `ErrorNode`, and (thanks to this same EOF check) breaks cleanly in
+        turn. For N levels of unclosed nesting this cascades N times, each
+        level contributing one `ErrorNode` pointing at the same EOF
+        position -- verbose (duplicate-looking messages) but never a hang,
+        and `parse_program()` itself always returns normally once `EOF` is
+        reached, never raises, for this case. Deduplicating same-position
+        cascaded messages would be a reasonable future LSP polish item, not
+        a correctness requirement."""
         stmts = []
         tail = None
         while True:
             while self.current.type is TokenType.SEMICOLON:
                 self.advance()
-            if self.current.type is end_type:
+            if self.current.type is end_type or self.current.type is TokenType.EOF:
                 break
 
-            if self.current.type in _STATEMENT_LEADING:
-                stmts.append(self.parse_stmt())
-                continue
-
-            if self.current.type is TokenType.FN:
-                fn_expr = self._parse_fn_expr()
-                if fn_expr.name is not None:
-                    stmts.append(
-                        LetStmt(name=fn_expr.name, value=fn_expr, position=fn_expr.position)
-                    )
+            try:
+                if self.current.type in _STATEMENT_LEADING:
+                    stmts.append(self.parse_stmt())
                     continue
-                expr = fn_expr  # anonymous fn: falls through to the general handling below
-            else:
-                expr = self.parse_expr()  # handles IF, MATCH, bare `{`, ID (ident/call/
-                # field-chain/struct-lit/enum-lit), literals, etc. via
-                # _parse_primary.
 
-            if self.current.type is TokenType.ASSIGN and isinstance(expr, (Ident, FieldAccess)):
-                self.advance()
-                value = self.parse_expr()
-                stmts.append(AssignStmt(target=expr, value=value, position=expr.position))
-                continue
-            if self.current.type is TokenType.SEMICOLON:
-                self.advance()
-                stmts.append(ExprStmt(value=expr, position=expr.position))
-                continue
-            if self.current.type is end_type:
-                tail = expr
-                break  # nothing may follow a tail -- it must be the last item
-            if isinstance(expr, (IfStmt, MatchStmt, Block, Call, FnExpr)):
-                # Block-shaped (if/match/bare block): no semicolon required
-                # when not last (Rust's rule). Call/anonymous-FnExpr are
-                # ALSO exempted here for a Mah-specific reason, not Rust's:
-                # pre-M5, `parse_stmt`'s dedicated ID-led-call and FN
-                # branches made a bare call statement (`foo(1)`) and a bare
-                # anonymous-fn statement free-standing, needing no trailing
-                # `;` regardless of what followed (the enclosing loop never
-                # required one between statements) -- see e.g.
-                # examples/match.mh's `describe_number(0)` / `(1)` / `(42)`
-                # sequence, with no semicolons, which must keep working
-                # byte-for-byte. This does not affect Call/FnExpr in *tail*
-                # position (the `end_type` branch above already handles
-                # that before this check ever runs), only "statement,
-                # followed immediately by more code, no semicolon."
-                stmts.append(ExprStmt(value=expr, position=expr.position))
-                continue
-            raise SyntaxError(
-                f"Invalid syntax '{self.current}' at position '{self.current.position}'"
-            )
+                if self.current.type is TokenType.FN:
+                    fn_expr = self._parse_fn_expr()
+                    if fn_expr.name is not None:
+                        stmts.append(
+                            LetStmt(name=fn_expr.name, value=fn_expr, position=fn_expr.position)
+                        )
+                        continue
+                    expr = fn_expr  # anonymous fn: falls through to the general handling below
+                else:
+                    expr = self.parse_expr()  # handles IF, MATCH, bare `{`, ID (ident/call/
+                    # field-chain/struct-lit/enum-lit), literals, etc. via
+                    # _parse_primary.
+
+                if self.current.type is TokenType.ASSIGN and isinstance(expr, (Ident, FieldAccess)):
+                    self.advance()
+                    value = self.parse_expr()
+                    stmts.append(AssignStmt(target=expr, value=value, position=expr.position))
+                    continue
+                if self.current.type is TokenType.SEMICOLON:
+                    self.advance()
+                    stmts.append(ExprStmt(value=expr, position=expr.position))
+                    continue
+                if self.current.type is end_type:
+                    tail = expr
+                    break  # nothing may follow a tail -- it must be the last item
+                if isinstance(expr, (IfStmt, MatchStmt, Block, Call, FnExpr)):
+                    # Block-shaped (if/match/bare block): no semicolon required
+                    # when not last (Rust's rule). Call/anonymous-FnExpr are
+                    # ALSO exempted here for a Mah-specific reason, not Rust's:
+                    # pre-M5, `parse_stmt`'s dedicated ID-led-call and FN
+                    # branches made a bare call statement (`foo(1)`) and a bare
+                    # anonymous-fn statement free-standing, needing no trailing
+                    # `;` regardless of what followed (the enclosing loop never
+                    # required one between statements) -- see e.g.
+                    # examples/match.mh's `describe_number(0)` / `(1)` / `(42)`
+                    # sequence, with no semicolons, which must keep working
+                    # byte-for-byte. This does not affect Call/FnExpr in *tail*
+                    # position (the `end_type` branch above already handles
+                    # that before this check ever runs), only "statement,
+                    # followed immediately by more code, no semicolon."
+                    stmts.append(ExprStmt(value=expr, position=expr.position))
+                    continue
+                raise SyntaxError(
+                    f"Invalid syntax '{self.current}' at position '{self.current.position}'"
+                )
+            except SyntaxError as exc:
+                # M6: don't let one bad item abort the whole parse -- record
+                # the error, substitute an ErrorNode (wrapped in ExprStmt) so
+                # every downstream consumer has something structurally valid
+                # to walk past, and skip ahead to a safe resumption point.
+                # `self.current.position` at the moment of the catch is used
+                # rather than re-parsing the message string for an embedded
+                # "at position 'N'" -- every raise site in this file leaves
+                # `self.current` sitting at (or very near) the offending
+                # token, since no dispatch branch advances past a token it's
+                # about to reject, so this is precise enough without the
+                # string-parsing round-trip. Recovery granularity is this
+                # whole item (e.g. one `let`, one `match`), never a
+                # sub-expression -- see docs/V2_DESIGN.md's M6 milestone.
+                error_position = self.current.position
+                self.errors.append((str(exc), error_position))
+                stmts.append(
+                    ExprStmt(
+                        value=ErrorNode(message=str(exc), position=error_position),
+                        position=error_position,
+                    )
+                )
+                before = self.current.position
+                self._synchronize(end_type)
+                if self.current.position == before and self._not_at_sync_point(end_type):
+                    # Belt-and-suspenders: the reasoning in _synchronize's
+                    # docstring says this can't happen, but a language
+                    # server must never hang on a parser bug, so force
+                    # progress anyway rather than trust the proof blindly.
+                    # Deliberately re-checks the *same* stopping condition
+                    # `_synchronize`'s own loop uses (not just "did the
+                    # position move") -- a zero-token `_synchronize` call
+                    # that started (and ends) already sitting on a sync
+                    # token, a `;`, `end_type`, or EOF is not stuck, it's
+                    # already correctly resynced (e.g. an expression-needs-
+                    # a-semicolon error where the very next token happens
+                    # to be `print`/`let`/etc.); forcing an advance there
+                    # would wrongly eat that legitimate resumption token.
+                    self.advance()
         return stmts, tail
+
+    def _synchronize(self, end_type: TokenType) -> None:
+        """M6 error recovery: discard tokens until reaching a safe
+        resumption point -- a statement-leading keyword (`_SYNC_TOKENS`), a
+        `;` (consumed, since it's a natural statement boundary), the
+        current call's own `end_type` (left alone -- `_parse_block_items`'s
+        own `if self.current.type is end_type: break` check, run at the
+        top of its loop, is what actually consumes/reacts to it), or `EOF`
+        (always a hard stop, regardless of `end_type`, in case a block
+        never gets its closing `}` at all).
+
+        `end_type` matters here, not just a bare "`}` is always special"
+        rule: a `{ }` block recurses into this same method with
+        `end_type=BRACE_CLOSE`, so leaving a `}` alone there is correct --
+        the enclosing `parse_block`/`_parse_block_items` call is right
+        there to consume it. But `parse_program`'s own call has
+        `end_type=EOF`: a stray, unmatched `}` at the top level has no
+        enclosing block waiting to consume it, so if `_synchronize` still
+        refused to touch it (the M6 design's original, simpler sketch --
+        "a `}` is always left alone"), it would sit there forever, this
+        loop would do nothing on every attempt, and the belt-and-suspenders
+        check above would *also* refuse to force past it (mistaking "sitting
+        on a `}`" for "already safely resynced" in every case) -- a genuine
+        infinite loop, caught by this milestone's own pathological-input
+        termination test rather than by the design sketch's reasoning,
+        which only proved termination for *tokens that start no construct
+        at all*, not for a `}` with no matching `{`. Tying "is this `}` a
+        safe stop" to *this call's own* `end_type` fixes it: at top level
+        a stray `}` is just more garbage to skip over like any other token.
+
+        Termination is otherwise guaranteed the way the original design
+        reasoned: `_parse_block_items`'s outer loop already checks
+        `if self.current.type is end_type: break` *before* attempting to
+        parse an item, so `self.current` is never already `end_type`/`EOF`
+        at the point an item-parse is attempted. Every dispatch branch for
+        a recognized construct (`LET`, `STRUCT`, `IF`, ...) always consumes
+        its leading token before it's possible for a deeper sub-parse to
+        fail -- so whenever a parse attempt fails *without having consumed
+        anything from the current token onward*, the current token doesn't
+        start any recognized construct at all (falls through to
+        `_parse_primary`'s final `raise SyntaxError`), and such a token is
+        by definition not a sync point either (if it were, some dispatch
+        branch would have matched and consumed it, or -- for `end_type`
+        specifically -- the outer loop's own check would already have
+        broken out before the attempt was ever made) -- so this loop is
+        guaranteed to consume at least one token in that case. (One other
+        raise site -- `_parse_block_items`'s own "needs a semicolon"
+        fallback -- can fire with `self.current` already sitting on a sync
+        token, e.g. `5 + 3\nprint(...)`: here `_synchronize`'s loop
+        correctly does nothing at all, zero iterations, because we were
+        already resynced the moment the error was raised, not because
+        anything is stuck -- see `_not_at_sync_point`, which the caller
+        uses to tell these two zero-progress cases apart.) The caller
+        still double-checks real progress was made (see above) rather than
+        trusting this proof unconditionally.
+        """
+        while self._not_at_sync_point(end_type):
+            self.advance()
+        if self.current.type is TokenType.SEMICOLON:
+            self.advance()
+
+    def _not_at_sync_point(self, end_type: TokenType) -> bool:
+        return (
+            self.current.type not in _SYNC_TOKENS
+            and self.current.type is not TokenType.SEMICOLON
+            and self.current.type is not end_type
+            and self.current.type is not TokenType.EOF
+        )
 
     # -- statements ---------------------------------------------------------
 

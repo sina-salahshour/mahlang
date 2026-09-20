@@ -44,10 +44,21 @@ def read_file(file_name):
     return input_str
 
 
-def generate_code(input_str: str) -> CodeBuffer:
+def generate_code(input_str: str, pp) -> CodeBuffer:
     lexer = Lexer(input_str)
     parser = Parser(lexer)
     program = parser.parse_program()
+
+    if parser.errors:
+        # M6: the parser is forgiving (it recovers and keeps going so a
+        # tool -- the LSP -- can report every syntax mistake in one pass),
+        # but `mah.py build`/`run` still refuse outright to build/execute a
+        # program with any parse error, collected or not -- see
+        # docs/V2_DESIGN.md's M6 milestone. Fold every collected error into
+        # one SyntaxError message (each position already substituted with
+        # its real file#line:col label) so it composes with the single-
+        # exception handling `main()`'s outer `except` block already does.
+        raise SyntaxError(_format_parser_errors(pp, parser.errors))
 
     resolver = Resolver()
     resolver.resolve_program(program)
@@ -67,6 +78,25 @@ def find_error_line(input_str: str, pos: int):
             row_number = 1
         if index == pos:
             return line_number, row_number
+
+
+def _format_parser_errors(pp, errors: list) -> str:
+    """M6: render every collected `parser.errors` entry as one combined
+    message, each with its raw combined-text position already resolved to
+    a real `#line:col`/`file#line:col` label -- so the result, once handed
+    to `main()`'s outer `except` as a single `SyntaxError`, has no more
+    bare `at position <digits>` patterns left for that handler's own
+    position-substitution regex to find (it just passes the message
+    through unchanged, exactly as it already does for a plain single-error
+    message with no position at all)."""
+    lines = []
+    for message, position in errors:
+        message = demangle_message(message)
+        label = _location_label(pp, pp.entry_path, position)
+        if label:
+            message = re.sub(rf"at position '?{position}'?", f"at position {label}", message, count=1)
+        lines.append(message)
+    return "\n".join(lines)
 
 
 def _location_label(pp, entry_path: str, combined_offset: int) -> str:
@@ -115,10 +145,10 @@ def main():
     try:
         match command:
             case "build":
-                buf = generate_code(file_str)
+                buf = generate_code(file_str, pp)
                 print_code_block(buf, should_save_to_file=should_save_to_file)
             case "run":
-                buf = generate_code(file_str)
+                buf = generate_code(file_str, pp)
                 run_code(buf.code[:400], buf.global_slot_count)
             case unknown_command:
                 print(
