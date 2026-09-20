@@ -1,0 +1,79 @@
+{
+  "name": "mah-language",
+  "displayName": "Mah Language",
+  "description": "Syntax highlighting and language server support (hover, go-to-definition, rename, diagnostics) for the Mah programming language.",
+  "version": "0.1.0",
+  "publisher": "mahlang",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sina-salahshour/mahlang.git",
+    "directory": "editors/vscode"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "mah",
+        "aliases": [
+          "Mah",
+          "mah"
+        ],
+        "extensions": [
+          ".mh"
+        ],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/mah-light.svg",
+          "dark": "./icons/mah-dark.svg"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "mah",
+        "scopeName": "source.mah",
+        "path": "./syntaxes/mah.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "Mah",
+      "properties": {
+        "mah.serverPath": {
+          "type": "string",
+          "default": "mah",
+          "markdownDescription": "Path to the `mah` executable used to start the language server (`mah lsp`). Defaults to `mah`, resolved on `PATH` -- see the mahlang repo's `make install-mah` target."
+        },
+        "mah.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Trace the communication between VS Code and the Mah language server."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -w -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^10.0.0"
+  }
+}

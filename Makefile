@@ -77,16 +77,18 @@ uninstall-nvim:
 	-rmdir $(NVIM_DIR)/ftdetect 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# vscode -- editor integration (not written yet)
+# vscode -- editor integration (TextMate grammar + LSP client wired to
+# `mah lsp` + a per-language file icon; see editors/vscode/README.md)
 # ---------------------------------------------------------------------------
 #
-# Placeholder so there's already a dedicated build step to grow into once
-# editors/vscode/ exists. Packaging a .vsix (npm install && npm run compile
-# && npx vsce package) is a fundamentally different kind of step -- building
-# a distributable artifact -- than copying files into a config directory, so
-# it gets its own command rather than folding into install-mah/install-nvim.
+# Packaging a .vsix is a fundamentally different kind of step -- building a
+# distributable artifact via npm/vsce -- than copying files into a config
+# directory, so it gets its own command rather than folding into
+# install-mah/install-nvim. Produces editors/vscode/mah-language-*.vsix;
+# install it yourself with `code --install-extension <path>` (deliberately
+# not done automatically here -- that would modify your live VS Code setup).
 build-vscode:
-	@echo "No VSCode extension yet -- editors/vscode/ doesn't exist. Nothing to build."
+	cd editors/vscode && npm install && npm run compile && npx @vscode/vsce package
 
 install: install-mah install-nvim
 install-all: install

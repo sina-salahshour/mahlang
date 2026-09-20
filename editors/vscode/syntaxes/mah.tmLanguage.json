@@ -1,0 +1,155 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Mah",
+  "scopeName": "source.mah",
+  "fileTypes": ["mh"],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#constants" },
+    { "include": "#module-keywords" },
+    { "include": "#control-keywords" },
+    { "include": "#storage-keywords" },
+    { "include": "#struct-enum-decl" },
+    { "include": "#fn-decl" },
+    { "include": "#builtins" },
+    { "include": "#function-calls" },
+    { "include": "#operators" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.number-sign.mah",
+          "match": "#.*$"
+        }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.mah",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.mah",
+          "match": "\\\\."
+        }
+      ]
+    },
+    "numbers": {
+      "name": "constant.numeric.mah",
+      "match": "\\b[0-9]+(\\.[0-9]+)?\\b"
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.boolean.mah",
+          "match": "\\b(true|false)\\b"
+        },
+        {
+          "name": "constant.language.none.mah",
+          "match": "\\bnone\\b"
+        }
+      ]
+    },
+    "module-keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.import.mah",
+          "match": "\\b(import|export|from)\\b"
+        }
+      ]
+    },
+    "control-keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.mah",
+          "match": "\\b(if|elif|else|while|break|continue|return|match|defer)\\b"
+        }
+      ]
+    },
+    "storage-keywords": {
+      "patterns": [
+        {
+          "name": "storage.type.mah",
+          "match": "\\b(let|fn|struct|enum)\\b"
+        }
+      ]
+    },
+    "struct-enum-decl": {
+      "patterns": [
+        {
+          "comment": "`struct Point` / `enum Shape` -- capture the declared type name distinctly from an ordinary identifier.",
+          "match": "\\b(struct|enum)\\s+([A-Za-z_$][A-Za-z0-9_$]*)",
+          "captures": {
+            "1": { "name": "storage.type.mah" },
+            "2": { "name": "entity.name.type.mah" }
+          }
+        }
+      ]
+    },
+    "fn-decl": {
+      "patterns": [
+        {
+          "comment": "`fn name(...)` -- named function declarations (anonymous `fn(...)` falls through to the plain storage-keyword rule).",
+          "match": "\\b(fn)\\s+([A-Za-z_$][A-Za-z0-9_$]*)\\s*(?=\\()",
+          "captures": {
+            "1": { "name": "storage.type.mah" },
+            "2": { "name": "entity.name.function.mah" }
+          }
+        }
+      ]
+    },
+    "builtins": {
+      "patterns": [
+        {
+          "name": "support.function.builtin.mah",
+          "match": "\\b(print|input|sin|cos)\\b"
+        },
+        {
+          "name": "support.function.builtin.option.mah",
+          "match": "\\bsome\\b"
+        }
+      ]
+    },
+    "function-calls": {
+      "patterns": [
+        {
+          "comment": "A plain identifier immediately followed by `(` -- a call site, or an enum/struct type name immediately followed by `{` -- a literal construction.",
+          "match": "\\b([A-Za-z_$][A-Za-z0-9_$]*)\\s*(?=\\()",
+          "name": "entity.name.function.call.mah"
+        },
+        {
+          "match": "\\b([A-Za-z_$][A-Za-z0-9_$]*)\\s*(?=\\{)",
+          "name": "entity.name.type.mah"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.mah",
+          "match": "(\\*\\*|//|==|!=|=>|<=|>=|[+\\-*/%<>=&|])"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "name": "punctuation.separator.delimiter.mah",
+          "match": "[.,:;]"
+        },
+        {
+          "name": "punctuation.section.braces.mah",
+          "match": "[{}]"
+        },
+        {
+          "name": "punctuation.section.parens.mah",
+          "match": "[()]"
+        }
+      ]
+    }
+  }
+}
