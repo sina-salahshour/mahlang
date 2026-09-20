@@ -1,186 +1,302 @@
 # The Mah Language
 
-> A beautiful language
+> ماه — "moon" in Persian.
 
-## Getting Started
+Mah is a small programming language built entirely from scratch: a
+hand-written lexer, recursive-descent parser, resolver, bytecode compiler,
+and a tree-walking VM, plus a real LSP server and editor integrations for
+Neovim and VS Code — **every one of them pure Python**, standard library
+only, with zero third-party runtime dependencies anywhere in the toolchain.
 
-```sh
-# first generate language by running python ./compiler-generator/generate.py <input_file>
+## Why it's built this way
 
-python ./compiler-generator/generate.py ./mah.lang
+Mah exists as a from-the-ground-up exploration of how a language and its
+tooling actually work, so a few choices run through the whole project on
+purpose:
 
-# or
+- **Pure Python, standard library only.** The lexer, parser, resolver,
+  codegen, VM, and the LSP server import nothing beyond `python3`'s own
+  stdlib — no parser-generator library, no LSP framework, no third-party
+  CLI library (the `mah` command's `run`/`build`/`lsp` subcommands are
+  plain `argparse`). Clone the repo, and everything runs with nothing to
+  `pip install`. The only place this project reaches for `npm`/Node is the
+  optional VS Code extension client, since that's simply what a VS Code
+  extension is — the language server it talks to is still pure Python.
+- **Hand-written, not generated.** There's no grammar DSL feeding a parser
+  generator (an earlier version of this project worked that way — see
+  `compiler-generator/` and `docs/GRAMMAR_DSL.md`, kept only as history).
+  The current compiler is entirely hand-written, which is slower to build
+  by hand but means every stage is something you can actually read and
+  reason about end to end.
+- **Heap-allocated closures over a native call stack.** Every function
+  call gets a heap-allocated `Frame`, linked to its lexically enclosing
+  frame by a static chain pointer (and, at runtime, a caller-return chain
+  — the classic SCP/DCP activation-record technique). This is what lets
+  Mah closures capture outer variables **by reference, like JavaScript**
+  (not by value/name like Python) — a closure that outlives the call that
+  created it still sees later mutations of its captured variables. There's
+  no garbage collector yet, but the object model (heap `Frame`s,
+  `Closure`s, `StructInstance`s, `EnumInstance`s, all with reference
+  semantics) is deliberately shaped so one can be added later without a
+  redesign.
+- **A forgiving parser, for tooling's sake.** The parser recovers from a
+  syntax error instead of aborting the whole parse, producing an `ErrorNode`
+  in place of what it couldn't read and continuing — so the language
+  server can report every mistake in a file in one pass, not just the
+  first one. (Running a file, as opposed to editing it, still refuses
+  outright if there's any parse error.)
 
-make lang
+## A quick tour
 
-# import parser, lexer, and ir_generator from compiler module and implement
-# required actions
+```mah
+# variables, structs, and closures that capture by reference
+let counter = fn() {
+    let count = 0
+    return fn() {
+        count = count + 1
+        return count
+    }
+}
+let next = counter()
+print(next())   # 1
+print(next())   # 2
 
-# then get the result how ever you want
+struct Point { x, y }
+fn add(a, b) {
+    return Point { x: a.x + b.x, y: a.y + b.y }
+}
+let p = add(Point { x: 1, y: 2 }, Point { x: 3, y: 4 })
+print(p)        # Point { x: 4, y: 6 }
 
-python -m mah run ./examples/input.mh      # from a repo checkout
-mah run ./examples/input.mh                # after `make install-cli`
+# enums (unit or struct-shaped variants), plus the built-in Option type
+enum Shape {
+    Circle { r },
+    Square { s },
+    Empty
+}
 
-# or you can see the generated code with
-python -m mah build ./examples/input.mh
+fn area(s) {
+    match s {
+        Shape.Circle { r } => { 3 * r * r }
+        Shape.Square { s } => { s * s }
+        Shape.Empty => { 0 }
+    }
+}
+print(area(Shape.Circle { r: 5 }))
 
-# `build` takes an explicit output flag if you want the dump written to a
-# file instead of stdout:
-python -m mah build ./examples/input.mh -o output.txt
+fn half(n) {
+    if n % 2 == 0 { return some(n // 2) }
+    return none
+}
+match half(7) {
+    some(v) => { print(v) }
+    none => { print("no half for an odd number") }
+}
 
+# if/match/bare blocks are expressions, and a function body is just a
+# block -- so its trailing expression is its implicit return value
+fn abs(n) {
+    if n < 0 { -n } else { n }
+}
 
+# defer -- Zig-style, block-scoped, LIFO, runs on every exit path
+struct Resource { name }
+fn open(name) {
+    print("opening " + name)
+    return Resource { name: name }
+}
+fn close(r) {
+    print("closing " + r.name)
+}
+fn process(name) {
+    let r = open(name)
+    defer close(r)          # runs whether this returns early or falls through
+    if r.name == "bad" {
+        return
+    }
+    print("using " + r.name)
+}
+process("alpha")   # opening alpha / using alpha / closing alpha
+process("bad")     # opening bad / closing bad -- close() still ran
 ```
 
-## Examples:
+See `examples/*.mh` for many more (structs, enums, pattern matching,
+expression blocks, `defer`, closures/recursion, imports, string handling,
+number-base conversions) and `docs/V2_DESIGN.md` for the full language
+design writeup, milestone by milestone.
 
-To see the language in action, you can check out the `examples` folder.
-
-```sh
-# Prime numbers calculation
-python -m mah run examples/new_prime_numbers.mh
-
-# String operations, concatenation, comparisons, and functions
-python -m mah run examples/strings.mh
-
-# Importing another file
-python -m mah run examples/import_demo.mh
-```
-
-## Imports and exports
-
-Modules are scoped: a file only shares the names it marks with `export`, and
-another file brings them in with `import`. The `.mh` extension is optional in
-import paths, which are resolved relative to the importing file.
-
-Export declarations (or a bare name declared elsewhere):
+### Modules
 
 ```mah
 # mathlib.mh
-export def square(n) { return n ** 2 }
+export fn square(n) { return n ** 2 }
 export let answer = 42
 
-def helper() { return 1 }   # private: not visible to importers
-export helper               # ...unless explicitly exported
+fn helper() { return 1 }    # private: not visible to importers
+export helper                # ...unless explicitly exported
 ```
-
-Import into a namespace and access members with `.`:
 
 ```mah
-import math from "mathlib"   # ".mh" optional
-
-print(math.square(4))
-print(math.answer)
+import math from "mathlib"   # namespaced -- math.square(4), math.answer
+# or
+import "mathlib"             # flat -- square(4) directly in scope
 ```
 
-Or import a module's exports directly into scope:
+Only `export`ed names are reachable; each file is inlined at most once, so
+diamond imports and cycles are safe, and errors inside an imported file are
+reported with their real `file:line:column`.
 
-```mah
-import "mathlib"
-
-print(square(4))
-```
-
-Only `export`ed names are reachable; referencing a private or non-exported
-member is a compile error. Each file is inlined at most once, so diamond
-imports and cycles are safe, and errors inside an imported file are reported
-with their originating `file:line:column`.
-
-
-
-## Installing the `mah` command
-
-Install the interpreter locally and expose a `mah` executable on your `PATH`:
+## Getting started
 
 ```sh
-# Installs into ~/.local/lib/mah and links ~/.local/bin/mah
-make install-cli
-
-# Remove it
-make uninstall-cli
+python -m mah run ./examples/prime_numbers.mh      # run a file, from a repo checkout
+python -m mah build ./examples/structs.mh          # see the compiled bytecode instead
+python -m mah build ./examples/structs.mh -o out.txt   # ...or write that dump to a file
 ```
 
-The install copies the interpreter into `$(PREFIX)/lib/mah` and symlinks
-`$(PREFIX)/bin/mah` to it (`PREFIX` defaults to `~/.local`; make sure
-`~/.local/bin` is on your `PATH`). Afterwards you can run programs from
-anywhere:
+`mah <file>` (no subcommand) is shorthand for `mah run <file>`.
+
+### Installing the `mah` command
+
+```sh
+make install-mah      # installs into ~/.local/lib/mah, links ~/.local/bin/mah
+make uninstall-mah
+```
+
+(`PREFIX` defaults to `~/.local` — make sure `~/.local/bin` is on your
+`PATH`.) Afterwards, from anywhere:
 
 ```sh
 mah path/to/program.mh
 mah build path/to/program.mh
+mah lsp                # starts the language server (see below) -- editors run this for you
 ```
 
-`make install` installs everything: the `mah` CLI, Neovim syntax highlighting,
-and the language server.
-
-
-## Syntax highlighting in neovim
-
-You can automatically install or remove the syntax highlighting for Neovim via Makefile:
-
-```sh
-# Install syntax highlighting, parser, and filetype detection to Neovim
-make install-nvim
-
-# Remove syntax highlighting from Neovim
-make uninstall-nvim
-```
-
-Alternatively, you can install the `syntax-highlight` folder as a Neovim plugin, then copy the `queries` folder inside of it into your Neovim config root.
-
-![syntax highlight showcase](./examples/example.png)
-
-## Language server (LSP)
-
-Mah ships with a language server (`lsp/`) written in pure Python (standard
-library only, no extra dependencies). It reuses the compiler pipeline to
-provide:
-
-- live diagnostics (compile errors) as you type, including errors inside
-  imported files
-- hover docs for keywords, builtins, functions and variables, showing any
-  `#` doc comment written directly above the declaration
-- go to definition (scope-aware: resolves parameters, locals, then globals),
-  working across imports -- including namespace members (`math.square`), the
-  namespace name itself, and the import path
-- autocomplete-on-type for keywords, builtins, in-scope symbols, imported
-  names and namespaces; typing `namespace.` lists that module's exports
-- document symbols (functions and variables)
-- a comment / uncomment code action for the selected lines
+## Editor support
 
 ### Neovim
 
-Install the server and the filetype hook that starts it for `*.mh` files:
-
 ```sh
-# Install the language server + Neovim integration
-make install-lsp
-
-# Remove it
-make uninstall-lsp
+make install-nvim      # tree-sitter syntax highlighting + the LSP ftplugin
+make uninstall-nvim
 ```
 
-`make install-lsp` copies the server (and the compiler modules it needs) to
-`<nvim-config>/mah-lsp/` and installs `<nvim-config>/ftplugin/mah.lua`, which
-launches the server via `vim.lsp.start` for every Mah buffer. It uses
-`python3` by default; set `$MAH_LSP_PYTHON` to choose a different interpreter.
+This builds the `syntax-highlight/` tree-sitter grammar into your Neovim
+config and drops in an ftplugin that starts the language server (`mah lsp`)
+for every `.mh` buffer via `vim.lsp.start` — so `make install-mah` needs to
+run first (or just run `make install`, which installs both, in order).
 
-With the server running, Neovim's built-in `vim.lsp.buf.definition` (mapped to
-`grd`, or use `gd` in older configs) jumps to the declaration of the symbol
-under the cursor, even when it lives in an imported file. Completion pops up
-automatically as you type (autotrigger), comment toggling is offered as a code
-action via `vim.lsp.buf.code_action`, and the buffer's `commentstring` is set
-so built-in commenting (`gcc`) works too.
+![syntax highlight showcase](./examples/example.png)
 
-`make install` installs everything: the `mah` CLI, syntax highlighting, and
-the language server.
+### VS Code
 
-### Other editors
+A VS Code extension lives in `editors/vscode/` — a TextMate grammar for
+syntax highlighting, the same `mah lsp` server wired in as an LSP client,
+and a custom file icon for `.mh` files. Build and install it locally with:
+
+```sh
+make build-vscode
+code --install-extension editors/vscode/mah-language-*.vsix
+```
+
+See `editors/vscode/README.md` for details (not yet published to the
+Marketplace).
+
+### Any other editor
 
 Any LSP client can run the server directly over stdio:
 
 ```sh
-python3 ./lsp/server.py
+mah lsp
 ```
 
-Point your editor's LSP client at that command for the `mah` filetype
-(`.mh` files).
+Point your editor's LSP client at that command for `.mh` files.
+
+## The language server
+
+`mah lsp` is a dependency-free (standard library only) implementation of
+the Language Server Protocol, built directly on the same resolver the
+compiler uses — not a second, independent analysis of the source. It
+currently provides:
+
+- live diagnostics as you type, including syntax and resolve errors inside
+  imported files
+- hover, with docs for keywords, builtins, and the declaration a variable/
+  function/parameter resolved to
+- go to definition — scope-aware (locals, then globals), and it follows
+  imports: jumping from a namespaced call, the namespace name itself, or
+  an `import` path string, into the file it points at
+- rename (single-file only for now — see `docs/NEXT_PHASES.md` for what
+  cross-file rename and struct/enum/field rename would take)
+
+(Completion, document symbols, and code actions existed in an earlier
+version of the server and are currently disabled pending a rewrite onto
+the same resolver-backed foundation as the features above — not yet
+reintroduced.)
+
+## Testing
+
+```sh
+make test
+```
+
+Runs the full suite (stdlib `unittest`, no extra dependencies) — every
+language feature and LSP capability above ships with automated tests, not
+just an example file; see `docs/TESTING.md`.
+
+## How it's built
+
+```
+source --> preprocessor --> lexer --> parser --> resolver --> codegen --> VM
+           (imports)                  (AST)      (scopes,      (flat IR)  (tree-walking
+                                                   addresses)              interpreter)
+```
+
+- `mah/preprocessor.py` inlines `import`/`export` directives into one
+  combined source text (tracking original file positions for error
+  messages), before anything else runs.
+- `mah/compiler/lexer.py` / `parser.py` hand-write tokenizing and a
+  recursive-descent parse into an AST (`ast_nodes.py`), recovering from
+  syntax errors instead of aborting (see "A forgiving parser" above).
+- `mah/compiler/resolve.py` walks the AST once, assigning every variable a
+  `(depth, slot)` address relative to its enclosing function's frame, and
+  building the symbol table the LSP's hover/definition/rename read
+  directly.
+- `mah/compiler/codegen.py` lowers the AST into a flat, 3-address bytecode
+  array.
+- `mah/code_interpreter.py` runs that bytecode: heap `Frame`s linked by a
+  static chain pointer for lexical scoping and closures (see "Heap-
+  allocated closures" above), an explicit return-address stack for calls,
+  and tagged heap values for structs/enums.
+
+`docs/V2_DESIGN.md` is the full design document — every language feature
+above landed as its own milestone (M0 through M9) with the reasoning,
+deviations, and test coverage for each written up in place.
+
+## Where this is going
+
+Not yet built, but designed for and tracked in `docs/NEXT_PHASES.md`:
+
+- **Match guards** (`pattern if condition => { ... }`)
+- **Arrays / lists**
+- **Generics**
+- **Traits / interfaces**
+- **A runtime type system** — types as ordinary values you can pass
+  around, narrow with the language's own `if`/`match`, and inspect at
+  runtime, rather than a separate static type-checker bolted on top
+- **Async** (`detach` / `.await`) — a JS-style event loop where only real
+  I/O ever triggers scheduling, not `detach` itself (there's a validated
+  prototype for this model already, see `docs/prototypes/async_model.py`)
+- **Cross-file rename** and **struct/enum/field rename** in the LSP
+- A garbage collector, once the above settle enough that the heap object
+  model they need is stable
+
+## Docs
+
+- `docs/V2_DESIGN.md` — the language design doc and milestone-by-milestone
+  build log
+- `docs/NEXT_PHASES.md` — detailed design notes for everything in
+  "Where this is going" above
+- `docs/TESTING.md` — the testing policy referenced above
+- `docs/DEVELOPMENT_WORKFLOW.md` — how this project's own development is
+  split across planning, implementation, and verification
