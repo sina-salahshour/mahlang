@@ -5,15 +5,22 @@ records instead of the old, independent token-scanning scope model) and
 rename (new).
 
 See docs/V2_DESIGN.md's M7 milestone. Scope, deliberately not covered here
-(both by this test file and by the feature itself):
+(both by this test file and by the feature itself, as of M7):
 
   - renaming a struct/enum type name or a struct/enum field name -- those
     live in `Resolver.struct_decls`/`enum_decls`, a separate namespace with
     different reference-tracking needs, out of scope for this milestone;
-  - cross-file rename -- a symbol whose declaration or any reference falls
-    outside the entry file's own text is refused outright rather than
-    performed partially (scenario 8 below);
   - hover/completion/document-symbols are not revived by this milestone.
+
+M11 note: scenario 8 below (`CrossFileRenameRefusalTests`) originally
+asserted that a symbol from an import refused rename outright -- M11 lifts
+that restriction (see docs/V2_DESIGN.md's M11 milestone and
+`tests/test_rename_types_fields_and_cross_file.py` for full cross-file
+rename coverage), so this scenario now asserts the opposite: the rename
+succeeds and correctly spans both files. Kept here (renamed to
+`test_symbol_from_an_import_now_renames_across_files`) rather than deleted,
+since it's still a real regression check on the exact boundary M7
+originally drew.
 
 Calls `lsp.analysis.get_definition`/`get_rename_edits` directly (no
 JSON-RPC/`lsp.server` plumbing needed) -- mirrors
@@ -234,12 +241,16 @@ class InvalidNewNameTests(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
-# 8: cross-file symbols refuse rename outright
+# 8: cross-file symbols now rename correctly (M11 lifts M7's refusal)
 # --------------------------------------------------------------------------
 
 class CrossFileRenameRefusalTests(unittest.TestCase):
-    def test_symbol_from_an_import_refuses_rename(self):
+    def test_symbol_from_an_import_now_renames_across_files(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
+            # A Makefile marker so `_find_workspace_root` finds this
+            # directory deterministically (see analysis.py's docstring).
+            with open(os.path.join(tmp_dir, "Makefile"), "w", encoding="utf-8") as handle:
+                handle.write("")
             lib_path = os.path.join(tmp_dir, "lib.mh")
             main_path = os.path.join(tmp_dir, "main.mh")
             with open(lib_path, "w", encoding="utf-8") as handle:
@@ -251,15 +262,20 @@ class CrossFileRenameRefusalTests(unittest.TestCase):
                 main_text = handle.read()
             use_offset = main_text.index("shared")
 
-            # Go-to-definition still works (it's allowed to jump cross-file) --
-            # confirms this is a deliberate rename-only refusal, not a
-            # symbol-table lookup failure.
+            # Go-to-definition still works (it's allowed to jump cross-file).
             definition = _definition_at(main_text, use_offset, main_path)
             self.assertIsNotNone(definition)
             self.assertEqual(definition["path"], lib_path)
 
-            # But renaming it must be refused outright.
-            self.assertIsNone(_rename_at(main_text, use_offset, "renamed", main_path))
+            # M11: renaming it now succeeds, and spans BOTH files.
+            result = _rename_at(main_text, use_offset, "renamed", main_path)
+            self.assertIsNotNone(result)
+            self.assertEqual(set(result["changes"].keys()), {lib_path, main_path})
+            lib_edits = result["changes"][lib_path]
+            main_edits = result["changes"][main_path]
+            self.assertEqual(len(lib_edits), 1)
+            self.assertEqual(len(main_edits), 1)
+            self.assertTrue(all(e["newText"] == "renamed" for e in lib_edits + main_edits))
 
 
 # --------------------------------------------------------------------------

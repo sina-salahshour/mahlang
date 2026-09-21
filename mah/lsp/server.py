@@ -23,6 +23,7 @@ Run it directly for a quick sanity check:
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -161,9 +162,16 @@ class Server:
         # built on `Resolver`'s real symbol table (see
         # `lsp/analysis.py`'s `get_definition`/`get_rename_edits`), not the
         # retired independent token-scope model (`_build_scopes` and
-        # friends), which M7 deleted. hover is advertised too, likewise
-        # built on the resolver (plus `type_position_index` for struct/enum/
-        # variant names). completion is now advertised as well -- revived on
+        # friends), which M7 deleted. M11: rename now covers cross-file
+        # variable/function rename (a `WorkspaceEdit` spanning multiple
+        # files/URIs, not just the current document -- see
+        # `_on_textDocument_rename` above) plus struct/enum type names,
+        # enum variant names, and struct/enum field names in declarations/
+        # literals/explicit patterns (single-file only -- structs/enums
+        # can't cross files at all). hover is advertised too, likewise
+        # built on the resolver (plus `type_position_index`/
+        # `field_position_index` for struct/enum/variant/field names).
+        # completion is now advertised as well -- revived on
         # top of the same resolver foundation (`analysis.py`'s
         # `get_completions`), replacing the dead, pre-M0 `TokenType`-based
         # scanner it used to call. document-symbols/code-actions remain
@@ -307,14 +315,19 @@ class Server:
         if result is None:
             self._respond(request_id, None)  # None is a valid "can't rename this" response
             return
-        # `analysis.get_rename_edits` returns its edits keyed by the entry
-        # file's own filesystem path (or BUFFER_PATH for a path-less
-        # buffer) -- rename is single-file only (see analysis.py), so
-        # there's always exactly one key here. Translate it to the real
-        # document URI the same way `_on_textDocument_definition` above
-        # translates `get_definition`'s ``path`` key.
-        edits = next(iter(result["changes"].values()), [])
-        self._respond(request_id, {"changes": {uri: edits}})
+        # M11: get_rename_edits can now return edits spanning MULTIPLE files
+        # (cross-file rename) -- translate every file-path key to its own
+        # document URI. The entry file's own path key maps back to `uri`
+        # itself (the document already open in the client); any other path is
+        # a genuinely different file, translated via path_to_uri the same way
+        # get_definition's cross-file jump target already is.
+        raw_entry_path = uri_to_path(uri)
+        entry_path = os.path.abspath(raw_entry_path) if raw_entry_path else raw_entry_path
+        changes = {}
+        for file_path, edits in result["changes"].items():
+            target_uri = uri if file_path in (raw_entry_path, entry_path) else path_to_uri(file_path)
+            changes[target_uri] = edits
+        self._respond(request_id, {"changes": changes})
 
     def _on_textDocument_codeAction(self, request_id, params: dict) -> None:
         uri = params.get("textDocument", {}).get("uri")

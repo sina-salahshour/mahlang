@@ -995,8 +995,13 @@ def get_hover(text: str, line: int, character: int, path: Optional[str] = None) 
     cross-file symbols outright) -- it just notes where the declaration
     actually lives, and (for variables/functions/params/bindings) shows
     that declaration's own leading doc comment and demangled display name.
-    Struct/enum *field* names are not covered (future work, see
-    docs/NEXT_PHASES.md)."""
+    M11 adds struct/enum *field* names too, but only in declarations,
+    literals, and explicit (non-shorthand) patterns -- plain field
+    *access* (`p.x`) still is not covered, deliberately: without a real
+    type system there's no sound way to know what struct shape an
+    arbitrary expression's value holds, so a field named `x` on `p` isn't
+    necessarily the same `x` -- see docs/NEXT_PHASES.md's "Struct/enum/field
+    rename" section."""
     tokens, _lex_error = tokenize(text)
     offset = position_to_offset(text, line, character)
     token = _token_at_offset(tokens, offset)
@@ -1038,9 +1043,19 @@ def get_hover(text: str, line: int, character: int, path: Optional[str] = None) 
                 value += f"\n\n*declared in `{os.path.basename(decl_path)}`*"
         else:
             type_found = _type_symbol_at_position(text, line, character, path)
-            if type_found is None:
-                return None
-            value = _type_hover_value(*type_found)
+            if type_found is not None:
+                value = _type_hover_value(*type_found)
+            else:
+                field_found = _field_symbol_at_position(text, line, character, path)
+                if field_found is None:
+                    return None
+                _resolver, kind, payload = field_found
+                if kind == "struct_field":
+                    struct_name, field_name = payload
+                    value = f"**field** `{field_name}` of struct `{struct_name}`"
+                else:
+                    enum_name, variant_name, field_name = payload
+                    value = f"**field** `{field_name}` of `{enum_name}.{variant_name}`"
     else:
         return None
 
@@ -1198,6 +1213,33 @@ def _type_symbol_at_position(text: str, line: int, character: int, path: Optiona
     return resolver, kind, entry[1]
 
 
+def _field_symbol_at_position(text: str, line: int, character: int, path: Optional[str]):
+    """Like `_type_symbol_at_position`, but looks up the resolver's
+    struct/enum FIELD namespace (`field_position_index`) instead --
+    field names in declarations/literals/explicit patterns only, never
+    plain field access (`p.x`) -- see `compiler/resolve.py`'s
+    `field_position_index` docstring. Returns `(resolver, kind, payload)`
+    where `kind` is `"struct_field"`/`"variant_field"` and `payload` is
+    `(struct_name, field_name)` or `(enum_name, variant_name, field_name)`
+    respectively -- or `None`."""
+    result = _resolve_for_navigation(text, path)
+    if result is None:
+        return None
+    _pp, resolver, tokens = result
+    combined_offset = _combined_offset_for_position(_pp, text, line, character)
+    if combined_offset is None:
+        return None
+    token = _token_at_offset(tokens, combined_offset)
+    if token is None or token.type is not TokenType.ID:
+        return None
+    entry = resolver.field_position_index.get(token.position)
+    if entry is None:
+        return None
+    if entry[0] == "struct_field":
+        return resolver, "struct_field", (entry[1], entry[2])
+    return resolver, "variant_field", (entry[1], entry[2], entry[3])
+
+
 def _type_hover_value(resolver, kind: str, payload) -> str:
     """Render hover markdown for a struct/enum/variant -- see
     `_type_symbol_at_position`."""
@@ -1258,11 +1300,14 @@ def get_definition(
     `lsp/server.py`'s `_on_textDocument_definition` handler expects.
     Covers variables/parameters/function bindings, and (via
     `_type_symbol_at_position`/`type_position_index`) struct/enum type
-    names and enum variant names -- struct/enum *field* names are still not
-    covered (they aren't in either symbol table). Returns ``None`` when the
-    file doesn't resolve cleanly, the cursor isn't on an identifier, or
-    that identifier never resolved to anything (a keyword, a field name,
-    ...).
+    names and enum variant names. M11 adds struct/enum *field* names too
+    (via `_field_symbol_at_position`/`field_position_index`), but only in
+    declarations, literals, and explicit (non-shorthand) patterns -- plain
+    field *access* (`p.x`) is still never covered, deliberately (unsound
+    without a real type system -- see docs/NEXT_PHASES.md's "Struct/enum/
+    field rename" section). Returns ``None`` when the file doesn't resolve
+    cleanly, the cursor isn't on an identifier, or that identifier never
+    resolved to anything (a keyword, a field-access use, ...).
 
     Also handles the cursor sitting on an `import` directive itself -- the
     path string (`import "mathlib"`) or the namespace identifier
@@ -1307,28 +1352,56 @@ def get_definition(
     # Not an ordinary variable/function symbol -- try the struct/enum/
     # variant namespace instead (see `_type_symbol_at_position`).
     type_found = _type_symbol_at_position(text, line, character, path)
-    if type_found is None:
+    if type_found is not None:
+        resolver, kind, payload = type_found
+        result = _resolve_for_navigation(text, path)
+        if result is None:
+            return None
+        pp, _resolver2, _tokens = result
+        if kind == "struct":
+            decl_pos = resolver.struct_decl_positions.get(payload)
+            name_for_fallback_length = payload
+        elif kind == "enum":
+            decl_pos = resolver.enum_decl_positions.get(payload)
+            name_for_fallback_length = payload
+        else:
+            enum_name, variant_name = payload
+            decl_pos = resolver.enum_variant_decl_positions.get(enum_name, {}).get(variant_name)
+            name_for_fallback_length = variant_name
+        if decl_pos is None:
+            return None
+        decl_path, decl_offset = pp.map_to_source(decl_pos)
+        source = text if decl_path == pp.entry_path else pp.files.get(decl_path, "")
+        length = _identifier_length_at(source, decl_offset) or len(name_for_fallback_length)
+        if decl_path == pp.entry_path:
+            return {"path": None, "range": make_range(text, decl_offset, decl_offset + length)}
+        return {"path": decl_path, "range": make_range(source, decl_offset, decl_offset + length)}
+
+    # Not a type/variant name either -- try the struct/enum FIELD namespace
+    # (M11). Field declarations are always single-file today (structs/enums
+    # can't be exported/imported at all -- see get_rename_edits's module
+    # notes), but the code shape below is kept identical to the type-name
+    # case above for consistency.
+    field_found = _field_symbol_at_position(text, line, character, path)
+    if field_found is None:
         return None
-    resolver, kind, payload = type_found
+    resolver, kind, payload = field_found
     result = _resolve_for_navigation(text, path)
     if result is None:
         return None
     pp, _resolver2, _tokens = result
-    if kind == "struct":
-        decl_pos = resolver.struct_decl_positions.get(payload)
-        name_for_fallback_length = payload
-    elif kind == "enum":
-        decl_pos = resolver.enum_decl_positions.get(payload)
-        name_for_fallback_length = payload
+    if kind == "struct_field":
+        struct_name, field_name = payload
+        decl_pos = resolver.struct_field_decl_positions.get((struct_name, field_name))
     else:
-        enum_name, variant_name = payload
-        decl_pos = resolver.enum_variant_decl_positions.get(enum_name, {}).get(variant_name)
-        name_for_fallback_length = variant_name
+        enum_name, variant_name, field_name = payload
+        decl_pos = resolver.enum_variant_field_decl_positions.get((enum_name, variant_name, field_name))
     if decl_pos is None:
+        # Shouldn't happen for a validly-resolved program -- defensive only.
         return None
     decl_path, decl_offset = pp.map_to_source(decl_pos)
     source = text if decl_path == pp.entry_path else pp.files.get(decl_path, "")
-    length = _identifier_length_at(source, decl_offset) or len(name_for_fallback_length)
+    length = _identifier_length_at(source, decl_offset) or len(field_name)
     if decl_path == pp.entry_path:
         return {"path": None, "range": make_range(text, decl_offset, decl_offset + length)}
     return {"path": decl_path, "range": make_range(source, decl_offset, decl_offset + length)}
@@ -1348,6 +1421,155 @@ def _is_valid_mah_identifier(name: str) -> bool:
     return all(ch.isalnum() or ch in "_$" for ch in name[1:])
 
 
+def _find_workspace_root(path: Optional[str]) -> Optional[str]:
+    """Walk upward from `path`'s directory looking for a project marker
+    (`.git` or `Makefile`), mirroring `editors/nvim/ftplugin/mah.lua`'s
+    own root-detection heuristic (`vim.fs.find({"mah.lang", ".git",
+    "Makefile"}, {upward = true, ...})`) for consistency between the two.
+    Falls back to the file's own directory if no marker is found up to
+    the filesystem root. Returns `None` for a path-less buffer (nothing
+    to anchor a workspace search from)."""
+    if path is None or path == BUFFER_PATH:
+        return None
+    current = os.path.dirname(os.path.abspath(path))
+    start = current
+    while True:
+        if os.path.exists(os.path.join(current, ".git")) or os.path.exists(os.path.join(current, "Makefile")):
+            return current
+        parent = os.path.dirname(current)
+        if parent == current:
+            return start
+        current = parent
+
+
+def _find_mh_files(root: str) -> list:
+    """Every `*.mh` file under `root`, skipping dot-directories."""
+    found = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        for fname in filenames:
+            if fname.endswith(".mh"):
+                found.append(os.path.join(dirpath, fname))
+    return found
+
+
+def _build_reverse_import_graph(mh_files: list) -> dict:
+    """resolved_path -> set of files that directly import it, discovered
+    via the preprocessor's own tolerant scanner/import-matcher -- no real
+    lex/parse/resolve needed just to find import edges (see
+    preprocessor.py's `scan`/`_match_import`/`_resolve_import`, already
+    written for exactly this kind of lightweight directive detection)."""
+    from ..preprocessor import scan as pp_scan, _match_import as pp_match_import, _resolve_import as pp_resolve_import
+
+    graph: dict = {}
+    for fpath in mh_files:
+        try:
+            with open(fpath, encoding="utf-8") as f:
+                source = f.read()
+        except OSError:
+            continue
+        tokens = pp_scan(source)
+        base_dir = os.path.dirname(fpath)
+        i = 0
+        count = len(tokens)
+        while i < count:
+            tok = tokens[i]
+            if tok.kind == "id" and tok.value == "import":
+                directive = pp_match_import(tokens, i)
+                if directive is not None:
+                    _kind, _ns_tok, str_tok, end_i = directive
+                    literal = str_tok.value[1:-1]
+                    resolved, exists = pp_resolve_import(base_dir, literal)
+                    if exists:
+                        graph.setdefault(resolved, set()).add(fpath)
+                    i = end_i + 1
+                    continue
+            i += 1
+    return graph
+
+
+def _rename_variable_cross_file(found, new_name: str, entry_text: str) -> Optional[dict]:
+    """Cross-file variable/function/parameter/binding rename: `found` is
+    `_symbol_at_position`'s own `(pp, resolver, symbol)` result for the
+    CURRENTLY OPEN document, and `entry_text` is that document's own live
+    buffer content (which may have unsaved edits, so it's used in place of
+    re-reading `pp.entry_path` from disk whenever that file is one of the
+    ones scanned -- including the buffer-less/path-less case, where
+    `pp.entry_path` is `BUFFER_PATH`, not a real file at all). Scans the
+    declaring file plus every file that directly imports it (structs/enums
+    can't be exported/imported at all today -- see docs/NEXT_PHASES.md's
+    "Cross-file rename" section -- so only this symbol kind ever needs
+    this). Refuses (`None`) outright, matching M7's own established safety
+    philosophy, the moment ANY relevant file fails to preprocess/parse/
+    resolve cleanly -- a partial cross-file rename that silently misses a
+    file is worse than refusing entirely."""
+    pp, _resolver, symbol = found
+    decl_path, decl_offset = pp.map_to_source(symbol.decl_position)
+
+    root = _find_workspace_root(decl_path)
+    importers: set = set()
+    if root is not None:
+        mh_files = _find_mh_files(root)
+        graph = _build_reverse_import_graph(mh_files)
+        importers = graph.get(decl_path, set())
+    files_to_scan = {decl_path} | importers
+
+    all_edits: dict = {}
+    seen_positions: set = set()
+
+    for fpath in files_to_scan:
+        if fpath == pp.entry_path:
+            # The currently open document: use its live buffer text rather
+            # than the disk (may be unsaved, or -- for a path-less buffer
+            # -- not a real file on disk at all).
+            fsource = entry_text
+            preprocess_path = None if pp.entry_path == BUFFER_PATH else fpath
+        else:
+            try:
+                with open(fpath, encoding="utf-8") as f:
+                    fsource = f.read()
+            except OSError:
+                return None
+            preprocess_path = fpath
+
+        fpp = preprocess(preprocess_path, fsource)
+        if fpp.errors:
+            return None
+        flexer = Lexer(fpp.text)
+        fparser = Parser(flexer)
+        fprogram = fparser.parse_program()
+        if fparser.errors:
+            return None
+        fresolver = Resolver()
+        try:
+            fresolver.resolve_program(fprogram)
+        except Exception:
+            return None
+
+        for fsymbol in fresolver.position_index.values():
+            fdecl_path, fdecl_offset = fpp.map_to_source(fsymbol.decl_position)
+            if (fdecl_path, fdecl_offset) != (decl_path, decl_offset):
+                continue
+            for position in [fsymbol.decl_position] + list(fsymbol.references):
+                src_path, src_offset = fpp.map_to_source(position)
+                key = (src_path, src_offset)
+                if key in seen_positions:
+                    continue
+                seen_positions.add(key)
+                source_text = fsource if src_path == fpath else fpp.files.get(src_path, "")
+                length = _identifier_length_at(source_text, src_offset) or len(symbol.name)
+                all_edits.setdefault(src_path, []).append(
+                    {
+                        "range": make_range(source_text, src_offset, src_offset + length),
+                        "newText": new_name,
+                    }
+                )
+
+    if not all_edits:
+        return None
+    return {"changes": all_edits}
+
+
 def get_rename_edits(
     text: str,
     line: int,
@@ -1355,60 +1577,104 @@ def get_rename_edits(
     new_name: str,
     path: Optional[str] = None,
 ) -> Optional[dict]:
-    """Rename the variable/parameter/function symbol under the cursor.
+    """Rename the symbol under the cursor -- variable/parameter/function
+    (M7, now cross-file, M11), struct/enum type name or enum variant name
+    (M11, single-file only), or struct/enum field name in a declaration/
+    literal/explicit pattern (M11, single-file only). Tries each in turn,
+    falling through to the next on `None`, and returns `None` outright if
+    none of them match.
 
-    Returns ``{"changes": {<key>: [TextEdit, ...]}}`` where ``<key>`` is the
-    entry file's own path (or `preprocessor.BUFFER_PATH` for an unsaved,
-    path-less buffer) -- `lsp/server.py`'s rename handler swaps this for the
-    real document URI before responding to the client, the same way
-    `get_definition`'s ``path`` key is translated to a URI there. Returns
-    ``None`` (refusing the rename outright) when:
+    Returns ``{"changes": {<key>: [TextEdit, ...]}}`` where ``<key>`` is a
+    filesystem path (or `preprocessor.BUFFER_PATH` for an unsaved,
+    path-less buffer) -- `lsp/server.py`'s rename handler translates every
+    key to its own document URI before responding to the client (M11:
+    there can now be MORE than one key, for a cross-file variable/function
+    rename -- see `_rename_variable_cross_file`). Returns ``None``
+    (refusing the rename outright) when:
 
       - the file doesn't resolve cleanly (no symbol table available at all);
-      - the cursor isn't on an identifier that resolved to a symbol;
+      - the cursor isn't on an identifier that resolved to anything;
       - `new_name` isn't a syntactically valid Mah identifier, or is a
         reserved keyword;
-      - the symbol's declaration or ANY of its references falls outside the
-        entry file's own text (i.e. it touches an inlined import) --
-        renaming it correctly would require rewriting the preprocessor's
-        name-mangling across multiple files in one atomic edit, which is
-        out of scope for this milestone (see module notes above and
-        docs/V2_DESIGN.md's M7 milestone). A partial, single-file-only
-        rename that silently leaves other files using the old name would be
-        worse than refusing outright.
+      - (variable/function case) any relevant file (the declaring file, or
+        any file that imports it) fails to preprocess/parse/resolve
+        cleanly -- see `_rename_variable_cross_file`'s docstring;
+      - (struct/enum type/variant/field case) these are always single-file
+        today -- structs/enums can't be exported/imported at all (the
+        preprocessor's export-detection only recognizes `fn`/`let`) -- so
+        there is no cross-file concept to extend here at all.
 
     Does not check whether `new_name` would collide with an unrelated
     existing binding already in scope -- a known, documented limitation.
-    Covers variables/parameters/function bindings only, not struct/enum
-    type or field names (see module notes above).
+    Renaming through plain field *access* (`p.x`) is deliberately never
+    attempted -- unsound without a real type system, see
+    docs/NEXT_PHASES.md's "Struct/enum/field rename" section.
     """
     if not _is_valid_mah_identifier(new_name) or new_name in KEYWORDS:
         return None
 
+    # 1. Variable/parameter/function/binding -- now cross-file (M11).
     found = _symbol_at_position(text, line, character, path)
-    if found is None:
-        return None
-    pp, _resolver, symbol = found
+    if found is not None:
+        return _rename_variable_cross_file(found, new_name, text)
 
-    positions = [symbol.decl_position] + list(symbol.references)
-    edits = []
-    for position in positions:
-        src_path, src_offset = pp.map_to_source(position)
-        if src_path != pp.entry_path:
-            # Cross-file: refuse the whole rename rather than perform a
-            # partial, single-file-only edit that silently misses other
-            # files -- see docstring above.
+    # 2. Struct/enum type name or enum variant name -- single-file only,
+    # since structs/enums can't cross files at all (see docstring above).
+    type_found = _type_symbol_at_position(text, line, character, path)
+    if type_found is not None:
+        resolver, kind, payload = type_found
+        result = _resolve_for_navigation(text, path)
+        if result is None:
             return None
-        length = _identifier_length_at(text, src_offset) or len(symbol.name)
-        edits.append(
-            {
-                "range": make_range(text, src_offset, src_offset + length),
-                "newText": new_name,
-            }
-        )
+        pp, _resolver2, _tokens = result
+        target = ("variant", payload[0], payload[1]) if kind == "variant" else (kind, payload)
+        edits = []
+        for pos, entry in resolver.type_position_index.items():
+            if entry != target:
+                continue
+            src_path, src_offset = pp.map_to_source(pos)
+            if src_path != pp.entry_path:
+                return None
+            fallback_name = payload[1] if kind == "variant" else payload
+            length = _identifier_length_at(text, src_offset) or len(fallback_name)
+            edits.append(
+                {
+                    "range": make_range(text, src_offset, src_offset + length),
+                    "newText": new_name,
+                }
+            )
+        if not edits:
+            return None
+        return {"changes": {pp.entry_path: edits}}
 
-    key = pp.entry_path
-    return {"changes": {key: edits}}
+    # 3. Struct/enum field name -- single-file only, same reasoning as (2).
+    field_found = _field_symbol_at_position(text, line, character, path)
+    if field_found is not None:
+        resolver, kind, payload = field_found
+        result = _resolve_for_navigation(text, path)
+        if result is None:
+            return None
+        pp, _resolver2, _tokens = result
+        target = (kind,) + payload
+        edits = []
+        for pos, entry in resolver.field_position_index.items():
+            if entry != target:
+                continue
+            src_path, src_offset = pp.map_to_source(pos)
+            if src_path != pp.entry_path:
+                return None
+            length = _identifier_length_at(text, src_offset) or len(payload[-1])
+            edits.append(
+                {
+                    "range": make_range(text, src_offset, src_offset + length),
+                    "newText": new_name,
+                }
+            )
+        if not edits:
+            return None
+        return {"changes": {pp.entry_path: edits}}
+
+    return None
 
 
 # --------------------------------------------------------------------------

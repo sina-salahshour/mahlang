@@ -568,9 +568,10 @@ class Parser:
                 self.advance()
                 variant_tok = self.expect(TokenType.ID)
                 fields = []
+                field_name_positions = []
                 if self.current.type is TokenType.BRACE_OPEN:
                     self.advance()
-                    fields = self._parse_pattern_field_list()
+                    fields, field_name_positions = self._parse_pattern_field_list()
                     self.expect(TokenType.BRACE_CLOSE)
                 return EnumPat(
                     type_name=tok.literal,
@@ -578,6 +579,7 @@ class Parser:
                     fields=fields,
                     position=tok.position,
                     variant_position=variant_tok.position,
+                    field_name_positions=field_name_positions,
                 )
             return BindPat(name=tok.literal, position=tok.position)
 
@@ -585,46 +587,65 @@ class Parser:
 
     def _parse_struct_pat(self, name_tok: Token) -> StructPat:
         self.expect(TokenType.BRACE_OPEN)
-        fields = self._parse_pattern_field_list()
+        fields, field_name_positions = self._parse_pattern_field_list()
         self.expect(TokenType.BRACE_CLOSE)
-        return StructPat(type_name=name_tok.literal, fields=fields, position=name_tok.position)
+        return StructPat(
+            type_name=name_tok.literal,
+            fields=fields,
+            position=name_tok.position,
+            field_name_positions=field_name_positions,
+        )
 
-    def _parse_pattern_field_list(self) -> list:
+    def _parse_pattern_field_list(self) -> tuple:
         fields = []
+        field_name_positions = []
         if self.current.type is not TokenType.BRACE_CLOSE:
-            fields.append(self._parse_pattern_field())
+            name, sub, pos = self._parse_pattern_field()
+            fields.append((name, sub))
+            field_name_positions.append(pos)
             while self.current.type is TokenType.COMMA:
                 self.advance()
-                fields.append(self._parse_pattern_field())
-        return fields
+                name, sub, pos = self._parse_pattern_field()
+                fields.append((name, sub))
+                field_name_positions.append(pos)
+        return fields, field_name_positions
 
     def _parse_pattern_field(self):
         name_tok = self.expect(TokenType.ID)
         if self.current.type is TokenType.COLON:
             self.advance()
             sub = self._parse_pattern()
-        else:
-            # Shorthand `x` means `x: x` -- bind field x's value to a fresh
-            # local variable named x.
-            sub = BindPat(name=name_tok.literal, position=name_tok.position)
-        return (name_tok.literal, sub)
+            return (name_tok.literal, sub, name_tok.position)
+        # Shorthand `x` means `x: x` -- bind field x's value to a fresh
+        # local variable named x. Deliberately no field-name position here
+        # (`None`) -- see StructPat.field_name_positions's docstring in
+        # ast_nodes.py for why shorthand stays a pure variable-binding
+        # rename, never a field-rename target.
+        sub = BindPat(name=name_tok.literal, position=name_tok.position)
+        return (name_tok.literal, sub, None)
 
     def _parse_struct_decl(self) -> StructDecl:
         struct_tok = self.advance()  # STRUCT
         name_tok = self.expect(TokenType.ID)
         self.expect(TokenType.BRACE_OPEN)
         fields = []
+        field_positions = []
         if self.current.type is TokenType.ID:
-            fields.append(self.advance().literal)
+            field_tok = self.advance()
+            fields.append(field_tok.literal)
+            field_positions.append(field_tok.position)
             while self.current.type is TokenType.COMMA:
                 self.advance()
-                fields.append(self.expect(TokenType.ID).literal)
+                field_tok = self.expect(TokenType.ID)
+                fields.append(field_tok.literal)
+                field_positions.append(field_tok.position)
         self.expect(TokenType.BRACE_CLOSE)
         return StructDecl(
             name=name_tok.literal,
             fields=fields,
             position=struct_tok.position,
             name_position=name_tok.position,
+            field_positions=field_positions,
         )
 
     def _parse_enum_decl(self) -> EnumDecl:
@@ -633,15 +654,18 @@ class Parser:
         self.expect(TokenType.BRACE_OPEN)
         variants = []
         variant_positions = []
+        variant_field_positions_list = []
         if self.current.type is not TokenType.BRACE_CLOSE:
-            variant_name, variant_fields, variant_pos = self._parse_enum_variant()
+            variant_name, variant_fields, variant_pos, variant_field_positions = self._parse_enum_variant()
             variants.append((variant_name, variant_fields))
             variant_positions.append(variant_pos)
+            variant_field_positions_list.append(variant_field_positions)
             while self.current.type is TokenType.COMMA:
                 self.advance()
-                variant_name, variant_fields, variant_pos = self._parse_enum_variant()
+                variant_name, variant_fields, variant_pos, variant_field_positions = self._parse_enum_variant()
                 variants.append((variant_name, variant_fields))
                 variant_positions.append(variant_pos)
+                variant_field_positions_list.append(variant_field_positions)
         self.expect(TokenType.BRACE_CLOSE)
         return EnumDecl(
             name=name_tok.literal,
@@ -649,6 +673,7 @@ class Parser:
             position=enum_tok.position,
             name_position=name_tok.position,
             variant_positions=variant_positions,
+            variant_field_positions=variant_field_positions_list,
         )
 
     def _parse_enum_variant(self):
@@ -656,14 +681,19 @@ class Parser:
         if self.current.type is TokenType.BRACE_OPEN:
             self.advance()
             fields = []
+            field_positions = []
             if self.current.type is TokenType.ID:
-                fields.append(self.advance().literal)
+                field_tok = self.advance()
+                fields.append(field_tok.literal)
+                field_positions.append(field_tok.position)
                 while self.current.type is TokenType.COMMA:
                     self.advance()
-                    fields.append(self.expect(TokenType.ID).literal)
+                    field_tok = self.expect(TokenType.ID)
+                    fields.append(field_tok.literal)
+                    field_positions.append(field_tok.position)
             self.expect(TokenType.BRACE_CLOSE)
-            return (name_tok.literal, fields, name_tok.position)
-        return (name_tok.literal, [], name_tok.position)
+            return (name_tok.literal, fields, name_tok.position, field_positions)
+        return (name_tok.literal, [], name_tok.position, [])
 
     def _parse_fn_expr(self) -> FnExpr:
         fn_tok = self.advance()  # FN
@@ -889,7 +919,7 @@ class Parser:
                 and self._struct_literal_allowed
             ):
                 self.advance()  # BRACE_OPEN
-                fields = self._parse_field_list()
+                fields, field_name_positions = self._parse_field_list()
                 self.expect(TokenType.BRACE_CLOSE)
                 base = EnumLit(
                     type_name=base.name,
@@ -897,6 +927,7 @@ class Parser:
                     fields=fields,
                     position=field_tok.position,
                     type_name_position=base.position,
+                    field_name_positions=field_name_positions,
                 )
             else:
                 base = FieldAccess(obj=base, field=field_tok.literal, position=field_tok.position)
@@ -904,24 +935,34 @@ class Parser:
 
     def _parse_field_list(self):
         fields = []
+        field_name_positions = []
         if self.current.type is not TokenType.BRACE_CLOSE:
-            fields.append(self._parse_one_field())
+            name, value, pos = self._parse_one_field()
+            fields.append((name, value))
+            field_name_positions.append(pos)
             while self.current.type is TokenType.COMMA:
                 self.advance()
-                fields.append(self._parse_one_field())
-        return fields
+                name, value, pos = self._parse_one_field()
+                fields.append((name, value))
+                field_name_positions.append(pos)
+        return fields, field_name_positions
 
     def _parse_one_field(self):
         name_tok = self.expect(TokenType.ID)
         self.expect(TokenType.COLON)
         value = self.parse_expr()
-        return (name_tok.literal, value)
+        return (name_tok.literal, value, name_tok.position)
 
     def _parse_struct_lit(self, name_tok: Token) -> StructLit:
         self.expect(TokenType.BRACE_OPEN)
-        fields = self._parse_field_list()
+        fields, field_name_positions = self._parse_field_list()
         self.expect(TokenType.BRACE_CLOSE)
-        return StructLit(type_name=name_tok.literal, fields=fields, position=name_tok.position)
+        return StructLit(
+            type_name=name_tok.literal,
+            fields=fields,
+            position=name_tok.position,
+            field_name_positions=field_name_positions,
+        )
 
     def _parse_paren_args(self) -> list:
         self.expect(TokenType.PAREN_OPEN)

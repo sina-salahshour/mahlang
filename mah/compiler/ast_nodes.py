@@ -58,6 +58,21 @@ LSP note: `StructDecl.name_position`, `EnumDecl.name_position`/
 position tracking for the LSP, landing alongside the corresponding
 `compiler/resolve.py` additions (`type_position_index` and friends).
 
+M11 adds the same tracking one level down, for struct/enum FIELD names
+(not just type/variant names): `StructDecl.field_positions`,
+`EnumDecl.variant_field_positions`, `StructLit.field_name_positions`,
+`EnumLit.field_name_positions`, `StructPat.field_name_positions`,
+`EnumPat.field_name_positions` -- see each field's own comment below and
+`compiler/resolve.py`'s `field_position_index` docstring. This powers
+struct/enum field-name rename/hover/go-to-definition in declarations,
+literals, and *explicit* (non-shorthand) patterns -- plain field access
+(`p.x`) is deliberately never tracked here at all (unsound without a real
+type system, see `docs/NEXT_PHASES.md`'s "Struct/enum/field rename"
+section), and a *shorthand* pattern field (`{ x }`, no colon) is
+deliberately excluded too, since that single token is simultaneously the
+field name AND the local variable it binds -- see `StructPat.field_name_positions`
+below for the full reasoning.
+
 Every node carries `position` (a source offset into the *combined*,
 preprocessed text) so error messages can point mah.py at a `file:line:col`
 the same way v1's did.
@@ -133,6 +148,11 @@ class StructLit:
                    # written twice in one literal (a dict would silently
                    # drop it)
     position: int
+    # M11: set by the parser -- the source position of each field NAME
+    # token, one per `.fields` entry, in the same order. Lets the resolver
+    # register a field-rename/hover/go-to-definition target for this exact
+    # use site (`field_position_index`) -- see `compiler/resolve.py`.
+    field_name_positions: list = field(default_factory=list, repr=False)
 
 
 @dataclass
@@ -167,6 +187,12 @@ class EnumDecl:
     # token, in the same order as `variants` -- mirrors `FnExpr`'s
     # `param_positions`-parallel-to-`params` convention.
     variant_positions: list = field(default_factory=list, repr=False)
+    # M11: set by the parser -- one list per entry in `.variants`, same
+    # order, each inner list itself being one position per that variant's
+    # own field NAME tokens (parallel to that variant's own field-name
+    # list). E.g. for `enum Shape { Circle { r }, Empty }`, this is
+    # `[[pos_of_r], []]`. See `compiler/resolve.py`'s `field_position_index`.
+    variant_field_positions: list = field(default_factory=list, repr=False)
 
 
 @dataclass
@@ -180,6 +206,14 @@ class EnumLit:
     # the *variant* name's position, set via `field_tok.position` in
     # `_parse_postfix_from`.
     type_name_position: Optional[int] = field(default=None, repr=False)
+    # M11: set by the parser -- the source position of each field NAME
+    # token, one per `.fields` entry, same order (parallel to `StructLit`'s
+    # own `field_name_positions`). See `compiler/resolve.py`'s
+    # `field_position_index`. NOT set for the built-in `none`/`some(x)`
+    # construction sites (they build `.fields` directly, never through
+    # `_parse_field_list`) -- left at the default empty list, same as
+    # `type_name_position` is also left unset there.
+    field_name_positions: list = field(default_factory=list, repr=False)
 
 
 @dataclass
@@ -379,6 +413,9 @@ class StructDecl:
     # -- M-LSP needs this exact span for hover/go-to-definition, the same
     # reasoning `LetStmt.name_position`/`FnExpr.name_position` exist for.
     name_position: Optional[int] = field(default=None, repr=False)
+    # M11: set by the parser -- one position per entry in `.fields`, same
+    # order. See `compiler/resolve.py`'s `field_position_index` docstring.
+    field_positions: list = field(default_factory=list, repr=False)
 
 
 # -- M4: patterns / match ------------------------------------------------
@@ -410,6 +447,20 @@ class StructPat:
     type_name: str
     fields: list  # list[tuple[str, pattern]]
     position: int
+    # M11: set by the parser -- one entry per `.fields` entry, but `None`
+    # for a SHORTHAND field (`{ x }`, no colon) and a real position for an
+    # explicit one (`{ x: sub }`). Deliberate: for shorthand `{ x }`, the
+    # single token `x` is *simultaneously* the field name being matched AND
+    # the local variable being bound (`BindPat(name="x", ...)`, already
+    # registered as an ordinary variable in `resolver.position_index` via
+    # `_declare`) -- renaming "the field" vs. "the local variable it's
+    # bound to" are two different, independent intents at that exact
+    # position, so shorthand fields are deliberately NOT registered as
+    # field-rename targets at all; renaming there stays exactly today's
+    # variable-rename behavior. Only the unambiguous explicit form
+    # (`x: sub`, two separate tokens) gets a field-rename registration --
+    # see `compiler/resolve.py`'s `field_position_index`.
+    field_name_positions: list = field(default_factory=list, repr=False)
 
 
 @dataclass
@@ -424,6 +475,9 @@ class EnumPat:
     # `position` above is already the type name's position, this fills the
     # gap for the variant part (mirrors `EnumLit.type_name_position`).
     variant_position: Optional[int] = field(default=None, repr=False)
+    # M11: same `None`-for-shorthand rule as `StructPat.field_name_positions`
+    # above -- see that field's comment for the full reasoning.
+    field_name_positions: list = field(default_factory=list, repr=False)
 
 
 @dataclass

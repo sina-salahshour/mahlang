@@ -124,6 +124,111 @@ class HoverStructEnumTests(unittest.TestCase):
         self.assertNotIn("Empty", value)
 
 
+class HoverFieldTests(unittest.TestCase):
+    """M11: field-name hover in declarations/literals/explicit patterns
+    (never plain field access -- see docs/V2_DESIGN.md's M11 milestone)."""
+
+    STRUCT_SRC = (
+        "struct Point { x, y }\n"
+        "let p = Point { x: 1, y: 2 }\n"
+    )
+
+    ENUM_SRC = (
+        "enum Shape {\n"
+        "\tCircle { r },\n"
+        "\tEmpty\n"
+        "}\n"
+        "let s = Shape.Circle { r: 5 }\n"
+    )
+
+    def test_hover_on_struct_field_label_shows_field_of_struct(self):
+        line, col = _find(self.STRUCT_SRC, "x", occurrence=1)  # the `x:` label in the literal
+        hover = analysis.get_hover(self.STRUCT_SRC, line, col)
+        self.assertIsNotNone(hover)
+        value = hover["contents"]["value"]
+        self.assertIn("field", value)
+        self.assertIn("x", value)
+        self.assertIn("Point", value)
+
+    def test_hover_on_struct_field_declaration_shows_field_of_struct(self):
+        line, col = _find(self.STRUCT_SRC, "x", occurrence=0)  # in `struct Point { x, y }`
+        hover = analysis.get_hover(self.STRUCT_SRC, line, col)
+        self.assertIsNotNone(hover)
+        value = hover["contents"]["value"]
+        self.assertIn("field", value)
+        self.assertIn("Point", value)
+
+    def test_hover_on_variant_field_label_shows_field_of_variant(self):
+        idx = self.ENUM_SRC.index("r: 5")  # the `r:` label in the literal
+        line = self.ENUM_SRC.count("\n", 0, idx)
+        col = idx - (self.ENUM_SRC.rfind("\n", 0, idx) + 1)
+        hover = analysis.get_hover(self.ENUM_SRC, line, col)
+        self.assertIsNotNone(hover)
+        value = hover["contents"]["value"]
+        self.assertIn("field", value)
+        self.assertIn("Shape.Circle", value)
+
+    def test_hover_on_plain_field_access_is_not_a_field_hover(self):
+        src = self.STRUCT_SRC + "print(p.x)\n"
+        line, col = _find(src, "p.x")
+        col += 2  # land on the `x` after `p.`
+        hover = analysis.get_hover(src, line, col)
+        # `p.x` is plain field access -- deliberately not covered (unsound
+        # without a real type system) -- so this must not claim to be a
+        # "field" hover at all (it may return None, or find nothing useful).
+        if hover is not None:
+            self.assertNotIn("**field**", hover["contents"]["value"])
+
+
+class GotoDefinitionFieldTests(unittest.TestCase):
+    """M11: go-to-definition on a field literal's label jumps to that
+    field's own declaration position within the struct/enum."""
+
+    STRUCT_SRC = (
+        "struct Point { x, y }\n"
+        "let p = Point { x: 1, y: 2 }\n"
+    )
+
+    ENUM_SRC = (
+        "enum Shape {\n"
+        "\tCircle { r },\n"
+        "\tEmpty\n"
+        "}\n"
+        "let s = Shape.Circle { r: 5 }\n"
+    )
+
+    def test_goto_definition_on_struct_field_literal_label_lands_on_declaration(self):
+        use_line, use_col = _find(self.STRUCT_SRC, "x", occurrence=1)
+        result = analysis.get_definition(self.STRUCT_SRC, use_line, use_col)
+        self.assertIsNotNone(result)
+        self.assertIsNone(result["path"])
+
+        decl_line, decl_col = _find(self.STRUCT_SRC, "x", occurrence=0)
+        self.assertEqual(result["range"]["start"]["line"], decl_line)
+        self.assertEqual(result["range"]["start"]["character"], decl_col)
+
+    def test_goto_definition_on_variant_field_literal_label_lands_on_declaration(self):
+        use_idx = self.ENUM_SRC.index("r: 5")
+        use_line = self.ENUM_SRC.count("\n", 0, use_idx)
+        use_col = use_idx - (self.ENUM_SRC.rfind("\n", 0, use_idx) + 1)
+        result = analysis.get_definition(self.ENUM_SRC, use_line, use_col)
+        self.assertIsNotNone(result)
+        self.assertIsNone(result["path"])
+
+        decl_idx = self.ENUM_SRC.index("{ r }") + 2
+        decl_line = self.ENUM_SRC.count("\n", 0, decl_idx)
+        decl_col = decl_idx - (self.ENUM_SRC.rfind("\n", 0, decl_idx) + 1)
+        self.assertEqual(result["range"]["start"]["line"], decl_line)
+        self.assertEqual(result["range"]["start"]["character"], decl_col)
+
+    def test_goto_definition_on_plain_field_access_returns_none(self):
+        src = self.STRUCT_SRC + "print(p.x)\n"
+        line, col = _find(src, "p.x")
+        col += 2
+        result = analysis.get_definition(src, line, col)
+        self.assertIsNone(result)
+
+
 class GotoDefinitionStructEnumTests(unittest.TestCase):
     ENUM_SRC = (
         "enum Shape {\n"

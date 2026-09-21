@@ -2068,6 +2068,192 @@ node that resolved to it. Then:
     `syntax-highlight/grammar.js`'s `detach_expr` rule (widened to accept
     `sleep_async_call` as well as `call_expr`) were updated to match.
 
+12. **M11 — Cross-file rename + struct/enum/field rename. ✅ Landed.**
+    Two previously-out-of-scope gaps in M7's rename feature, per
+    `docs/NEXT_PHASES.md`'s "Cross-file rename" and "Struct/enum/field
+    rename" sections (design worked out and largely fixed ahead of time
+    there; this milestone implements it, with one real gap found and fixed
+    along the way -- see below).
+
+    **Part 1 -- field-name position tracking**, one level down from the
+    struct/enum *type*-name tracking a recent (un-milestoned) LSP follow-up
+    already added (`compiler/resolve.py`'s `type_position_index`). New
+    parallel position-list AST fields, threaded through the parser exactly
+    like `variant_positions`/`param_positions` already are, with zero
+    change to any existing tuple shape (`StructDecl.fields: list[str]`,
+    `StructLit.fields`/`EnumLit.fields: list[tuple[str, expr]]`,
+    `StructPat.fields`/`EnumPat.fields: list[tuple[str, pattern]]` are all
+    unchanged -- every `for name, value in expr.fields`-shaped destructuring
+    site across `resolve.py`/`codegen.py` keeps working untouched):
+    `StructDecl.field_positions`, `EnumDecl.variant_field_positions` (one
+    list per variant, each itself parallel to that variant's own field
+    names), `StructLit.field_name_positions`, `EnumLit.field_name_positions`,
+    `StructPat.field_name_positions`, `EnumPat.field_name_positions`.
+    `compiler/resolve.py` gains `field_position_index` (parallel to
+    `type_position_index`, one level down: maps a position to
+    `("struct_field", struct_name, field_name)` or `("variant_field",
+    enum_name, variant_name, field_name)`) plus two dedicated declaration-
+    only maps, `struct_field_decl_positions`/`enum_variant_field_decl_positions`
+    (needed because `field_position_index` alone records every occurrence --
+    declaration and uses alike -- under the same tuple key, with no way to
+    tell "this is the declaration" apart from "this is a use" without a
+    second, disambiguating index; go-to-definition/rename need the
+    declaration specifically).
+
+    **The shorthand-vs-explicit field disambiguation.** A struct/enum
+    pattern field can be written two ways: explicit (`{ x: sub }`, two
+    separate tokens) or shorthand (`{ x }`, one token doing double duty --
+    simultaneously the field name being matched AND the local variable
+    name it binds to, via `BindPat(name="x", ...)`, already registered as
+    an ordinary variable in `resolver.position_index`). At that one
+    position, "rename the field" and "rename the local binding" are two
+    different, independent intents that can't both be served by one
+    rename invocation -- so shorthand fields are deliberately NOT
+    registered in `field_position_index` at all (`field_name_positions`
+    carries `None` for a shorthand field, a real position only for an
+    explicit one); renaming at a shorthand position stays exactly today's
+    (M7) variable-rename behavior, unchanged. This is a real design
+    decision, not an oversight -- pinned down by
+    `ShorthandPatternFieldRenameTests` in the new test file.
+
+    **Part 2 -- the LSP layer.** `_field_symbol_at_position` mirrors
+    `_type_symbol_at_position` exactly, one level down. `get_hover`/
+    `get_definition` each gain one more fallback level (variable lookup,
+    then type lookup, then field lookup, each falling through to the next
+    on `None`) -- field hover renders `**field** \`x\` of struct
+    \`Point\`` / `**field** \`x\` of \`Shape.Circle\``; go-to-definition
+    reuses the two new dedicated declaration-only maps from Part 1,
+    keeping the exact same code shape as the existing struct/enum-type
+    case (declaration is always single-file for a field today, but the
+    shape is kept identical for consistency). `get_rename_edits` is
+    restructured into three fallback stages, tried in order: (1) variable/
+    function/parameter/binding -- now cross-file (see below); (2) struct/
+    enum type name or enum variant name -- collects every position in
+    `type_position_index` whose value equals the target tuple, single-file
+    only; (3) struct/enum field name -- same idea against
+    `field_position_index`. Stages 2 and 3 are single-file
+    *unconditionally*, not just "for now": confirmed empirically before
+    writing this milestone's spec that structs/enums cannot be exported/
+    imported across files at all today (`export struct Point {...}` is a
+    syntax error -- `preprocessor.py`'s export-detection only recognizes
+    `fn`/`let`), so there is no cross-file concept to extend for either of
+    them.
+
+    **Part 3 -- cross-file variable/function rename**, the substantial new
+    piece. `_find_workspace_root` walks upward from the renamed symbol's
+    declaring file looking for a `.git`/`Makefile` marker (mirroring
+    `editors/nvim/ftplugin/mah.lua`'s own root-detection heuristic, for
+    consistency between the two), falling back to the file's own directory
+    if none is found. `_find_mh_files` + `_build_reverse_import_graph`
+    build a workspace-wide reverse-import-graph via the preprocessor's own
+    already-written tolerant scanner/import-matcher (`scan`/`_match_import`/
+    `_resolve_import`) -- no real lex/parse/resolve needed just to find
+    import edges, exactly as `docs/NEXT_PHASES.md`'s own sketch anticipated.
+    `_rename_variable_cross_file` then scans the declaring file plus every
+    file that directly imports it (structs/enums never need this, since
+    they can't cross files at all -- see above): for each, runs the real
+    `preprocess`/`Parser`/`Resolver` pipeline and looks for a `Symbol`
+    whose *declaration* maps back to the same original `(file, offset)`,
+    then collects every one of *that* symbol's own declaration/reference
+    positions, mapped back through that file's own source map, deduplicated
+    across files via a single `seen_positions` set (an importer's own
+    preprocessing inlines the declaring file too, so its own resolve pass
+    would otherwise re-discover the same declaration-file occurrences a
+    second time). The declaring file itself is always included in
+    `files_to_scan` (`{decl_path} | importers`), so renaming from *within*
+    the declaring file and renaming from *within* an importer are both
+    handled by the exact same code path, with no special-casing for which
+    file the rename was invoked from -- verified directly by
+    `test_rename_from_one_importer_touches_all_three_files` and
+    `test_rename_from_declaring_file_itself_touches_both_importers`.
+    Refuses (`None`) the whole rename, matching M7's own established
+    safety philosophy, the instant any relevant file fails to preprocess/
+    parse/resolve cleanly -- a partial cross-file rename that silently
+    misses a file is worse than refusing entirely
+    (`test_cross_file_rename_refuses_when_an_importer_has_a_syntax_error`).
+    `lsp/server.py`'s `_on_textDocument_rename` is fixed to translate
+    *every* key in the returned `changes` dict to its own document URI
+    (previously it silently kept only one file's edits via
+    `next(iter(...))`, a latent bug that could never surface before this
+    milestone since single-file rename never returned more than one key).
+
+    **One real gap found and fixed while landing this milestone, not
+    present in the delegated spec:** the spec's own reference
+    implementation for `_rename_variable_cross_file` always re-reads every
+    file in `files_to_scan` from disk, including the currently-open
+    document itself -- which breaks the moment that document is a
+    path-less, unsaved buffer (`preprocessor.BUFFER_PATH`, not a real file
+    at all) or simply has unsaved edits, and would have silently
+    regressed every one of M7's own original buffer-less rename tests.
+    Fixed by special-casing the entry file: whenever a file in
+    `files_to_scan` equals the currently-open document's own
+    `pp.entry_path`, its live buffer text (already available, passed in as
+    `entry_text`) is used directly instead of opening it from disk, with
+    `preprocess`'s own `path` argument passed as `None` in the
+    `BUFFER_PATH` case specifically so the recomputed entry path still
+    comes out as `BUFFER_PATH` rather than an incorrect `abspath("<buffer>")`.
+    Every other file in `files_to_scan` (the declaring file, if different
+    from the open document, and every other importer) is still read fresh
+    from disk, exactly as the spec described.
+
+    Also fixed an existing M7 test whose assertion was the literal
+    opposite of this milestone's new, intended behavior:
+    `tests/test_lsp_rename.py`'s `test_symbol_from_an_import_refuses_rename`
+    asserted a cross-file rename returns `None` -- renamed to
+    `test_symbol_from_an_import_now_renames_across_files` and rewritten to
+    assert the rename now succeeds and correctly spans both files, kept
+    (not deleted) since it's still a real regression check on the exact
+    boundary M7 originally drew.
+
+    Verified independently: full suite green (236/236 -- 216 pre-M11 + 13
+    new `tests/test_rename_types_fields_and_cross_file.py` scenarios + 7
+    new field hover/go-to-definition tests in
+    `tests/test_lsp_hover_types_and_completion.py`, with
+    `tests/test_lsp_rename.py`'s other 10 pre-existing scenarios re-run and
+    confirmed unaffected by the `get_rename_edits` restructuring). Paid
+    particular attention, as this milestone's own risk area, to every
+    parser destructuring site touching the changed tuple shapes
+    (`StructLit`/`EnumLit`/`StructPat`/`EnumPat`/`StructDecl`/`EnumDecl`
+    construction) across `resolve.py`/`codegen.py` -- none needed changes,
+    since `.fields` itself was never touched, only new parallel position
+    lists added alongside it. Ran a real end-to-end script exercising the
+    cross-file scenario through the actual `python3 -m mah lsp` subprocess
+    (framed JSON-RPC `initialize`/`didOpen`/`textDocument/rename`),
+    confirming the real server round-trip produces a correct multi-file
+    `WorkspaceEdit` with real `file://` URIs -- not just what the unit
+    tests exercise via direct `Server` instantiation. Manually applied a
+    cross-file rename's and a struct-field rename's returned edits to real
+    source text and confirmed the resulting file(s) still parse and run
+    correctly via `python3 -m mah run`. Confirmed `tree-sitter generate`
+    still succeeds with zero grammar changes (this milestone touches
+    `compiler/`/`lsp/` only) and every `examples/*.mh` file still parses
+    and runs correctly.
+
+    Changed: `compiler/ast_nodes.py` (six new parallel position-list
+    fields: `StructDecl.field_positions`, `EnumDecl.variant_field_positions`,
+    `StructLit.field_name_positions`, `EnumLit.field_name_positions`,
+    `StructPat.field_name_positions`, `EnumPat.field_name_positions`),
+    `compiler/parser.py` (`_parse_struct_decl`, `_parse_enum_variant`,
+    `_parse_enum_decl`, `_parse_one_field`/`_parse_field_list` and both
+    callers, `_parse_pattern_field`/`_parse_pattern_field_list` and both
+    callers -- all threading the new parallel position lists through,
+    `.fields` itself unchanged), `compiler/resolve.py`
+    (`field_position_index`, `struct_field_decl_positions`,
+    `enum_variant_field_decl_positions`, registration in the
+    `StructDecl`/`EnumDecl`/`StructLit`/`EnumLit`/`StructPat`/`EnumPat`
+    branches), `lsp/analysis.py` (`_field_symbol_at_position`, `get_hover`/
+    `get_definition` field fallbacks, `get_rename_edits` restructured into
+    three fallback stages, `_find_workspace_root`/`_find_mh_files`/
+    `_build_reverse_import_graph`/`_rename_variable_cross_file` new),
+    `lsp/server.py` (`_on_textDocument_rename` multi-file-URI passthrough
+    fix, `_on_initialize`'s capabilities comment), `tests/test_lsp_rename.py`
+    (one scenario updated for the new cross-file behavior),
+    `tests/test_rename_types_fields_and_cross_file.py` (new, 13 tests),
+    `tests/test_lsp_hover_types_and_completion.py` (7 new field hover/
+    go-to-definition tests), `docs/NEXT_PHASES.md` (both sections
+    collapsed to pointers, matching the "Async" section's own precedent
+    after M10).
+
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
 it** (`make test` must stay green) — see `docs/TESTING.md` for where
@@ -2079,10 +2265,11 @@ M1 was built and documented that way.
 
 ## Status
 
-M0 through M10 are all landed (see their entries above for what changed and
+M0 through M11 are all landed (see their entries above for what changed and
 each milestone's deliberate deviations/simplifications). `docs/NEXT_PHASES.md`
 captures what's deliberately deferred still (match guards, arrays/lists,
-generics, traits, the type system, cross-file rename) and what M0–M10 need
+generics, traits, the type system -- and, as of M11, sound field-*access*
+rename, which still needs the type system) and what M0–M11 need
 to keep forward-compatible with. M7 added a real symbol table to
 `compiler/resolve.py` and rebuilt go-to-definition + added rename on top
 of it, retiring the independent token-scope model
@@ -2104,5 +2291,12 @@ per-`Task` object so multiple tasks can genuinely interleave without
 leaking each other's pending defers, plus fixes for two pre-existing gaps
 found while in the area: `defer` had never been added to `lsp/analysis.py`'s
 hover tables or to `syntax-highlight/grammar.js`'s grammar at all (both
-predate M9). All planned milestones (M0–M10) are now complete; see
-`docs/NEXT_PHASES.md` for what's next.
+predate M9). M11 closed M7's two remaining rename gaps: cross-file
+variable/function rename (a workspace-wide reverse-import-graph search,
+not just the currently-open file's own import closure) and struct/enum
+type-name, enum variant-name, and struct/enum field-name rename in
+declarations/literals/explicit patterns (always single-file, since
+structs/enums can't be exported/imported across files at all) -- plain
+field *access* (`p.x`) rename remains deliberately refused, unsound
+without a real type system. All planned milestones (M0–M11) are now
+complete; see `docs/NEXT_PHASES.md` for what's next.

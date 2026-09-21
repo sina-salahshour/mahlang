@@ -112,8 +112,10 @@ identifier occurrence resolved to that declaration," which the LSP's
 go-to-definition and rename features (lsp/analysis.py) read directly --
 see docs/V2_DESIGN.md's M7 milestone. Struct/enum type names and field
 names are NOT part of this symbol table -- they live in the separate
-`struct_decls`/`enum_decls` registries above and are out of scope for M7's
-rename (a distinct, larger piece of work; see the milestone entry).
+`struct_decls`/`enum_decls` registries above (M7 scoped rename to
+variables/functions only; M11 later adds `type_position_index`/
+`field_position_index`, parallel dedicated indexes for those two
+namespaces -- see their own docstrings below).
 
 M9 adds `DeferStmt` (see docs/V2_DESIGN.md's M9 milestone): its body is
 already packaged by the parser as a synthesized, anonymous, zero-param
@@ -245,6 +247,29 @@ class Resolver:
         self.enum_decl_positions: dict = {}         # enum name -> its own name-token position
         self.enum_variant_decl_positions: dict = {} # enum name -> {variant name -> position}
         self.type_position_index: dict = {}         # position -> the tuple shapes above
+        # LSP (M11): parallel to type_position_index, one level down -- maps a
+        # combined-text position to a tuple describing what struct/enum FIELD
+        # name is written there:
+        #   ("struct_field", struct_name, field_name)
+        #   ("variant_field", enum_name, variant_name, field_name)
+        # Populated at declarations, literals, and EXPLICIT (non-shorthand)
+        # patterns only -- see StructPat/EnumPat's field_name_positions docstring
+        # in ast_nodes.py for why shorthand pattern fields are deliberately
+        # excluded. Field ACCESS (`p.x`) is never registered here at all -- it's
+        # not in scope (see docs/NEXT_PHASES.md's "Struct/enum/field rename"
+        # section: unsound without a real type system to know what struct shape
+        # `p` holds).
+        self.field_position_index: dict = {}
+        # LSP (M11): unlike field_position_index above (which records EVERY
+        # occurrence -- declaration and uses alike -- under the same tuple
+        # key, with no way to tell them apart), these two are dedicated
+        # DECLARATION-only maps, exactly parallel to struct_decl_positions/
+        # enum_decl_positions/enum_variant_decl_positions above -- so
+        # go-to-definition/rename can look up a field's declaration site
+        # unambiguously instead of scanning field_position_index and hoping
+        # dict iteration order happens to put the declaration first.
+        self.struct_field_decl_positions: dict = {}   # (struct_name, field_name) -> declaration position
+        self.enum_variant_field_decl_positions: dict = {}  # (enum_name, variant_name, field_name) -> declaration position
 
     # -- name table helpers ----------------------------------------------
 
@@ -410,6 +435,11 @@ class Resolver:
             name_pos = stmt.name_position if stmt.name_position is not None else stmt.position
             self.struct_decl_positions[stmt.name] = name_pos
             self.type_position_index[name_pos] = ("struct", stmt.name)
+            # LSP (M11): register each field's own declaration site -- see
+            # field_position_index's docstring above.
+            for fname, fpos in zip(stmt.fields, stmt.field_positions):
+                self.field_position_index[fpos] = ("struct_field", stmt.name, fname)
+                self.struct_field_decl_positions[(stmt.name, fname)] = fpos
         elif isinstance(stmt, EnumDecl):
             seen_variants = set()
             for variant_name, variant_fields in stmt.variants:
@@ -444,6 +474,12 @@ class Resolver:
                 variant_positions_map[variant_name] = variant_pos
                 self.type_position_index[variant_pos] = ("variant", stmt.name, variant_name)
             self.enum_variant_decl_positions[stmt.name] = variant_positions_map
+            # LSP (M11): register each variant's own field declaration
+            # sites -- see field_position_index's docstring above.
+            for (vname, vfields), vfield_positions in zip(stmt.variants, stmt.variant_field_positions):
+                for fname, fpos in zip(vfields, vfield_positions):
+                    self.field_position_index[fpos] = ("variant_field", stmt.name, vname, fname)
+                    self.enum_variant_field_decl_positions[(stmt.name, vname, fname)] = fpos
         else:
             raise AssertionError(f"unhandled statement node {stmt!r}")
 
@@ -527,6 +563,10 @@ class Resolver:
                 self.resolve_expr(value_expr)
             # LSP: register this use site -- see type_position_index's docstring.
             self.type_position_index[expr.position] = ("struct", expr.type_name)
+            # LSP (M11): register each field label's use site -- see
+            # field_position_index's docstring.
+            for (fname, _value), fpos in zip(expr.fields, expr.field_name_positions):
+                self.field_position_index[fpos] = ("struct_field", expr.type_name, fname)
             return
         if isinstance(expr, EnumLit):
             variants = self.enum_decls.get(expr.type_name)
@@ -551,6 +591,10 @@ class Resolver:
             self.type_position_index[expr.position] = ("variant", expr.type_name, expr.variant)
             if expr.type_name_position is not None:
                 self.type_position_index[expr.type_name_position] = ("enum", expr.type_name)
+            # LSP (M11): register each field label's use site -- see
+            # field_position_index's docstring.
+            for (fname, _value), fpos in zip(expr.fields, expr.field_name_positions):
+                self.field_position_index[fpos] = ("variant_field", expr.type_name, expr.variant, fname)
             return
         if isinstance(expr, FieldAccess):
             if isinstance(expr.obj, Ident):
@@ -640,6 +684,12 @@ class Resolver:
                 self.resolve_pattern(sub)
             # LSP: register this use site -- see type_position_index's docstring.
             self.type_position_index[pattern.position] = ("struct", pattern.type_name)
+            # LSP (M11): register each EXPLICIT field label's use site
+            # (shorthand fields have fpos=None -- see field_position_index's
+            # docstring).
+            for (fname, _sub), fpos in zip(pattern.fields, pattern.field_name_positions):
+                if fpos is not None:
+                    self.field_position_index[fpos] = ("struct_field", pattern.type_name, fname)
             return
         if isinstance(pattern, EnumPat):
             variants = self.enum_decls.get(pattern.type_name)
@@ -669,5 +719,10 @@ class Resolver:
             self.type_position_index[pattern.position] = ("enum", pattern.type_name)
             if pattern.variant_position is not None:
                 self.type_position_index[pattern.variant_position] = ("variant", pattern.type_name, pattern.variant)
+            # LSP (M11): register each EXPLICIT field label's use site --
+            # see field_position_index's docstring.
+            for (fname, _sub), fpos in zip(pattern.fields, pattern.field_name_positions):
+                if fpos is not None:
+                    self.field_position_index[fpos] = ("variant_field", pattern.type_name, pattern.variant, fname)
             return
         raise AssertionError(f"unhandled pattern node {pattern!r}")
