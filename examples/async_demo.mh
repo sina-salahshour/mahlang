@@ -1,0 +1,76 @@
+# M10: async -- `detach`, `sleep_async(ms)`, `.await`, and the `Promise`
+# built-in enum. Single-threaded cooperative concurrency: `detach` runs a
+# call immediately, synchronously, stepping it exactly like a direct call
+# until it hits a real suspension -- see docs/V2_DESIGN.md's M10 milestone
+# for the full design. This file walks through the pieces one at a time.
+
+# -- Part 1: a plain call with nothing async in it -------------------------
+#
+# `greet` never touches anything that needs real scheduling, so `detach
+# greet()` runs it to completion in place, right here, before "2" prints --
+# NOT after.
+fn greet() {
+    print("hey")
+}
+
+print("1")
+detach greet()
+print("2")
+# Output so far: 1, hey, 2
+
+# -- Part 2: the core rule -- `.await` is only needed once you've
+# explicitly opted OUT of blocking, via `detach` -----------------------
+#
+# A bare (non-detached) `sleep_async(ms)` needs no `.await` at all -- it
+# just blocks, exactly like an ordinary synchronous call with a slow body
+# would. There is no Promise to manage here; you don't need to think about
+# async at all for this simple "pause, then continue" case.
+print("--- bare sleep_async: just blocks ---")
+print("before")
+sleep_async(30)
+print("after")
+# Output: before, (a real 30ms pause happens here), after
+
+# -- Part 3: `detach sleep_async(ms)` -- the one exception to "detach
+# wraps a plain function call" -- opts back INTO non-blocking behavior,
+# handing you the raw, still-pending Promise to `.await` whenever you're
+# ready instead of blocking immediately -----------------------------------
+print("--- detach sleep_async: does NOT block, hands back a Promise ---")
+let timer = detach sleep_async(30)
+
+# `timer` is a real Mah value right now -- a `Promise`, which is a
+# built-in enum (Promise.Pending / Promise.Settled { value }), not some
+# opaque magic handle. Printing it before it's settled shows exactly that:
+print(timer)
+
+# Because `detach` didn't block, this runs immediately -- no 30ms pause
+# here, unlike Part 2's bare `sleep_async(30)`.
+print("doing other work while the timer runs in the background")
+
+# NOW we actually wait for it -- `.await` is what suspends until the
+# Promise settles, yielding the value from `Promise.Settled { value }`
+# (here just `none`, since sleep_async has nothing meaningful to return).
+timer.await
+print(timer)
+print("timer done")
+# Output: (Promise.Pending), doing other work..., (a 30ms pause happens
+# here, no earlier), (Promise.Settled { value: none }), timer done
+
+# -- Part 4: a user function containing a bare sleep_async, called via
+# `detach` -- the bare sleep_async's own auto-await is the "real
+# suspension point" detach hits while running the function eagerly -------
+fn after(ms, label) {
+    print("start of " + label)
+    sleep_async(ms)
+    print(label)
+}
+
+print("--- concurrent detached sleeps resolve in wake-time order ---")
+detach after(30, "second")
+detach after(10, "first")
+print("start")
+# Output: start of second, start of first, start, first, second -- both
+# `after` calls run eagerly up to their own bare sleep_async (their real
+# suspension point) before "start" even prints; the 10ms timer then fires
+# before the 30ms one regardless of which `detach` ran first -- wake-time
+# order, not detach order.

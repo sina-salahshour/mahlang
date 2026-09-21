@@ -47,6 +47,8 @@ KEYWORD_TOKENS = {
     TokenType.MATCH,
     TokenType.SOME,
     TokenType.NONE,
+    TokenType.DEFER,
+    TokenType.DETACH,
 }
 
 BUILTIN_TOKENS = {
@@ -54,6 +56,7 @@ BUILTIN_TOKENS = {
     TokenType.INPUT,
     TokenType.SIN,
     TokenType.COS,
+    TokenType.SLEEP_ASYNC,
 }
 
 KEYWORD_DOCS = {
@@ -88,6 +91,23 @@ KEYWORD_DOCS = {
     "one.\n\n```mah\nexport fn name(a) { ... }\nexport let value = 1\nexport name  # export something declared elsewhere\n```",
     "import": "Inline another file's `export`ed declarations. The path is "
     "resolved relative to this file.\n\n```mah\nimport \"lib.mh\"\n```",
+    "defer": "Schedule a statement to run when the enclosing block exits "
+    "(falling through, or via return/break/continue) -- LIFO order among "
+    "multiple defers in the same block, Zig-style, not function-scoped "
+    "like Go.\n\n```mah\nfn process(name) {\n\tlet r = open(name)\n\tdefer close(r)\n\t...\n}\n```",
+    "detach": "Start a function call running immediately, synchronously -- "
+    "runs to completion in place unless it hits a real suspension (like a "
+    "bare `sleep_async` inside it), in which case it hands back a "
+    "still-pending `Promise` instead of blocking. Never itself a "
+    "scheduling boundary. `.await` is only needed once you've opted out "
+    "of blocking this way -- a bare, non-detached call never needs it.\n\n"
+    "```mah\nlet p = detach fetch_thing()\n...\nlet result = p.await\n```",
+    "await": "Suspend the current execution until this `Promise` settles "
+    "(`Promise.Settled { value }`), then yield `value`. Written as a "
+    "postfix pseudo-field (`value.await`), not a prefix keyword. Only "
+    "meaningful on a `Promise` you got from an explicit `detach` -- a "
+    "bare, non-detached call already blocks on its own, with nothing to "
+    "await.\n\n`value.await`",
 }
 
 BUILTIN_DOCS = {
@@ -95,6 +115,13 @@ BUILTIN_DOCS = {
     "input": "Read an integer from standard input.\n\n`input()`",
     "sin": "Sine of a number, in radians.\n\n`sin(x)`",
     "cos": "Cosine of a number, in radians.\n\n`cos(x)`",
+    "sleep_async": "Waits `ms` milliseconds -- the first genuinely "
+    "scheduled (suspend-capable) operation. Called bare, it just blocks, "
+    "exactly like an ordinary synchronous call -- no `.await` needed. "
+    "`detach sleep_async(ms)` is the exception: it hands back a "
+    "still-pending `Promise` (`Promise.Pending` / `Promise.Settled "
+    "{ value }`, a real built-in enum) instead of blocking, for you to "
+    "`.await` whenever you're ready.\n\n`sleep_async(ms)`",
 }
 
 # LSP enum values ----------------------------------------------------------
@@ -272,6 +299,23 @@ def _token_index_at_offset(tokens: list[Token], offset: int) -> Optional[int]:
         if offset == end:
             return index
     return None
+
+
+def _is_await_field(token: Token, tokens: list[Token]) -> bool:
+    """True when ``token`` is the ``await`` in a `.await` postfix access
+    (M10 async -- see docs/V2_DESIGN.md's M10 milestone). `"await"` is not
+    a lexer keyword at all -- it parses as an ordinary `FieldAccess` field
+    name (see compiler/ast_nodes.py's M10 note) -- so, mirroring
+    `_is_soft_keyword` above, hover has to recognize it positionally: an
+    ID token spelled exactly "await" immediately preceded by a `.`."""
+    if token.type != TokenType.ID or token.literal != "await":
+        return False
+    pos = next(
+        (i for i, t in enumerate(tokens) if t.position == token.position), None
+    )
+    if pos is None or pos == 0:
+        return False
+    return tokens[pos - 1].type == TokenType.DOT
 
 
 def _is_soft_keyword(token: Token, tokens: list[Token]) -> bool:
@@ -893,8 +937,11 @@ def get_completions(
         for struct_name in resolver.struct_decls:
             items.append({"label": struct_name, "kind": COMPLETION_STRUCT, "detail": "struct"})
         for enum_name in resolver.enum_decls:
-            if enum_name == "Option":
-                continue  # built-in, reached via `some`/`none` keywords instead
+            if enum_name in ("Option", "Promise"):
+                # Built-ins: Option is reached via `some`/`none` keywords,
+                # Promise via `detach`/`sleep_async` -- not something users
+                # normally type the bare type name of.
+                continue
             items.append({"label": enum_name, "kind": COMPLETION_ENUM, "detail": "enum"})
 
     # 5. Namespaces and flat-imported exported names -- sourced directly
@@ -964,6 +1011,8 @@ def get_hover(text: str, line: int, character: int, path: Optional[str] = None) 
         value = f"**builtin** `{token.literal}`\n\n" + BUILTIN_DOCS.get(token.literal, "")
     elif token.type is TokenType.ID and _is_soft_keyword(token, tokens):
         value = f"**keyword** `{token.literal}`\n\n" + KEYWORD_DOCS.get(token.literal, "")
+    elif token.type is TokenType.ID and _is_await_field(token, tokens):
+        value = f"**keyword** `.{token.literal}`\n\n" + KEYWORD_DOCS.get(token.literal, "")
     elif token.type is TokenType.NUMBER:
         value = f"**number** `{token.literal}`"
     elif token.type is TokenType.STRING:

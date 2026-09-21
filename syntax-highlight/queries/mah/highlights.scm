@@ -21,6 +21,8 @@
 "import" @keyword
 "export" @keyword
 "from" @keyword
+"defer" @keyword
+"detach" @keyword
 (break_stmt) @keyword
 (continue_stmt) @keyword
 (none_expr) @keyword
@@ -35,6 +37,15 @@
 "sin" @function.builtin
 "cos" @function.builtin
 "input" @function.builtin
+"sleep_async" @function.builtin
+
+; M10 (async): `.await` is not its own grammar rule (an ordinary
+; `field_access` with field name "await" covers it structurally -- see
+; grammar.js's `detach_expr` comment) so it can't be targeted by node type
+; the way `none`/`_`/`true`/`false` are above; a query anchored on the
+; literal field text isn't straightforward without a grammar change, so
+; `.await` is left highlighted the same as any other field access rather
+; than forcing one just for coloring.
 
 ; Operators
 "+" @operator

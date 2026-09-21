@@ -90,6 +90,7 @@ module.exports = grammar({
         $.continue_stmt,
         $.while_stmt,
         $.print_stmt,
+        $.defer_stmt,
         $.expr_stmt,
       ),
 
@@ -153,6 +154,22 @@ module.exports = grammar({
       ),
 
     print_stmt: ($) => seq("print", "(", optional($._args), ")"),
+
+    // M10 (async): `defer <stmt>` desugars (in the real hand-written
+    // parser -- compiler/parser.py's `_parse_defer_stmt`) into a
+    // synthesized zero-arg closure wrapping any `_STATEMENT_LEADING`
+    // statement, a single expression-statement, a single assignment, or a
+    // full `{ ... }` block -- not byte-for-byte as permissive here (a
+    // highlighter doesn't need it), just structurally reasonable for the
+    // common forms (`defer print(...)`, `defer foo()`, `defer x = 1`,
+    // `defer { ... }`). Was landed in M9 but never added to this grammar
+    // at all -- a real pre-existing gap this milestone also fixes.
+    //
+    // `$._stmt` alone (no separate `$.block` alternative) covers the
+    // `{ ... }` block form too, via `_stmt`'s own `expr_stmt -> expr ->
+    // block` path -- adding `$.block` directly here made the block form
+    // reachable two ways and was an unresolvable grammar conflict.
+    defer_stmt: ($) => seq("defer", $._stmt),
 
     expr_stmt: ($) => $.expr,
 
@@ -272,6 +289,8 @@ module.exports = grammar({
         $.sin_call,
         $.cos_call,
         $.input_call,
+        $.detach_expr,
+        $.sleep_async_call,
         $.paren_expr,
         $.identifier,
         $.number,
@@ -392,6 +411,35 @@ module.exports = grammar({
     cos_call: ($) => seq("cos", "(", $.expr, ")"),
 
     input_call: ($) => seq("input", "(", ")"),
+
+    // M10 (async): `detach <call>` normally wraps a call expression (see
+    // docs/V2_DESIGN.md's M10 milestone -- compiler/parser.py parses this
+    // by directly consuming `ID ( args )`, never the general expression
+    // grammar, so `.await` binds to the Promise `detach` produces rather
+    // than to the inner call's own result). One exception: `detach
+    // sleep_async(ms)` -- `sleep_async` isn't a real Closure call at all
+    // (a dedicated builtin, see `sleep_async_call` below), and detaching
+    // it is purely a codegen-time choice (skip the auto-await a bare
+    // `sleep_async(ms)` otherwise gets), not a real Task -- but it's still
+    // valid, real syntax the parser accepts, so it needs to parse here
+    // too. `.await` itself needs no dedicated rule at all -- it's an
+    // ordinary `field_access` with field name "await", already covered
+    // generically above -- but only once `detach_expr` itself has already
+    // reduced: right after `detach call_expr`, a `.` is ambiguous between
+    // extending the inner call into its OWN `field_access` (wrong --
+    // would mean `detach (foo().field)`) and finishing `detach_expr` first
+    // so the `.` applies to the whole `detach_expr` instead (right --
+    // `(detach foo()).field`, matching the real parser's
+    // `_parse_postfix_from(DetachExpr(...))`). Giving `detach_expr` a
+    // higher precedence than `PREC.POSTFIX` resolves this in favor of
+    // reducing `detach_expr` immediately.
+    detach_expr: ($) =>
+      prec(
+        PREC.POSTFIX + 1,
+        seq("detach", field("call", choice($.call_expr, $.sleep_async_call))),
+      ),
+
+    sleep_async_call: ($) => seq("sleep_async", "(", $.expr, ")"),
 
     true: ($) => "true",
 

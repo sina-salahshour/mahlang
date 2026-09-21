@@ -14,6 +14,7 @@
     { "include": "#struct-enum-decl" },
     { "include": "#fn-decl" },
     { "include": "#builtins" },
+    { "include": "#await-field" },
     { "include": "#function-calls" },
     { "include": "#operators" },
     { "include": "#punctuation" }
@@ -66,7 +67,7 @@
       "patterns": [
         {
           "name": "keyword.control.mah",
-          "match": "\\b(if|elif|else|while|break|continue|return|match|defer)\\b"
+          "match": "\\b(if|elif|else|while|break|continue|return|match|defer|detach)\\b"
         }
       ]
     },
@@ -106,13 +107,21 @@
       "patterns": [
         {
           "name": "support.function.builtin.mah",
-          "match": "\\b(print|input|sin|cos)\\b"
+          "match": "\\b(print|input|sin|cos|sleep_async)\\b"
         },
         {
           "name": "support.function.builtin.option.mah",
           "match": "\\bsome\\b"
         }
       ]
+    },
+    "await-field": {
+      "comment": "M10 (async): `.await` is a postfix pseudo-field (ordinary field-access grammar, `\"await\"` special-cased at codegen time -- see docs/V2_DESIGN.md's M10 milestone), not a real keyword token -- highlighted positionally, mirroring how `#function-calls` above recognizes call sites by shape rather than by a dedicated grammar rule.",
+      "match": "(\\.)(await)\\b",
+      "captures": {
+        "1": { "name": "punctuation.accessor.mah" },
+        "2": { "name": "keyword.control.await.mah" }
+      }
     },
     "function-calls": {
       "patterns": [

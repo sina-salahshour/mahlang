@@ -157,6 +157,7 @@ from .ast_nodes import (
     ContinueStmt,
     CosExpr,
     DeferStmt,
+    DetachExpr,
     EnumDecl,
     EnumLit,
     EnumPat,
@@ -173,6 +174,7 @@ from .ast_nodes import (
     PrintStmt,
     ReturnStmt,
     SinExpr,
+    SleepAsyncExpr,
     StringLit,
     StructDecl,
     StructLit,
@@ -531,6 +533,42 @@ class Codegen:
             tmp = self._temp()
             self.buf.emit(("input", None, None, tmp))
             return tmp
+        if isinstance(expr, DetachExpr):
+            if isinstance(expr.call, SleepAsyncExpr):
+                # `detach sleep_async(ms)`: unlike a bare `sleep_async(ms)`
+                # (see the SleepAsyncExpr case below, which auto-awaits
+                # itself), detaching it explicitly opts back OUT of that --
+                # sleep_async isn't a real Closure call in the first place
+                # (it's a dedicated builtin opcode), so there's no Task to
+                # spin up here; "detaching" it is purely a codegen-time
+                # choice of which instructions to emit: just the raw
+                # `sleepasync` opcode, handing back a still-pending Promise
+                # for the caller to `.await` whenever it's ready to.
+                src = self.gen_expr(expr.call.arg)
+                dest = self._temp()
+                self.buf.emit(("sleepasync", src, None, dest))
+                return dest
+            call = expr.call
+            callee_addr = self.gen_expr(call.callee)
+            arg_addrs = tuple(self.gen_expr(a) for a in call.args)
+            dest = self._temp()
+            self.buf.emit(("detach", callee_addr, arg_addrs, dest))
+            return dest
+        if isinstance(expr, SleepAsyncExpr):
+            # Bare (non-detached) `sleep_async(ms)` auto-awaits its own
+            # Promise immediately -- `.await` is only needed once you've
+            # explicitly `detach`ed something (see the DetachExpr case
+            # above), matching how an ordinary function call already
+            # blocks synchronously for its result unless detached. This is
+            # a plain two-instruction sequence, not a new mechanism: the
+            # exact same `sleepasync`+`await` opcodes a hand-written
+            # `sleep_async(ms).await` would already compile to.
+            src = self.gen_expr(expr.arg)
+            promise_dest = self._temp()
+            self.buf.emit(("sleepasync", src, None, promise_dest))
+            dest = self._temp()
+            self.buf.emit(("await", promise_dest, None, dest))
+            return dest
         if isinstance(expr, FnExpr):
             return self._gen_fn_expr(expr)
         if isinstance(expr, StructLit):
@@ -545,7 +583,10 @@ class Codegen:
                 return dest
             obj_addr = self.gen_expr(expr.obj)
             dest = self._temp()
-            self.buf.emit(("getfield", obj_addr, expr.field, dest))
+            if expr.field == "await":
+                self.buf.emit(("await", obj_addr, None, dest))
+            else:
+                self.buf.emit(("getfield", obj_addr, expr.field, dest))
             return dest
         if isinstance(expr, EnumLit):
             if expr.type_name == "Option" and expr.variant == "none":

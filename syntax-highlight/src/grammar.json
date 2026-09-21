@@ -59,6 +59,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "defer_stmt"
+        },
+        {
+          "type": "SYMBOL",
           "name": "expr_stmt"
         }
       ]
@@ -414,6 +418,19 @@
         {
           "type": "STRING",
           "value": ")"
+        }
+      ]
+    },
+    "defer_stmt": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "defer"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "_stmt"
         }
       ]
     },
@@ -1000,6 +1017,14 @@
         },
         {
           "type": "SYMBOL",
+          "name": "detach_expr"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "sleep_async_call"
+        },
+        {
+          "type": "SYMBOL",
           "name": "paren_expr"
         },
         {
@@ -1559,6 +1584,57 @@
         {
           "type": "STRING",
           "value": "("
+        },
+        {
+          "type": "STRING",
+          "value": ")"
+        }
+      ]
+    },
+    "detach_expr": {
+      "type": "PREC",
+      "value": 8,
+      "content": {
+        "type": "SEQ",
+        "members": [
+          {
+            "type": "STRING",
+            "value": "detach"
+          },
+          {
+            "type": "FIELD",
+            "name": "call",
+            "content": {
+              "type": "CHOICE",
+              "members": [
+                {
+                  "type": "SYMBOL",
+                  "name": "call_expr"
+                },
+                {
+                  "type": "SYMBOL",
+                  "name": "sleep_async_call"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "sleep_async_call": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "sleep_async"
+        },
+        {
+          "type": "STRING",
+          "value": "("
+        },
+        {
+          "type": "SYMBOL",
+          "name": "expr"
         },
         {
           "type": "STRING",

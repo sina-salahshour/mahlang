@@ -50,6 +50,8 @@ class TokenType(Enum):
     CONTINUE = "continue"
     RETURN = "return"
     DEFER = "defer"
+    DETACH = "detach"
+    SLEEP_ASYNC = "sleep_async"
     FN = "fn"
     STRUCT = "struct"
     ENUM = "enum"
@@ -83,6 +85,8 @@ KEYWORDS = {
     "continue": TokenType.CONTINUE,
     "return": TokenType.RETURN,
     "defer": TokenType.DEFER,
+    "detach": TokenType.DETACH,
+    "sleep_async": TokenType.SLEEP_ASYNC,
     "fn": TokenType.FN,
     "struct": TokenType.STRUCT,
     "enum": TokenType.ENUM,

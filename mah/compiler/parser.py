@@ -24,6 +24,7 @@ from .ast_nodes import (
     ContinueStmt,
     CosExpr,
     DeferStmt,
+    DetachExpr,
     EnumDecl,
     EnumLit,
     EnumPat,
@@ -41,6 +42,7 @@ from .ast_nodes import (
     PrintStmt,
     ReturnStmt,
     SinExpr,
+    SleepAsyncExpr,
     StringLit,
     StructDecl,
     StructLit,
@@ -222,7 +224,9 @@ class Parser:
                 if self.current.type is end_type:
                     tail = expr
                     break  # nothing may follow a tail -- it must be the last item
-                if isinstance(expr, (IfStmt, MatchStmt, Block, Call, FnExpr)):
+                if isinstance(
+                    expr, (IfStmt, MatchStmt, Block, Call, FnExpr, DetachExpr, SleepAsyncExpr, FieldAccess)
+                ):
                     # Block-shaped (if/match/bare block): no semicolon required
                     # when not last (Rust's rule). Call/anonymous-FnExpr are
                     # ALSO exempted here for a Mah-specific reason, not Rust's:
@@ -237,6 +241,16 @@ class Parser:
                     # position (the `end_type` branch above already handles
                     # that before this check ever runs), only "statement,
                     # followed immediately by more code, no semicolon."
+                    #
+                    # M10: DetachExpr/SleepAsyncExpr are exempted for the exact
+                    # same reason as Call (they're call-shaped, keyword-prefixed
+                    # forms most naturally written bare -- `detach foo()`, both
+                    # of the design doc's own worked examples). FieldAccess is
+                    # exempted too, specifically for `.await` used as a bare
+                    # statement (`sleep_async(ms).await` / `p.await` followed by
+                    # more code, no semicolon) -- see docs/NEXT_PHASES.md's
+                    # "Async" section's own worked examples, none of which use
+                    # semicolons.
                     stmts.append(ExprStmt(value=expr, position=expr.position))
                     continue
                 raise SyntaxError(
@@ -795,6 +809,33 @@ class Parser:
             self.expect(TokenType.PAREN_OPEN)
             self.expect(TokenType.PAREN_CLOSE)
             return self._parse_postfix_from(InputExpr(position=tok.position))
+
+        if tok.type is TokenType.DETACH:
+            self.advance()
+            if self.current.type is TokenType.SLEEP_ASYNC:
+                # `detach sleep_async(ms)` -- the one builtin-shaped
+                # exception to "detach wraps a plain ID(...) call": see
+                # DetachExpr's own comment and codegen.py for why this
+                # compiles completely differently from an ordinary
+                # detached call.
+                sleep_tok = self.advance()
+                args = self._parse_paren_args()
+                if len(args) != 1:
+                    raise SyntaxError(f"'sleep_async' can only have one argument")
+                inner = SleepAsyncExpr(arg=args[0], position=sleep_tok.position)
+                return self._parse_postfix_from(DetachExpr(call=inner, position=tok.position))
+            name_tok = self.expect(TokenType.ID)
+            args = self._parse_paren_args()
+            callee = Ident(name=name_tok.literal, position=name_tok.position)
+            call_expr = Call(callee=callee, args=args, position=name_tok.position)
+            return self._parse_postfix_from(DetachExpr(call=call_expr, position=tok.position))
+
+        if tok.type is TokenType.SLEEP_ASYNC:
+            self.advance()
+            args = self._parse_paren_args()
+            if len(args) != 1:
+                raise SyntaxError(f"'sleep_async' can only have one argument")
+            return self._parse_postfix_from(SleepAsyncExpr(arg=args[0], position=tok.position))
 
         if tok.type is TokenType.NUMBER:
             self.advance()

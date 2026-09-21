@@ -1873,6 +1873,201 @@ node that resolved to it. Then:
     `tests/test_language.py` (2 new regression tests for the
     `_while_stack` fix), `examples/defer.mh` (new).
 
+11. **M10 — Async (`detach`/`.await`/`sleep_async`). ✅ Landed.**
+    Single-threaded, JS-style cooperative concurrency, per
+    `docs/NEXT_PHASES.md`'s "Async" section (design worked out and fixed
+    ahead of time there; this milestone implements it, no relitigating).
+    `detach <call>` is a prefix *expression* (unlike `defer`, which is a
+    statement) that starts `<call>` running **immediately, synchronously**
+    — stepped exactly like an ordinary call — until it either finishes (the
+    common case: the caller gets back an already-resolved `Promise`, no
+    reordering at all vs. calling it directly) or hits a *real* suspension,
+    currently only `.await`ing a still-pending `Promise`. `detach` is never
+    itself a scheduling boundary; the worked example from the design doc
+    (`detach foo()` printing `1, hey, 2`, not `1, 2, hey`, when `foo` never
+    suspends) is pinned down exactly by
+    `tests/test_async.py::EagerDetachTests`. `.await` is not new grammar at
+    all — it's the existing `FieldAccess(obj, field="await")` production,
+    with `"await"` a reserved field name special-cased only at codegen time
+    (emit the new `await` opcode instead of `getfield`), the same
+    reuse-an-existing-production trick `some`/`none` already used.
+    `sleep_async(ms)` is the first genuinely scheduled builtin — modeled as
+    a dedicated AST node/opcode exactly like `sin`/`cos`, not a
+    general user-callable function — returning a pending `Promise`
+    immediately and dropping `(now + ms, promise)` into a `heapq`-based
+    timer queue; calling it never blocks or suspends, only later
+    `.await`ing its result can.
+
+    A new heap object kind, `PromiseInstance` (`runtime_values.py`) — two
+    states only, `"pending"`/`"resolved"`, never a third "rejected" state:
+    a scheduled operation that fails just raises a fatal Mah runtime error
+    immediately, the same as every other error today, rather than
+    bundling "design Mah's first error-handling primitive" into this
+    milestone. Resolving a `Promise` runs its `callbacks` list
+    synchronously, immediately — this is what makes chained
+    `detach`/`.await` work correctly with no separate microtask-queue data
+    structure.
+
+    The real mechanism this needed: `code_interpreter.py`'s `run_code` no
+    longer has one flat `(pc, current_frame, return_stack, defer_stack)` —
+    it has one per `Task` (`runtime_values.py`), the main program being
+    task 0 and `detach` spinning up one more per detached call. **M9's
+    `defer_stack` moves from a single interpreter-local list onto each
+    `Task`** — a suspended task's own pending defers must never leak into
+    whichever task runs next once tasks can genuinely interleave —
+    verified directly by `tests/test_async.py::DeferIsolationTests`, which
+    would fail immediately if this weren't per-task. `return_register` (the
+    single-value handoff between `ret` and the immediately-following
+    `retval`) stays a single shared interpreter-local variable, unchanged
+    from M1-M9: nothing can ever switch tasks between those two adjacent
+    instructions, so there's nothing to isolate there. The dispatch loop
+    itself is factored into a nested, reentrant `step_task(task)` closure —
+    called once by the top-level driver for task 0, and again (nested) by
+    the new `detach` opcode for a freshly created `Task` — plus a `drive`
+    wrapper that resolves a task's `watching_promise` (set by `detach` for
+    the task it creates, `None` for the main program) once that task
+    truly finishes, whether immediately or, later, via a resumed `.await`
+    callback. Three new opcodes: `detach` builds the fresh `Task`/`Promise`
+    and drives it via `step_task`, writing the (possibly still-pending)
+    Promise to `dest` either way, and never suspending its own caller;
+    `await` checks the receiver's state — resolved: keep stepping, no
+    scheduling at all; pending: register a resume callback on the Promise
+    and return `("suspended", None)` up the (possibly nested) Python call
+    stack; `sleepasync` schedules a timer and returns immediately. Process
+    lifetime is Node-like: once task 0's own top-level code finishes, the
+    top-level loop keeps draining the earliest-firing timer (which may
+    resume task 0 itself, if that's what suspended, or any other pending
+    detached task) until *nothing* is left scheduled, rather than exiting
+    immediately and abandoning still-pending `detach`ed work nobody ever
+    `.await`ed (`tests/test_async.py`'s
+    `test_process_does_not_exit_before_a_detached_timer_fires`).
+
+    **One real gap found and fixed while landing this milestone, not
+    present in the delegated spec:** `compiler/parser.py`'s
+    `_parse_block_items` only exempted `(IfStmt, MatchStmt, Block, Call,
+    FnExpr)` from needing a trailing `;` when not the last item in a block
+    — every one of this milestone's own worked examples (`detach foo()`
+    followed by more code, `sleep_async(ms).await` followed by more code,
+    `p.await` followed by more code, all with no semicolons) hit this
+    exact wall, since `DetachExpr`/`SleepAsyncExpr`/`FieldAccess` weren't
+    in that tuple. Fixed by adding all three — `DetachExpr`/
+    `SleepAsyncExpr` for the same reason `Call` is already exempted
+    (call-shaped, keyword-prefixed forms naturally written bare), and
+    `FieldAccess` specifically so a bare `.await` statement doesn't need
+    an unnatural trailing `;`.
+
+    Verified independently: full suite green (210/210 — 205 pre-M10 + 9
+    new `tests/test_async.py` scenarios + 1 new `tests/test_parser.py`
+    scenario, with `tests/test_defer.py`'s existing 12 re-run and
+    confirmed byte-for-byte unaffected by `defer_stack` moving onto
+    `Task`), re-derived and matched the exact expected stdout for every
+    interleaving-sensitive scenario by hand before running it (the
+    `1/hey/2` eager case, the `start/first/second` wake-time-ordering
+    case, and the `outer-body/outer-defer/inner-body/inner-defer`
+    defer-isolation case), ran `examples/async_demo.mh` directly and
+    confirmed its output, confirmed `grep -n
+    "\bcurrent_frame\b|\breturn_stack\b|\bdefer_stack\b"
+    code_interpreter.py` shows no un-prefixed stray variable (only
+    docstring prose and the `Task(...)` constructor's own keyword
+    argument), and confirmed `tree-sitter generate` succeeds with zero
+    `(ERROR)` nodes re-parsing every `examples/*.mh` file plus a dedicated
+    async syntax stress file. Also fixed two other real pre-existing gaps
+    while in the area: `lsp/analysis.py` never had `defer` in
+    `KEYWORD_TOKENS`/`KEYWORD_DOCS` at all (landed in M9, before this
+    follow-up existed) — hover on `defer` returned nothing; and
+    `syntax-highlight/grammar.js` never had a `defer_stmt` rule at all
+    (M8's grammar rewrite predates M9) — `defer` didn't parse/highlight in
+    Neovim at all. Both fixed alongside `detach`/`sleep_async`/`.await`'s
+    own additions rather than filed as separate follow-ups.
+
+    Changed: `compiler/lexer.py` (`DETACH`/`SLEEP_ASYNC` tokens/keywords),
+    `compiler/ast_nodes.py` (`DetachExpr`, `SleepAsyncExpr`),
+    `compiler/parser.py` (`DETACH`/`SLEEP_ASYNC` branches in
+    `_parse_primary`, the `_parse_block_items` bare-statement-exemption
+    fix above), `compiler/resolve.py` (two dispatch lines),
+    `compiler/codegen.py` (`detach`/`sleepasync` opcode emission, `.await`
+    special-case in the `FieldAccess` branch), `runtime_values.py`
+    (`PromiseInstance`, `Task`), `code_interpreter.py` (rewritten for
+    multi-task scheduling — `step_task`/`drive`, `detach`/`await`/
+    `sleepasync` opcodes, timer queue), `lsp/analysis.py` (`defer`/
+    `detach` added to `KEYWORD_TOKENS`/`KEYWORD_DOCS`, `sleep_async` added
+    to `BUILTIN_TOKENS`/`BUILTIN_DOCS`, `.await` positional hover),
+    `syntax-highlight/grammar.js` + `highlights.scm` (`defer_stmt`,
+    `detach_expr`, `sleep_async_call`), `editors/vscode/syntaxes/
+    mah.tmLanguage.json` (`detach` added to control-keywords,
+    `sleep_async` added to builtins, new `.await` pattern),
+    `tests/test_async.py` (new, 9 tests), `tests/test_parser.py` (1 new
+    test), `tests/test_lsp_hover_and_import_nav.py` (5 new hover tests),
+    `examples/async_demo.mh` (new).
+
+    **Revised immediately after initial landing, before moving on — two
+    DX/semantic corrections, not a separate milestone:**
+
+    1. **`.await` is only needed once you've explicitly opted out of
+       blocking via `detach`.** The first cut required writing
+       `sleep_async(ms).await` even for a plain, non-concurrent pause,
+       which is needless ceremony for the common case and inconsistent
+       with how an ordinary function call already blocks synchronously
+       for its result. Now: a *bare* (non-detached) `sleep_async(ms)`
+       auto-awaits its own `Promise` immediately — `compiler/codegen.py`'s
+       `SleepAsyncExpr` case emits `sleepasync` immediately followed by
+       `await` on its own result — so it just blocks, no `.await` written
+       anywhere. `detach sleep_async(ms)` is the one explicit exception to
+       "`detach` wraps a plain `ID(...)` call": since `sleep_async` isn't
+       a real `Closure` call at all (a dedicated builtin, not a Task),
+       "detaching" it is purely a codegen-time choice — `DetachExpr`'s
+       case special-cases a `SleepAsyncExpr` operand to emit *only* the
+       raw `sleepasync` opcode, skipping the auto-await, handing back the
+       still-pending `Promise` for you to `.await` whenever you're ready.
+       `compiler/parser.py`'s `TokenType.DETACH` branch now accepts either
+       a plain `ID(...)` call or a `sleep_async(...)` call as the operand.
+       Writing `.await` on a bare `sleep_async(ms)`'s result is now a
+       clean runtime error (it already auto-awaited and evaluated to
+       `none`, not a `Promise`).
+    2. **`Promise` is a real, built-in Mah *enum*** —
+       `Promise.Pending` / `Promise.Settled { value }` — not an opaque
+       host-only type, exactly the same "built-in enum backed by
+       `EnumInstance`" pattern `Option`/`none`/`some(x)` already
+       established. `runtime_values.PromiseInstance` is now an
+       `EnumInstance` *subclass* (`type_name="Promise"`, `variant`
+       mutated from `"Pending"` to `"Settled"` in place on resolve, with
+       `fields={"value": ...}` set at that point) plus one extra,
+       Mah-invisible slot (`callbacks`) for the scheduler's own
+       bookkeeping. `compiler/resolve.py`'s `enum_decls` pre-seeds
+       `"Promise": {"Pending": [], "Settled": ["value"]}` alongside
+       `"Option"`, so a `Promise` value prints (`Promise.Pending` /
+       `Promise.Settled { value: ... }`, via the exact same generic
+       `EnumInstance` formatting in `code_interpreter.py`'s `_to_str` —
+       no special-casing needed there at all anymore), pattern-matches
+       (`match p { Promise.Pending => ..., Promise.Settled { value } =>
+       ... }`), and hovers through the same generic struct/enum machinery
+       every other enum already gets, with zero new code for any of that.
+       The `await` opcode reads `.variant`/`.fields["value"]` directly
+       instead of a bespoke `.state`/`.value` pair.
+
+    Both revisions are additive to the mechanism above (`Task`/scheduler/
+    timer queue are completely unchanged) — purely which instructions
+    `SleepAsyncExpr`/`DetachExpr` compile to, and what shape the runtime
+    `Promise` object itself is. `tests/test_async.py` was updated
+    accordingly (dropped the now-invalid `sleep_async(ms).await` pattern
+    everywhere it appeared, verified the exact same interleaving/ordering
+    still holds with bare `sleep_async(ms)` instead) and gained dedicated
+    coverage for both points: `BareSleepAsyncBlocksTests`,
+    `DetachSleepAsyncTests`, `PromiseAsEnumTests` (including a direct
+    `match` on a live `Promise`). `examples/async_demo.mh` was rewritten
+    to walk through both rules explicitly, with prints/comments at each
+    step, and its actual output re-verified line-for-line against the
+    hand-traced expectation in its own comments (the *original* version of
+    this file shipped with a real bug caught during this revision: its
+    `after` function called bare `sleep_async(ms)` under the old
+    semantics — meaning the promise was created and immediately discarded,
+    never awaited — so the two "concurrent" detached sleeps never actually
+    suspended at all and the file's own comments describing wake-time
+    ordering didn't match what it actually printed). `lsp/analysis.py`'s
+    `detach`/`await`/`sleep_async` doc text and
+    `syntax-highlight/grammar.js`'s `detach_expr` rule (widened to accept
+    `sleep_async_call` as well as `call_expr`) were updated to match.
+
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
 it** (`make test` must stay green) — see `docs/TESTING.md` for where
@@ -1884,13 +2079,11 @@ M1 was built and documented that way.
 
 ## Status
 
-M0 through M9 are all landed (see their entries above for what changed and
-each milestone's deliberate deviations/simplifications) — every milestone in
-the original plan is now complete; everything remaining lives in
-`docs/NEXT_PHASES.md` as deferred future work, not a scheduled milestone.
-`docs/NEXT_PHASES.md` captures what's deliberately deferred (match guards,
-arrays/lists, generics, traits, the type system, async) and what M0–M9
-need to keep forward-compatible with. M7 added a real symbol table to
+M0 through M10 are all landed (see their entries above for what changed and
+each milestone's deliberate deviations/simplifications). `docs/NEXT_PHASES.md`
+captures what's deliberately deferred still (match guards, arrays/lists,
+generics, traits, the type system, cross-file rename) and what M0–M10 need
+to keep forward-compatible with. M7 added a real symbol table to
 `compiler/resolve.py` and rebuilt go-to-definition + added rename on top
 of it, retiring the independent token-scope model
 (`_build_scopes`/`_resolve_declaration`/`_Scope`) `lsp/analysis.py` used to
@@ -1905,5 +2098,11 @@ block-scoped `defer` (desugared to a zero-arg closure registered on a
 runtime `defer_stack`, drained at every block exit) plus, as a
 side-finding, a fix for a pre-existing bug where `break`/`continue`
 inside a nested `fn`'s body silently corrupted execution instead of
-raising. All planned milestones (M0–M9) are now complete; see
+raising. M10 added single-threaded cooperative async (`detach`/`.await`/
+`sleep_async`), moving `defer_stack` from a single shared list onto a new
+per-`Task` object so multiple tasks can genuinely interleave without
+leaking each other's pending defers, plus fixes for two pre-existing gaps
+found while in the area: `defer` had never been added to `lsp/analysis.py`'s
+hover tables or to `syntax-highlight/grammar.js`'s grammar at all (both
+predate M9). All planned milestones (M0–M10) are now complete; see
 `docs/NEXT_PHASES.md` for what's next.

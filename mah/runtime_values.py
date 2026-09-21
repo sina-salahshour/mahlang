@@ -3,6 +3,11 @@
 `EnumInstance`. Imported by both compiler/codegen.py (only needs
 NONE_VALUE, to emit it as a literal) and code_interpreter.py (constructs
 Frame/Closure/StructInstance/EnumInstance instances at runtime).
+
+M10 adds `PromiseInstance` (an `EnumInstance` subclass -- see its own
+docstring) and `Task` for async (`detach`/`.await`/`sleep_async`, see
+docs/V2_DESIGN.md's M10 milestone) -- both are only ever constructed/
+consumed by code_interpreter.py.
 """
 
 
@@ -65,6 +70,71 @@ class EnumInstance:
         # checks against a bare/implicit `return` keep behaving as they did
         # before M1 -- see that milestone's note in docs/V2_DESIGN.md).
         return not (self.type_name == "Option" and self.variant == "none")
+
+
+class PromiseInstance(EnumInstance):
+    """Async: a `Promise`, represented as a real built-in Mah *enum* --
+    `Promise.Pending` (unit) or `Promise.Settled { value }` (one field) --
+    exactly the same "built-in enum backed by EnumInstance" pattern
+    `Option`/`none`/`some(x)` already established (see `NONE_VALUE`
+    below), rather than an opaque host-only type. This means a `Promise`
+    prints, pattern-matches, and hovers through the exact same generic
+    machinery every other enum already gets, for free -- see
+    docs/NEXT_PHASES.md's "Async" section (M10).
+
+    Only two variants: a Promise never rejects -- a scheduled operation
+    that fails just raises a fatal Mah runtime error immediately, the same
+    as any other error today, rather than needing a third "Rejected"
+    variant here.
+
+    `callbacks` is the one piece that ISN'T a normal enum field: purely
+    interpreter-internal scheduling bookkeeping (never visible in
+    `.fields`, never touched by ordinary Mah code), holding the callbacks
+    to run -- synchronously -- once this promise settles. Resolving a
+    Promise mutates `variant`/`fields` in place, exactly like any other
+    enum's fields can already be mutated via `setfield` -- every reference
+    to this same heap object (Mah's usual reference semantics) sees the
+    transition from Pending to Settled."""
+
+    __slots__ = ("callbacks",)
+
+    def __init__(self):
+        super().__init__(type_name="Promise", variant="Pending", fields={})
+        self.callbacks = []  # list[Callable[[Any], None]], run synchronously on resolve
+
+    def resolve(self, value):
+        if self.variant == "Settled":
+            return
+        self.variant = "Settled"
+        self.fields = {"value": value}
+        callbacks, self.callbacks = self.callbacks, []
+        for callback in callbacks:
+            callback(value)
+
+
+class Task:
+    """Async: one independent (pc, frame, return_stack, defer_stack)
+    stepping context -- the main program is task 0, `detach` creates one
+    more per detached call. See docs/NEXT_PHASES.md's "Async" section
+    (M10) for why M9's `defer_stack` -- previously a single list shared by
+    the whole program -- has to move onto each Task (a suspended task's
+    own pending defers must never leak into whichever task runs next),
+    while a single shared `return_register` in code_interpreter.py stays
+    correct (nothing can ever switch tasks between a `ret` and its
+    immediately-following `retval`, so there's nothing to isolate there).
+    `watching_promise` is the Promise (if any) that should be resolved
+    once this task truly finishes -- set by `detach` for the task it
+    creates; `None` for the main program (task 0), which nothing is
+    watching."""
+
+    __slots__ = ("pc", "current_frame", "return_stack", "defer_stack", "watching_promise")
+
+    def __init__(self, pc, current_frame, watching_promise=None):
+        self.pc = pc
+        self.current_frame = current_frame
+        self.return_stack = []   # list[tuple[int, Frame]]
+        self.defer_stack = []    # list[list[Closure]]
+        self.watching_promise = watching_promise
 
 
 # Mah's `none` -- a single shared singleton, not reallocated per use (see

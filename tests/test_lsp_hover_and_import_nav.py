@@ -80,6 +80,53 @@ class HoverTests(unittest.TestCase):
         self.assertIsNone(hover)
 
 
+class AsyncHoverTests(unittest.TestCase):
+    """M10: `defer` (a pre-existing gap -- landed in M9 but never added to
+    KEYWORD_TOKENS/KEYWORD_DOCS), plus the new `detach`/`sleep_async`
+    keywords and `.await`'s positional (non-token) hover."""
+
+    def test_hover_on_defer(self):
+        src = 'fn f() { defer print("x") }\n'
+        line, col = _find(src, "defer")
+        hover = analysis.get_hover(src, line, col)
+        self.assertIsNotNone(hover)
+        self.assertIn("keyword", hover["contents"]["value"])
+        self.assertIn("defer", hover["contents"]["value"])
+
+    def test_hover_on_detach(self):
+        src = "fn foo() { }\ndetach foo()\n"
+        line, col = _find(src, "detach")
+        hover = analysis.get_hover(src, line, col)
+        self.assertIsNotNone(hover)
+        self.assertIn("keyword", hover["contents"]["value"])
+        self.assertIn("detach", hover["contents"]["value"])
+
+    def test_hover_on_sleep_async(self):
+        src = "let p = sleep_async(10)\n"
+        line, col = _find(src, "sleep_async")
+        hover = analysis.get_hover(src, line, col)
+        self.assertIsNotNone(hover)
+        self.assertIn("builtin", hover["contents"]["value"])
+        self.assertIn("sleep_async", hover["contents"]["value"])
+
+    def test_hover_on_await_field(self):
+        src = "let p = sleep_async(10)\nprint(p.await)\n"
+        line, col = _find(src, "await")
+        hover = analysis.get_hover(src, line, col)
+        self.assertIsNotNone(hover)
+        self.assertIn("keyword", hover["contents"]["value"])
+        self.assertIn("await", hover["contents"]["value"])
+
+    def test_hover_on_bare_await_identifier_is_not_treated_as_keyword(self):
+        # An ordinary variable named `await` (not preceded by `.`) must not
+        # be mistaken for the `.await` pseudo-field.
+        src = "let await = 5\nprint(await)\n"
+        line, col = _find(src, "await", occurrence=1)
+        hover = analysis.get_hover(src, line, col)
+        self.assertIsNotNone(hover)
+        self.assertNotIn("**keyword**", hover["contents"]["value"])
+
+
 class ImportGotoDefinitionTests(unittest.TestCase):
     def test_namespaced_import_path_string_jumps_to_file(self):
         path = os.path.join(EXAMPLES_DIR, "import_demo.mh")

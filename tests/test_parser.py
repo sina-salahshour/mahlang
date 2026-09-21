@@ -251,6 +251,25 @@ class CallTests(unittest.TestCase):
         self.assertEqual(len(expr.args), 2)
 
 
+class DetachParsingTests(unittest.TestCase):
+    """M10: `detach`'s operand must already be a call expression -- see
+    docs/V2_DESIGN.md's M10 milestone for why this is parsed by directly
+    consuming `ID ( args )` rather than through the general expression
+    grammar."""
+
+    def test_detach_rejects_a_non_call_operand(self):
+        # M6's forgiving parser (see the `test_bare_expression_statement_
+        # requires_semicolon_unless_last` note above) means a bad `detach`
+        # operand is collected into `parser.errors` rather than raised out
+        # of `parse_program()` -- `self.expect(TokenType.ID)` is what
+        # actually raises the underlying SyntaxError here (`5` is a
+        # NUMBER, not an ID), caught by `_parse_block_items`'s recovery.
+        lexer = Lexer("detach 5")
+        parser = Parser(lexer)
+        parser.parse_program()  # must not raise
+        self.assertEqual(len(parser.errors), 1)
+
+
 class LspPositionFieldTests(unittest.TestCase):
     """Pin down the new AST position fields added for the LSP's
     struct/enum/variant hover and go-to-definition support -- see

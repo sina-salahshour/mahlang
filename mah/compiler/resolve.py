@@ -136,6 +136,7 @@ from .ast_nodes import (
     ContinueStmt,
     CosExpr,
     DeferStmt,
+    DetachExpr,
     EnumDecl,
     EnumLit,
     EnumPat,
@@ -152,6 +153,7 @@ from .ast_nodes import (
     PrintStmt,
     ReturnStmt,
     SinExpr,
+    SleepAsyncExpr,
     StringLit,
     StructDecl,
     StructLit,
@@ -208,8 +210,17 @@ class Resolver:
         # like struct_decls, and in a separate namespace from it (a struct
         # and an enum may share a name). Pre-seeded with the built-in
         # `Option` type so `none`/`some(x)` validate through the same
-        # machinery as a user-declared enum -- see module docstring.
-        self.enum_decls: dict = {"Option": {"none": [], "some": ["value"]}}
+        # machinery as a user-declared enum -- see module docstring. M10
+        # adds the built-in `Promise` type the same way (`Pending`/
+        # `Settled { value }`, see runtime_values.PromiseInstance) --
+        # `detach`/`sleep_async` construct one directly at the interpreter
+        # level, but pre-seeding it here means a `Promise` value still
+        # pattern-matches and struct/enum-hovers through the exact same
+        # generic machinery any other enum does.
+        self.enum_decls: dict = {
+            "Option": {"none": [], "some": ["value"]},
+            "Promise": {"Pending": [], "Settled": ["value"]},
+        }
         # M7: source position -> Symbol, for every position that either
         # declared or referenced a variable/parameter/function-binding/
         # match-binding name. Gives the LSP's go-to-definition/rename
@@ -492,6 +503,12 @@ class Resolver:
             self.resolve_expr(expr.arg)
             return
         if isinstance(expr, InputExpr):
+            return
+        if isinstance(expr, DetachExpr):
+            self.resolve_expr(expr.call)
+            return
+        if isinstance(expr, SleepAsyncExpr):
+            self.resolve_expr(expr.arg)
             return
         if isinstance(expr, FnExpr):
             self._resolve_fn_expr(expr)

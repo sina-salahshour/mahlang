@@ -111,15 +111,34 @@ python -m mah run examples/your_test.mh         # run it
 
 ## 8. Editor support (do this before calling the feature done)
 
+The LSP is live and working (`mah/lsp/`, rebuilt on the real resolver
+across M6-M9 and a later hover/completion follow-up — see
+`docs/V2_DESIGN.md`) — a new keyword or builtin needs to show up there,
+not just in the compiler:
+
 - **`syntax-highlight/grammar.js`** — mirror the new syntax by hand (a
   hand-maintained tree-sitter grammar, not generated from anything).
   Update `syntax-highlight/queries/mah/highlights.scm` if new syntax needs
   new highlight groups.
-- **`lsp/`** — already non-functional since M0 (it targets the retired
-  pipeline: old `TokenType` set, `actions.py`'s `register_actions`, the
-  generated `Parser`/`IRGenerator`). Don't try to patch it incrementally;
-  it's rebuilt properly in M6–M8 per `docs/V2_DESIGN.md`. Nothing to do
-  here until then.
+- **`editors/vscode/syntaxes/mah.tmLanguage.json`** — the VS Code
+  extension's own TextMate grammar, hand-maintained separately from the
+  tree-sitter one above (VS Code has no public API for a third-party
+  extension to register a tree-sitter-based grammar — TextMate is the only
+  option). A new keyword needs a pattern here too, or it won't highlight
+  in VS Code even though it does in Neovim.
+- **`mah/lsp/analysis.py`** — a new reserved keyword needs an entry in
+  `KEYWORD_TOKENS`/`KEYWORD_DOCS` (or `BUILTIN_TOKENS`/`BUILTIN_DOCS` for a
+  builtin-function-shaped addition like `sin`/`cos`) so hover and
+  completion pick it up automatically — both dispatch off these same
+  tables, no separate registration needed. If the feature adds a new kind
+  of *declaration* (like M2's structs, M3's enums) rather than just a
+  keyword, check whether it needs its own position-tracking in
+  `compiler/resolve.py` for hover/go-to-definition to describe it (see
+  `type_position_index` for the struct/enum precedent) — variables/
+  functions already get this for free via `position_index`.
+- Add or extend a test in `tests/test_lsp_*.py` covering hover on the new
+  keyword/construct, matching the pattern already there for existing
+  keywords/builtins.
 
 ## Common mistakes
 

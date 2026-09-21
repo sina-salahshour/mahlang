@@ -47,6 +47,11 @@ M9 adds `DeferStmt` (see docs/V2_DESIGN.md's M9 milestone) -- its
 wrapping the deferred statement's body, letting M1's existing closure
 machinery handle capture with no new resolve logic.
 
+M10 adds `DetachExpr`/`SleepAsyncExpr` for async (`detach`/`sleep_async`,
+see docs/V2_DESIGN.md's M10 milestone) -- `.await` needs no new AST node
+at all, it's an ordinary `FieldAccess` with `field="await"`, special-cased
+only in codegen.
+
 LSP note: `StructDecl.name_position`, `EnumDecl.name_position`/
 `variant_positions`, `EnumLit.type_name_position`, and
 `EnumPat.variant_position` add enum/struct declaration + reference
@@ -191,6 +196,25 @@ class CosExpr:
 
 @dataclass
 class InputExpr:
+    position: int
+
+
+@dataclass
+class DetachExpr:
+    call: object  # a Call node, or (for `detach sleep_async(ms)`) a
+                   # SleepAsyncExpr node -- the operand `detach` wraps; see
+                   # the parser for why this must already be one of those
+                   # two shapes by construction, and codegen.py for why
+                   # each compiles completely differently (an ordinary
+                   # Call spins up a real Task; sleep_async isn't a real
+                   # Closure call at all, so "detaching" it just means
+                   # skipping the auto-await a bare sleep_async(ms) gets)
+    position: int
+
+
+@dataclass
+class SleepAsyncExpr:
+    arg: object  # milliseconds, an expression
     position: int
 
 
