@@ -112,6 +112,11 @@ COMPLETION_KEYWORD = 14
 COMPLETION_FUNCTION = 3
 COMPLETION_VARIABLE = 6
 COMPLETION_MODULE = 9
+COMPLETION_STRUCT = 22   # LSP CompletionItemKind.Struct
+COMPLETION_ENUM = 13     # LSP CompletionItemKind.Enum
+COMPLETION_ENUM_MEMBER = 20  # LSP CompletionItemKind.EnumMember
+COMPLETION_FILE = 17     # LSP CompletionItemKind.File
+COMPLETION_FOLDER = 19   # LSP CompletionItemKind.Folder
 
 SYMBOL_FUNCTION = 12
 SYMBOL_VARIABLE = 13
@@ -479,14 +484,15 @@ class Symbol:
     file: Optional[str] = None
 
 
-def _leading_doc_comment(text: str, token: Token) -> str:
+def _leading_doc_comment(text: str, position: int) -> str:
     """Collect contiguous ``#`` comment lines directly above a declaration.
 
     Comments are ignored by the lexer, so they are not in the token stream;
     we read them straight from the source. A blank or code line ends the
-    doc block.
+    doc block. ``position`` is either a declaration's own position, or (for
+    hover on a *use* site) that use's resolved declaration position.
     """
-    line_start = text.rfind("\n", 0, token.position) + 1
+    line_start = text.rfind("\n", 0, position) + 1
     lines_above = text[:line_start].splitlines()
 
     collected: list[str] = []
@@ -515,7 +521,7 @@ def collect_symbols(
     seen_names: set[str] = set()
 
     def doc_for(decl_token: Token) -> str:
-        return _leading_doc_comment(text, decl_token) if text is not None else ""
+        return _leading_doc_comment(text, decl_token.position) if text is not None else ""
 
     index = 0
     count = len(tokens)
@@ -730,27 +736,128 @@ def _namespace_prefix_at(text: str, offset: int) -> Optional[str]:
     return name or None
 
 
+def _import_string_context(text: str, offset: int):
+    """If `offset` sits inside a (possibly still being typed, unclosed)
+    string literal that immediately follows `import` or `from` on the
+    same line, return `(partial_path_typed_so_far, quote_offset)` --
+    `quote_offset` is the position of the opening `"`. Returns `None`
+    otherwise. Deliberately a simple same-line textual scan, NOT based on
+    `preprocessor.py`'s own import-directive matching (which requires a
+    complete, well-formed, closed string token) -- completion needs to
+    work at the exact moment someone is mid-typing an unclosed path, which
+    the preprocessor's own machinery isn't designed to tolerate."""
+    line_start = text.rfind("\n", 0, offset) + 1
+    line_end = text.find("\n", offset)
+    if line_end == -1:
+        line_end = len(text)
+    line = text[line_start:line_end]
+    cursor_col = offset - line_start
+    quote_col = line.rfind('"', 0, cursor_col)
+    if quote_col == -1:
+        return None
+    before = line[:quote_col].rstrip()
+    if not (before.endswith("import") or before.endswith("from")):
+        return None
+    partial = line[quote_col + 1 : cursor_col]
+    if '"' in partial:
+        return None  # already past a closed string
+    return partial, line_start + quote_col + 1
+
+
+def _import_path_completions(text: str, path: Optional[str], offset: int):
+    """Completion items for `.mh` files/directories, when the cursor is
+    inside an `import "..."` / `from "..."` string -- see
+    `_import_string_context`. Returns `None` (meaning "not this kind of
+    completion, caller should fall through to normal completion") when
+    the cursor isn't in such a string; returns a (possibly empty) list
+    otherwise."""
+    ctx = _import_string_context(text, offset)
+    if ctx is None:
+        return None
+    partial, _quote_offset = ctx
+    base_dir = os.path.dirname(path) if path else os.getcwd()
+    typed_dir, _sep, typed_prefix = partial.rpartition("/")
+    search_dir = os.path.join(base_dir, typed_dir) if typed_dir else base_dir
+    try:
+        entries = os.listdir(search_dir)
+    except OSError:
+        return []
+    items = []
+    for entry in sorted(entries):
+        if not entry.startswith(typed_prefix):
+            continue
+        full = os.path.join(search_dir, entry)
+        if os.path.isdir(full):
+            items.append({"label": entry, "kind": COMPLETION_FOLDER, "detail": "directory"})
+        elif entry.endswith(".mh"):
+            items.append(
+                {
+                    "label": entry[: -len(".mh")],
+                    "kind": COMPLETION_FILE,
+                    "detail": entry,
+                }
+            )
+    return items
+
+
+def _resolver_symbol_completion_item(symbol) -> dict:
+    """Completion item for a `compiler/resolve.py` `Symbol` (variable/
+    parameter/function binding) -- parallel to hover's kind labels."""
+    kind = COMPLETION_FUNCTION if symbol.kind == "fn" else COMPLETION_VARIABLE
+    detail = {"let": "variable", "fn": "function", "param": "parameter", "binding": "binding"}.get(
+        symbol.kind, symbol.kind
+    )
+    return {"label": demangle_message(symbol.name), "kind": kind, "detail": detail}
+
+
 def get_completions(
     text: str,
     path: Optional[str] = None,
     line: Optional[int] = None,
     character: Optional[int] = None,
 ) -> list[dict]:
-    namespaces = collect_namespaces(text, path)
+    """Completion items for the cursor position, built on the same
+    resolver-based foundation as hover/go-to-definition/rename (see
+    `compiler/resolve.py`'s `position_index`/`type_position_index`) rather
+    than a second, independent token scan.
 
-    # Namespaced member completion: when the cursor follows `ns.`, offer only
-    # that namespace's exported members.
+    Deliberate scope limitation: symbol completion (item 4 below) offers
+    every declared name in the file, not a precisely lexically-scoped
+    subset for the exact cursor position -- `Resolver` doesn't retain
+    scope-interval information after resolving, only a flat position ->
+    Symbol index (see docs/NEXT_PHASES.md for the broader type-system work
+    a real scope-interval model would likely piggyback on). This means
+    completion can slightly over-suggest (a name declared later in the
+    file, or in a sibling branch) rather than ever under-suggest -- an
+    accepted tradeoff, not a bug.
+    """
     if line is not None and character is not None:
         offset = position_to_offset(text, line, character)
+
+        # 1. Import path string: an entirely different completion context,
+        # returned exclusively (never merged with keywords/symbols/etc).
+        import_items = _import_path_completions(text, path, offset)
+        if import_items is not None:
+            return import_items
+
+        # 2. Namespace member completion (`math.` -> square/cube/...):
+        # exclusive too, reusing the preprocessor's own already-computed
+        # import metadata (not a second re-tokenization).
         ns_name = _namespace_prefix_at(text, offset)
         if ns_name is not None:
-            for ns in namespaces:
-                if ns.name == ns_name:
-                    return [_symbol_completion_item(m) for m in ns.members]
+            pp = preprocess(path, text)
+            for ns in pp.entry_namespaces:
+                if ns.name != ns_name or ns.resolved is None:
+                    continue
+                return [
+                    {"label": member, "kind": COMPLETION_VARIABLE, "detail": f"(from {os.path.basename(ns.resolved)})"}
+                    for member in sorted(pp.exported_names(ns.resolved))
+                ]
             return []
 
     items: list[dict] = []
 
+    # 3. Keywords + builtins -- always offered.
     for keyword, doc in KEYWORD_DOCS.items():
         items.append(
             {
@@ -760,7 +867,6 @@ def get_completions(
                 "documentation": {"kind": "markdown", "value": doc},
             }
         )
-
     for builtin, doc in BUILTIN_DOCS.items():
         items.append(
             {
@@ -771,29 +877,50 @@ def get_completions(
             }
         )
 
-    # Namespaces themselves are completable identifiers.
-    for ns in namespaces:
+    # 4. Every declared variable/function/parameter/pattern-binding in the
+    # file, plus struct/enum type names -- only available when the file
+    # resolves cleanly (same limitation hover/go-to-definition/rename
+    # already have -- see `_resolve_for_navigation`'s docstring).
+    result = _resolve_for_navigation(text, path)
+    if result is not None:
+        _pp, resolver, _tokens = result
+        seen_decls = set()
+        for symbol in resolver.position_index.values():
+            if symbol.decl_position in seen_decls:
+                continue
+            seen_decls.add(symbol.decl_position)
+            items.append(_resolver_symbol_completion_item(symbol))
+        for struct_name in resolver.struct_decls:
+            items.append({"label": struct_name, "kind": COMPLETION_STRUCT, "detail": "struct"})
+        for enum_name in resolver.enum_decls:
+            if enum_name == "Option":
+                continue  # built-in, reached via `some`/`none` keywords instead
+            items.append({"label": enum_name, "kind": COMPLETION_ENUM, "detail": "enum"})
+
+    # 5. Namespaces and flat-imported exported names -- sourced directly
+    # from the preprocessor's own import metadata (works even when the
+    # rest of the file doesn't resolve cleanly, since imports are
+    # processed before the real parser/resolver ever run).
+    pp = preprocess(path, text)
+    for ns in pp.entry_namespaces:
         items.append(
             {
                 "label": ns.name,
                 "kind": COMPLETION_MODULE,
-                "detail": f"namespace (from {os.path.basename(ns.file)})"
-                if ns.file
-                else "namespace",
+                "detail": f"namespace (from {os.path.basename(ns.resolved)})" if ns.resolved else "namespace",
             }
         )
-
-    tokens, _lex_error = tokenize(text)
-    local_symbols = collect_symbols(tokens, text)
-    imported_symbols = collect_imported_symbols(text, path)
-
-    seen: set = set()
-    for symbol in local_symbols + imported_symbols:
-        key = (symbol.name, symbol.kind)
-        if key in seen:
+    for imp in pp.entry_imports:
+        if imp.resolved is None:
             continue
-        seen.add(key)
-        items.append(_symbol_completion_item(symbol))
+        for name in sorted(pp.exported_names(imp.resolved)):
+            items.append(
+                {
+                    "label": name,
+                    "kind": COMPLETION_FUNCTION,
+                    "detail": f"(from {os.path.basename(imp.resolved)})",
+                }
+            )
 
     return items
 
@@ -815,11 +942,13 @@ def get_hover(text: str, line: int, character: int, path: Optional[str] = None) 
     longer maintained (left as dead code; do not call them from here).
 
     Scope, matching M7's go-to-definition (not rename): identifier hover
-    covers variables/parameters/function bindings only, and *is* allowed to
-    describe a symbol whose declaration lives in an imported file (unlike
-    rename, which refuses cross-file symbols outright) -- it just notes
-    where the declaration actually lives. Struct/enum type names and field
-    names, and doc-comment extraction, are not covered (future work, see
+    covers variables/parameters/function bindings, struct/enum type names,
+    and enum variant names, and *is* allowed to describe a symbol whose
+    declaration lives in an imported file (unlike rename, which refuses
+    cross-file symbols outright) -- it just notes where the declaration
+    actually lives, and (for variables/functions/params/bindings) shows
+    that declaration's own leading doc comment and demangled display name.
+    Struct/enum *field* names are not covered (future work, see
     docs/NEXT_PHASES.md)."""
     tokens, _lex_error = tokenize(text)
     offset = position_to_offset(text, line, character)
@@ -841,19 +970,28 @@ def get_hover(text: str, line: int, character: int, path: Optional[str] = None) 
         value = f"**string** `{token.literal}`"
     elif token.type is TokenType.ID:
         found = _symbol_at_position(text, line, character, path)
-        if found is None:
-            return None
-        pp, _resolver, symbol = found
-        kind_label = {
-            "let": "variable",
-            "fn": "function",
-            "param": "parameter",
-            "binding": "binding",
-        }.get(symbol.kind, symbol.kind)
-        value = f"**{kind_label}** `{symbol.name}`"
-        decl_path, _decl_offset = pp.map_to_source(symbol.decl_position)
-        if decl_path != pp.entry_path:
-            value += f"\n\n*declared in `{os.path.basename(decl_path)}`*"
+        if found is not None:
+            pp, _resolver, symbol = found
+            kind_label = {
+                "let": "variable",
+                "fn": "function",
+                "param": "parameter",
+                "binding": "binding",
+            }.get(symbol.kind, symbol.kind)
+            display_name = demangle_message(symbol.name)
+            value = f"**{kind_label}** `{display_name}`"
+            decl_path, decl_offset = pp.map_to_source(symbol.decl_position)
+            doc_source = text if decl_path == pp.entry_path else pp.files.get(decl_path, "")
+            doc = _leading_doc_comment(doc_source, decl_offset) if doc_source else ""
+            if doc:
+                value += f"\n\n{doc}"
+            if decl_path != pp.entry_path:
+                value += f"\n\n*declared in `{os.path.basename(decl_path)}`*"
+        else:
+            type_found = _type_symbol_at_position(text, line, character, path)
+            if type_found is None:
+                return None
+            value = _type_hover_value(*type_found)
     else:
         return None
 
@@ -902,18 +1040,24 @@ def _is_namespace_use(text: str, token: Token) -> bool:
 # the old re-derived scope tree could.
 #
 # Scope, deliberately not covered here (see docs/V2_DESIGN.md's M7 entry):
-#   - struct/enum type names and struct/enum field names are NOT part of
-#     the resolver's symbol table (they live in `Resolver.struct_decls`/
-#     `enum_decls`, a separate namespace with different reference-tracking
-#     needs) -- renaming them is a distinct, larger future piece of work.
+#   - struct/enum type names and enum variant names ARE now covered by
+#     go-to-definition and hover, via a parallel index
+#     (`Resolver.type_position_index`/`struct_decl_positions`/
+#     `enum_decl_positions`/`enum_variant_decl_positions` -- a separate
+#     namespace from the ordinary variable/function `position_index`).
+#     Struct/enum *field* names (e.g. `x`/`y` in `Point { x, y }`) still are
+#     not -- renaming/navigating those is a distinct, larger future piece
+#     of work.
 #   - rename is single-file only: a symbol whose declaration or any
 #     reference falls outside the entry file's own text segment (i.e. it
 #     touches an inlined import) is refused outright rather than performed
 #     partially -- see `get_rename_edits` below.
-#   - hover/completion/document-symbols are NOT revived by this milestone;
-#     `get_hover`/`get_completions`/`get_document_symbols` above are left
-#     exactly as M6 found them (disabled/non-advertised, still referencing
-#     the old `TokenType` spellings).
+#   - document-symbols/code-actions are NOT revived by this milestone;
+#     `get_document_symbols`/`get_code_actions` above are left exactly as
+#     they were found (disabled/non-advertised, still referencing the old
+#     `TokenType` spellings) -- completion, however, now IS revived (see
+#     `get_completions` below), rebuilt on the resolver rather than the old
+#     dead token-scanning helpers.
 
 
 def _resolve_for_navigation(text: str, path: Optional[str]):
@@ -978,6 +1122,56 @@ def _symbol_at_position(text: str, line: int, character: int, path: Optional[str
     return pp, resolver, symbol
 
 
+def _type_symbol_at_position(text: str, line: int, character: int, path: Optional[str]):
+    """Like `_symbol_at_position`, but looks up the resolver's struct/enum/
+    variant namespace (`type_position_index`) instead of the ordinary
+    variable/function one (`position_index`) -- see
+    `compiler/resolve.py`'s `type_position_index` docstring. Returns
+    `(resolver, kind, payload)` where `kind` is `"struct"`/`"enum"`/
+    `"variant"` and `payload` is the struct/enum name (a str) or, for a
+    variant, an `(enum_name, variant_name)` tuple -- or `None`."""
+    result = _resolve_for_navigation(text, path)
+    if result is None:
+        return None
+    _pp, resolver, tokens = result
+    combined_offset = _combined_offset_for_position(_pp, text, line, character)
+    if combined_offset is None:
+        return None
+    token = _token_at_offset(tokens, combined_offset)
+    if token is None or token.type is not TokenType.ID:
+        return None
+    entry = resolver.type_position_index.get(token.position)
+    if entry is None:
+        return None
+    kind = entry[0]
+    if kind == "variant":
+        return resolver, "variant", (entry[1], entry[2])
+    return resolver, kind, entry[1]
+
+
+def _type_hover_value(resolver, kind: str, payload) -> str:
+    """Render hover markdown for a struct/enum/variant -- see
+    `_type_symbol_at_position`."""
+    def _shape(name: str, fields: list) -> str:
+        return name if not fields else f"{name} {{ {', '.join(fields)} }}"
+
+    if kind == "struct":
+        name = payload
+        fields = resolver.struct_decls.get(name, [])
+        return f"**struct** `{name}`\n\n```mah\nstruct {_shape(name, fields)}\n```"
+    if kind == "enum":
+        name = payload
+        variants = resolver.enum_decls.get(name, {})
+        variant_text = ", ".join(_shape(v, f) for v, f in variants.items())
+        return f"**enum** `{name}`\n\n```mah\nenum {name} {{ {variant_text} }}\n```"
+    enum_name, variant_name = payload
+    fields = resolver.enum_decls.get(enum_name, {}).get(variant_name, [])
+    return (
+        f"**enum variant** `{enum_name}.{variant_name}`\n\n"
+        f"```mah\n{_shape(variant_name, fields)}\n```"
+    )
+
+
 def _identifier_length_at(source: str, offset: int) -> int:
     """Length of the identifier written in `source` starting at `offset`
     (mirrors `compiler/lexer.py`'s identifier-scanning rule). Used instead
@@ -1013,11 +1207,13 @@ def get_definition(
     Returns ``{"path": <abs path or None>, "range": <lsp range>}`` where a
     ``path`` of ``None`` means "the current document" -- the shape
     `lsp/server.py`'s `_on_textDocument_definition` handler expects.
-    Covers variables/parameters/function bindings only (not struct/enum
-    type or field names, which aren't in the symbol table at all -- see
-    module notes above). Returns ``None`` when the file doesn't resolve
-    cleanly, the cursor isn't on an identifier, or that identifier never
-    resolved to anything (a keyword, a struct/enum name, a field name, ...).
+    Covers variables/parameters/function bindings, and (via
+    `_type_symbol_at_position`/`type_position_index`) struct/enum type
+    names and enum variant names -- struct/enum *field* names are still not
+    covered (they aren't in either symbol table). Returns ``None`` when the
+    file doesn't resolve cleanly, the cursor isn't on an identifier, or
+    that identifier never resolved to anything (a keyword, a field name,
+    ...).
 
     Also handles the cursor sitting on an `import` directive itself -- the
     path string (`import "mathlib"`) or the namespace identifier
@@ -1046,26 +1242,47 @@ def get_definition(
             return {"path": ns.resolved, "range": _FILE_START_RANGE}
 
     found = _symbol_at_position(text, line, character, path)
-    if found is None:
-        return None
-    pp, _resolver, symbol = found
+    if found is not None:
+        pp, _resolver, symbol = found
+        decl_path, decl_offset = pp.map_to_source(symbol.decl_position)
+        source = text if decl_path == pp.entry_path else pp.files.get(decl_path, "")
+        length = _identifier_length_at(source, decl_offset) or len(symbol.name)
+        if decl_path == pp.entry_path:
+            return {"path": None, "range": make_range(text, decl_offset, decl_offset + length)}
+        # Declaration lives in an inlined import -- still a valid jump for
+        # go-to-definition (unlike rename, which refuses cross-file symbols
+        # outright, see `get_rename_edits`): build the range against that
+        # file's own source text.
+        return {"path": decl_path, "range": make_range(source, decl_offset, decl_offset + length)}
 
-    decl_path, decl_offset = pp.map_to_source(symbol.decl_position)
+    # Not an ordinary variable/function symbol -- try the struct/enum/
+    # variant namespace instead (see `_type_symbol_at_position`).
+    type_found = _type_symbol_at_position(text, line, character, path)
+    if type_found is None:
+        return None
+    resolver, kind, payload = type_found
+    result = _resolve_for_navigation(text, path)
+    if result is None:
+        return None
+    pp, _resolver2, _tokens = result
+    if kind == "struct":
+        decl_pos = resolver.struct_decl_positions.get(payload)
+        name_for_fallback_length = payload
+    elif kind == "enum":
+        decl_pos = resolver.enum_decl_positions.get(payload)
+        name_for_fallback_length = payload
+    else:
+        enum_name, variant_name = payload
+        decl_pos = resolver.enum_variant_decl_positions.get(enum_name, {}).get(variant_name)
+        name_for_fallback_length = variant_name
+    if decl_pos is None:
+        return None
+    decl_path, decl_offset = pp.map_to_source(decl_pos)
     source = text if decl_path == pp.entry_path else pp.files.get(decl_path, "")
-    length = _identifier_length_at(source, decl_offset) or len(symbol.name)
+    length = _identifier_length_at(source, decl_offset) or len(name_for_fallback_length)
     if decl_path == pp.entry_path:
-        return {
-            "path": None,
-            "range": make_range(text, decl_offset, decl_offset + length),
-        }
-    # Declaration lives in an inlined import -- still a valid jump for
-    # go-to-definition (unlike rename, which refuses cross-file symbols
-    # outright, see `get_rename_edits`): build the range against that
-    # file's own source text.
-    return {
-        "path": decl_path,
-        "range": make_range(source, decl_offset, decl_offset + length),
-    }
+        return {"path": None, "range": make_range(text, decl_offset, decl_offset + length)}
+    return {"path": decl_path, "range": make_range(source, decl_offset, decl_offset + length)}
 
 
 def _is_valid_mah_identifier(name: str) -> bool:

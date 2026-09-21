@@ -47,6 +47,12 @@ M9 adds `DeferStmt` (see docs/V2_DESIGN.md's M9 milestone) -- its
 wrapping the deferred statement's body, letting M1's existing closure
 machinery handle capture with no new resolve logic.
 
+LSP note: `StructDecl.name_position`, `EnumDecl.name_position`/
+`variant_positions`, `EnumLit.type_name_position`, and
+`EnumPat.variant_position` add enum/struct declaration + reference
+position tracking for the LSP, landing alongside the corresponding
+`compiler/resolve.py` additions (`type_position_index` and friends).
+
 Every node carries `position` (a source offset into the *combined*,
 preprocessed text) so error messages can point mah.py at a `file:line:col`
 the same way v1's did.
@@ -148,6 +154,14 @@ class EnumDecl:
                       # field_names is [] for a unit variant (uniform
                       # representation, no separate None-vs-list case)
     position: int
+    # set by the parser: the source position of the enum's own name token
+    # (`position` above is the `enum` keyword's position) -- see
+    # `StructDecl.name_position` for the exact same reasoning.
+    name_position: Optional[int] = field(default=None, repr=False)
+    # set by the parser: the source position of each variant's own name
+    # token, in the same order as `variants` -- mirrors `FnExpr`'s
+    # `param_positions`-parallel-to-`params` convention.
+    variant_positions: list = field(default_factory=list, repr=False)
 
 
 @dataclass
@@ -156,6 +170,11 @@ class EnumLit:
     variant: str
     fields: list  # list[tuple[str, expr]] -- [] for a unit variant literal
     position: int
+    # set by the parser: the source position of the type name token (e.g.
+    # "Shape" in `Shape.Circle { r: 5 }`) -- `position` above is already
+    # the *variant* name's position, set via `field_tok.position` in
+    # `_parse_postfix_from`.
+    type_name_position: Optional[int] = field(default=None, repr=False)
 
 
 @dataclass
@@ -330,7 +349,12 @@ class FnExpr:
 class StructDecl:
     name: str
     fields: list  # list[str] -- declared field names, in declaration order
-    position: int
+    position: int  # position of the `struct` keyword token, NOT the name's --
+                    # see `name_position` below.
+    # set by the parser: the source position of the struct's own name token
+    # -- M-LSP needs this exact span for hover/go-to-definition, the same
+    # reasoning `LetStmt.name_position`/`FnExpr.name_position` exist for.
+    name_position: Optional[int] = field(default=None, repr=False)
 
 
 # -- M4: patterns / match ------------------------------------------------
@@ -369,7 +393,13 @@ class EnumPat:
     type_name: str
     variant: str
     fields: list  # list[tuple[str, pattern]] -- [] for a unit variant
-    position: int
+    position: int  # position of the *type* name token (e.g. "Shape" in
+                    # `Shape.Circle { r }`) -- set via `tok.position` in
+                    # `_parse_pattern`; see `variant_position` below.
+    # set by the parser: the source position of the variant name token --
+    # `position` above is already the type name's position, this fills the
+    # gap for the variant part (mirrors `EnumLit.type_name_position`).
+    variant_position: Optional[int] = field(default=None, repr=False)
 
 
 @dataclass

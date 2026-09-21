@@ -16,6 +16,8 @@ from mah.compiler.ast_nodes import (
     Block,
     BoolLit,
     Call,
+    EnumDecl,
+    EnumLit,
     EnumPat,
     ErrorNode,
     ExprStmt,
@@ -26,6 +28,7 @@ from mah.compiler.ast_nodes import (
     MatchStmt,
     NumberLit,
     PrintStmt,
+    StructDecl,
     StructPat,
     Unary,
     WildcardPat,
@@ -246,6 +249,37 @@ class CallTests(unittest.TestCase):
         self.assertIsInstance(expr.callee, Ident)
         self.assertEqual(expr.callee.name, "foo")
         self.assertEqual(len(expr.args), 2)
+
+
+class LspPositionFieldTests(unittest.TestCase):
+    """Pin down the new AST position fields added for the LSP's
+    struct/enum/variant hover and go-to-definition support -- see
+    `compiler/ast_nodes.py`'s LSP note and `compiler/resolve.py`'s
+    `type_position_index`."""
+
+    def test_struct_decl_name_position_points_at_name(self):
+        src = "struct Point { x, y }\n"
+        (stmt,) = parse(src)
+        self.assertIsInstance(stmt, StructDecl)
+        self.assertEqual(stmt.name_position, src.index("Point"))
+
+    def test_enum_decl_variant_positions_point_at_each_variant_name(self):
+        src = "enum Shape { Circle { r }, Empty }\n"
+        (stmt,) = parse(src)
+        self.assertIsInstance(stmt, EnumDecl)
+        self.assertEqual(len(stmt.variant_positions), 2)
+        self.assertEqual(stmt.variant_positions[0], src.index("Circle"))
+        self.assertEqual(stmt.variant_positions[1], src.index("Empty"))
+
+    def test_enum_lit_type_name_position_points_at_type_while_position_stays_at_variant(self):
+        src = "enum Shape { Circle { r }, Empty }\n"
+        expr = parse_expr("Shape.Circle { r: 5 }")
+        self.assertIsInstance(expr, EnumLit)
+        # `.position` is unchanged from before -- still the *variant* name's
+        # position within the wrapping `print(...)` expression text.
+        wrapped = "print(Shape.Circle { r: 5 })"
+        self.assertEqual(expr.position, wrapped.index("Circle"))
+        self.assertEqual(expr.type_name_position, wrapped.index("Shape"))
 
 
 if __name__ == "__main__":

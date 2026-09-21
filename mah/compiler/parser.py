@@ -563,6 +563,7 @@ class Parser:
                     variant=variant_tok.literal,
                     fields=fields,
                     position=tok.position,
+                    variant_position=variant_tok.position,
                 )
             return BindPat(name=tok.literal, position=tok.position)
 
@@ -605,20 +606,36 @@ class Parser:
                 self.advance()
                 fields.append(self.expect(TokenType.ID).literal)
         self.expect(TokenType.BRACE_CLOSE)
-        return StructDecl(name=name_tok.literal, fields=fields, position=struct_tok.position)
+        return StructDecl(
+            name=name_tok.literal,
+            fields=fields,
+            position=struct_tok.position,
+            name_position=name_tok.position,
+        )
 
     def _parse_enum_decl(self) -> EnumDecl:
         enum_tok = self.advance()  # ENUM
         name_tok = self.expect(TokenType.ID)
         self.expect(TokenType.BRACE_OPEN)
         variants = []
+        variant_positions = []
         if self.current.type is not TokenType.BRACE_CLOSE:
-            variants.append(self._parse_enum_variant())
+            variant_name, variant_fields, variant_pos = self._parse_enum_variant()
+            variants.append((variant_name, variant_fields))
+            variant_positions.append(variant_pos)
             while self.current.type is TokenType.COMMA:
                 self.advance()
-                variants.append(self._parse_enum_variant())
+                variant_name, variant_fields, variant_pos = self._parse_enum_variant()
+                variants.append((variant_name, variant_fields))
+                variant_positions.append(variant_pos)
         self.expect(TokenType.BRACE_CLOSE)
-        return EnumDecl(name=name_tok.literal, variants=variants, position=enum_tok.position)
+        return EnumDecl(
+            name=name_tok.literal,
+            variants=variants,
+            position=enum_tok.position,
+            name_position=name_tok.position,
+            variant_positions=variant_positions,
+        )
 
     def _parse_enum_variant(self):
         name_tok = self.expect(TokenType.ID)
@@ -631,8 +648,8 @@ class Parser:
                     self.advance()
                     fields.append(self.expect(TokenType.ID).literal)
             self.expect(TokenType.BRACE_CLOSE)
-            return (name_tok.literal, fields)
-        return (name_tok.literal, [])
+            return (name_tok.literal, fields, name_tok.position)
+        return (name_tok.literal, [], name_tok.position)
 
     def _parse_fn_expr(self) -> FnExpr:
         fn_tok = self.advance()  # FN
@@ -838,6 +855,7 @@ class Parser:
                     variant=field_tok.literal,
                     fields=fields,
                     position=field_tok.position,
+                    type_name_position=base.position,
                 )
             else:
                 base = FieldAccess(obj=base, field=field_tok.literal, position=field_tok.position)

@@ -217,6 +217,23 @@ class Resolver:
         # without re-walking the AST -- see docs/V2_DESIGN.md's M7
         # milestone.
         self.position_index: dict = {}
+        # LSP: parallel to position_index, but for the struct/enum/variant
+        # namespace (a separate namespace from variables -- see struct_decls/
+        # enum_decls above) -- maps a combined-text position to a tuple
+        # describing what struct/enum/variant name is written there:
+        #   ("struct", struct_name)
+        #   ("enum", enum_name)
+        #   ("variant", enum_name, variant_name)
+        # Populated at both DECLARATION sites (struct/enum statements) and every
+        # USE site (struct/enum literals, patterns, bare enum-unit-variant field
+        # access) so hovering/go-to-definition works uniformly at either. The
+        # built-in `Option` type (`none`/`some(x)`) is deliberately never
+        # registered here -- it has no user-written declaration to link to, and
+        # already gets correct hover via the existing keyword path.
+        self.struct_decl_positions: dict = {}       # struct name -> its own name-token position
+        self.enum_decl_positions: dict = {}         # enum name -> its own name-token position
+        self.enum_variant_decl_positions: dict = {} # enum name -> {variant name -> position}
+        self.type_position_index: dict = {}         # position -> the tuple shapes above
 
     # -- name table helpers ----------------------------------------------
 
@@ -377,6 +394,11 @@ class Resolver:
                     f"Struct '{stmt.name}' is already declared at position {stmt.position}"
                 )
             self.struct_decls[stmt.name] = stmt.fields
+            # LSP: register the declaration site in type_position_index --
+            # see that dict's docstring above.
+            name_pos = stmt.name_position if stmt.name_position is not None else stmt.position
+            self.struct_decl_positions[stmt.name] = name_pos
+            self.type_position_index[name_pos] = ("struct", stmt.name)
         elif isinstance(stmt, EnumDecl):
             seen_variants = set()
             for variant_name, variant_fields in stmt.variants:
@@ -401,6 +423,16 @@ class Resolver:
             self.enum_decls[stmt.name] = {
                 variant_name: variant_fields for variant_name, variant_fields in stmt.variants
             }
+            # LSP: register the enum's and each variant's declaration site
+            # in type_position_index -- see that dict's docstring above.
+            name_pos = stmt.name_position if stmt.name_position is not None else stmt.position
+            self.enum_decl_positions[stmt.name] = name_pos
+            self.type_position_index[name_pos] = ("enum", stmt.name)
+            variant_positions_map = {}
+            for (variant_name, _variant_fields), variant_pos in zip(stmt.variants, stmt.variant_positions):
+                variant_positions_map[variant_name] = variant_pos
+                self.type_position_index[variant_pos] = ("variant", stmt.name, variant_name)
+            self.enum_variant_decl_positions[stmt.name] = variant_positions_map
         else:
             raise AssertionError(f"unhandled statement node {stmt!r}")
 
@@ -476,6 +508,8 @@ class Resolver:
             self._check_field_set_matches(f"Struct literal for '{expr.type_name}'", provided, declared, expr.position)
             for _name, value_expr in expr.fields:
                 self.resolve_expr(value_expr)
+            # LSP: register this use site -- see type_position_index's docstring.
+            self.type_position_index[expr.position] = ("struct", expr.type_name)
             return
         if isinstance(expr, EnumLit):
             variants = self.enum_decls.get(expr.type_name)
@@ -495,6 +529,11 @@ class Resolver:
             )
             for _name, value_expr in expr.fields:
                 self.resolve_expr(value_expr)
+            # LSP: register the variant use site, and the type name use
+            # site when tracked -- see type_position_index's docstring.
+            self.type_position_index[expr.position] = ("variant", expr.type_name, expr.variant)
+            if expr.type_name_position is not None:
+                self.type_position_index[expr.type_name_position] = ("enum", expr.type_name)
             return
         if isinstance(expr, FieldAccess):
             if isinstance(expr.obj, Ident):
@@ -513,6 +552,11 @@ class Resolver:
                     if variants is not None and expr.field in variants:
                         if variants[expr.field] == []:
                             expr.enum_unit_type = expr.obj.name
+                            # LSP: register both the type-name and variant-name
+                            # use sites for a bare enum-unit-variant
+                            # construction -- see type_position_index's docstring.
+                            self.type_position_index[expr.obj.position] = ("enum", expr.obj.name)
+                            self.type_position_index[expr.position] = ("variant", expr.obj.name, expr.field)
                             return
                         raise Exception(
                             f"Enum variant '{expr.obj.name}.{expr.field}' requires fields "
@@ -577,6 +621,8 @@ class Resolver:
             )
             for _name, sub in pattern.fields:
                 self.resolve_pattern(sub)
+            # LSP: register this use site -- see type_position_index's docstring.
+            self.type_position_index[pattern.position] = ("struct", pattern.type_name)
             return
         if isinstance(pattern, EnumPat):
             variants = self.enum_decls.get(pattern.type_name)
@@ -601,5 +647,10 @@ class Resolver:
             )
             for _name, sub in pattern.fields:
                 self.resolve_pattern(sub)
+            # LSP: register the type-name and variant-name use sites when
+            # tracked -- see type_position_index's docstring.
+            self.type_position_index[pattern.position] = ("enum", pattern.type_name)
+            if pattern.variant_position is not None:
+                self.type_position_index[pattern.variant_position] = ("variant", pattern.type_name, pattern.variant)
             return
         raise AssertionError(f"unhandled pattern node {pattern!r}")

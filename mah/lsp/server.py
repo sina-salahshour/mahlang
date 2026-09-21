@@ -23,10 +23,9 @@ Run it directly for a quick sanity check:
 from __future__ import annotations
 
 import json
-import os
 import sys
+from pathlib import Path
 from urllib.parse import unquote, urlparse
-from urllib.request import pathname2url
 
 from . import analysis
 
@@ -45,8 +44,22 @@ def uri_to_path(uri: str) -> str | None:
 
 
 def path_to_uri(path: str) -> str:
-    """Convert a local filesystem path to a ``file://`` URI."""
-    return "file://" + pathname2url(os.path.abspath(path))
+    """Convert a local filesystem path to a ``file://`` URI.
+
+    Uses `pathlib.Path.as_uri()` rather than the old
+    `"file://" + urllib.request.pathname2url(path)` idiom: a CPython
+    stdlib behavior change (`pathname2url` now itself prepends an
+    authority-separating `//` before an absolute POSIX path's leading `/`,
+    to stop an absolute path from ever being misread as a URL authority)
+    means that old idiom now produces a malformed URI with two extra
+    slashes (`file://///tmp/...` instead of `file:///tmp/...`) on current
+    Python versions. This broke cross-file go-to-definition specifically
+    -- the only place this function's return value ever reaches a client
+    -- while same-file jumps (which never call this function, see
+    `_on_textDocument_definition` below) kept working, which is why this
+    was easy to miss. `Path.as_uri()` is the stable, version-independent
+    way to do this conversion."""
+    return Path(path).resolve().as_uri()
 
 
 def _log(message: str) -> None:
@@ -148,13 +161,17 @@ class Server:
         # built on `Resolver`'s real symbol table (see
         # `lsp/analysis.py`'s `get_definition`/`get_rename_edits`), not the
         # retired independent token-scope model (`_build_scopes` and
-        # friends), which M7 deleted. hover/completion/document-symbols/
-        # code-actions remain deliberately NOT advertised: they're still
-        # built on `analysis.py`'s old, pre-M0 `TokenType` spellings (a
-        # focused follow-up, not part of M7 -- see docs/V2_DESIGN.md's M7
-        # milestone). Advertising them now would invite a well-behaved
-        # client to call handlers that raise. Diagnostics need no
-        # capability flag: they're pushed via
+        # friends), which M7 deleted. hover is advertised too, likewise
+        # built on the resolver (plus `type_position_index` for struct/enum/
+        # variant names). completion is now advertised as well -- revived on
+        # top of the same resolver foundation (`analysis.py`'s
+        # `get_completions`), replacing the dead, pre-M0 `TokenType`-based
+        # scanner it used to call. document-symbols/code-actions remain
+        # deliberately NOT advertised: they're unrelated to this work and
+        # still built on that old dead token-scanner (a focused follow-up,
+        # not part of this milestone). Advertising them now would invite a
+        # well-behaved client to call handlers that raise. Diagnostics need
+        # no capability flag: they're pushed via
         # `textDocument/publishDiagnostics` notifications on open/change/
         # save, unconditionally.
         capabilities = {
@@ -165,6 +182,7 @@ class Server:
             "definitionProvider": True,
             "renameProvider": True,
             "hoverProvider": True,
+            "completionProvider": {"triggerCharacters": [".", "\""]},
         }
         self._respond(
             request_id,

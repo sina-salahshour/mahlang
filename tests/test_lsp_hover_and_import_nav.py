@@ -127,5 +127,73 @@ class ImportGotoDefinitionTests(unittest.TestCase):
         self.assertIsNone(result)
 
 
+class PathToUriTests(unittest.TestCase):
+    """Regression tests for a bug found via a real cross-file go-to-
+    definition in VS Code: `mah.lsp.server.path_to_uri` used to build a
+    URI as `"file://" + urllib.request.pathname2url(path)`, but a CPython
+    stdlib behavior change made `pathname2url` itself prepend an
+    authority-separating `//` before an absolute POSIX path's leading `/`
+    -- combined with `path_to_uri`'s own `"file://"` prefix, this produced
+    a malformed 5-slash URI (`file://///tmp/...` instead of the correct
+    `file:///tmp/...`). Same-file go-to-definition never calls this
+    function at all (see `_on_textDocument_definition`'s `if target_path`
+    check), which is why this was invisible in every prior test -- they
+    all either called `analysis.get_definition` directly (bypassing
+    `server.py`'s URI layer entirely) or exercised only same-file jumps.
+    """
+
+    def test_path_to_uri_produces_exactly_three_slashes(self):
+        from mah.lsp import server
+
+        uri = server.path_to_uri("/tmp/some/file.mh")
+        self.assertEqual(uri, "file:///tmp/some/file.mh")
+        self.assertNotIn("////", uri)
+
+    def test_server_cross_file_definition_produces_well_formed_uri(self):
+        """End-to-end: drive `Server._on_textDocument_definition` (not
+        just `analysis.get_definition`) for a real cross-file jump, the
+        exact path the bug lived in."""
+        from mah.lsp import server
+
+        tmp_dir = os.path.join(EXAMPLES_DIR, "_path_to_uri_regression")
+        os.makedirs(tmp_dir, exist_ok=True)
+        lib_path = os.path.join(tmp_dir, "lib.mh")
+        entry_path = os.path.join(tmp_dir, "entry.mh")
+        try:
+            with open(lib_path, "w") as f:
+                f.write("export fn helper(n) {\n\treturn n\n}\n")
+            entry_text = 'import lib from "lib"\n\nprint(lib.helper(1))\n'
+            with open(entry_path, "w") as f:
+                f.write(entry_text)
+
+            responses = []
+            srv = server.Server(stdin=None, stdout=None)
+            srv._respond = lambda request_id, result: responses.append(result)  # noqa: SLF001
+
+            entry_uri = server.path_to_uri(entry_path)
+            srv._documents[entry_uri] = entry_text  # noqa: SLF001
+
+            idx = entry_text.index("lib.helper") + len("lib.")
+            line = entry_text.count("\n", 0, idx)
+            col = idx - (entry_text.rfind("\n", 0, idx) + 1)
+            srv._on_textDocument_definition(  # noqa: SLF001
+                1, {"textDocument": {"uri": entry_uri}, "position": {"line": line, "character": col}}
+            )
+
+            self.assertEqual(len(responses), 1)
+            result = responses[0]
+            self.assertIsNotNone(result)
+            self.assertNotIn("////", result["uri"])
+            self.assertTrue(result["uri"].startswith("file:///"))
+            self.assertEqual(server.uri_to_path(result["uri"]), os.path.realpath(lib_path))
+        finally:
+            for name in ("lib.mh", "entry.mh"):
+                p = os.path.join(tmp_dir, name)
+                if os.path.exists(p):
+                    os.remove(p)
+            if os.path.isdir(tmp_dir):
+                os.rmdir(tmp_dir)
+
+
 if __name__ == "__main__":
     unittest.main()
