@@ -3,9 +3,17 @@
 Editor support for [Mah](https://github.com/sina-salahshour/mahlang) (`.mh` files):
 
 - Syntax highlighting (a TextMate grammar covering Mah's keywords, structs/enums,
-  strings, numbers, and comments)
-- Full language server support via `mah lsp` — diagnostics, hover, go-to-definition
-  (including jumping into an `import`ed file), and rename
+  async (`detach`/`.await`/`sleep_async`), strings, numbers, and comments)
+- Full language server support via `mah lsp`:
+  - diagnostics
+  - hover — including doc comments, and struct/enum/variant shapes
+  - go-to-definition — variables, functions, struct/enum/variant names, and
+    jumping straight into an `import`ed file
+  - rename — including across files (renaming a function/variable updates
+    every file in the workspace that imports it), and struct/enum type,
+    variant, and field names
+  - completion — keywords, builtins, in-scope symbols, namespaced imports,
+    and `.mh` file paths while typing inside an `import "..."` string
 - A custom file icon for `.mh` files in the Explorer (VS Code's built-in icon themes
   only — see **File icon note** below if you use a third-party icon theme)
 
@@ -44,7 +52,7 @@ Then either:
 
   ```sh
   npx @vscode/vsce package
-  code --install-extension mah-language-0.1.0.vsix
+  code --install-extension mah-language-0.2.0.vsix
   ```
 
   (Also available as `make build-vscode` from the repo root.)
