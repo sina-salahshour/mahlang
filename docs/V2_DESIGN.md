@@ -2354,6 +2354,64 @@ node that resolved to it. Then:
     impl). Full suite: 358 tests green. `tree-sitter parse` needed no grammar
     change for the new `detach` operands (zero ERROR nodes).
 
+15. **M14 — Portable `.mahc` bytecode, `mah build`/`runc`/`dis`. ✅ Landed.**
+
+    The normative spec is `docs/MAHC_FORMAT.md` (file layout, every
+    opcode's operands and semantics, the value model, scheduling, method
+    dispatch, versioning). It's written so a VM can be implemented in any
+    language from that document alone.
+
+    - **Format**: magic `MAHC` + `u16` major/minor, then id+length sections
+      (STRINGS, CONSTANTS, TYPES, NATIVES, FUNCTIONS, CODE, and an optional
+      DEBUG line table). LEB128 varints throughout, one deduplicated string
+      table, types and variants referenced by index. Only Mah values
+      appear: Number constants are an integer varint or decimal text, never
+      a Python type.
+    - **Extensibility**: host capabilities are named, arity-checked
+      **natives** (`io.print`, `io.input`, `math.sin`, `math.cos`,
+      `time.sleep_async` today; `fs.*`/`net.*`/`string.*`/`os.*` are meant
+      to join them) implemented in `mah/natives.py`. A VM refuses at load
+      time to run a program that needs a native it doesn't have. New
+      opcodes, constant tags, natives, and built-in types go in minor
+      versions, and optional sections can be skipped by VMs that don't
+      understand them.
+    - **Pipeline**: codegen's tuple IR is unchanged apart from per-instruction
+      source positions; a new, strictly 1:1 lowering pass
+      (`mah/bytecode/lower.py`) produces a `Program`; `encode`/`decode`/
+      `disasm` are driven by `bytecode/format.py`'s `OPCODES` table. The VM
+      (`code_interpreter.py`, `run_bytes`/`run_program`) executes only
+      decoded programs, after a link step, and never imports the compiler
+      (a test enforces this). `mah run` goes through the real bytes too, so
+      the whole test suite exercises the format.
+    - **CLI**: `mah build FILE [-o/--out PATH] [--target debug|release]`
+      (default output `<entry>.mahc`; `release` omits DEBUG), `mah runc
+      FILE.mahc`, `mah dis FILE.mahc`, and `mah prog.mahc` as shorthand.
+    - **Errors**: VM errors are plain-message `MahRuntimeError`s; the step
+      loop appends `at position #L:C` / `file#L:C` from DEBUG exactly once,
+      or nothing in a release build. The CLI prints `RuntimeError: ...`.
+      Mah has no catchable/structured errors yet; they're planned as a
+      minor-version addition (§6.8). The compile-time `#L:C` column was off
+      by one and is now exact.
+    - **Semantics pinned down by the spec** (they had been whatever Python
+      did): Numbers are always decimals; `true == 1` is `false` (Python's
+      `bool` is an `int`); mixed-type arithmetic and division by zero are
+      clean Mah errors; non-integral numbers print without trailing zeros;
+      struct fields print in declaration order; `input()` at end of input
+      is an error instead of an infinite loop. No existing test asserted
+      the old behavior.
+
+    Same thinker/coder split: I wrote `MAHC_FORMAT.md` and the implementation
+    spec, and Sonnet implemented it in one dispatch. Verified independently:
+    re-ran the suite; decoded a build with a separate ~40-line reader
+    written only from the doc, which matched; checked `build`+`runc` against
+    `run` for every example; exercised release/debug/imported-file error
+    locations and a corrupt file through the real CLI; added a CLI
+    runtime-error test after making the CLI print `RuntimeError: ...`
+    instead of the exception's module path; and applied the coder's
+    doc-clarity findings (the reference VM's 28-digit precision, and the two
+    unrelated meanings of "native"). Full suite: 396 tests green.
+    `examples/traits.mh` compiles to 1246 bytes (debug) / 862 (release).
+
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
 it** (`make test` must stay green) — see `docs/TESTING.md` for where
@@ -2365,7 +2423,7 @@ M1 was built and documented that way.
 
 ## Status
 
-M0 through M13 are all landed (see their entries above for what changed and
+M0 through M14 are all landed (see their entries above for what changed and
 each milestone's deliberate deviations/simplifications). `docs/NEXT_PHASES.md`
 captures what's deliberately deferred still (match guards, arrays/lists,
 generics, the type system -- and, as of M11, sound field-*access*
@@ -2402,6 +2460,8 @@ without a real type system. M12 added Rust-style traits (`trait`,
 inherent and trait `impl`s, runtime method dispatch, the `Printable`
 system trait used by `print`/string `+`) -- see `docs/TRAITS.md`; M13
 added field-closure calls (`p.f()`), `detach` on method calls, and
-method-name hover/go-to-definition/completion in the LSP. All
-planned milestones (M0–M13) are now complete; see `docs/NEXT_PHASES.md`
+method-name hover/go-to-definition/completion in the LSP; M14 made the
+compiler's output a portable, versioned binary format (`.mahc`, see
+`docs/MAHC_FORMAT.md`) that the VM runs exclusively. All
+planned milestones (M0–M14) are now complete; see `docs/NEXT_PHASES.md`
 for what's next.

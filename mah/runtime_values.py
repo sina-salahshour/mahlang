@@ -171,6 +171,22 @@ class Task:
 NONE_VALUE = EnumInstance("Option", "none", {})
 
 
+class MahRuntimeError(Exception):
+    """A `.mahc` program's own runtime error (docs/MAHC_FORMAT.md #6.8) --
+    distinct from `mah.bytecode.format.MahcFormatError` (a malformed FILE)
+    and from an ordinary Python exception (a VM-internal bug or a Python
+    stdlib error, e.g. `decimal.InvalidOperation`, that the VM's step loop
+    catches and wraps the same way -- see `mah/code_interpreter.py`).
+
+    `located` (set to `True` once the step loop has appended a `at position
+    ...` suffix, or decided no location is available) exists purely so an
+    error raised deep inside a nested task (`invoke_sync`/`detach`'s own,
+    independent step loop) gets exactly one location suffix, not one per
+    step loop it passes through on its way back up."""
+
+    located: bool = False
+
+
 def type_name_of(value) -> str:
     """M12: the runtime type name `impl`/method dispatch sees `value` as --
     see this module's docstring and docs/V2_DESIGN.md's M12 milestone.

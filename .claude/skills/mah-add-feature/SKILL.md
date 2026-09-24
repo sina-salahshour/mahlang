@@ -24,7 +24,9 @@ The current pipeline is hand-written: `preprocessor.py` (imports/exports,
 rarely needs touching) → `compiler/lexer.py` → `compiler/parser.py`
 (builds the AST in `compiler/ast_nodes.py`) → `compiler/resolve.py`
 (scope/address resolution) → `compiler/codegen.py` (emits IR tuples) →
-`code_interpreter.py`'s `run_code` (executes them), with `runtime_values.py`
+`bytecode/lower.py` (turns them into the portable `.mahc` format, see
+`docs/MAHC_FORMAT.md`) → `code_interpreter.py`'s `run_program` (executes
+only that format), with `runtime_values.py`
 holding shared heap-object types (`Frame`, `Closure`, `NONE_VALUE`, and
 whatever M2+ adds — `StructInstance`, `EnumInstance`, etc.). A feature
 typically touches several of these **in this order**:
@@ -78,11 +80,29 @@ target is known) — don't invent a different mechanism. If the feature
 needs a new heap object kind (like M1's `Closure`), add the class to
 `runtime_values.py`, not here.
 
-## 6. VM opcode: `code_interpreter.py`
+## 6. Bytecode + VM: `bytecode/` and `code_interpreter.py`
 
-New `op` string → add a `case (op, ...):` arm in `run_code`'s `match`. Use
-the `_read`/`_write` helpers for any `(depth, slot)` operand — never index
-`frame.slots` directly outside those two functions.
+Since M14 the VM runs only the portable `.mahc` format, and
+`docs/MAHC_FORMAT.md` is its **normative spec** — other people may implement
+VMs from it, so a feature isn't done until that document describes it.
+
+- **Needs a host capability** (I/O, files, sockets, string utilities, OS)?
+  Don't add an opcode. Add a **native** instead: a dotted name +
+  arity in `bytecode/format.py`'s `NATIVE_ARITIES`, an `impl(ctx, args)` in
+  `mah/natives.py`, a lowering rule in `bytecode/lower.py`, and a row in
+  `MAHC_FORMAT.md` §4.4 (bump the minor version).
+- **Needs a genuinely new instruction**: add it to `bytecode/format.py`'s
+  `OPCODES` (a reserved code + operand kinds), map the IR tuple to it in
+  `bytecode/lower.py` (lowering stays 1:1 per instruction), handle it in
+  `code_interpreter.py` (link step + a `case` in the step loop), and
+  document its operands and semantics in `MAHC_FORMAT.md` §4.6/§6 with a
+  minor-version bump. `encode.py`/`decode.py`/`disasm.py` are table-driven
+  and pick up new operand kinds from `OPCODES`.
+- VM runtime errors raise `MahRuntimeError` with a plain message; the step
+  loop adds the source location from the DEBUG section. Never put
+  `at position ...` in a VM message.
+- The VM must never import `mah.compiler`/`mah.preprocessor`/`mah.lsp`
+  (a test enforces this).
 
 ## 7. Test it — do this before calling the feature done, not after
 
@@ -91,7 +111,8 @@ file.** Concretely:
 
 ```sh
 make test                                       # must stay green
-python -m mah build examples/your_test.mh       # eyeball the generated IR
+python -m mah build examples/your_test.mh       # writes examples/your_test.mahc
+python -m mah dis examples/your_test.mahc       # eyeball the bytecode
 python -m mah run examples/your_test.mh         # run it
 ```
 

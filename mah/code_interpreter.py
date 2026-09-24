@@ -1,174 +1,67 @@
-"""Executes the flat IR compiler/codegen.py emits (see docs/RUNTIME.md and
-docs/V2_DESIGN.md's M1 milestone).
+"""The Mah VM -- executes a `.mahc` `Program` exactly as specified by
+docs/MAHC_FORMAT.md #5/#6. This module (and everything it imports) may
+depend only on `mah.runtime_values`, `mah.bytecode.*`, `mah.natives`, and
+the stdlib -- **never** `mah.compiler`, `mah.preprocessor`, or `mah.lsp` --
+so a `.mahc` file is a complete, self-describing program: nothing about
+how it got compiled leaks into how it runs (see
+`tests/test_bytecode.py`'s VM-independence subprocess check, and
+docs/MAHC_FORMAT.md #1's "portable" design goal).
 
-M1 replaces the M0 flat shared-array/`sp`-stack model with heap-allocated
-`Frame`s linked by a static-chain pointer (`Frame.static_parent`), plus a
-`Closure` value for first-class/nested functions -- see runtime_values.py.
-Every IR operand is now a `(depth, slot)` tuple: `_read`/`_write` walk
-`depth` `static_parent` hops from the *currently executing* frame, then
-index `.slots[slot]`. Calls push `(return_pc, caller_frame)` onto an
-explicit Python-list return stack and switch `current_frame` to a brand
-new `Frame` (so recursive calls never alias each other's locals, and a
-closure's captured frame lives exactly as long as something still
-references it -- ordinary Python object lifetime, no reuse/popping of a
-shared stack). `ret` copies its value into an interpreter-local "return
-register" (not a `Frame` slot) and pops the return stack; the `retval`
-opcode immediately following a `call` in the caller's code copies that
-register into the caller's destination slot, since the destination can't
-be known until after the call returns.
+Two public entry points: `run_bytes(data)` (decode + run) and
+`run_program(program)` (run an already-decoded/already-built `Program`
+directly -- used by `mah run`'s in-process path once it already has bytes
+it just encoded, and by tests that build a `Program` by hand).
 
-M2 adds `struct`/`getfield`/`setfield` opcodes for `StructInstance` values
-(see docs/V2_DESIGN.md's M2 milestone and compiler/codegen.py's module
-docstring for the exact opcode shapes). Field-name validation for
-`getfield`/`setfield` happens here, at runtime -- deliberately, since
-there's no static type system yet to check a field access against ahead of
-time (struct *literal* field validation, by contrast, is fully static and
-lives in compiler/resolve.py, since a literal always names its struct type
-explicitly).
+Pipeline: `_link(program)` resolves every instruction's string/constant/
+type/function/native indices into direct Python values ONCE at load time
+(see `_link_instr` and friends below), producing a flat list of ready-to-
+execute tuples the step loop just pattern-matches on -- mirroring the
+pre-M14 interpreter's own IR tuples (same idea, new opcode names, and the
+address-operand shape -- `(depth, slot)` pairs read by walking
+`Frame.static_parent` -- is unchanged from that design). Native names are
+validated against `mah.natives.NATIVES` during linking, and validation
+happens for every declared native regardless of whether the program's
+control flow ever reaches a use of it -- so a file naming an unsupported
+native is rejected before a single instruction runs (see
+docs/MAHC_FORMAT.md #3's "fail fast" and `tests/test_bytecode.py`'s
+`test_unsupported_native_...` case, which prints something first and
+checks stdout is still empty).
 
-M3 adds the `enum` opcode for `EnumInstance` values (see
-docs/V2_DESIGN.md's M3 milestone), including the built-in `Option` type
-(`none`/`some(x)`) which now shares this same representation --
-`NONE_VALUE` (runtime_values.py) is a genuine `EnumInstance`, not a bespoke
-class. `getfield`/`setfield` are generalized to accept either a
-`StructInstance` or an `EnumInstance` -- both expose the identical
-`.fields` dict shape, so `some(5).value` and `some(5).value = 6` work
-through the exact same mechanism M2 built for structs, with no new opcode
-needed for enum field access/mutation.
-
-M4 adds `matchtag`/`matchfail` for `match` statements (see
-docs/V2_DESIGN.md's M4 milestone): `matchtag` tests whether a value is a
-`StructInstance`/`EnumInstance` of the expected type (and, for an enum,
-variant), writing a boolean result that compiler/codegen.py's
-backpatched jump chain then branches on; `matchfail` is reached only when
-no arm's pattern matched (M4 does no exhaustiveness checking) and always
-raises a clean runtime error naming the source position.
-
-M9 adds `defer_stack: list[list[Closure]]` -- a stack of "scopes," each
-scope a list of pending zero-arg `Closure`s for one currently-active
-block that directly contains a `defer` (see docs/V2_DESIGN.md's M9
-milestone and compiler/codegen.py's module docstring). Four small
-opcodes drive it: `deferpush` opens a new empty scope; `deferadd` (whose
-`case` lives in the ordinary opcode dispatch below, right next to these)
-pushes one closure onto the top scope; `deferpeek` writes whether the top
-scope is non-empty; `deferpopclosure` pops and returns its
-most-recently-pushed closure; `deferscopepop` discards the (by then
-empty) top scope. Deferred closures are invoked through the ordinary
-`call`/`ret`/`retval` opcodes already implemented above (M1's calling
-convention, unchanged) -- `compiler/codegen.py`'s
-`_emit_drain_one_defer_scope` emits a small loop of `deferpeek` /
-`deferpopclosure` / `call` / `retval` (return value discarded) /
-`deferscopepop`, so no new call mechanism exists here at all.
-
-M10 adds multi-task scheduling for async (`detach`/`.await`/
-`sleep_async` -- see docs/V2_DESIGN.md's M10 milestone and
-docs/NEXT_PHASES.md's "Async" section for the full design rationale).
-Previously there was exactly one `(pc, current_frame, return_stack,
-defer_stack)` -- one flat instruction stream, one call chain. Async needs
-several of these live at once, one per `Task` (runtime_values.py): the
-main program is task 0, and `detach` spins up one more per detached call.
-`defer_stack` moves from a single interpreter-local list onto each
-`Task`, because a suspended task's own pending defers must never leak
-into whichever task runs next once tasks can genuinely interleave;
-`return_register` (the single-value handoff between `ret` and the
-immediately-following `retval`) stays a single interpreter-local
-variable, since nothing can ever switch tasks between those two adjacent
-instructions.
-
-M12 adds `method_table`/`defmethod`/`callmethod` for traits/`impl`/method
-calls (see docs/V2_DESIGN.md's M12 milestone and compiler/codegen.py's
-module docstring for the opcode shapes): `method_table` is a runtime dict
-keyed `(type_name, method_name) -> {"inherent": target_or_None, "traits":
-{trait_name: target}}` where a `target` is `(fn, is_method)`, `fn` either a
-`Closure` (a Mah-code method) or a plain Python callable (a native system-
-trait method, see `NATIVE_TRAIT_METHODS` -- currently just
-`Printable.to_string`, seeded for every built-in type). `defmethod` fills
-one entry at program start (before the first ordinary top-level statement
-runs, via compiler/codegen.py's `generate`-time hoisting); `callmethod`
-looks a receiver's runtime type + method name up in it, applying the same
-inherent-wins/single-trait-else-ambiguous/static-fn-is-an-error rules
-compiler/resolve.py's `MethodCall` docstring describes for the compile-time
-`Type.method(...)` case, but at runtime (dynamic `x.m(...)` dispatch has no
-static type to resolve ahead of time). Two small refactors support this:
-`enter_closure` factors the frame-building half of the `call` case out into
-a reusable helper (`callmethod`'s Closure branch calls it too, after its
-own arity check with a method-shaped message); `invoke_sync` runs a
-Closure to completion via a brand-new, independent `Task` and
-`step_task` (re-entrant already, same precedent as `detach`), used by
-`to_str` to call a user `Printable.to_string` impl synchronously from
-regular (non-async) code paths like `print`/string concatenation --
-raising a clean error if that call ever tries to suspend (there is no
-Promise anybody is watching for it). `to_str` replaces the old, non-
-Printable-aware `_to_str` (renamed `_format_value`, still used standalone
-outside a running program, e.g. by `main.py`'s error formatting) as the
-formatting function `print`/`+` actually call: it checks
-`method_table[(type_name_of(val), "to_string")]["traits"].get("Printable")`
-first, calling a user (Mah-code) impl if present and requiring it to
-return a `String`; otherwise it falls back to `_format_value(val, to_str)`
--- the existing structural formatting, itself recursing through `to_str`
-(not `_format_value` again) for nested values, so a struct field or
-`some(...)` payload whose own type has a user `Printable` impl formats
-through that impl too.
-
-M13 lifts two M12 trait limitations. (1) `p.f(args)` now also accepts a
-closure stored in a struct/enum FIELD named `f`, not just a real method:
-`find_method` (a helper closed over `method_table`, factored out of the old
-inline `callmethod` case) does the ordinary M12 lookup first, and only when
-that finds no target -- or finds only a static function -- AND the receiver
-is a `StructInstance`/`EnumInstance` with a field named `f`, falls back to
-that field's value (which must be a `Closure`); `callmethod`'s Closure
-branch is invoked with the field value directly, no receiver prepended to
-its args (`include_self=False`, vs. `True` for a real method). Ambiguity
-(2+ traits providing the method) is still raised before the fallback is
-even considered, and a trait-qualified call (`trait` argument set) never
-falls back to a field at all -- both match M12's existing "does not
-implement trait" error exactly. (2) `detach` now also accepts a method call
-operand (`detach obj.m(args)`, `detach Type.m(args)`, `detach Trait.m(recv,
-...)`) -- see compiler/codegen.py's module docstring for the new
-`detachmethod` opcode. `spawn_detached` (factored out of the old inline
-`detach` case) builds the frame/Promise/Task and drives it, shared by both
-`detach`'s Closure branch and the new `detachmethod` case (which first runs
-the same `find_method` lookup `callmethod` uses, then either spawns a
-detached task for a Closure target or synchronously resolves a Promise
-around a native target's return value, mirroring `callmethod`'s own
-Closure-vs-native split).
-
-Three new opcodes (M10): `detach` builds a fresh `Task` and `PromiseInstance`
-and drives the new task synchronously (via `step_task`, reentrant --
-nested calls happen only as deep as concurrent `detach`-in-progress
-nesting, not per ordinary Mah call) until it finishes or suspends,
-writing the (possibly still-pending) Promise to `dest` either way, and
-never suspending its own caller. `await` (`.await`, compiled specially by
-codegen.py rather than as `getfield`) checks a Promise's state: if
-already resolved, keeps stepping with no scheduling; if still pending,
-this is a genuine suspension -- the running task's `step_task` call
-returns `("suspended", None)` up the (possibly nested) Python call stack,
-having first registered a resume callback on the Promise that restores
-this task's `pc`/`dest` and re-drives it once the Promise resolves.
-`sleepasync` returns a pending Promise immediately and schedules a timer
-in a `heapq`-based queue; resolving a Promise (a timer firing, or a
-`detach`ed task finishing) runs its callbacks synchronously, which is
-what actually resumes suspended tasks with no separate microtask-queue
-data structure needed. The top-level scheduling loop keeps draining
-timers -- Node-like process lifetime -- until the main task has both
-finished and nothing is left scheduled, rather than exiting the instant
-the main program's own top-level code finishes and abandoning any
-still-pending detached work nobody ever awaited.
+Frames/tasks/promises/defer/methods/the scheduler are otherwise a direct
+port of the pre-M14 interpreter (see git history / docs/V2_DESIGN.md's
+M1/M9/M10/M12/M13 milestones for the *design* rationale, unchanged here) --
+M14 only changes: opcode names/shapes (the bytecode ones instead of
+codegen.py's IR tuples), frame slots start filled with the real `none`
+value (`NONE_VALUE`) instead of Python `None`, every Number is a
+`Decimal`, `eq`/`neq`/`lt`/`gt`/arithmetic/truthiness follow
+docs/MAHC_FORMAT.md #5/#6.2 exactly (a Bool is never `==` a Number, a
+struct/enum/Function/Promise compares by identity, `lt`/`gt` reject
+anything but two Numbers or two Strings), and every runtime error is a
+`MahRuntimeError` with a clean, location-free message that the step loop
+itself appends `at position ...` to exactly once (see `_step`/`_locate`
+below) instead of instructions baking a (meaningless, pre-M14) raw `pc`
+into their own error text.
 """
 
-from decimal import Decimal
+from __future__ import annotations
+
+import bisect
 import heapq
 import itertools
-import math
-import sys
 import time
-from typing import Any
+from decimal import Decimal
+from typing import Any, NamedTuple
 
+from .bytecode.decode import decode
+from .bytecode.format import MahcFormatError
+from .bytecode.program import Program
+from .natives import NATIVES, NativeContext
 from .runtime_values import (
     BUILTIN_TYPE_NAMES,
     Closure,
     EnumInstance,
     Frame,
+    MahRuntimeError,
     NONE_VALUE,
     PromiseInstance,
     StructInstance,
@@ -176,29 +69,259 @@ from .runtime_values import (
     type_name_of,
 )
 
+_BINOP_SYMBOLS = {
+    "add": "+", "sub": "-", "mul": "*", "div": "/",
+    "idiv": "//", "mod": "%", "pow": "**", "lt": "<", "gt": ">",
+}
+
+
+# ---------------------------------------------------------------------------
+# Linking: Program -> a flat list of directly-executable instruction tuples
+# ---------------------------------------------------------------------------
+
+class TypeInfo(NamedTuple):
+    kind: int  # 0 = struct, 1 = enum
+    name: str
+    fields: list | None       # kind 0: declared field names, in order
+    variants: list | None     # kind 1: [(variant_name, [field_name, ...]), ...]
+
+
+class FunctionInfo(NamedTuple):
+    entry: int
+    slot_count: int
+    param_count: int
+    name: str | None
+
+
+class DebugIndex(NamedTuple):
+    # Parallel arrays, sorted by pc (ascending), for a `bisect` lookup of
+    # "which run covers this pc" -- see `_locate`.
+    pcs: list
+    runs: list           # (file_idx, line, col), aligned with `pcs`
+    file_paths: list      # file index -> relative path string
+
+
+class LinkedProgram(NamedTuple):
+    constants: list
+    types: list
+    natives: list          # (name, arity, impl) aligned to native index
+    functions: list        # FunctionInfo aligned to function index
+    code: list              # directly-executable instruction tuples
+    debug: DebugIndex | None
+
+
+def _convert_const(const, strings: list) -> Any:
+    tag = const.tag
+    if tag == 0:
+        return NONE_VALUE
+    if tag == 1:
+        return False
+    if tag == 2:
+        return True
+    if tag == 3:
+        return Decimal(const.value)
+    if tag == 4:
+        return Decimal(strings[const.value])
+    if tag == 5:
+        return strings[const.value]
+    raise AssertionError(f"unknown constant tag {tag}")
+
+
+def _build_types(type_decls: list, strings: list) -> list:
+    infos = [
+        TypeInfo(1, "Option", None, [("none", []), ("some", ["value"])]),
+        TypeInfo(1, "Promise", None, [("Pending", []), ("Settled", ["value"])]),
+    ]
+    for t in type_decls:
+        name = strings[t.name]
+        if t.kind == 0:
+            infos.append(TypeInfo(0, name, [strings[f] for f in t.fields], None))
+        else:
+            infos.append(
+                TypeInfo(1, name, None, [(strings[vn], [strings[f] for f in vf]) for vn, vf in t.variants])
+            )
+    return infos
+
+
+def _validate_natives(native_refs: list, strings: list) -> list:
+    linked = []
+    for ref in native_refs:
+        name = strings[ref.name]
+        entry = NATIVES.get(name)
+        if entry is None or entry[0] != ref.arity:
+            raise MahcFormatError(f"this VM does not support native '{name}' (arity {ref.arity})")
+        linked.append((name, entry[0], entry[1]))
+    return linked
+
+
+def _link_instr(instr, strings: list, constants: list, types: list, natives: list, functions: list):
+    op = instr.op
+    a = instr.args
+    if op == "halt":
+        return ("halt",)
+    if op == "move":
+        return ("move", a[0], a[1])
+    if op == "loadk":
+        return ("loadk", constants[a[0]], a[1])
+    if op == "jmp":
+        return ("jmp", a[0])
+    if op == "jmpf":
+        return ("jmpf", a[0], a[1])
+    if op in ("add", "sub", "mul", "div", "idiv", "mod", "pow", "eq", "neq", "lt", "gt", "and", "or"):
+        return (op, a[0], a[1], a[2])
+    if op == "neg":
+        return ("neg", a[0], a[1])
+    if op == "closure":
+        return ("closure", functions[a[0]], a[1])
+    if op == "call":
+        return ("call", a[0], a[1])
+    if op == "ret":
+        return ("ret", a[0])
+    if op == "retval":
+        return ("retval", a[0])
+    if op == "callmethod":
+        recv, name_idx, args, trait_idx = a
+        return ("callmethod", recv, strings[name_idx], args, strings[trait_idx] if trait_idx is not None else None)
+    if op == "defmethod":
+        closure_addr, type_idx, trait_idx, name_idx, is_method = a
+        return (
+            "defmethod",
+            closure_addr,
+            strings[type_idx],
+            strings[trait_idx] if trait_idx is not None else None,
+            strings[name_idx],
+            is_method,
+        )
+    if op == "detach":
+        return ("detach", a[0], a[1], a[2])
+    if op == "detachmethod":
+        recv, name_idx, args, trait_idx, dest = a
+        return (
+            "detachmethod",
+            recv,
+            strings[name_idx],
+            args,
+            strings[trait_idx] if trait_idx is not None else None,
+            dest,
+        )
+    if op == "await":
+        return ("await", a[0], a[1])
+    if op == "struct":
+        t_idx, values, dest = a
+        return ("struct", types[t_idx], values, dest)
+    if op == "enum":
+        t_idx, variant_idx, values, dest = a
+        return ("enum", types[t_idx], variant_idx, values, dest)
+    if op == "getfield":
+        obj, field_idx, dest = a
+        return ("getfield", obj, strings[field_idx], dest)
+    if op == "setfield":
+        obj, field_idx, src = a
+        return ("setfield", obj, strings[field_idx], src)
+    if op == "matchstruct":
+        value, t_idx, dest = a
+        return ("matchstruct", value, types[t_idx], dest)
+    if op == "matchenum":
+        value, t_idx, variant_idx, dest = a
+        return ("matchenum", value, types[t_idx], variant_idx, dest)
+    if op == "matchfail":
+        return ("matchfail",)
+    if op == "deferpush":
+        return ("deferpush",)
+    if op == "deferadd":
+        return ("deferadd", a[0])
+    if op == "deferpeek":
+        return ("deferpeek", a[0])
+    if op == "deferpop":
+        return ("deferpop", a[0])
+    if op == "deferscopepop":
+        return ("deferscopepop",)
+    if op == "native":
+        native_idx, args, dest = a
+        _name, _arity, impl = natives[native_idx]
+        return ("native", impl, args, dest)
+    raise AssertionError(f"unknown linked opcode {op!r}")
+
+
+def _link_debug(debug, strings: list) -> DebugIndex:
+    file_paths = [strings[i] for i in debug.files]
+    pcs = [run[0] for run in debug.runs]
+    runs = [(run[1], run[2], run[3]) for run in debug.runs]
+    return DebugIndex(pcs, runs, file_paths)
+
+
+def _link(program: Program) -> LinkedProgram:
+    strings = program.strings
+    constants = [_convert_const(c, strings) for c in program.constants]
+    types = _build_types(program.types, strings)
+    natives = _validate_natives(program.natives, strings)
+    functions = [
+        FunctionInfo(fn.entry, fn.slot_count, fn.param_count, strings[fn.name] if fn.name is not None else None)
+        for fn in program.functions
+    ]
+    code = [_link_instr(instr, strings, constants, types, natives, functions) for instr in program.code]
+    debug = _link_debug(program.debug, strings) if program.debug is not None else None
+    return LinkedProgram(constants, types, natives, functions, code, debug)
+
+
+# ---------------------------------------------------------------------------
+# Value helpers -- docs/MAHC_FORMAT.md #5/#6.2/#6.6
+# ---------------------------------------------------------------------------
+
+def _is_number(v: Any) -> bool:
+    return type_name_of(v) == "Number"
+
+
+def truthy(v: Any) -> bool:
+    """docs/MAHC_FORMAT.md #5: exactly four falsy values -- `false`,
+    `none`, the Number `0`, and the empty String -- everything else
+    (including every struct/enum instance other than `none` itself, e.g.
+    `some(false)`) is truthy."""
+    if v is NONE_VALUE:
+        return False
+    if isinstance(v, bool):
+        return v
+    if _is_number(v):
+        return v != 0
+    if isinstance(v, str):
+        return v != ""
+    return True
+
+
+def _values_equal(a: Any, b: Any) -> bool:
+    """docs/MAHC_FORMAT.md #6.2: Numbers/Strings/Bools compare by value,
+    `none` equals only `none`; every other value (struct/enum instances --
+    including `some(x)` -- Function, Promise) is equal only to itself. A
+    plain identity check (`a is b`) already gives the right answer for
+    `none` (the shared `NONE_VALUE` singleton) and for every "identity
+    only" case, so only Number/String/Bool need their own branch -- and the
+    type-name check up front is what keeps a Bool from ever `==` a Number
+    (Python's `bool` is an `int`/`Decimal`-comparable subclass of `int`)."""
+    ta, tb = type_name_of(a), type_name_of(b)
+    if ta != tb:
+        return False
+    if ta in ("Number", "String", "Bool"):
+        return a == b
+    return a is b
+
+
+def _format_number(v: Decimal) -> str:
+    if v == v.to_integral_value():
+        return str(int(v))
+    return format(v.normalize(), "f")
+
 
 def _format_value(val: Any, recurse) -> str:
-    """The structural (non-Printable-aware) formatting logic shared by
-    `_to_str` (module-level, no Printable awareness -- used outside a
-    running program) and `run_code`'s own `to_str` (Printable-aware,
-    recurses through itself instead of straight back into
-    `_format_value`) -- see this module's docstring. `recurse` is called
-    for every nested value (an enum payload, a struct field) so each
-    caller's own notion of "how do I format a value" applies uniformly at
-    every nesting depth, not just the top level."""
+    """Structural (non-`Printable`-aware) formatting -- `recurse` is called
+    for every nested value (an enum payload, a struct field) so `to_str`
+    (below) can thread `Printable` dispatch through nested values too."""
     if val is NONE_VALUE:
         return "none"
     if isinstance(val, bool):
         return "true" if val else "false"
     if isinstance(val, Closure):
-        # M12: a function value prints as `<fn NAME>` (or `<fn>` for an
-        # anonymous closure) instead of the Python object repr.
         return f"<fn {val.name}>" if val.name else "<fn>"
     if isinstance(val, EnumInstance):
-        # PromiseInstance is a subclass of EnumInstance (see
-        # runtime_values.py) and needs no special-casing here at all --
-        # it prints as "Promise.Pending" / "Promise.Settled { value: ... }"
-        # through this exact same generic formatting any other enum gets.
         if val.type_name == "Option" and val.variant == "some":
             return f"some({recurse(val.fields['value'])})"
         if val.fields:
@@ -208,84 +331,96 @@ def _format_value(val: Any, recurse) -> str:
     if isinstance(val, StructInstance):
         inner = ", ".join(f"{k}: {recurse(v)}" for k, v in val.fields.items())
         return f"{val.type_name} {{ {inner} }}"
-    if isinstance(val, (int, float, Decimal)):
-        if val % 1 == 0:
-            return str(int(val))
-        return str(val)
+    if isinstance(val, Decimal):
+        return _format_number(val)
+    if isinstance(val, str):
+        return val
     return str(val)
 
 
-def _to_str(val: Any) -> str:
-    """No Printable awareness (see `_format_value`'s docstring) -- used
-    only outside a running program (there is no `method_table` to consult
-    without one)."""
-    return _format_value(val, _to_str)
+# ---------------------------------------------------------------------------
+# Frame slot access -- `A` operands are `(depth, slot)` pairs (unchanged
+# from the pre-M14 interpreter): walk `static_parent` `depth` times from
+# the currently executing frame, then index `.slots[slot]`.
+# ---------------------------------------------------------------------------
 
-
-def _read(frame, addr):
+def _read(frame: Frame, addr):
     depth, slot = addr
     for _ in range(depth):
         frame = frame.static_parent
     return frame.slots[slot]
 
 
-def _write(frame, addr, value):
+def _write(frame: Frame, addr, value) -> None:
     depth, slot = addr
     for _ in range(depth):
         frame = frame.static_parent
     frame.slots[slot] = value
 
 
-def run_code(code_block: list, global_slot_count: int):
+# ---------------------------------------------------------------------------
+# Execution
+# ---------------------------------------------------------------------------
+
+def run_bytes(data: bytes):
+    """Decode `data` as a `.mahc` file and run it -- `decode` performs the
+    full structural validation of docs/MAHC_FORMAT.md #3/#4 before this
+    even gets called."""
+    return run_program(decode(data))
+
+
+def run_program(program: Program):
+    linked = _link(program)  # raises MahcFormatError for an unsupported native, before anything runs
+    _execute(linked)
+
+
+def _locate_factory(debug: DebugIndex | None):
+    if debug is None:
+        return lambda pc, message: message
+
+    def locate(pc: int, message: str) -> str:
+        idx = bisect.bisect_right(debug.pcs, pc) - 1
+        if idx < 0:
+            return message
+        file_idx, line, col = debug.runs[idx]
+        if line == 0:
+            return message
+        if file_idx == 0:
+            return f"{message} at position #{line}:{col}"
+        return f"{message} at position {debug.file_paths[file_idx]}#{line}:{col}"
+
+    return locate
+
+
+def _execute(linked: LinkedProgram) -> None:
+    code = linked.code
+    locate = _locate_factory(linked.debug)
     return_register = NONE_VALUE
     timers: list = []  # heap of (wake_time, seq, promise)
     timer_seq = itertools.count()
 
-    # M12: runtime method table -- (type_name, method_name) -> {"inherent":
-    # target_or_None, "traits": {trait_name: target}}, a target being
-    # `(fn, is_method)` with `fn` a Closure (a Mah-code method, registered
-    # by `defmethod`) or a plain Python callable (a native system-trait
-    # method -- see NATIVE_TRAIT_METHODS below). See this module's
-    # docstring.
+    # method_table: (type_name, method_name) -> {"inherent": target_or_None,
+    # "traits": {trait_name: target}}; target = (fn, is_method), fn either a
+    # Closure (a Mah-code method, via `defmethod`) or a plain Python
+    # callable (a native system-trait method) -- see docs/MAHC_FORMAT.md
+    # #6.7. Every built-in type natively implements Printable.to_string.
     method_table: dict = {}
-
-    # M12: native implementations of this milestone's one system trait,
-    # Printable -- every built-in type implements it natively (see
-    # runtime_values.BUILTIN_TYPE_NAMES/SYSTEM_TRAITS), so `5.to_string()`,
-    # `Printable.to_string(true)`, `Number.to_string(3)`, `none.to_string()`
-    # all work with no user-written `impl`. Defined here (inside run_code)
-    # since it needs `to_str`, itself defined below.
-    NATIVE_TRAIT_METHODS = {("Printable", "to_string"): lambda v: to_str(v)}
     for builtin_type in BUILTIN_TYPE_NAMES:
-        for (trait_name, method_name), native_fn in NATIVE_TRAIT_METHODS.items():
-            method_table.setdefault((builtin_type, method_name), {"inherent": None, "traits": {}})[
-                "traits"
-            ][trait_name] = (native_fn, True)
+        method_table.setdefault((builtin_type, "to_string"), {"inherent": None, "traits": {}})["traits"][
+            "Printable"
+        ] = (lambda v: to_str(v), True)
 
-    def enter_closure(task, closure, arg_values) -> None:
-        """M12: the frame-building half of the `call` opcode's own logic,
-        factored out so `callmethod`'s Closure branch can reuse it after
-        its own (method-shaped) arity check -- see this module's
-        docstring. Builds a fresh Frame, fills its parameter slots, pushes
-        the caller's own (pc, frame) onto the return stack, and switches
-        `task` to the new frame/pc -- the exact same steps the `call` case
-        below used to do inline."""
-        new_frame = Frame(slots=[None] * closure.slot_count, static_parent=closure.defining_frame)
+    ctx = NativeContext(to_string=lambda v: to_str(v), schedule_timer=lambda secs, p: schedule_timer(secs, p))
+
+    def enter_closure(task: Task, closure: Closure, arg_values: list) -> None:
+        new_frame = Frame(slots=[NONE_VALUE] * closure.slot_count, static_parent=closure.defining_frame)
         for i, v in enumerate(arg_values):
             new_frame.slots[i] = v
         task.return_stack.append((task.pc, task.current_frame))
         task.current_frame = new_frame
         task.pc = closure.code_address
 
-    def find_method(recv, name, trait, position):
-        """M13: shared lookup for `callmethod`/`detachmethod`. Returns
-        `(fn, include_self)` -- `fn` a Closure or native callable;
-        `include_self` is False only for the field-closure fallback (the
-        field's own value is called with exactly the call's own args, no
-        receiver prepended). Raises the same errors `callmethod` always
-        has for ambiguity / "does not implement trait" / "no method" /
-        "static function called as a method" -- see this module's
-        docstring."""
+    def find_method(recv, name: str, trait: str | None):
         tname = type_name_of(recv)
         entry = method_table.get((tname, name))
         target = None
@@ -297,72 +432,49 @@ def run_code(code_block: list, global_slot_count: int):
             elif len(entry["traits"]) == 1:
                 target = next(iter(entry["traits"].values()))
             elif len(entry["traits"]) > 1:
-                raise Exception(
+                raise MahRuntimeError(
                     f"Method '{name}' on '{tname}' is ambiguous: provided by traits "
-                    f"{sorted(entry['traits'])}; call it as 'Trait.{name}(value, ...)' "
-                    f"at position {position}"
+                    f"{sorted(entry['traits'])}; call it as 'Trait.{name}(value, ...)'"
                 )
         if trait is None and (target is None or not target[1]):
             if isinstance(recv, (StructInstance, EnumInstance)) and name in recv.fields:
                 value = recv.fields[name]
                 if not isinstance(value, Closure):
-                    raise Exception(
-                        f"Field '{name}' of '{tname}' is not a function (it holds a "
-                        f"{type_name_of(value)}) at position {position}"
+                    raise MahRuntimeError(
+                        f"Field '{name}' of '{tname}' is not a function (it holds a {type_name_of(value)})"
                     )
                 return value, False
         if target is None:
             if trait is not None:
-                raise Exception(
-                    f"'{tname}' does not implement trait '{trait}' (no method '{name}') "
-                    f"at position {position}"
-                )
-            raise Exception(f"'{tname}' has no method '{name}' at position {position}")
+                raise MahRuntimeError(f"'{tname}' does not implement trait '{trait}' (no method '{name}')")
+            raise MahRuntimeError(f"'{tname}' has no method '{name}'")
         fn, is_method = target
         if not is_method:
-            raise Exception(
-                f"'{name}' is a static function of '{tname}', not a method; call it as "
-                f"'{tname}.{name}(...)' at position {position}"
+            raise MahRuntimeError(
+                f"'{name}' is a static function of '{tname}', not a method; call it as '{tname}.{name}(...)'"
             )
         return fn, True
 
-    def method_call_args_or_raise(recv, fn, include_self, name, arg_addrs, frame, position):
-        """M13: shared by `callmethod`/`detachmethod` -- reads `arg_addrs`
-        (plus `recv` when `include_self`), raising the same arity-mismatch
-        messages each opcode always has (a method-shaped message when
-        `include_self`, the field-closure message from `find_method`'s
-        spec otherwise)."""
+    def method_call_args(recv, fn, include_self: bool, name: str, arg_addrs, frame: Frame):
         args = ([recv] if include_self else []) + [_read(frame, a) for a in arg_addrs]
         if isinstance(fn, Closure) and len(args) != fn.param_count:
             if include_self:
-                raise Exception(
-                    f"Argument Count is invalid. method '{name}' accepts "
-                    f"{fn.param_count - 1} arguments but {len(args) - 1} was given "
-                    f"at position {position}"
+                raise MahRuntimeError(
+                    f"Argument Count is invalid. method '{name}' accepts {fn.param_count - 1} "
+                    f"arguments but {len(args) - 1} was given"
                 )
-            raise Exception(
-                f"Argument Count is invalid. '{name}' accepts {fn.param_count} "
-                f"arguments but {len(args)} was given at position {position}"
+            raise MahRuntimeError(
+                f"Argument Count is invalid. '{name}' accepts {fn.param_count} arguments but "
+                f"{len(args)} was given"
             )
         if not isinstance(fn, Closure) and len(args) != 1:
-            # Every native method in this milestone is (self) only -- see
-            # NATIVE_TRAIT_METHODS below. A native target is only ever
-            # reached with include_self=True (find_method never falls back
-            # to a field for a target that came from method_table).
-            raise Exception(
-                f"Argument Count is invalid. method '{name}' accepts 0 arguments "
-                f"but {len(args) - 1} was given at position {position}"
+            raise MahRuntimeError(
+                f"Argument Count is invalid. method '{name}' accepts 0 arguments but {len(args) - 1} was given"
             )
         return args
 
-    def spawn_detached(closure, arg_values):
-        """M13: the task-spawning half of the `detach` opcode's own logic,
-        factored out so the new `detachmethod` opcode (a detached method
-        call whose target is a Closure) can reuse it -- builds the frame,
-        wraps it in a `Task` watched by a fresh `Promise`, drives it, and
-        returns that (possibly still-pending) Promise. See this module's
-        docstring."""
-        new_frame = Frame(slots=[None] * closure.slot_count, static_parent=closure.defining_frame)
+    def spawn_detached(closure: Closure, arg_values: list):
+        new_frame = Frame(slots=[NONE_VALUE] * closure.slot_count, static_parent=closure.defining_frame)
         for i, v in enumerate(arg_values):
             new_frame.slots[i] = v
         promise = PromiseInstance()
@@ -370,68 +482,41 @@ def run_code(code_block: list, global_slot_count: int):
         drive(new_task)
         return promise
 
-    def invoke_sync(closure, arg_values, label: str):
-        """M12: run `closure` to completion synchronously, from ordinary
-        (non-async) interpreter code -- used by `to_str` to call a user
-        `Printable.to_string` impl. Spins up a brand-new, independent
-        `Task` (own pc/frame/return_stack/defer_stack) and drives it via
-        `step_task` -- re-entrant already (the `detach` case below relies
-        on the exact same reentrancy), so this works correctly even when
-        called from deep inside another task's own execution. Raises if
-        the call ever genuinely suspends (awaits a still-pending Promise)
-        -- there is no Promise anybody is watching for an implicit,
-        synchronous call like this one."""
+    def invoke_sync(closure: Closure, arg_values: list, label: str):
         if len(arg_values) != closure.param_count:
             call_label = f"'{closure.name}'" if closure.name else "function"
-            raise Exception(
-                f"Argument Count is invalid. {call_label} accepts {closure.param_count} "
-                f"arguments but {len(arg_values)} was given"
+            raise MahRuntimeError(
+                f"Argument Count is invalid. {call_label} accepts {closure.param_count} arguments "
+                f"but {len(arg_values)} was given"
             )
-        frame = Frame(slots=[None] * closure.slot_count, static_parent=closure.defining_frame)
+        frame = Frame(slots=[NONE_VALUE] * closure.slot_count, static_parent=closure.defining_frame)
         for i, v in enumerate(arg_values):
             frame.slots[i] = v
         sub_task = Task(pc=closure.code_address, current_frame=frame)
         status, value = step_task(sub_task)
         if status == "suspended":
-            raise Exception(
-                f"'{label}' cannot suspend (it awaited a pending Promise) when called "
-                "implicitly by the runtime"
+            raise MahRuntimeError(
+                f"'{label}' cannot suspend (it awaited a pending Promise) when called implicitly by the runtime"
             )
         return value
 
     def to_str(val) -> str:
-        """M12: Printable-aware formatting -- the function `print` and
-        string concatenation (`+`) actually call, in place of the old,
-        non-Printable-aware `_to_str`. If `val`'s runtime type has a user
-        (Mah-code) `Printable` impl, calls its `to_string` (via
-        `invoke_sync`) and requires it to return a `String`; otherwise
-        falls back to the existing structural formatting
-        (`_format_value`), itself recursing through `to_str` (not
-        `_format_value` directly) for nested values, so a struct field or
-        `some(...)` payload whose own type has a user impl formats through
-        that impl too, at any nesting depth."""
         entry = method_table.get((type_name_of(val), "to_string"))
         target = entry["traits"].get("Printable") if entry else None
         if target is not None and isinstance(target[0], Closure):
             result = invoke_sync(target[0], [val], "to_string")
             if not isinstance(result, str):
-                raise Exception(
-                    f"Printable.to_string for '{type_name_of(val)}' must return a String, "
-                    f"got {type_name_of(result)}"
+                raise MahRuntimeError(
+                    f"Printable.to_string for '{type_name_of(val)}' must return a String, got "
+                    f"{type_name_of(result)}"
                 )
             return result
         return _format_value(val, to_str)
 
-    def schedule_timer(delay_seconds: float, promise) -> None:
-        wake_time = time.monotonic() + delay_seconds
-        heapq.heappush(timers, (wake_time, next(timer_seq), promise))
+    def schedule_timer(delay_seconds: float, promise: PromiseInstance) -> None:
+        heapq.heappush(timers, (time.monotonic() + delay_seconds, next(timer_seq), promise))
 
     def drain_next_timer() -> bool:
-        """Pop and resolve the earliest-firing timer, blocking (sleeping)
-        for whatever time remains until it's due. Returns False if there
-        were no timers to drain. Resolving a Promise runs its callbacks
-        synchronously (see PromiseInstance.resolve), which is what
-        actually resumes whatever task was awaiting it."""
         if not timers:
             return False
         wake_time, _seq, promise = heapq.heappop(timers)
@@ -441,289 +526,270 @@ def run_code(code_block: list, global_slot_count: int):
         promise.resolve(NONE_VALUE)
         return True
 
-    def step_task(task):
-        """Advance `task` until it either finishes -- its own
-        return_stack empties right after a `ret` at that task's outermost
-        level, or it hits the top-level halt sentinel (task 0 only) --
-        returning ("done", value), or hits a real suspension (an `await`
-        on a still-pending Promise), returning ("suspended", None) having
-        already arranged (via a callback on that Promise) for `drive` to
-        be called again once it resolves. Reentrant: the `detach` case
-        below calls `step_task` again, for a brand new Task, while this
-        very call is still on the Python stack -- bounded by how many
-        tasks are actually mid-detach at once, not by Mah call depth (see
-        docs/NEXT_PHASES.md's "Task-based scheduling" section for why
-        that's fine)."""
+    def _op_add(a, b):
+        if isinstance(a, str) or isinstance(b, str):
+            return to_str(a) + to_str(b)
+        if _is_number(a) and _is_number(b):
+            return a + b
+        raise MahRuntimeError(f"Cannot apply '+' to {type_name_of(a)} and {type_name_of(b)}")
+
+    def _op_mul(a, b):
+        if _is_number(a) and _is_number(b):
+            return a * b
+        if isinstance(a, str) and _is_number(b) and b == b.to_integral_value():
+            n = int(b)
+            return a * n if n > 0 else ""
+        if isinstance(b, str) and _is_number(a) and a == a.to_integral_value():
+            n = int(a)
+            return b * n if n > 0 else ""
+        raise MahRuntimeError(f"Cannot apply '*' to {type_name_of(a)} and {type_name_of(b)}")
+
+    def _numeric_binop(op: str, a, b):
+        if not (_is_number(a) and _is_number(b)):
+            raise MahRuntimeError(f"Cannot apply '{_BINOP_SYMBOLS[op]}' to {type_name_of(a)} and {type_name_of(b)}")
+        if op == "sub":
+            return a - b
+        if op == "div":
+            if b == 0:
+                raise MahRuntimeError("Division by zero")
+            return a / b
+        if op == "idiv":
+            if b == 0:
+                raise MahRuntimeError("Division by zero")
+            return a // b
+        if op == "mod":
+            if b == 0:
+                raise MahRuntimeError("Division by zero")
+            return a % b
+        if op == "pow":
+            return a**b
+        raise AssertionError(op)
+
+    def _compare(op: str, a, b):
+        if _is_number(a) and _is_number(b):
+            return a < b if op == "lt" else a > b
+        if isinstance(a, str) and isinstance(b, str):
+            return a < b if op == "lt" else a > b
+        raise MahRuntimeError(f"Cannot compare {type_name_of(a)} and {type_name_of(b)} with '{_BINOP_SYMBOLS[op]}'")
+
+    def step_task(task: Task):
+        """Advance `task` until it finishes (`("done", value)`) or genuinely
+        suspends (`("suspended", None)`, having already arranged for
+        `drive` to be called again once whatever it awaited resolves).
+        Reentrant: `invoke_sync`/`spawn_detached` call this again, for a
+        brand new `Task`, while an outer call is still on the Python stack.
+
+        Wraps any exception raised while executing the instruction most
+        recently fetched (`current_pc`) into a located `MahRuntimeError`,
+        exactly once -- an exception that already passed through some
+        OTHER `step_task` call (its own nested step loop, e.g. inside
+        `invoke_sync`) is already marked `.located` and passes through
+        here untouched, so a nested failure gets exactly one location
+        suffix, not one per step loop it unwinds through."""
         nonlocal return_register
         while True:
-            operation = code_block[task.pc]
-            task.pc += 1
+            current_pc = task.pc
+            instr = code[current_pc]
+            task.pc = current_pc + 1
+            try:
+                result = _exec(task, instr)
+            except MahRuntimeError as exc:
+                if exc.located:
+                    raise
+                new_exc = MahRuntimeError(locate(current_pc, str(exc)))
+                new_exc.located = True
+                raise new_exc from None
+            except Exception as exc:  # noqa: BLE001 -- wrap any non-Mah Python exception too
+                new_exc = MahRuntimeError(locate(current_pc, str(exc)))
+                new_exc.located = True
+                raise new_exc from None
+            if result is not None:
+                return result
 
-            match operation:
-                case (None, None, None, None):
-                    return "done", NONE_VALUE
-                case ("print", arg, None, None):
-                    val = _read(task.current_frame, arg)
-                    print(to_str(val))
-                case ("input", None, None, dest):
-                    raw_num = ""
-                    has_num_started = False
-                    while True:
-                        char = sys.stdin.read(1)
-                        if char.isdigit():
-                            has_num_started = True
-                            raw_num += char
-                        else:
-                            if not has_num_started:
-                                continue
-                            else:
-                                break
-                    num = int(raw_num)
-                    _write(task.current_frame, dest, num)
-                case ("jmpf", cond_addr, None, loc):
-                    if not _read(task.current_frame, cond_addr):
-                        task.pc = loc
-                case ("jmp", None, None, loc):
-                    task.pc = loc
-                # Binary-op tuples are `(op, left_addr, right_addr, dest)` in
-                # plain left-to-right order (see codegen.py's module docstring
-                # for why this differs from v1's reversed convention).
-                case ("+", left, right, dest):
-                    a = _read(task.current_frame, left)
-                    b = _read(task.current_frame, right)
-                    if isinstance(a, str) or isinstance(b, str):
-                        _write(task.current_frame, dest, to_str(a) + to_str(b))
-                    else:
-                        _write(task.current_frame, dest, a + b)
-                case ("sin", arg, None, dest):
-                    _write(task.current_frame, dest, math.sin(_read(task.current_frame, arg)))
-                case ("cos", arg, None, dest):
-                    _write(task.current_frame, dest, math.cos(_read(task.current_frame, arg)))
-                case ("neg", arg, None, dest):
-                    _write(task.current_frame, dest, -_read(task.current_frame, arg))
-                case ("**", left, right, dest):
-                    a = _read(task.current_frame, left)
-                    b = _read(task.current_frame, right)
-                    _write(task.current_frame, dest, a**b)
-                case ("*", left, right, dest):
-                    a = _read(task.current_frame, left)
-                    b = _read(task.current_frame, right)
-                    if isinstance(a, str) and isinstance(b, (int, Decimal)) and not isinstance(b, bool):
-                        _write(task.current_frame, dest, a * int(b))
-                    elif isinstance(b, str) and isinstance(a, (int, Decimal)) and not isinstance(a, bool):
-                        _write(task.current_frame, dest, b * int(a))
-                    else:
-                        _write(task.current_frame, dest, a * b)
-                case ("-", left, right, dest):
-                    a = _read(task.current_frame, left)
-                    b = _read(task.current_frame, right)
-                    _write(task.current_frame, dest, a - b)
-                case ("/", left, right, dest):
-                    a = _read(task.current_frame, left)
-                    b = _read(task.current_frame, right)
-                    _write(task.current_frame, dest, a / b)
-                case ("//", left, right, dest):
-                    a = _read(task.current_frame, left)
-                    b = _read(task.current_frame, right)
-                    _write(task.current_frame, dest, a // b)
-                case ("%", left, right, dest):
-                    a = _read(task.current_frame, left)
-                    b = _read(task.current_frame, right)
-                    _write(task.current_frame, dest, a % b)
-                case ("lt", left, right, dest):
-                    _write(task.current_frame, dest, _read(task.current_frame, left) < _read(task.current_frame, right))
-                case ("gt", left, right, dest):
-                    _write(task.current_frame, dest, _read(task.current_frame, left) > _read(task.current_frame, right))
-                case ("and", left, right, dest):
-                    _write(
-                        task.current_frame,
-                        dest,
-                        bool(_read(task.current_frame, left) and _read(task.current_frame, right)),
+    def _exec(task: Task, instr):
+        frame = task.current_frame
+        nonlocal return_register
+        match instr:
+            case ("halt",):
+                return "done", NONE_VALUE
+            case ("move", src, dest):
+                _write(frame, dest, _read(frame, src))
+            case ("loadk", value, dest):
+                _write(frame, dest, value)
+            case ("jmp", target):
+                task.pc = target
+            case ("jmpf", cond, target):
+                if not truthy(_read(frame, cond)):
+                    task.pc = target
+            case ("add", a_addr, b_addr, dest):
+                _write(frame, dest, _op_add(_read(frame, a_addr), _read(frame, b_addr)))
+            case ("mul", a_addr, b_addr, dest):
+                _write(frame, dest, _op_mul(_read(frame, a_addr), _read(frame, b_addr)))
+            case ("sub" | "div" | "idiv" | "mod" | "pow" as op, a_addr, b_addr, dest):
+                _write(frame, dest, _numeric_binop(op, _read(frame, a_addr), _read(frame, b_addr)))
+            case ("eq", a_addr, b_addr, dest):
+                _write(frame, dest, _values_equal(_read(frame, a_addr), _read(frame, b_addr)))
+            case ("neq", a_addr, b_addr, dest):
+                _write(frame, dest, not _values_equal(_read(frame, a_addr), _read(frame, b_addr)))
+            case ("lt" | "gt" as op, a_addr, b_addr, dest):
+                _write(frame, dest, _compare(op, _read(frame, a_addr), _read(frame, b_addr)))
+            case ("and", a_addr, b_addr, dest):
+                _write(frame, dest, bool(truthy(_read(frame, a_addr)) and truthy(_read(frame, b_addr))))
+            case ("or", a_addr, b_addr, dest):
+                _write(frame, dest, bool(truthy(_read(frame, a_addr)) or truthy(_read(frame, b_addr))))
+            case ("neg", a_addr, dest):
+                v = _read(frame, a_addr)
+                if not _is_number(v):
+                    raise MahRuntimeError(f"Cannot negate {type_name_of(v)}")
+                _write(frame, dest, -v)
+            case ("closure", function_info, dest):
+                _write(
+                    frame,
+                    dest,
+                    Closure(function_info.entry, frame, function_info.slot_count, function_info.param_count, function_info.name),
+                )
+            case ("call", callee_addr, arg_addrs):
+                closure = _read(frame, callee_addr)
+                if not isinstance(closure, Closure):
+                    raise MahRuntimeError(f"Tried to call a non-function value ({type_name_of(closure)})")
+                if len(arg_addrs) != closure.param_count:
+                    label = f"'{closure.name}'" if closure.name else "function"
+                    raise MahRuntimeError(
+                        f"Argument Count is invalid. {label} accepts {closure.param_count} arguments "
+                        f"but {len(arg_addrs)} was given"
                     )
-                case ("or", left, right, dest):
-                    _write(
-                        task.current_frame,
-                        dest,
-                        bool(_read(task.current_frame, left) or _read(task.current_frame, right)),
+                arg_values = [_read(frame, a) for a in arg_addrs]
+                enter_closure(task, closure, arg_values)
+            case ("ret", value_addr):
+                return_register = _read(frame, value_addr)
+                if not task.return_stack:
+                    return "done", return_register
+                task.pc, task.current_frame = task.return_stack.pop()
+            case ("retval", dest):
+                _write(frame, dest, return_register)
+            case ("detach", callee_addr, arg_addrs, dest):
+                closure = _read(frame, callee_addr)
+                if not isinstance(closure, Closure):
+                    raise MahRuntimeError(f"Tried to detach a non-function value ({type_name_of(closure)})")
+                if len(arg_addrs) != closure.param_count:
+                    label = f"'{closure.name}'" if closure.name else "function"
+                    raise MahRuntimeError(
+                        f"Argument Count is invalid. {label} accepts {closure.param_count} arguments "
+                        f"but {len(arg_addrs)} was given"
                     )
-                case ("neq", left, right, dest):
-                    _write(task.current_frame, dest, _read(task.current_frame, left) != _read(task.current_frame, right))
-                case ("eq", left, right, dest):
-                    _write(task.current_frame, dest, _read(task.current_frame, left) == _read(task.current_frame, right))
-                case ("=", src, None, dest):
-                    _write(task.current_frame, dest, _read(task.current_frame, src))
-                case ("ld", value, None, dest):
-                    _write(task.current_frame, dest, value)
-                case ("closure", code_addr, meta, dest):
-                    slot_count, param_count, name = meta
-                    _write(task.current_frame, dest, Closure(code_addr, task.current_frame, slot_count, param_count, name))
-                case ("call", callee_addr, arg_addrs, None):
-                    closure = _read(task.current_frame, callee_addr)
-                    if not isinstance(closure, Closure):
-                        raise Exception(f"Tried to call a non function at position {task.pc}")
-                    if len(arg_addrs) != closure.param_count:
-                        label = f"'{closure.name}'" if closure.name else "function"
-                        raise Exception(
-                            f"Argument Count is invalid. {label} accepts {closure.param_count} "
-                            f"arguments but {len(arg_addrs)} was given at position {task.pc}"
-                        )
-                    arg_values = [_read(task.current_frame, a) for a in arg_addrs]
-                    enter_closure(task, closure, arg_values)
-                case ("ret", value_addr, None, None):
-                    return_register = _read(task.current_frame, value_addr)
-                    if not task.return_stack:
-                        return "done", return_register
-                    task.pc, task.current_frame = task.return_stack.pop()
-                case ("retval", None, None, dest):
-                    _write(task.current_frame, dest, return_register)
-                case ("detach", callee_addr, arg_addrs, dest):
-                    closure = _read(task.current_frame, callee_addr)
-                    if not isinstance(closure, Closure):
-                        raise Exception(f"Tried to detach a non function at position {task.pc}")
-                    if len(arg_addrs) != closure.param_count:
-                        label = f"'{closure.name}'" if closure.name else "function"
-                        raise Exception(
-                            f"Argument Count is invalid. {label} accepts {closure.param_count} "
-                            f"arguments but {len(arg_addrs)} was given at position {task.pc}"
-                        )
-                    arg_values = [_read(task.current_frame, a) for a in arg_addrs]
-                    promise = spawn_detached(closure, arg_values)
-                    _write(task.current_frame, dest, promise)
-                case ("await", promise_addr, None, dest):
-                    value = _read(task.current_frame, promise_addr)
-                    if not isinstance(value, PromiseInstance):
-                        raise Exception(f"'.await' used on a non-Promise value at position {task.pc}")
-                    if value.variant == "Settled":
-                        _write(task.current_frame, dest, value.fields["value"])
-                    else:
-                        resume_pc = task.pc
+                arg_values = [_read(frame, a) for a in arg_addrs]
+                _write(frame, dest, spawn_detached(closure, arg_values))
+            case ("await", promise_addr, dest):
+                value = _read(frame, promise_addr)
+                if not isinstance(value, PromiseInstance):
+                    raise MahRuntimeError(f"'.await' used on a non-Promise value ({type_name_of(value)})")
+                if value.variant == "Settled":
+                    _write(frame, dest, value.fields["value"])
+                else:
+                    resume_pc = task.pc
 
-                        def _resume(resolved_value, task=task, dest=dest, resume_pc=resume_pc):
-                            _write(task.current_frame, dest, resolved_value)
-                            task.pc = resume_pc
-                            drive(task)
+                    def _resume(resolved_value, task=task, dest=dest, resume_pc=resume_pc):
+                        _write(task.current_frame, dest, resolved_value)
+                        task.pc = resume_pc
+                        drive(task)
 
-                        value.callbacks.append(_resume)
-                        return "suspended", None
-                case ("sleepasync", ms_addr, None, dest):
-                    ms = _read(task.current_frame, ms_addr)
+                    value.callbacks.append(_resume)
+                    return "suspended", None
+            case ("struct", type_info, values, dest):
+                fields = {name: _read(frame, addr) for name, addr in zip(type_info.fields, values)}
+                _write(frame, dest, StructInstance(type_info.name, fields))
+            case ("enum", type_info, variant_idx, values, dest):
+                variant_name, variant_fields = type_info.variants[variant_idx]
+                if type_info.name == "Option" and variant_name == "none":
+                    _write(frame, dest, NONE_VALUE)
+                else:
+                    fields = {name: _read(frame, addr) for name, addr in zip(variant_fields, values)}
+                    _write(frame, dest, EnumInstance(type_info.name, variant_name, fields))
+            case ("getfield", obj_addr, field_name, dest):
+                obj = _read(frame, obj_addr)
+                if not isinstance(obj, (StructInstance, EnumInstance)):
+                    raise MahRuntimeError(f"Tried to access field '{field_name}' on a non-struct value ({type_name_of(obj)})")
+                if field_name not in obj.fields:
+                    raise MahRuntimeError(f"'{obj.type_name}' has no field '{field_name}'")
+                _write(frame, dest, obj.fields[field_name])
+            case ("setfield", obj_addr, field_name, src_addr):
+                obj = _read(frame, obj_addr)
+                if not isinstance(obj, (StructInstance, EnumInstance)):
+                    raise MahRuntimeError(f"Tried to access field '{field_name}' on a non-struct value ({type_name_of(obj)})")
+                if field_name not in obj.fields:
+                    raise MahRuntimeError(f"'{obj.type_name}' has no field '{field_name}'")
+                obj.fields[field_name] = _read(frame, src_addr)
+            case ("matchstruct", value_addr, type_info, dest):
+                val = _read(frame, value_addr)
+                _write(frame, dest, isinstance(val, StructInstance) and val.type_name == type_info.name)
+            case ("matchenum", value_addr, type_info, variant_idx, dest):
+                val = _read(frame, value_addr)
+                variant_name = type_info.variants[variant_idx][0]
+                _write(
+                    frame, dest,
+                    isinstance(val, EnumInstance) and val.type_name == type_info.name and val.variant == variant_name,
+                )
+            case ("matchfail",):
+                raise MahRuntimeError("No pattern in 'match' matched the value")
+            case ("deferpush",):
+                task.defer_stack.append([])
+            case ("deferadd", closure_addr):
+                task.defer_stack[-1].append(_read(frame, closure_addr))
+            case ("deferpeek", dest):
+                _write(frame, dest, bool(task.defer_stack[-1]))
+            case ("deferpop", dest):
+                _write(frame, dest, task.defer_stack[-1].pop())
+            case ("deferscopepop",):
+                task.defer_stack.pop()
+            case ("defmethod", closure_addr, type_name, trait, name, is_method):
+                closure = _read(frame, closure_addr)
+                entry = method_table.setdefault((type_name, name), {"inherent": None, "traits": {}})
+                if trait is None:
+                    entry["inherent"] = (closure, is_method)
+                else:
+                    entry["traits"][trait] = (closure, is_method)
+            case ("callmethod", recv_addr, name, arg_addrs, trait):
+                recv = _read(frame, recv_addr)
+                fn, include_self = find_method(recv, name, trait)
+                args = method_call_args(recv, fn, include_self, name, arg_addrs, frame)
+                if isinstance(fn, Closure):
+                    enter_closure(task, fn, args)
+                else:
+                    return_register = fn(*args)
+            case ("detachmethod", recv_addr, name, arg_addrs, trait, dest):
+                recv = _read(frame, recv_addr)
+                fn, include_self = find_method(recv, name, trait)
+                args = method_call_args(recv, fn, include_self, name, arg_addrs, frame)
+                if isinstance(fn, Closure):
+                    promise = spawn_detached(fn, args)
+                else:
                     promise = PromiseInstance()
-                    schedule_timer(float(ms) / 1000.0, promise)
-                    _write(task.current_frame, dest, promise)
-                case ("struct", type_name, field_pairs, dest):
-                    fields = {name: _read(task.current_frame, addr) for name, addr in field_pairs}
-                    _write(task.current_frame, dest, StructInstance(type_name, fields))
-                case ("enum", type_name, variant_and_pairs, dest):
-                    variant, field_pairs = variant_and_pairs
-                    fields = {name: _read(task.current_frame, addr) for name, addr in field_pairs}
-                    _write(task.current_frame, dest, EnumInstance(type_name, variant, fields))
-                case ("getfield", obj_addr, field_name, dest):
-                    obj = _read(task.current_frame, obj_addr)
-                    if not isinstance(obj, (StructInstance, EnumInstance)):
-                        raise Exception(
-                            f"Tried to access field '{field_name}' on a non-struct value at position {task.pc}"
-                        )
-                    if field_name not in obj.fields:
-                        raise Exception(f"'{obj.type_name}' has no field '{field_name}' at position {task.pc}")
-                    _write(task.current_frame, dest, obj.fields[field_name])
-                case ("setfield", obj_addr, field_name, src_addr):
-                    obj = _read(task.current_frame, obj_addr)
-                    if not isinstance(obj, (StructInstance, EnumInstance)):
-                        raise Exception(
-                            f"Tried to access field '{field_name}' on a non-struct value at position {task.pc}"
-                        )
-                    if field_name not in obj.fields:
-                        raise Exception(f"'{obj.type_name}' has no field '{field_name}' at position {task.pc}")
-                    obj.fields[field_name] = _read(task.current_frame, src_addr)
-                case ("matchtag", value_addr, tag_info, dest):
-                    kind, type_name, variant = tag_info
-                    val = _read(task.current_frame, value_addr)
-                    if kind == "struct":
-                        matched = isinstance(val, StructInstance) and val.type_name == type_name
-                    else:
-                        matched = (
-                            isinstance(val, EnumInstance)
-                            and val.type_name == type_name
-                            and val.variant == variant
-                        )
-                    _write(task.current_frame, dest, matched)
-                case ("matchfail", None, None, position):
-                    raise Exception(f"No pattern in 'match' matched the value at position {position}")
-                case ("deferpush", None, None, None):
-                    task.defer_stack.append([])
-                case ("deferadd", closure_addr, None, None):
-                    # Registers the closure compiled from a `defer <stmt>`'s
-                    # body onto the innermost currently-open defer scope --
-                    # only actually-executed `defer`s reach here at runtime,
-                    # matching ordinary execution order (see
-                    # compiler/codegen.py's module docstring).
-                    task.defer_stack[-1].append(_read(task.current_frame, closure_addr))
-                case ("deferpeek", None, None, dest):
-                    _write(task.current_frame, dest, bool(task.defer_stack[-1]))
-                case ("deferpopclosure", None, None, dest):
-                    _write(task.current_frame, dest, task.defer_stack[-1].pop())
-                case ("deferscopepop", None, None, None):
-                    task.defer_stack.pop()
-                case ("defmethod", closure_addr, meta, None):
-                    closure = _read(task.current_frame, closure_addr)
-                    type_name, trait, name, is_method = meta
-                    entry = method_table.setdefault((type_name, name), {"inherent": None, "traits": {}})
-                    if trait is None:
-                        entry["inherent"] = (closure, is_method)
-                    else:
-                        entry["traits"][trait] = (closure, is_method)
-                case ("callmethod", recv_addr, call_info, None):
-                    name, arg_addrs, trait, position = call_info
-                    recv = _read(task.current_frame, recv_addr)
-                    fn, include_self = find_method(recv, name, trait, position)
-                    args = method_call_args_or_raise(
-                        recv, fn, include_self, name, arg_addrs, task.current_frame, position
-                    )
-                    if isinstance(fn, Closure):
-                        enter_closure(task, fn, args)
-                    else:
-                        return_register = fn(*args)
-                case ("detachmethod", recv_addr, call_info, dest):
-                    name, arg_addrs, trait, position = call_info
-                    recv = _read(task.current_frame, recv_addr)
-                    fn, include_self = find_method(recv, name, trait, position)
-                    args = method_call_args_or_raise(
-                        recv, fn, include_self, name, arg_addrs, task.current_frame, position
-                    )
-                    if isinstance(fn, Closure):
-                        promise = spawn_detached(fn, args)
-                    else:
-                        promise = PromiseInstance()
-                        promise.resolve(fn(*args))
-                    _write(task.current_frame, dest, promise)
-                case catchall:
-                    raise RuntimeError(f"invalid operation {catchall}")
+                    promise.resolve(fn(*args))
+                _write(frame, dest, promise)
+            case ("native", impl, arg_addrs, dest):
+                args = [_read(frame, a) for a in arg_addrs]
+                result = impl(ctx, args)
+                if dest is not None:
+                    _write(frame, dest, result)
+                else:
+                    return_register = result
+            case other:
+                raise AssertionError(f"invalid linked instruction {other!r}")
+        return None
 
-    def drive(task) -> None:
-        """Step `task` forward; if it truly finishes (immediately, or
-        later via a resumed `_resume` callback above) and something is
-        watching it (`task.watching_promise`, set by `detach` -- or the
-        top-level Promise for task 0, see below), resolve that Promise.
-        If it suspends instead, does nothing further here -- the
-        suspending `await`'s own callback (registered above) is what
-        calls `drive` again once whatever it was waiting on resolves, so
-        a task's eventual completion is always correctly propagated no
-        matter how many times it suspends along the way."""
+    def drive(task: Task) -> None:
         status, value = step_task(task)
         if status == "done" and task.watching_promise is not None:
             task.watching_promise.resolve(value)
 
-    main_frame = Frame(slots=[None] * global_slot_count, static_parent=None)
+    if not linked.functions:
+        raise MahcFormatError("FUNCTIONS section must declare at least one function")
+    main_fn = linked.functions[0]
+    main_frame = Frame(slots=[NONE_VALUE] * main_fn.slot_count, static_parent=None)
     main_promise = PromiseInstance()
-    main_task = Task(pc=0, current_frame=main_frame, watching_promise=main_promise)
+    main_task = Task(pc=main_fn.entry, current_frame=main_frame, watching_promise=main_promise)
     drive(main_task)
 
-    # Node-like process lifetime: keep draining timers -- which may
-    # resume main_task itself if IT was what suspended, or any other
-    # still-pending detached task -- until main_task has truly finished
-    # (main_promise resolved) AND nothing else is scheduled, rather than
-    # exiting the instant main_task's own top-level code finishes and
-    # abandoning pending detached work nobody ever awaited.
     while main_promise.variant != "Settled" or timers:
         if not drain_next_timer():
             break

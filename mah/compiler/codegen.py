@@ -249,6 +249,18 @@ class CodeBuffer:
         self.code: list = []
         self.code_pointer = 0
         self.global_slot_count = 0
+        # M14: parallel to `code` -- the source position (a combined-text
+        # offset, or None) in effect when each instruction was emitted, for
+        # `mah/bytecode/lower.py`'s DEBUG section. Appended on a normal
+        # emit; a backpatch-emit (an explicit `address`) overwrites an
+        # existing slot's *code*, not its position, which was already
+        # correctly recorded when that placeholder was first emitted -- see
+        # `Codegen._pos`/`current_pos` below.
+        self.positions: list = []
+        # M14: the position `Codegen` wants attributed to the next normal
+        # emit -- set by `Codegen.gen_stmt`/`gen_expr`/`_gen_pattern_check`
+        # on entry (see those methods), read here on every normal emit.
+        self.current_pos = None
 
     def emit(self, code, address: int | None = None) -> int:
         if address is None:
@@ -256,6 +268,7 @@ class CodeBuffer:
                 raise RuntimeError("CodeBlock is full")
             addr = self.code_pointer
             self.code.append(code)
+            self.positions.append(self.current_pos)
             self.code_pointer += 1
             return addr
         self.code[address] = code
@@ -272,6 +285,10 @@ class Codegen:
         # start of the current function's (or the top-level program's) own
         # body -- see `_emit_defer_unwind`/`gen_block`/`_gen_fn_expr`.
         self._defer_depth = 0
+        # M14: the source position (a combined-text offset) attributed to
+        # whatever gets emitted next -- see `gen_stmt`/`gen_expr`/
+        # `_gen_pattern_check` and `CodeBuffer.current_pos`/`positions`.
+        self._pos = None
 
     def _temp(self) -> tuple:
         return (0, self.frame_stack[-1].alloc())
@@ -319,6 +336,23 @@ class Codegen:
     # -- statements ------------------------------------------------------
 
     def gen_stmt(self, stmt) -> None:
+        # M14: track this node's source position for DEBUG (see `_pos`'s
+        # docstring above) -- saved/restored around the whole dispatch so a
+        # nested `gen_expr`/`gen_stmt`/`_gen_pattern_check` call temporarily
+        # overriding `_pos` for its own subtree doesn't leak back out to
+        # whatever this statement emits AFTER that nested call returns.
+        saved_pos = self._pos
+        position = getattr(stmt, "position", None)
+        if position is not None:
+            self._pos = position
+        self.buf.current_pos = self._pos
+        try:
+            self._gen_stmt(stmt)
+        finally:
+            self._pos = saved_pos
+            self.buf.current_pos = self._pos
+
+    def _gen_stmt(self, stmt) -> None:
         if isinstance(stmt, LetStmt):
             src = self.gen_expr(stmt.value)
             self.buf.emit(("=", src, None, (0, stmt.address)))
@@ -497,6 +531,21 @@ class Codegen:
         walk of one arm's pattern -- see this module's docstring for why
         that single shared list is what gives correct short-circuit AND
         semantics at arbitrary nesting depth."""
+        # M14: see `gen_stmt`'s identical wrapper for why this saves/sets/
+        # restores `_pos` around the whole dispatch (including the
+        # recursive calls for struct/enum sub-patterns below).
+        saved_pos = self._pos
+        position = getattr(pattern, "position", None)
+        if position is not None:
+            self._pos = position
+        self.buf.current_pos = self._pos
+        try:
+            self._gen_pattern_check_impl(pattern, value_addr, failure_jumps)
+        finally:
+            self._pos = saved_pos
+            self.buf.current_pos = self._pos
+
+    def _gen_pattern_check_impl(self, pattern, value_addr, failure_jumps: list) -> None:
         if isinstance(pattern, WildcardPat):
             return
         if isinstance(pattern, BindPat):
@@ -559,6 +608,20 @@ class Codegen:
     # -- expressions -------------------------------------------------------
 
     def gen_expr(self, expr) -> tuple:
+        # M14: see `gen_stmt`'s identical wrapper for why this saves/sets/
+        # restores `_pos` around the whole dispatch.
+        saved_pos = self._pos
+        position = getattr(expr, "position", None)
+        if position is not None:
+            self._pos = position
+        self.buf.current_pos = self._pos
+        try:
+            return self._gen_expr(expr)
+        finally:
+            self._pos = saved_pos
+            self.buf.current_pos = self._pos
+
+    def _gen_expr(self, expr) -> tuple:
         if isinstance(expr, ErrorNode):
             # M6: substitute `none`, the same default already used for a
             # function's implicit return and a semicolon-terminated block's
