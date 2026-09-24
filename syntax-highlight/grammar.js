@@ -85,6 +85,8 @@ module.exports = grammar({
         $.let_stmt,
         $.struct_decl,
         $.enum_decl,
+        $.trait_decl,
+        $.impl_decl,
         $.return_stmt,
         $.break_stmt,
         $.continue_stmt,
@@ -138,6 +140,62 @@ module.exports = grammar({
       seq(
         field("name", $.identifier),
         optional(seq("{", optional($._name_list), "}")),
+      ),
+
+    // Trait declaration (top-level item). Items are `fn NAME(params)`
+    // optionally followed by a block -- unlike `impl_item` below, the body
+    // is optional here: a trait item with no block is a *required* method
+    // (signature only, implementors must supply a body); one with a block
+    // is a *default* method (the trait itself supplies a body, which
+    // implementors may override). A `self`-less item (`fn unit()`) is a
+    // static/associated function, same shape either way -- `self` is an
+    // ordinary parameter name syntactically, not distinguished in the
+    // grammar (see the highlight queries for how it's special-cased).
+    // Optional `;` between items falls out of `;` already being declared
+    // in `extras` (see top of file), same as everywhere else in Mah.
+    trait_decl: ($) =>
+      seq(
+        "trait",
+        field("name", $.identifier),
+        "{",
+        repeat($.trait_item),
+        "}",
+      ),
+
+    trait_item: ($) =>
+      seq(
+        "fn",
+        field("name", $.identifier),
+        "(",
+        optional($._params),
+        ")",
+        optional(field("body", $.block)),
+      ),
+
+    // Impl block (top-level item), two forms:
+    //   `impl Rect { ... }`         -- inherent impl; `name` is the target type.
+    //   `impl Shape for Rect { ... }` -- trait impl; `name` is the trait,
+    //                                    `target` is the implementing type.
+    // Every item requires a body (unlike `trait_item`) -- an impl always
+    // provides concrete method implementations.
+    impl_decl: ($) =>
+      seq(
+        "impl",
+        field("name", $.identifier),
+        optional(seq("for", field("target", $.identifier))),
+        "{",
+        repeat($.impl_item),
+        "}",
+      ),
+
+    impl_item: ($) =>
+      seq(
+        "fn",
+        field("name", $.identifier),
+        "(",
+        optional($._params),
+        ")",
+        field("body", $.block),
       ),
 
     return_stmt: ($) => prec.right(seq("return", optional($.expr))),

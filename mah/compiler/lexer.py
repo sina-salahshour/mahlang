@@ -60,6 +60,9 @@ class TokenType(Enum):
     NONE = "none"
     TRUE = "true"
     FALSE = "false"
+    TRAIT = "trait"
+    IMPL = "impl"
+    FOR = "for"
     # literals / identifiers
     STRING = "STRING"
     NUMBER = "NUMBER"
@@ -95,6 +98,9 @@ KEYWORDS = {
     "none": TokenType.NONE,
     "true": TokenType.TRUE,
     "false": TokenType.FALSE,
+    "trait": TokenType.TRAIT,
+    "impl": TokenType.IMPL,
+    "for": TokenType.FOR,
 }
 
 _SINGLE_CHAR = {

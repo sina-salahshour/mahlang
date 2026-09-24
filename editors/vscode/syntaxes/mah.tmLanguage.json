@@ -9,11 +9,14 @@
     { "include": "#numbers" },
     { "include": "#constants" },
     { "include": "#module-keywords" },
+    { "include": "#trait-impl-decl" },
     { "include": "#control-keywords" },
     { "include": "#storage-keywords" },
     { "include": "#struct-enum-decl" },
     { "include": "#fn-decl" },
     { "include": "#builtins" },
+    { "include": "#builtin-types" },
+    { "include": "#self-identifiers" },
     { "include": "#await-field" },
     { "include": "#function-calls" },
     { "include": "#operators" },
@@ -76,6 +79,72 @@
         {
           "name": "storage.type.mah",
           "match": "\\b(let|fn|struct|enum)\\b"
+        }
+      ]
+    },
+    "trait-impl-decl": {
+      "comment": "`trait`/`impl`/`for` are new reserved keywords. This section is included BEFORE `#control-keywords`/`#storage-keywords` in the top-level `patterns` list (rather than also listing `trait`/`impl`/`for` in those bare-keyword sections, the way `struct`/`enum`/`fn` do) so that its longer, more specific matches win the same-start-position tie against a bare keyword-only match -- otherwise the bare match would consume just the keyword and leave the trait/type name(s) that follow unmatched (no compensating rule like `#function-calls` catches a name that's followed by `for`/whitespace rather than `(`/`{`).",
+      "patterns": [
+        {
+          "comment": "`trait Shape { ... }` -- capture the declared trait name distinctly from an ordinary identifier.",
+          "match": "\\b(trait)\\s+([A-Za-z_$][A-Za-z0-9_$]*)",
+          "captures": {
+            "1": { "name": "storage.type.mah" },
+            "2": { "name": "entity.name.type.mah" }
+          }
+        },
+        {
+          "comment": "`impl Shape for Rect { ... }` -- trait impl: both the trait name and the implementing type are type references. Listed before the no-`for` form below so it wins the tie for `impl` headers that do have a `for`.",
+          "match": "\\b(impl)\\s+([A-Za-z_$][A-Za-z0-9_$]*)\\s+(for)\\s+([A-Za-z_$][A-Za-z0-9_$]*)",
+          "captures": {
+            "1": { "name": "storage.type.mah" },
+            "2": { "patterns": [{ "include": "#builtin-type-name" }] },
+            "3": { "name": "keyword.control.mah" },
+            "4": { "patterns": [{ "include": "#builtin-type-name" }] }
+          }
+        },
+        {
+          "comment": "`impl Rect { ... }` -- inherent impl: the implementing type.",
+          "match": "\\b(impl)\\s+([A-Za-z_$][A-Za-z0-9_$]*)",
+          "captures": {
+            "1": { "name": "storage.type.mah" },
+            "2": { "patterns": [{ "include": "#builtin-type-name" }] }
+          }
+        }
+      ]
+    },
+    "builtin-type-name": {
+      "comment": "Shared by `#trait-impl-decl`'s captures: an impl header's type/trait name gets the more specific `support.type.builtin.mah` scope when it's one of the built-in type/trait names, otherwise the ordinary `entity.name.type.mah`.",
+      "patterns": [
+        {
+          "name": "support.type.builtin.mah",
+          "match": "\\b(Number|String|Bool|Function|Option|Promise|Printable)\\b"
+        },
+        {
+          "name": "entity.name.type.mah",
+          "match": "[A-Za-z_$][A-Za-z0-9_$]*"
+        }
+      ]
+    },
+    "builtin-types": {
+      "comment": "Built-in type names (`Number`, `String`, `Bool`, `Function`, `Option`, `Promise`) and the built-in `Printable` trait, wherever they appear as a bare identifier outside an impl header (which `#trait-impl-decl` already handles via `#builtin-type-name`).",
+      "patterns": [
+        {
+          "name": "support.type.builtin.mah",
+          "match": "\\b(Number|String|Bool|Function|Option|Promise|Printable)\\b"
+        }
+      ]
+    },
+    "self-identifiers": {
+      "comment": "`self`/`Self` are ordinary identifiers syntactically (no dedicated grammar rule -- see grammar.js), so they're recognized positionally here by literal text, the same way `#constants` recognizes `none`.",
+      "patterns": [
+        {
+          "name": "variable.language.self.mah",
+          "match": "\\bself\\b"
+        },
+        {
+          "name": "support.type.builtin.mah",
+          "match": "\\bSelf\\b"
         }
       ]
     },

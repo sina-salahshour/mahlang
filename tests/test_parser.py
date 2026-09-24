@@ -16,20 +16,25 @@ from mah.compiler.ast_nodes import (
     Block,
     BoolLit,
     Call,
+    DetachExpr,
     EnumDecl,
     EnumLit,
     EnumPat,
     ErrorNode,
     ExprStmt,
+    FieldAccess,
     FnExpr,
     IfStmt,
+    ImplDecl,
     Ident,
     LetStmt,
     MatchStmt,
+    MethodCall,
     NumberLit,
     PrintStmt,
     StructDecl,
     StructPat,
+    TraitDecl,
     Unary,
     WildcardPat,
 )
@@ -299,6 +304,96 @@ class LspPositionFieldTests(unittest.TestCase):
         wrapped = "print(Shape.Circle { r: 5 })"
         self.assertEqual(expr.position, wrapped.index("Circle"))
         self.assertEqual(expr.type_name_position, wrapped.index("Shape"))
+
+
+class TraitParsingTests(unittest.TestCase):
+    """M12: `trait`/`impl` declarations and method calls -- AST shape only
+    (see tests/test_traits.py for end-to-end behavioral coverage)."""
+
+    def test_trait_decl_with_required_and_default_methods(self):
+        src = "trait T { fn a(self) fn b(self, x) { x } }"
+        (stmt,) = parse(src)
+        self.assertIsInstance(stmt, TraitDecl)
+        self.assertEqual(stmt.name, "T")
+        self.assertEqual(len(stmt.methods), 2)
+        self.assertIsNone(stmt.methods[0].fn)
+        self.assertTrue(stmt.methods[0].is_method)
+        self.assertEqual(stmt.methods[1].params, ["self", "x"])
+        self.assertIsInstance(stmt.methods[1].fn, FnExpr)
+
+    def test_impl_trait_for_type(self):
+        src = "impl T for S { fn a(self) { 1 } }"
+        (stmt,) = parse(src)
+        self.assertIsInstance(stmt, ImplDecl)
+        self.assertEqual(stmt.type_name, "S")
+        self.assertEqual(stmt.trait_name, "T")
+        self.assertEqual(len(stmt.methods), 1)
+        self.assertIsNotNone(stmt.methods[0].fn)
+
+    def test_inherent_impl_with_no_methods(self):
+        (stmt,) = parse("impl S { }")
+        self.assertIsInstance(stmt, ImplDecl)
+        self.assertIsNone(stmt.trait_name)
+        self.assertEqual(stmt.methods, [])
+
+    def test_method_call_shape(self):
+        (stmt,) = parse("p.m(1, 2)")
+        self.assertIsInstance(stmt, ExprStmt)
+        expr = stmt.value
+        self.assertIsInstance(expr, MethodCall)
+        self.assertIsInstance(expr.obj, Ident)
+        self.assertEqual(expr.obj.name, "p")
+        self.assertEqual(expr.method, "m")
+        self.assertEqual(len(expr.args), 2)
+
+    def test_method_call_on_field_access(self):
+        expr = parse_expr("a.b.c()")
+        self.assertIsInstance(expr, MethodCall)
+        self.assertIsInstance(expr.obj, FieldAccess)
+        self.assertIsInstance(expr.obj.obj, Ident)
+        self.assertEqual(expr.obj.obj.name, "a")
+        self.assertEqual(expr.obj.field, "b")
+        self.assertEqual(expr.method, "c")
+
+    def test_field_access_on_method_call(self):
+        expr = parse_expr("x.f().g")
+        self.assertIsInstance(expr, FieldAccess)
+        self.assertIsInstance(expr.obj, MethodCall)
+        self.assertEqual(expr.obj.method, "f")
+        self.assertEqual(expr.field, "g")
+
+
+class DetachOperandParsingTests(unittest.TestCase):
+    """M13: `detach` on any call chain (`obj.method(args)`, not just plain
+    `name(args)`) -- AST shape only (see tests/test_traits_m13.py for
+    end-to-end behavioral coverage)."""
+
+    def test_detach_work_await_shape_unchanged(self):
+        expr = parse_expr("detach work().await")
+        self.assertIsInstance(expr, FieldAccess)
+        self.assertEqual(expr.field, "await")
+        self.assertIsInstance(expr.obj, DetachExpr)
+        self.assertIsInstance(expr.obj.call, Call)
+
+    def test_detach_chained_method_calls_then_await(self):
+        expr = parse_expr("detach a.b().c().await")
+        self.assertIsInstance(expr, FieldAccess)
+        self.assertEqual(expr.field, "await")
+        detach = expr.obj
+        self.assertIsInstance(detach, DetachExpr)
+        outer = detach.call
+        self.assertIsInstance(outer, MethodCall)
+        self.assertEqual(outer.method, "c")
+        inner = outer.obj
+        self.assertIsInstance(inner, MethodCall)
+        self.assertEqual(inner.method, "b")
+        self.assertIsInstance(inner.obj, Ident)
+        self.assertEqual(inner.obj.name, "a")
+
+    def test_detach_method_call(self):
+        expr = parse_expr("detach p.m(1)")
+        self.assertIsInstance(expr, DetachExpr)
+        self.assertIsInstance(expr.call, MethodCall)
 
 
 if __name__ == "__main__":

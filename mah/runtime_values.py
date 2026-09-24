@@ -8,7 +8,30 @@ M10 adds `PromiseInstance` (an `EnumInstance` subclass -- see its own
 docstring) and `Task` for async (`detach`/`.await`/`sleep_async`, see
 docs/V2_DESIGN.md's M10 milestone) -- both are only ever constructed/
 consumed by code_interpreter.py.
+
+M12 adds `BUILTIN_TYPE_NAMES`/`SYSTEM_TRAITS`/`type_name_of` for traits/
+`impl`/method calls (see compiler/resolve.py's module docstring for the
+full design): `BUILTIN_TYPE_NAMES` is the fixed set of type names built-in
+values respond to for `impl Trait for BuiltinType`/dispatch purposes;
+`SYSTEM_TRAITS` lists this milestone's one system trait (`Printable`,
+implemented natively by every built-in type -- see
+code_interpreter.py's `NATIVE_TRAIT_METHODS`); `type_name_of` is the single
+source of truth for "what type does method/trait dispatch see this runtime
+value as," used by both compiler/resolve.py (`Self` substitution needs
+nothing from it, but the interpreter's `callmethod`/`to_str` do) and
+code_interpreter.py.
 """
+
+from decimal import Decimal
+
+# M12: names of the built-in types, as seen by `impl` and method dispatch.
+BUILTIN_TYPE_NAMES = ("Number", "String", "Bool", "Function", "Option", "Promise")
+
+# M12: system traits -- trait name -> {method name -> parameter names}.
+# Every built-in type implements every system trait natively
+# (code_interpreter.py's NATIVE_TRAIT_METHODS); user types opt in via
+# `impl Printable for T`. Future: Iterable/Iterator for `for` loops.
+SYSTEM_TRAITS = {"Printable": {"to_string": ["self"]}}
 
 
 class Frame:
@@ -146,3 +169,26 @@ class Task:
 # `enum` construction instruction, precisely so identity checks like
 # `val is NONE_VALUE` elsewhere keep working.
 NONE_VALUE = EnumInstance("Option", "none", {})
+
+
+def type_name_of(value) -> str:
+    """M12: the runtime type name `impl`/method dispatch sees `value` as --
+    see this module's docstring and docs/V2_DESIGN.md's M12 milestone.
+    `bool` is checked before `int`/`float`/`Decimal` since Python's `bool`
+    is itself a subclass of `int`. A `StructInstance`/`EnumInstance`
+    (including `PromiseInstance` and `NONE_VALUE`, both `EnumInstance`s)
+    reports its own `.type_name`. Anything else (e.g. an uninitialized
+    frame slot's Python `None`) reports `"Unknown"` rather than raising --
+    dispatch on such a value then just fails its own "no such method"
+    lookup cleanly, instead of `type_name_of` itself blowing up first."""
+    if isinstance(value, bool):
+        return "Bool"
+    if isinstance(value, (int, float, Decimal)):
+        return "Number"
+    if isinstance(value, str):
+        return "String"
+    if isinstance(value, Closure):
+        return "Function"
+    if isinstance(value, (StructInstance, EnumInstance)):
+        return value.type_name
+    return "Unknown"

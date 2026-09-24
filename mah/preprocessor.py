@@ -37,6 +37,18 @@ enabling cross-file diagnostics and go-to-definition.
 
 Dependency-free -- it has its own tolerant scanner (below) and never
 imports the ``compiler`` package.
+
+M12 adds two rewrite-avoidance fixes that traits/impl/method calls expose
+(struct/enum/trait/impl names are global and never renamed -- that stays
+unchanged -- but a module's own top-level `fn`/`let` names ARE still
+alpha-renamed, and this is where the two new blind spots showed up): an
+``id`` immediately preceded by a ``.`` is always a field/method NAME, never
+a variable reference, so it's never rewritten even if it happens to spell
+some unrelated top-level binding; and a method's own declared name (the
+``id`` right after ``fn`` directly inside a top-level ``trait``/``impl``
+block body) is similarly never rewritten, so it can't be corrupted into
+some other top-level binding's mangled name just because the two happen to
+share a spelling.
 """
 
 from __future__ import annotations
@@ -377,6 +389,21 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
         cursor = 0
         depth = 0
         i = 0
+        # M12: `trait`/`impl` blocks introduce a new spot where an `id`
+        # token is a DECLARATION, not a reference -- a method's own name in
+        # `fn NAME(...) { ... }` directly inside a top-level trait/impl
+        # body. Without special-casing it, a method name that happens to
+        # collide with some unrelated top-level `fn`/`let` of this same
+        # module would get silently rewritten to that other binding's
+        # mangled name, corrupting the method's registered name (it would
+        # never again match how callers spell it). `pending_trait_impl`
+        # is True right after seeing a depth-0 `trait`/`impl` id, until its
+        # own opening `{` is reached; `trait_impl_body_depth` is then the
+        # brace depth of that block's own body (its direct children, not
+        # anything nested deeper inside e.g. a method's own `{ }`), reset
+        # to `None` once that block's closing `}` is reached.
+        pending_trait_impl = False
+        trait_impl_body_depth = None
 
         def emit_gap(upto: int) -> None:
             nonlocal cursor
@@ -501,12 +528,40 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
                 continue
 
             # -- ordinary token ---------------------------------------------
+            if tok.kind == "id" and tok.value in ("trait", "impl") and depth == 0:
+                pending_trait_impl = True
+
             if tok.kind == "punct" and tok.value == "{":
                 depth += 1
+                if pending_trait_impl and trait_impl_body_depth is None:
+                    trait_impl_body_depth = depth
+                    pending_trait_impl = False
             elif tok.kind == "punct" and tok.value == "}":
                 depth = max(0, depth - 1)
+                if trait_impl_body_depth is not None and depth < trait_impl_body_depth:
+                    trait_impl_body_depth = None
 
-            if tok.kind == "id" and tok.value in name_rewrite:
+            # M12 fix 1: an `id` immediately preceded by a `dot` is always a
+            # field/method NAME (`p.field`, `p.method(...)`), never a
+            # variable reference -- never rewrite it, even if it happens to
+            # spell some unrelated top-level name of this module. (The
+            # `ns . member` namespace case above is handled earlier in this
+            # loop -- by the time a plain member id could reach here, that
+            # branch has already consumed it via `i += 3`, so this can only
+            # ever fire for a non-namespace `.`.)
+            prev_is_dot = i > 0 and tokens[i - 1].kind == "dot"
+            # M12 fix 2: an `id` immediately preceded by the `id` `fn`,
+            # directly inside a top-level trait/impl body, is that method's
+            # own declared NAME -- see `trait_impl_body_depth` above.
+            prev_is_method_decl_name = (
+                trait_impl_body_depth is not None
+                and depth == trait_impl_body_depth
+                and i > 0
+                and tokens[i - 1].kind == "id"
+                and tokens[i - 1].value == "fn"
+            )
+
+            if tok.kind == "id" and tok.value in name_rewrite and not prev_is_dot and not prev_is_method_decl_name:
                 emit_gap(tok.start)
                 emit(name_rewrite[tok.value], fpath, tok.start, len(tok.value), root)
                 cursor = tok.end

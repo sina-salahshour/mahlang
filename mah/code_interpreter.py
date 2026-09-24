@@ -75,7 +75,65 @@ immediately-following `retval`) stays a single interpreter-local
 variable, since nothing can ever switch tasks between those two adjacent
 instructions.
 
-Three new opcodes: `detach` builds a fresh `Task` and `PromiseInstance`
+M12 adds `method_table`/`defmethod`/`callmethod` for traits/`impl`/method
+calls (see docs/V2_DESIGN.md's M12 milestone and compiler/codegen.py's
+module docstring for the opcode shapes): `method_table` is a runtime dict
+keyed `(type_name, method_name) -> {"inherent": target_or_None, "traits":
+{trait_name: target}}` where a `target` is `(fn, is_method)`, `fn` either a
+`Closure` (a Mah-code method) or a plain Python callable (a native system-
+trait method, see `NATIVE_TRAIT_METHODS` -- currently just
+`Printable.to_string`, seeded for every built-in type). `defmethod` fills
+one entry at program start (before the first ordinary top-level statement
+runs, via compiler/codegen.py's `generate`-time hoisting); `callmethod`
+looks a receiver's runtime type + method name up in it, applying the same
+inherent-wins/single-trait-else-ambiguous/static-fn-is-an-error rules
+compiler/resolve.py's `MethodCall` docstring describes for the compile-time
+`Type.method(...)` case, but at runtime (dynamic `x.m(...)` dispatch has no
+static type to resolve ahead of time). Two small refactors support this:
+`enter_closure` factors the frame-building half of the `call` case out into
+a reusable helper (`callmethod`'s Closure branch calls it too, after its
+own arity check with a method-shaped message); `invoke_sync` runs a
+Closure to completion via a brand-new, independent `Task` and
+`step_task` (re-entrant already, same precedent as `detach`), used by
+`to_str` to call a user `Printable.to_string` impl synchronously from
+regular (non-async) code paths like `print`/string concatenation --
+raising a clean error if that call ever tries to suspend (there is no
+Promise anybody is watching for it). `to_str` replaces the old, non-
+Printable-aware `_to_str` (renamed `_format_value`, still used standalone
+outside a running program, e.g. by `main.py`'s error formatting) as the
+formatting function `print`/`+` actually call: it checks
+`method_table[(type_name_of(val), "to_string")]["traits"].get("Printable")`
+first, calling a user (Mah-code) impl if present and requiring it to
+return a `String`; otherwise it falls back to `_format_value(val, to_str)`
+-- the existing structural formatting, itself recursing through `to_str`
+(not `_format_value` again) for nested values, so a struct field or
+`some(...)` payload whose own type has a user `Printable` impl formats
+through that impl too.
+
+M13 lifts two M12 trait limitations. (1) `p.f(args)` now also accepts a
+closure stored in a struct/enum FIELD named `f`, not just a real method:
+`find_method` (a helper closed over `method_table`, factored out of the old
+inline `callmethod` case) does the ordinary M12 lookup first, and only when
+that finds no target -- or finds only a static function -- AND the receiver
+is a `StructInstance`/`EnumInstance` with a field named `f`, falls back to
+that field's value (which must be a `Closure`); `callmethod`'s Closure
+branch is invoked with the field value directly, no receiver prepended to
+its args (`include_self=False`, vs. `True` for a real method). Ambiguity
+(2+ traits providing the method) is still raised before the fallback is
+even considered, and a trait-qualified call (`trait` argument set) never
+falls back to a field at all -- both match M12's existing "does not
+implement trait" error exactly. (2) `detach` now also accepts a method call
+operand (`detach obj.m(args)`, `detach Type.m(args)`, `detach Trait.m(recv,
+...)`) -- see compiler/codegen.py's module docstring for the new
+`detachmethod` opcode. `spawn_detached` (factored out of the old inline
+`detach` case) builds the frame/Promise/Task and drives it, shared by both
+`detach`'s Closure branch and the new `detachmethod` case (which first runs
+the same `find_method` lookup `callmethod` uses, then either spawns a
+detached task for a Closure target or synchronously resolves a Promise
+around a native target's return value, mirroring `callmethod`'s own
+Closure-vs-native split).
+
+Three new opcodes (M10): `detach` builds a fresh `Task` and `PromiseInstance`
 and drives the new task synchronously (via `step_task`, reentrant --
 nested calls happen only as deep as concurrent `detach`-in-progress
 nesting, not per ordinary Mah call) until it finishes or suspends,
@@ -106,33 +164,62 @@ import sys
 import time
 from typing import Any
 
-from .runtime_values import Closure, EnumInstance, Frame, NONE_VALUE, PromiseInstance, StructInstance, Task
+from .runtime_values import (
+    BUILTIN_TYPE_NAMES,
+    Closure,
+    EnumInstance,
+    Frame,
+    NONE_VALUE,
+    PromiseInstance,
+    StructInstance,
+    Task,
+    type_name_of,
+)
 
 
-def _to_str(val: Any) -> str:
+def _format_value(val: Any, recurse) -> str:
+    """The structural (non-Printable-aware) formatting logic shared by
+    `_to_str` (module-level, no Printable awareness -- used outside a
+    running program) and `run_code`'s own `to_str` (Printable-aware,
+    recurses through itself instead of straight back into
+    `_format_value`) -- see this module's docstring. `recurse` is called
+    for every nested value (an enum payload, a struct field) so each
+    caller's own notion of "how do I format a value" applies uniformly at
+    every nesting depth, not just the top level."""
     if val is NONE_VALUE:
         return "none"
     if isinstance(val, bool):
         return "true" if val else "false"
+    if isinstance(val, Closure):
+        # M12: a function value prints as `<fn NAME>` (or `<fn>` for an
+        # anonymous closure) instead of the Python object repr.
+        return f"<fn {val.name}>" if val.name else "<fn>"
     if isinstance(val, EnumInstance):
         # PromiseInstance is a subclass of EnumInstance (see
         # runtime_values.py) and needs no special-casing here at all --
         # it prints as "Promise.Pending" / "Promise.Settled { value: ... }"
         # through this exact same generic formatting any other enum gets.
         if val.type_name == "Option" and val.variant == "some":
-            return f"some({_to_str(val.fields['value'])})"
+            return f"some({recurse(val.fields['value'])})"
         if val.fields:
-            inner = ", ".join(f"{k}: {_to_str(v)}" for k, v in val.fields.items())
+            inner = ", ".join(f"{k}: {recurse(v)}" for k, v in val.fields.items())
             return f"{val.type_name}.{val.variant} {{ {inner} }}"
         return f"{val.type_name}.{val.variant}"
     if isinstance(val, StructInstance):
-        inner = ", ".join(f"{k}: {_to_str(v)}" for k, v in val.fields.items())
+        inner = ", ".join(f"{k}: {recurse(v)}" for k, v in val.fields.items())
         return f"{val.type_name} {{ {inner} }}"
     if isinstance(val, (int, float, Decimal)):
         if val % 1 == 0:
             return str(int(val))
         return str(val)
     return str(val)
+
+
+def _to_str(val: Any) -> str:
+    """No Printable awareness (see `_format_value`'s docstring) -- used
+    only outside a running program (there is no `method_table` to consult
+    without one)."""
+    return _format_value(val, _to_str)
 
 
 def _read(frame, addr):
@@ -153,6 +240,187 @@ def run_code(code_block: list, global_slot_count: int):
     return_register = NONE_VALUE
     timers: list = []  # heap of (wake_time, seq, promise)
     timer_seq = itertools.count()
+
+    # M12: runtime method table -- (type_name, method_name) -> {"inherent":
+    # target_or_None, "traits": {trait_name: target}}, a target being
+    # `(fn, is_method)` with `fn` a Closure (a Mah-code method, registered
+    # by `defmethod`) or a plain Python callable (a native system-trait
+    # method -- see NATIVE_TRAIT_METHODS below). See this module's
+    # docstring.
+    method_table: dict = {}
+
+    # M12: native implementations of this milestone's one system trait,
+    # Printable -- every built-in type implements it natively (see
+    # runtime_values.BUILTIN_TYPE_NAMES/SYSTEM_TRAITS), so `5.to_string()`,
+    # `Printable.to_string(true)`, `Number.to_string(3)`, `none.to_string()`
+    # all work with no user-written `impl`. Defined here (inside run_code)
+    # since it needs `to_str`, itself defined below.
+    NATIVE_TRAIT_METHODS = {("Printable", "to_string"): lambda v: to_str(v)}
+    for builtin_type in BUILTIN_TYPE_NAMES:
+        for (trait_name, method_name), native_fn in NATIVE_TRAIT_METHODS.items():
+            method_table.setdefault((builtin_type, method_name), {"inherent": None, "traits": {}})[
+                "traits"
+            ][trait_name] = (native_fn, True)
+
+    def enter_closure(task, closure, arg_values) -> None:
+        """M12: the frame-building half of the `call` opcode's own logic,
+        factored out so `callmethod`'s Closure branch can reuse it after
+        its own (method-shaped) arity check -- see this module's
+        docstring. Builds a fresh Frame, fills its parameter slots, pushes
+        the caller's own (pc, frame) onto the return stack, and switches
+        `task` to the new frame/pc -- the exact same steps the `call` case
+        below used to do inline."""
+        new_frame = Frame(slots=[None] * closure.slot_count, static_parent=closure.defining_frame)
+        for i, v in enumerate(arg_values):
+            new_frame.slots[i] = v
+        task.return_stack.append((task.pc, task.current_frame))
+        task.current_frame = new_frame
+        task.pc = closure.code_address
+
+    def find_method(recv, name, trait, position):
+        """M13: shared lookup for `callmethod`/`detachmethod`. Returns
+        `(fn, include_self)` -- `fn` a Closure or native callable;
+        `include_self` is False only for the field-closure fallback (the
+        field's own value is called with exactly the call's own args, no
+        receiver prepended). Raises the same errors `callmethod` always
+        has for ambiguity / "does not implement trait" / "no method" /
+        "static function called as a method" -- see this module's
+        docstring."""
+        tname = type_name_of(recv)
+        entry = method_table.get((tname, name))
+        target = None
+        if entry is not None:
+            if trait is not None:
+                target = entry["traits"].get(trait)
+            elif entry["inherent"] is not None:
+                target = entry["inherent"]
+            elif len(entry["traits"]) == 1:
+                target = next(iter(entry["traits"].values()))
+            elif len(entry["traits"]) > 1:
+                raise Exception(
+                    f"Method '{name}' on '{tname}' is ambiguous: provided by traits "
+                    f"{sorted(entry['traits'])}; call it as 'Trait.{name}(value, ...)' "
+                    f"at position {position}"
+                )
+        if trait is None and (target is None or not target[1]):
+            if isinstance(recv, (StructInstance, EnumInstance)) and name in recv.fields:
+                value = recv.fields[name]
+                if not isinstance(value, Closure):
+                    raise Exception(
+                        f"Field '{name}' of '{tname}' is not a function (it holds a "
+                        f"{type_name_of(value)}) at position {position}"
+                    )
+                return value, False
+        if target is None:
+            if trait is not None:
+                raise Exception(
+                    f"'{tname}' does not implement trait '{trait}' (no method '{name}') "
+                    f"at position {position}"
+                )
+            raise Exception(f"'{tname}' has no method '{name}' at position {position}")
+        fn, is_method = target
+        if not is_method:
+            raise Exception(
+                f"'{name}' is a static function of '{tname}', not a method; call it as "
+                f"'{tname}.{name}(...)' at position {position}"
+            )
+        return fn, True
+
+    def method_call_args_or_raise(recv, fn, include_self, name, arg_addrs, frame, position):
+        """M13: shared by `callmethod`/`detachmethod` -- reads `arg_addrs`
+        (plus `recv` when `include_self`), raising the same arity-mismatch
+        messages each opcode always has (a method-shaped message when
+        `include_self`, the field-closure message from `find_method`'s
+        spec otherwise)."""
+        args = ([recv] if include_self else []) + [_read(frame, a) for a in arg_addrs]
+        if isinstance(fn, Closure) and len(args) != fn.param_count:
+            if include_self:
+                raise Exception(
+                    f"Argument Count is invalid. method '{name}' accepts "
+                    f"{fn.param_count - 1} arguments but {len(args) - 1} was given "
+                    f"at position {position}"
+                )
+            raise Exception(
+                f"Argument Count is invalid. '{name}' accepts {fn.param_count} "
+                f"arguments but {len(args)} was given at position {position}"
+            )
+        if not isinstance(fn, Closure) and len(args) != 1:
+            # Every native method in this milestone is (self) only -- see
+            # NATIVE_TRAIT_METHODS below. A native target is only ever
+            # reached with include_self=True (find_method never falls back
+            # to a field for a target that came from method_table).
+            raise Exception(
+                f"Argument Count is invalid. method '{name}' accepts 0 arguments "
+                f"but {len(args) - 1} was given at position {position}"
+            )
+        return args
+
+    def spawn_detached(closure, arg_values):
+        """M13: the task-spawning half of the `detach` opcode's own logic,
+        factored out so the new `detachmethod` opcode (a detached method
+        call whose target is a Closure) can reuse it -- builds the frame,
+        wraps it in a `Task` watched by a fresh `Promise`, drives it, and
+        returns that (possibly still-pending) Promise. See this module's
+        docstring."""
+        new_frame = Frame(slots=[None] * closure.slot_count, static_parent=closure.defining_frame)
+        for i, v in enumerate(arg_values):
+            new_frame.slots[i] = v
+        promise = PromiseInstance()
+        new_task = Task(pc=closure.code_address, current_frame=new_frame, watching_promise=promise)
+        drive(new_task)
+        return promise
+
+    def invoke_sync(closure, arg_values, label: str):
+        """M12: run `closure` to completion synchronously, from ordinary
+        (non-async) interpreter code -- used by `to_str` to call a user
+        `Printable.to_string` impl. Spins up a brand-new, independent
+        `Task` (own pc/frame/return_stack/defer_stack) and drives it via
+        `step_task` -- re-entrant already (the `detach` case below relies
+        on the exact same reentrancy), so this works correctly even when
+        called from deep inside another task's own execution. Raises if
+        the call ever genuinely suspends (awaits a still-pending Promise)
+        -- there is no Promise anybody is watching for an implicit,
+        synchronous call like this one."""
+        if len(arg_values) != closure.param_count:
+            call_label = f"'{closure.name}'" if closure.name else "function"
+            raise Exception(
+                f"Argument Count is invalid. {call_label} accepts {closure.param_count} "
+                f"arguments but {len(arg_values)} was given"
+            )
+        frame = Frame(slots=[None] * closure.slot_count, static_parent=closure.defining_frame)
+        for i, v in enumerate(arg_values):
+            frame.slots[i] = v
+        sub_task = Task(pc=closure.code_address, current_frame=frame)
+        status, value = step_task(sub_task)
+        if status == "suspended":
+            raise Exception(
+                f"'{label}' cannot suspend (it awaited a pending Promise) when called "
+                "implicitly by the runtime"
+            )
+        return value
+
+    def to_str(val) -> str:
+        """M12: Printable-aware formatting -- the function `print` and
+        string concatenation (`+`) actually call, in place of the old,
+        non-Printable-aware `_to_str`. If `val`'s runtime type has a user
+        (Mah-code) `Printable` impl, calls its `to_string` (via
+        `invoke_sync`) and requires it to return a `String`; otherwise
+        falls back to the existing structural formatting
+        (`_format_value`), itself recursing through `to_str` (not
+        `_format_value` directly) for nested values, so a struct field or
+        `some(...)` payload whose own type has a user impl formats through
+        that impl too, at any nesting depth."""
+        entry = method_table.get((type_name_of(val), "to_string"))
+        target = entry["traits"].get("Printable") if entry else None
+        if target is not None and isinstance(target[0], Closure):
+            result = invoke_sync(target[0], [val], "to_string")
+            if not isinstance(result, str):
+                raise Exception(
+                    f"Printable.to_string for '{type_name_of(val)}' must return a String, "
+                    f"got {type_name_of(result)}"
+                )
+            return result
+        return _format_value(val, to_str)
 
     def schedule_timer(delay_seconds: float, promise) -> None:
         wake_time = time.monotonic() + delay_seconds
@@ -196,7 +464,7 @@ def run_code(code_block: list, global_slot_count: int):
                     return "done", NONE_VALUE
                 case ("print", arg, None, None):
                     val = _read(task.current_frame, arg)
-                    print(_to_str(val))
+                    print(to_str(val))
                 case ("input", None, None, dest):
                     raw_num = ""
                     has_num_started = False
@@ -224,7 +492,7 @@ def run_code(code_block: list, global_slot_count: int):
                     a = _read(task.current_frame, left)
                     b = _read(task.current_frame, right)
                     if isinstance(a, str) or isinstance(b, str):
-                        _write(task.current_frame, dest, _to_str(a) + _to_str(b))
+                        _write(task.current_frame, dest, to_str(a) + to_str(b))
                     else:
                         _write(task.current_frame, dest, a + b)
                 case ("sin", arg, None, dest):
@@ -300,12 +568,7 @@ def run_code(code_block: list, global_slot_count: int):
                             f"arguments but {len(arg_addrs)} was given at position {task.pc}"
                         )
                     arg_values = [_read(task.current_frame, a) for a in arg_addrs]
-                    new_frame = Frame(slots=[None] * closure.slot_count, static_parent=closure.defining_frame)
-                    for i, v in enumerate(arg_values):
-                        new_frame.slots[i] = v
-                    task.return_stack.append((task.pc, task.current_frame))
-                    task.current_frame = new_frame
-                    task.pc = closure.code_address
+                    enter_closure(task, closure, arg_values)
                 case ("ret", value_addr, None, None):
                     return_register = _read(task.current_frame, value_addr)
                     if not task.return_stack:
@@ -324,12 +587,7 @@ def run_code(code_block: list, global_slot_count: int):
                             f"arguments but {len(arg_addrs)} was given at position {task.pc}"
                         )
                     arg_values = [_read(task.current_frame, a) for a in arg_addrs]
-                    new_frame = Frame(slots=[None] * closure.slot_count, static_parent=closure.defining_frame)
-                    for i, v in enumerate(arg_values):
-                        new_frame.slots[i] = v
-                    promise = PromiseInstance()
-                    new_task = Task(pc=closure.code_address, current_frame=new_frame, watching_promise=promise)
-                    drive(new_task)
+                    promise = spawn_detached(closure, arg_values)
                     _write(task.current_frame, dest, promise)
                 case ("await", promise_addr, None, dest):
                     value = _read(task.current_frame, promise_addr)
@@ -406,6 +664,38 @@ def run_code(code_block: list, global_slot_count: int):
                     _write(task.current_frame, dest, task.defer_stack[-1].pop())
                 case ("deferscopepop", None, None, None):
                     task.defer_stack.pop()
+                case ("defmethod", closure_addr, meta, None):
+                    closure = _read(task.current_frame, closure_addr)
+                    type_name, trait, name, is_method = meta
+                    entry = method_table.setdefault((type_name, name), {"inherent": None, "traits": {}})
+                    if trait is None:
+                        entry["inherent"] = (closure, is_method)
+                    else:
+                        entry["traits"][trait] = (closure, is_method)
+                case ("callmethod", recv_addr, call_info, None):
+                    name, arg_addrs, trait, position = call_info
+                    recv = _read(task.current_frame, recv_addr)
+                    fn, include_self = find_method(recv, name, trait, position)
+                    args = method_call_args_or_raise(
+                        recv, fn, include_self, name, arg_addrs, task.current_frame, position
+                    )
+                    if isinstance(fn, Closure):
+                        enter_closure(task, fn, args)
+                    else:
+                        return_register = fn(*args)
+                case ("detachmethod", recv_addr, call_info, dest):
+                    name, arg_addrs, trait, position = call_info
+                    recv = _read(task.current_frame, recv_addr)
+                    fn, include_self = find_method(recv, name, trait, position)
+                    args = method_call_args_or_raise(
+                        recv, fn, include_self, name, arg_addrs, task.current_frame, position
+                    )
+                    if isinstance(fn, Closure):
+                        promise = spawn_detached(fn, args)
+                    else:
+                        promise = PromiseInstance()
+                        promise.resolve(fn(*args))
+                    _write(task.current_frame, dest, promise)
                 case catchall:
                     raise RuntimeError(f"invalid operation {catchall}")
 

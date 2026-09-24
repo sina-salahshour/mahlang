@@ -73,6 +73,16 @@ deliberately excluded too, since that single token is simultaneously the
 field name AND the local variable it binds -- see `StructPat.field_name_positions`
 below for the full reasoning.
 
+M12 adds `trait`/`impl` declarations and method calls: `MethodDecl` (one
+`fn` item inside a `trait`/`impl` block -- required/default trait methods
+have `fn=None`/a body respectively, every `impl` method has a body),
+`TraitDecl`, `ImplDecl` (inherent when `trait_name is None`), and
+`MethodCall` (`obj.method(args)`, plus the resolver-set `static_address`/
+`trait_name` disambiguation for `Type.method(...)`/`Trait.method(recv,
+...)` -- see `compiler/resolve.py`'s module docstring for the full
+three-phase top-level resolution these introduce, and `compiler/codegen.py`
+for the `defmethod`/`callmethod` opcodes they compile to).
+
 Every node carries `position` (a source offset into the *combined*,
 preprocessed text) so error messages can point mah.py at a `file:line:col`
 the same way v1's did.
@@ -235,14 +245,15 @@ class InputExpr:
 
 @dataclass
 class DetachExpr:
-    call: object  # a Call node, or (for `detach sleep_async(ms)`) a
-                   # SleepAsyncExpr node -- the operand `detach` wraps; see
-                   # the parser for why this must already be one of those
-                   # two shapes by construction, and codegen.py for why
-                   # each compiles completely differently (an ordinary
-                   # Call spins up a real Task; sleep_async isn't a real
-                   # Closure call at all, so "detaching" it just means
-                   # skipping the auto-await a bare sleep_async(ms) gets)
+    call: object  # M13: a Call node, a MethodCall node, or (for `detach
+                   # sleep_async(ms)`) a SleepAsyncExpr node -- the operand
+                   # `detach` wraps; see the parser's `_parse_detach_operand`
+                   # for why this must already be one of those three shapes
+                   # by construction, and codegen.py for why each compiles
+                   # completely differently (an ordinary Call/MethodCall
+                   # spins up a real Task; sleep_async isn't a real Closure
+                   # call at all, so "detaching" it just means skipping the
+                   # auto-await a bare sleep_async(ms) gets)
     position: int
 
 
@@ -416,6 +427,82 @@ class StructDecl:
     # M11: set by the parser -- one position per entry in `.fields`, same
     # order. See `compiler/resolve.py`'s `field_position_index` docstring.
     field_positions: list = field(default_factory=list, repr=False)
+
+
+# -- M12: traits / impls / method calls ----------------------------------
+
+
+@dataclass
+class MethodDecl:
+    """M12: one `fn` item inside a `trait` or `impl` block."""
+
+    name: str
+    params: list  # list[str]
+    fn: Optional[object]  # FnExpr (name=method name, same params) or None for a
+    # required (bodyless) trait method
+    position: int  # the `fn` keyword's position
+    name_position: Optional[int] = field(default=None, repr=False)
+    param_positions: list = field(default_factory=list, repr=False)
+    # set by Resolver: hidden global-frame slot holding this fn's Closure
+    # (only when `fn` is not None)
+    slot: Optional[int] = field(default=None, repr=False)
+
+    @property
+    def is_method(self) -> bool:
+        return bool(self.params) and self.params[0] == "self"
+
+
+@dataclass
+class TraitDecl:
+    name: str
+    methods: list  # list[MethodDecl]
+    position: int  # `trait` keyword position
+    name_position: Optional[int] = field(default=None, repr=False)
+    # M13: set by the parser -- the position of this trait block's closing
+    # `}` token. Used by the resolver's `member_block_ranges` (LSP: what
+    # `self` means at a cursor position inside a trait default body) --
+    # see `compiler/resolve.py`'s module docstring.
+    end_position: Optional[int] = field(default=None, repr=False)
+
+
+@dataclass
+class ImplDecl:
+    type_name: str
+    trait_name: Optional[str]  # None for an inherent `impl T { }`
+    methods: list  # list[MethodDecl], every one has a body
+    position: int  # `impl` keyword position
+    type_name_position: Optional[int] = field(default=None, repr=False)
+    trait_name_position: Optional[int] = field(default=None, repr=False)
+    # M13: set by the parser -- the position of this impl block's closing
+    # `}` token. See `TraitDecl.end_position` above.
+    end_position: Optional[int] = field(default=None, repr=False)
+    # set by Resolver: every (method_name, slot, is_method) this impl
+    # registers at runtime -- its own fns PLUS inherited trait defaults
+    # (for trait impls). Codegen emits one `defmethod` per entry.
+    registrations: list = field(default_factory=list, repr=False)
+
+
+@dataclass
+class MethodCall:
+    obj: object  # receiver expression, or an Ident naming a type/trait
+    method: str
+    args: list
+    position: int  # the method-name token's position
+    # set by Resolver (at most one of these two is set):
+    # static_address: `Type.fn(args)` resolved at compile time to the hidden
+    #   global slot of that impl fn -> compiled as an ordinary `call`.
+    static_address: Optional[tuple] = field(default=None, repr=False)
+    # trait_name: dynamic dispatch on args[0] (the receiver) restricted to
+    #   this trait -- used for `Trait.m(x, ...)` and for `BuiltinType.m(x)`
+    #   when the target is a native impl.
+    trait_name: Optional[str] = field(default=None, repr=False)
+    # When neither is set, it's an ordinary dynamic method call on `obj`.
+    # M13: set by Resolver -- a best-effort, purely advisory syntactic
+    # guess at this call's return type (see `compiler/resolve.py`'s
+    # `_syntactic_type_hint`/`_type_hint`), used only by the LSP for
+    # further hover/completion type-hint propagation. Never used for
+    # codegen/dispatch.
+    return_hint: Optional[str] = field(default=None, repr=False)
 
 
 # -- M4: patterns / match ------------------------------------------------

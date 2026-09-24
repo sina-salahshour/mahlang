@@ -54,9 +54,10 @@ model:
   and as an assignment target — a new `Index` AST node alongside
   `FieldAccess`), and almost certainly a `for` loop (`for x in arr { ... }`)
   since iterating v1's `while` + manual index is painful for real list use.
-  `for`-loop syntax/desugaring (e.g. into a `while` over an index, or a
-  dedicated iterator protocol) is an open question for whenever this phase
-  is scheduled — not decided here.
+  As of M12 the `for` loop's direction is set: it goes through the
+  `Iterable`/`Iterator` system traits and desugars into a `while` + `match`
+  over `Iterator.next` (see `docs/TRAITS.md`), with arrays getting native
+  impls of those traits.
 - Pattern matching over arrays (fixed-length `[a, b]`, or a slice-style
   `[head, ...rest]`) is a natural extension of M4's pattern compiler but is
   explicitly not committed to yet — flagging it so M4's `Pattern` AST base
@@ -93,19 +94,17 @@ a note for whichever future phase tackles it.
 
 ## Traits / interfaces
 
-Also not designed in detail yet, with a similar likely direction: Mah's
-structs are already structurally described (a name + field list, no
-inheritance) and enums are tagged unions — a "trait" most naturally becomes
-a **structural** constraint ("has at least these fields" / "is one of
-these enum shapes") checked by the future type system, rather than a
-nominal `impl Trait for Type` declaration mechanism bolted on separately.
-Concretely this would likely again piggyback on types-as-values: a trait
-is a `Type` value describing a required shape, and "does this value satisfy
-this trait" is just a function (possibly a builtin) over `Type` values,
-using the same if/match narrowing described below. Not committed — same
-caveat as generics above.
-
-**Keep in mind for M0–M9:** nothing to do differently now.
+Landed as M12 — see `docs/TRAITS.md` for the design and
+`docs/V2_DESIGN.md`'s M12 entry for what changed. The earlier sketch here
+proposed purely *structural* traits checked by the future type system; M12
+went **nominal** instead (Rust-style `trait` / `impl Tr for T` / inherent
+`impl T`, with runtime method dispatch), because method dispatch and the
+orphan rule need an explicit record of who implements what. That record
+(`Resolver.trait_decls`/`Resolver.impls`) is what a future type checker
+would query for trait bounds. System traits (`Printable` today;
+`Iterable`/`Iterator` for a future `for` loop) are how built-in operations
+get per-type behavior — see `docs/TRAITS.md`'s "System traits" section for
+the planned `for` desugaring.
 
 ## The type system
 

@@ -326,6 +326,281 @@ class CompletionImportPathTests(unittest.TestCase):
             os.remove(tmp_path)
 
 
+class TraitHoverDefinitionRenameTests(unittest.TestCase):
+    """M12: hover/go-to-definition/rename on `trait`/`impl` -- keyword
+    hover, the trait namespace (`type_position_index`'s new `("trait",
+    name)` entries), and `Self` deliberately staying out of the struct's
+    own rename targets."""
+
+    SHAPE_SRC = (
+        "trait Shape {\n"
+        "\tfn area(self)\n"
+        "\tfn name(self) { \"s\" }\n"
+        "}\n"
+        "struct Rect { w }\n"
+        "impl Shape for Rect {\n"
+        "\tfn area(self) { self.w }\n"
+        "}\n"
+        "print(Shape.area(Rect { w: 1 }))\n"
+    )
+
+    def test_hover_on_trait_keyword_and_impl_keyword(self):
+        src = "trait T { fn a(self) }\nimpl T for T { }\n"
+        line, col = _find(src, "trait")
+        hover = analysis.get_hover(src, line, col)
+        self.assertIsNotNone(hover)
+        self.assertIn("trait", hover["contents"]["value"])
+
+        line, col = _find(src, "impl")
+        hover = analysis.get_hover(src, line, col)
+        self.assertIsNotNone(hover)
+        self.assertIn("impl", hover["contents"]["value"])
+
+    def test_hover_on_trait_name_at_declaration(self):
+        line, col = _find(self.SHAPE_SRC, "Shape", occurrence=0)
+        hover = analysis.get_hover(self.SHAPE_SRC, line, col)
+        self.assertIsNotNone(hover)
+        value = hover["contents"]["value"]
+        self.assertIn("**trait** `Shape`", value)
+        self.assertIn("fn area(self)", value)
+        self.assertIn("fn name(self) { ... }", value)
+
+    def test_goto_definition_from_impl_header_trait_name_lands_on_declaration(self):
+        line, col = _find(self.SHAPE_SRC, "Shape", occurrence=1)
+        result = analysis.get_definition(self.SHAPE_SRC, line, col)
+        self.assertIsNotNone(result)
+        self.assertIsNone(result["path"])
+        self.assertEqual(result["range"]["start"]["line"], 0)
+
+    def test_goto_definition_from_impl_header_type_name_lands_on_declaration(self):
+        line, col = _find(self.SHAPE_SRC, "Rect", occurrence=1)
+        result = analysis.get_definition(self.SHAPE_SRC, line, col)
+        self.assertIsNotNone(result)
+        self.assertIsNone(result["path"])
+        self.assertEqual(result["range"]["start"]["line"], 4)
+
+    def test_rename_trait_name_touches_declaration_impl_header_and_call(self):
+        line, col = _find(self.SHAPE_SRC, "Shape", occurrence=0)
+        result = analysis.get_rename_edits(self.SHAPE_SRC, line, col, "Figure")
+        self.assertIsNotNone(result)
+        (edits,) = result["changes"].values()
+        self.assertEqual(len(edits), 3)
+
+    def test_rename_type_name_includes_impl_header_occurrence(self):
+        line, col = _find(self.SHAPE_SRC, "Rect", occurrence=0)
+        result = analysis.get_rename_edits(self.SHAPE_SRC, line, col, "Box")
+        self.assertIsNotNone(result)
+        (edits,) = result["changes"].values()
+        self.assertEqual(len(edits), 3)
+
+    def test_self_is_not_a_rename_target_of_the_struct(self):
+        src = "struct P { v }\nimpl P {\n\tfn new(v) { Self { v: v } }\n}\n"
+        self_line, self_col = _find(src, "Self")
+        line, col = _find(src, "P", occurrence=0)
+        result = analysis.get_rename_edits(src, line, col, "Q")
+        self.assertIsNotNone(result)
+        (edits,) = result["changes"].values()
+        self.assertEqual(len(edits), 2)
+        for edit in edits:
+            self.assertFalse(
+                edit["range"]["start"]["line"] == self_line
+                and edit["range"]["start"]["character"] == self_col
+            )
+
+
+class MethodNavigationTests(unittest.TestCase):
+    """M13: hover/go-to-definition/completion for method names -- see
+    `compiler/resolve.py`'s 'method indexes' (`method_call_index`/
+    `method_decl_index`/`member_block_ranges`) and `lsp/analysis.py`'s
+    `_method_at_position`/`_method_hover_value`/`_member_access_completions`."""
+
+    SRC = (
+        "trait Shape {\n"
+        "\tfn area(self)\n"
+        "\tfn describe(self) { \"area \" + self.area() }\n"
+        "}\n"
+        "struct Rect { w, h }\n"
+        "struct Sq { s }\n"
+        "impl Rect {\n"
+        "\t# makes a rect\n"
+        "\tfn new(w, h) { Self { w: w, h: h } }\n"
+        "}\n"
+        "impl Shape for Rect {\n"
+        "\tfn area(self) { self.w * self.h }\n"
+        "}\n"
+        "impl Shape for Sq {\n"
+        "\tfn area(self) { self.s * self.s }\n"
+        "}\n"
+        "let r = Rect.new(2, 3)\n"
+        "print(r.area())\n"
+        "fn any(x) { x.area() }\n"
+    )
+
+    def test_hover_on_new_in_static_call(self):
+        line, col = _find(self.SRC, "Rect.new")
+        col += len("Rect.")
+        hover = analysis.get_hover(self.SRC, line, col)
+        self.assertIsNotNone(hover)
+        value = hover["contents"]["value"]
+        self.assertIn("impl Rect: fn new(w, h)", value)
+        self.assertIn("makes a rect", value)
+
+    def test_hover_on_area_with_known_receiver_type(self):
+        line, col = _find(self.SRC, "r.area")
+        col += len("r.")
+        hover = analysis.get_hover(self.SRC, line, col)
+        self.assertIsNotNone(hover)
+        value = hover["contents"]["value"]
+        self.assertIn("on `Rect`", value)
+        self.assertIn("impl Shape for Rect: fn area(self)", value)
+        self.assertNotIn("Sq", value)
+
+    def test_hover_on_area_with_unknown_receiver_type(self):
+        line, col = _find(self.SRC, "x.area")
+        col += len("x.")
+        hover = analysis.get_hover(self.SRC, line, col)
+        self.assertIsNotNone(hover)
+        value = hover["contents"]["value"]
+        self.assertIn("isn't known statically", value)
+        self.assertIn("impl Shape for Rect", value)
+        self.assertIn("impl Shape for Sq", value)
+
+    def test_hover_on_trait_declaration_method(self):
+        line, col = _find(self.SRC, "area", occurrence=0)
+        hover = analysis.get_hover(self.SRC, line, col)
+        self.assertIsNotNone(hover)
+        value = hover["contents"]["value"]
+        self.assertIn("trait method", value)
+        self.assertIn("required", value)
+        self.assertIn("Implemented by: Rect, Sq", value)
+
+    def test_hover_on_impl_method_declaration_shows_trait_it_implements(self):
+        # Occurrence 3 of "area" is the `fn area` inside `impl Shape for Rect`
+        # (0: trait's own decl, 1: inside the "area " string literal, 2: the
+        # `self.area()` call in the trait default body, 3: the impl decl).
+        line, col = _find(self.SRC, "area", occurrence=3)
+        hover = analysis.get_hover(self.SRC, line, col)
+        self.assertIsNotNone(hover)
+        self.assertIn("implements `Shape.area`", hover["contents"]["value"])
+
+    def test_definition_from_static_call_new(self):
+        line, col = _find(self.SRC, "Rect.new")
+        col += len("Rect.")
+        result = analysis.get_definition(self.SRC, line, col)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["range"]["start"]["line"], 8)
+
+    def test_definition_from_known_receiver_call(self):
+        line, col = _find(self.SRC, "r.area")
+        col += len("r.")
+        result = analysis.get_definition(self.SRC, line, col)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["range"]["start"]["line"], 11)
+
+    def test_definition_from_unknown_receiver_call_returns_a_list(self):
+        line, col = _find(self.SRC, "x.area")
+        col += len("x.")
+        result = analysis.get_definition(self.SRC, line, col)
+        self.assertIsInstance(result, list)
+        self.assertEqual(len(result), 2)
+        lines = sorted(item["range"]["start"]["line"] for item in result)
+        self.assertEqual(lines, [11, 14])
+
+    def test_definition_from_self_call_inside_trait_default(self):
+        line, col = _find(self.SRC, "area", occurrence=2)  # self.area()
+        result = analysis.get_definition(self.SRC, line, col)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["range"]["start"]["line"], 1)
+
+    def test_definition_from_impl_method_name_lands_on_trait_declaration(self):
+        line, col = _find(self.SRC, "area", occurrence=3)  # impl Shape for Rect's own `fn area`
+        result = analysis.get_definition(self.SRC, line, col)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["range"]["start"]["line"], 1)
+
+    def _completion_labels(self, suffix: str) -> dict:
+        text = self.SRC + suffix
+        line = text.count("\n")
+        col = len(text) - (text.rfind("\n") + 1)
+        items = analysis.get_completions(text, None, line, col)
+        return {item["label"]: item for item in items}
+
+    def test_completion_on_variable_with_known_type(self):
+        labels = self._completion_labels("r.")
+        self.assertIn("area", labels)
+        self.assertIn("describe", labels)
+        self.assertIn("w", labels)
+        self.assertIn("h", labels)
+        self.assertNotIn("to_string", labels)  # Rect has no Printable impl
+        self.assertNotIn("new", labels)  # static, not a method
+
+    def test_completion_on_type_name(self):
+        labels = self._completion_labels("Rect.")
+        self.assertIn("new", labels)
+        self.assertIn("area", labels)
+        self.assertIn("describe", labels)
+
+    def test_completion_on_trait_name(self):
+        labels = self._completion_labels("Shape.")
+        self.assertEqual(set(labels), {"area", "describe"})
+
+    def test_completion_for_an_unknown_receiver(self):
+        text = self.SRC + "fn g(y) { y. }"
+        idx = text.index("y. }") + len("y.")
+        line = text.count("\n", 0, idx)
+        col = idx - (text.rfind("\n", 0, idx) + 1)
+        items = analysis.get_completions(text, None, line, col)
+        labels = {item["label"]: item for item in items}
+        self.assertIn("area", labels)
+        self.assertIn("describe", labels)
+        self.assertIn("Rect", labels["area"]["detail"])
+        self.assertIn("Sq", labels["area"]["detail"])
+
+    def test_completion_on_a_number_literal(self):
+        labels = self._completion_labels("5.")
+        self.assertIn("to_string", labels)
+
+    def test_server_definition_responds_with_a_list_for_multiple_candidates(self):
+        # Constructing a real `Server` needs no stdin/stdout I/O for this --
+        # only `_on_textDocument_definition`'s own list-handling logic is
+        # under test, so `analysis.get_definition` is monkeypatched to
+        # return a 2-item list and `_respond` is faked to record its args
+        # (mirroring how `TraitHoverDefinitionRenameTests` and friends in
+        # this file drive `analysis` functions directly rather than
+        # spinning up a real Server -- there's no existing Server-level
+        # test in this repo to otherwise mirror).
+        from mah.lsp.server import Server
+
+        srv = Server(None, None)
+        recorded = {}
+
+        def fake_respond(request_id, result):
+            recorded["result"] = result
+
+        srv._respond = fake_respond
+        srv._documents["file:///x.mh"] = "x"
+
+        fake_target = [
+            {"path": None, "range": {"start": {"line": 11, "character": 4}, "end": {"line": 11, "character": 8}}},
+            {"path": None, "range": {"start": {"line": 14, "character": 4}, "end": {"line": 14, "character": 8}}},
+        ]
+        original = analysis.get_definition
+        analysis.get_definition = lambda *a, **k: fake_target
+        try:
+            srv._on_textDocument_definition(
+                1, {"textDocument": {"uri": "file:///x.mh"}, "position": {"line": 0, "character": 0}}
+            )
+        finally:
+            analysis.get_definition = original
+
+        result = recorded["result"]
+        self.assertIsInstance(result, list)
+        self.assertEqual(len(result), 2)
+        for item in result:
+            self.assertIn("uri", item)
+            self.assertIn("range", item)
+
+
 class ServerCapabilitiesTests(unittest.TestCase):
     def test_completion_provider_advertised_in_server_source(self):
         server_path = os.path.join(

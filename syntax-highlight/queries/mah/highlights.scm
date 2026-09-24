@@ -10,6 +10,9 @@
 "let" @keyword
 "struct" @keyword
 "enum" @keyword
+"trait" @keyword
+"impl" @keyword
+"for" @keyword
 "return" @keyword
 "while" @keyword
 "fn" @keyword
@@ -92,15 +95,23 @@
 (string) @string
 (comment) @comment
 
-; Type names -- struct/enum declarations and any reference to a
-; struct/enum type name in a literal or pattern.
+; Type names -- struct/enum/trait declarations and any reference to a
+; struct/enum/trait/impl-target type name in a literal, pattern, or impl
+; header.
 (struct_decl name: (identifier) @type)
 (enum_decl name: (identifier) @type)
+(trait_decl name: (identifier) @type)
 (struct_literal type: (identifier) @type)
 (enum_literal type: (identifier) @type)
 (struct_pattern type: (identifier) @type)
 (enum_pattern type: (identifier) @type)
 (enum_variant name: (identifier) @type)
+
+; `impl Rect { ... }` -- `name` is the target type.
+; `impl Shape for Rect { ... }` -- `name` is the trait, `target` the type.
+; Both are ordinary type references, same as `struct_decl name` above.
+(impl_decl name: (identifier) @type)
+(impl_decl target: (identifier) @type)
 
 ; Enum/struct member (variant/field) names.
 ;
@@ -120,4 +131,32 @@
 (fn_stmt name: (identifier) @function)
 (fn_expr name: (identifier) @function)
 (call_expr function: (identifier) @function)
-(call_expr function: (field_access field: (identifier) @function))
+
+; Method definitions -- trait items (both the required, signature-only form
+; and the default form with a body) and impl items (body always present).
+(trait_item name: (identifier) @function.method)
+(impl_item name: (identifier) @function.method)
+
+; Method call sites: `obj.name(...)`, chainable (`a.b().c()`), including on
+; literals (`5.to_string()`, `"ab".double()`, `none.to_string()`).
+(call_expr function: (field_access field: (identifier) @function.method.call))
+
+; `self`/`Self` are ordinary identifiers syntactically (see grammar.js --
+; `self` is just another parameter/identifier, `Self` just another type
+; identifier), so they're special-cased here by literal text rather than by
+; a dedicated grammar rule, the same way the TextMate grammar does it.
+; Placed at the end of the file so they win over every more-generic capture
+; above (@variable, @type, @property, ...) per tree-sitter's
+; last-pattern-wins convention.
+((identifier) @variable.builtin
+  (#eq? @variable.builtin "self"))
+
+((identifier) @type.builtin
+  (#eq? @type.builtin "Self"))
+
+; Built-in type names / built-in trait name, at minimum where they appear
+; in impl headers (`impl Number { ... }`, `impl Printable for Rect { ... }`)
+; -- also matched generically by text wherever else they appear.
+((identifier) @type.builtin
+  (#any-of? @type.builtin
+    "Number" "String" "Bool" "Function" "Option" "Promise" "Printable"))

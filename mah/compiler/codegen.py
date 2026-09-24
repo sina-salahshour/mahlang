@@ -115,6 +115,50 @@ tail (see this milestone's writeup for why that's safe). `BlockStmt`'s old
 `ExprStmt(value=Block(...))`, compiled via the ordinary `ExprStmt`
 dispatch (`gen_expr` on a `Block` with a throwaway temp, discarded).
 
+M12 (see docs/V2_DESIGN.md's M12 milestone) removes the fixed 400-
+instruction cap -- `CodeBuffer.code` is now a plain growing list instead of
+a pre-allocated `[None] * 1000` array (`CODE_LIMIT` was 400 before M12; it's
+now a 1,000,000-instruction sanity ceiling, not a real program size limit).
+New opcodes for traits/impl/method calls:
+- `defmethod`: `arg1` = address of the Closure, `arg2` = `(type_name,
+  trait_name_or_None, method_name, is_method)`, `dest` = None. Registers
+  one entry in code_interpreter.py's runtime `method_table` -- emitted once
+  per `ImplDecl.registrations` entry, at program start (before the first
+  ordinary top-level statement runs), so every method is available for
+  dispatch regardless of where in the file it's textually declared.
+- `callmethod`: `arg1` = receiver address, `arg2` = `(method_name,
+  arg_addrs_tuple_excluding_receiver, trait_name_or_None,
+  source_position)`, `dest` = None; ALWAYS immediately followed by a
+  `retval` (same call/retval split as `call` -- the callee's frame is only
+  known/switched at runtime, so the destination-in-caller write can't
+  happen until control returns).
+`MethodCall` codegen picks one of three shapes depending on what the
+resolver set on the node (see `ast_nodes.py`'s `MethodCall` docstring):
+`static_address` set compiles to an ordinary `call`/`retval` pair (no
+`callmethod` at all -- the resolver already pinned down exactly which
+Closure this is, at compile time, so there's nothing left to dispatch on
+at runtime); `trait_name` set or neither set both compile to
+`callmethod`/`retval`, differing only in whether `trait_name` narrows
+dispatch to one specific trait or leaves it to the interpreter's normal
+inherent-then-single-trait-else-ambiguous lookup. `TraitDecl`/`ImplDecl`
+themselves emit no instructions in `gen_stmt` (like `StructDecl`/
+`EnumDecl`) -- all of their runtime effect is the `generate`-time
+`defmethod` hoisting described above.
+
+M13 extends `detach` to accept a `MethodCall` operand (`detach
+obj.method(args)`, `detach Type.method(args)`, `detach Trait.method(recv,
+...)`), not just a plain `Call` -- see the parser's `_parse_detach_operand`.
+New opcode: `detachmethod` -- same operand shape as `callmethod` (`arg1` =
+receiver address, `arg2` = `(method_name, arg_addrs_tuple_excluding_
+receiver, trait_name_or_None, source_position)`), but `dest` receives a
+(possibly still-pending) `Promise`, mirroring `detach`, and there is no
+following `retval` (unlike `callmethod`, which is always paired with one).
+`DetachExpr` codegen picks between three shapes for a `MethodCall` operand,
+mirroring `_gen_method_call`: `static_address` set -> an ordinary `detach`
+(the callee address is just the hidden global slot, exactly like a plain
+`detach some_fn(...)`); `trait_name` set or neither set -> `detachmethod`,
+the receiver being `args[0]` for the former and `obj` for the latter.
+
 New opcodes for M9 (`defer`, see docs/V2_DESIGN.md's M9 milestone): a
 `DeferStmt` is compiled as the body of a synthesized zero-arg `FnExpr`
 (parser-built), so `defer <stmt>` codegen is just `gen_expr` on that
@@ -167,9 +211,11 @@ from .ast_nodes import (
     FnExpr,
     Ident,
     IfStmt,
+    ImplDecl,
     InputExpr,
     LetStmt,
     MatchStmt,
+    MethodCall,
     NumberLit,
     PrintStmt,
     ReturnStmt,
@@ -179,13 +225,18 @@ from .ast_nodes import (
     StructDecl,
     StructLit,
     StructPat,
+    TraitDecl,
     Unary,
     WhileStmt,
     WildcardPat,
 )
 from ..runtime_values import NONE_VALUE
 
-CODE_LIMIT = 400
+# M12: was a hard 400-instruction program-size limit before M12; now just a
+# sanity ceiling far beyond any real program, guarding against a genuine
+# runaway/bug rather than rejecting ordinary-sized programs -- see this
+# module's docstring.
+CODE_LIMIT = 1_000_000
 
 
 class CodeBuffer:
@@ -193,7 +244,9 @@ class CodeBuffer:
     v1's `IRGenerator.sstack`/`write_code`/`get_temp_address`."""
 
     def __init__(self):
-        self.code: list = [None] * 1000
+        # M12: a growing list instead of a pre-allocated `[None] * 1000`
+        # array -- see this module's docstring and `CODE_LIMIT` above.
+        self.code: list = []
         self.code_pointer = 0
         self.global_slot_count = 0
 
@@ -202,7 +255,7 @@ class CodeBuffer:
             if self.code_pointer >= CODE_LIMIT:
                 raise RuntimeError("CodeBlock is full")
             addr = self.code_pointer
-            self.code[addr] = code
+            self.code.append(code)
             self.code_pointer += 1
             return addr
         self.code[address] = code
@@ -224,6 +277,28 @@ class Codegen:
         return (0, self.frame_stack[-1].alloc())
 
     def generate(self, stmts: list) -> CodeBuffer:
+        # M12: hoist every trait-default/impl method closure and its
+        # `defmethod` registration BEFORE anything else -- including the M9
+        # defer push below -- so every method is registered and callable
+        # from the very first top-level statement, regardless of where in
+        # the file its `trait`/`impl` block is textually written (mirrors
+        # resolve.py's phase-1/3 hoisting). Two separate loops: every
+        # closure must exist (loop 1) before any `defmethod` runs (loop 2),
+        # since a trait impl's registrations can reference an inherited
+        # trait-default slot that a DIFFERENT statement (the `trait`
+        # itself) populated.
+        for stmt in stmts:
+            if isinstance(stmt, (TraitDecl, ImplDecl)):
+                for method in stmt.methods:
+                    if method.fn is not None:
+                        addr = self.gen_expr(method.fn)
+                        self.buf.emit(("=", addr, None, (0, method.slot)))
+        for stmt in stmts:
+            if isinstance(stmt, ImplDecl):
+                for name, slot, is_method in stmt.registrations:
+                    self.buf.emit(
+                        ("defmethod", (0, slot), (stmt.type_name, stmt.trait_name, name, is_method), None)
+                    )
         # M9: the top-level statement list is treated exactly like a
         # block's own `stmts` -- push/drain a defer scope only when a
         # top-level `defer` is directly present, so a top-level defer
@@ -272,6 +347,8 @@ class Codegen:
             pass  # purely a resolve-time/compile-time declaration; no runtime code
         elif isinstance(stmt, EnumDecl):
             pass  # purely a resolve-time/compile-time declaration; no runtime code
+        elif isinstance(stmt, (TraitDecl, ImplDecl)):
+            pass  # M12: method closures + defmethod are hoisted in `generate` above
         elif isinstance(stmt, DeferStmt):
             closure_addr = self.gen_expr(stmt.closure_expr)
             self.buf.emit(("deferadd", closure_addr, None, None))
@@ -548,6 +625,10 @@ class Codegen:
                 dest = self._temp()
                 self.buf.emit(("sleepasync", src, None, dest))
                 return dest
+            if isinstance(expr.call, MethodCall):
+                # M13: `detach obj.method(args)` -- see this module's
+                # docstring and `_gen_detach_method_call`.
+                return self._gen_detach_method_call(expr.call)
             call = expr.call
             callee_addr = self.gen_expr(call.callee)
             arg_addrs = tuple(self.gen_expr(a) for a in call.args)
@@ -604,6 +685,8 @@ class Codegen:
             dest = self._temp()
             self.buf.emit(("enum", expr.type_name, (expr.variant, pairs), dest))
             return dest
+        if isinstance(expr, MethodCall):
+            return self._gen_method_call(expr)
         if isinstance(expr, IfStmt):
             dest = self._temp()
             self._gen_if_into(expr, dest)
@@ -670,4 +753,62 @@ class Codegen:
         dest = self._temp()
         self.buf.emit(("call", callee_addr, arg_addrs, None))
         self.buf.emit(("retval", None, None, dest))
+        return dest
+
+    def _gen_method_call(self, expr: MethodCall) -> tuple:
+        """M12: three shapes, chosen by what the resolver set on `expr` --
+        see `ast_nodes.py`'s `MethodCall` docstring and this module's own
+        docstring for the `defmethod`/`callmethod` opcode shapes."""
+        if expr.static_address is not None:
+            # `Type.fn(args)` resolved at compile time to a specific hidden
+            # global slot -- an ordinary `call`, no runtime dispatch at all.
+            arg_addrs = tuple(self.gen_expr(a) for a in expr.args)
+            dest = self._temp()
+            self.buf.emit(("call", expr.static_address, arg_addrs, None))
+            self.buf.emit(("retval", None, None, dest))
+            return dest
+        if expr.trait_name is not None:
+            # `Trait.m(recv, ...)` / `BuiltinType.m(recv)` (native impl) --
+            # the receiver is `args[0]`, dispatch restricted to this trait.
+            recv = self.gen_expr(expr.args[0])
+            rest = tuple(self.gen_expr(a) for a in expr.args[1:])
+            dest = self._temp()
+            self.buf.emit(("callmethod", recv, (expr.method, rest, expr.trait_name, expr.position), None))
+            self.buf.emit(("retval", None, None, dest))
+            return dest
+        # Ordinary dynamic method call: `expr.obj.method(args)`, dispatch on
+        # the runtime type of `expr.obj`'s value.
+        recv = self.gen_expr(expr.obj)
+        arg_addrs = tuple(self.gen_expr(a) for a in expr.args)
+        dest = self._temp()
+        self.buf.emit(("callmethod", recv, (expr.method, arg_addrs, None, expr.position), None))
+        self.buf.emit(("retval", None, None, dest))
+        return dest
+
+    def _gen_detach_method_call(self, call: MethodCall) -> tuple:
+        """M13: `detach obj.method(args)` / `detach Type.method(args)` /
+        `detach Trait.method(recv, ...)` -- mirrors `_gen_method_call`'s
+        three shapes, but emits `detach`/`detachmethod` (dest receives a
+        Promise, no following `retval`) instead of `call`/`retval` or
+        `callmethod`/`retval` -- see this module's docstring."""
+        if call.static_address is not None:
+            # `detach Type.fn(args)` resolved at compile time to a specific
+            # hidden global slot -- an ordinary `detach`, no runtime
+            # dispatch at all (the callee address is just that slot).
+            arg_addrs = tuple(self.gen_expr(a) for a in call.args)
+            dest = self._temp()
+            self.buf.emit(("detach", call.static_address, arg_addrs, dest))
+            return dest
+        if call.trait_name is not None:
+            # `detach Trait.m(recv, ...)` / `detach BuiltinType.m(recv)`.
+            recv = self.gen_expr(call.args[0])
+            rest = tuple(self.gen_expr(a) for a in call.args[1:])
+            dest = self._temp()
+            self.buf.emit(("detachmethod", recv, (call.method, rest, call.trait_name, call.position), dest))
+            return dest
+        # Ordinary dynamic method call: `detach obj.method(args)`.
+        recv = self.gen_expr(call.obj)
+        arg_addrs = tuple(self.gen_expr(a) for a in call.args)
+        dest = self._temp()
+        self.buf.emit(("detachmethod", recv, (call.method, arg_addrs, None, call.position), dest))
         return dest

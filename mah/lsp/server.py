@@ -295,6 +295,17 @@ class Server:
         if target is None:
             self._respond(request_id, None)
             return
+        # M13: a method call site with 2+ candidate implementations (the
+        # receiver type isn't known statically) comes back as a LIST of
+        # target dicts instead of one -- respond with a list of Locations.
+        if isinstance(target, list):
+            locations = []
+            for item in target:
+                item_path = item.get("path")
+                item_uri = path_to_uri(item_path) if item_path else uri
+                locations.append({"uri": item_uri, "range": item["range"]})
+            self._respond(request_id, locations)
+            return
         # A ``path`` of None means the definition is in the current document.
         target_path = target.get("path")
         target_uri = path_to_uri(target_path) if target_path else uri

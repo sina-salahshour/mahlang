@@ -1,0 +1,73 @@
+# A readable tour of traits, impl blocks, and method calls -- see the M12
+# milestone in docs/V2_DESIGN.md.
+
+# `Shape` declares one required method (`area`, no body) and one default
+# method (`describe`, has a body) -- implementers must supply `area` but
+# inherit `describe` for free unless they choose to override it.
+trait Shape {
+    fn area(self)
+    fn describe(self) { "a shape with area " + self.area() }
+}
+
+struct Rect { w, h }
+struct Circle { r }
+
+impl Shape for Rect {
+    fn area(self) { self.w * self.h }
+}
+
+impl Shape for Circle {
+    fn area(self) { 3 * self.r * self.r }
+}
+
+# An inherent impl (no trait) gives Rect its own constructor function --
+# `Self` inside an impl block always means the impl's own target type.
+impl Rect {
+    fn new(w, h) { Self { w: w, h: h } }
+}
+
+print(Rect.new(3, 5).describe())
+print(Circle { r: 2 }.describe())
+
+# `impl Printable for Rect` opts Rect into the built-in Printable system
+# trait -- once implemented, `print(...)` and string concatenation (`+`)
+# format a Rect through this `to_string` instead of the default structural
+# format.
+impl Printable for Rect {
+    fn to_string(self) { "Rect(" + self.w + "x" + self.h + ")" }
+}
+
+print(Rect.new(5, 6))
+
+# A user trait can be implemented for a built-in type too (as long as the
+# trait itself is user-defined -- the orphan rule).
+trait Double {
+    fn double(self)
+}
+
+impl Double for Number {
+    fn double(self) { self * 2 }
+}
+
+print(21.double())
+
+# A trait-qualified call (`Trait.method(receiver, ...)`) dispatches on the
+# receiver but restricted to that one trait -- handy when a value
+# implements the same method name through more than one trait.
+print(Shape.area(Circle { r: 3 }))
+
+# M13: `p.f(args)` also calls a closure stored in a plain struct field --
+# not just a real method -- when no method named `f` exists (or only a
+# static function of that name does).
+struct Adder { step, add }
+let a = Adder { step: 10, add: none }
+a.add = fn(x) { x + a.step }
+print(a.add(5))
+
+# M13: `detach` now accepts any call chain, not just a plain `name(args)`
+# -- here a dynamic method call, immediately `.await`ed after detaching.
+impl Rect {
+    fn grow(self, by) { sleep_async(5); Rect { w: self.w + by, h: self.h + by } }
+}
+let big = detach Rect.new(1, 1).grow(4)
+print(big.await)

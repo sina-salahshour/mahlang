@@ -66,6 +66,15 @@ class LexerTests(unittest.TestCase):
         with self.assertRaises(SyntaxError):
             token_types("@")
 
+    def test_trait_impl_for_are_keywords_self_stays_a_plain_id(self):
+        # M12: `self`/`Self` deliberately stay plain `ID`s (see
+        # ast_nodes.py's M12 note) -- only `trait`/`impl`/`for` become
+        # reserved keyword tokens.
+        self.assertEqual(
+            token_types("trait impl for self"),
+            [TokenType.TRAIT, TokenType.IMPL, TokenType.FOR, TokenType.ID, TokenType.EOF],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

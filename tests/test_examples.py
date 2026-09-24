@@ -60,6 +60,19 @@ class ExampleTests(unittest.TestCase):
         out = run_file(example_path("binary_to_decimal.mh"), stdin="1101")
         self.assertEqual(out.strip(), "13")
 
+    def test_traits(self):
+        out = run_file(example_path("traits.mh"))
+        self.assertEqual(
+            out,
+            "a shape with area 15\n"
+            "a shape with area 12\n"
+            "Rect(5x6)\n"
+            "42\n"
+            "27\n"
+            "15\n"
+            "Rect(5x5)\n",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -34,10 +34,13 @@ from .ast_nodes import (
     FnExpr,
     Ident,
     IfStmt,
+    ImplDecl,
     InputExpr,
     LetStmt,
     MatchArm,
     MatchStmt,
+    MethodCall,
+    MethodDecl,
     NumberLit,
     PrintStmt,
     ReturnStmt,
@@ -47,6 +50,7 @@ from .ast_nodes import (
     StructDecl,
     StructLit,
     StructPat,
+    TraitDecl,
     Unary,
     WhileStmt,
     WildcardPat,
@@ -93,6 +97,12 @@ _STATEMENT_LEADING = {
     TokenType.WHILE,
     TokenType.PRINT,
     TokenType.DEFER,
+    # M12: `trait`/`impl` decls -- always statement-leading, dispatched by
+    # parse_stmt to _parse_trait_decl/_parse_impl_decl. Also becoming sync
+    # tokens (via _SYNC_TOKENS below) is exactly what we want: a syntax
+    # error before a `trait`/`impl` should resynchronize at its start.
+    TokenType.TRAIT,
+    TokenType.IMPL,
 }
 
 # M6: recovery points `_synchronize` will stop at after a syntax error --
@@ -225,7 +235,18 @@ class Parser:
                     tail = expr
                     break  # nothing may follow a tail -- it must be the last item
                 if isinstance(
-                    expr, (IfStmt, MatchStmt, Block, Call, FnExpr, DetachExpr, SleepAsyncExpr, FieldAccess)
+                    expr,
+                    (
+                        IfStmt,
+                        MatchStmt,
+                        Block,
+                        Call,
+                        FnExpr,
+                        DetachExpr,
+                        SleepAsyncExpr,
+                        FieldAccess,
+                        MethodCall,
+                    ),
                 ):
                     # Block-shaped (if/match/bare block): no semicolon required
                     # when not last (Rust's rule). Call/anonymous-FnExpr are
@@ -251,6 +272,10 @@ class Parser:
                     # more code, no semicolon) -- see docs/NEXT_PHASES.md's
                     # "Async" section's own worked examples, none of which use
                     # semicolons.
+                    #
+                    # M12: MethodCall is call-shaped too, same reasoning as
+                    # Call above (`p.scale(10)` as a bare statement, followed
+                    # by more code, needs no semicolon).
                     stmts.append(ExprStmt(value=expr, position=expr.position))
                     continue
                 raise SyntaxError(
@@ -369,12 +394,13 @@ class Parser:
 
     def parse_stmt(self):
         """M5: only handles the statement forms in `_STATEMENT_LEADING` --
-        `let`/`struct`/`enum`/`return`/`break`/`continue`/`while`/`print`.
-        Everything else (a bare identifier/call/field-chain, `if`, `match`,
-        a bare `{ }` block, `fn`, assignment, and any other expression) is
-        now handled directly by `_parse_block_items`, which is the only
-        caller of this method -- see that method and its module-level
-        `_STATEMENT_LEADING` set for why."""
+        `let`/`struct`/`enum`/`return`/`break`/`continue`/`while`/`print`/
+        `trait`/`impl` (M12). Everything else (a bare identifier/call/
+        field-chain/method-call, `if`, `match`, a bare `{ }` block, `fn`,
+        assignment, and any other expression) is now handled directly by
+        `_parse_block_items`, which is the only caller of this method --
+        see that method and its module-level `_STATEMENT_LEADING` set for
+        why."""
         tok = self.current
 
         if tok.type is TokenType.PRINT:
@@ -423,6 +449,12 @@ class Parser:
 
         if tok.type is TokenType.DEFER:
             return self._parse_defer_stmt()
+
+        if tok.type is TokenType.TRAIT:
+            return self._parse_trait_decl()
+
+        if tok.type is TokenType.IMPL:
+            return self._parse_impl_decl()
 
         raise SyntaxError(f"Invalid syntax '{tok}' at position '{tok.position}'")
 
@@ -695,14 +727,11 @@ class Parser:
             return (name_tok.literal, fields, name_tok.position, field_positions)
         return (name_tok.literal, [], name_tok.position, [])
 
-    def _parse_fn_expr(self) -> FnExpr:
-        fn_tok = self.advance()  # FN
-        name = None
-        name_position = None
-        if self.current.type is TokenType.ID:
-            name_tok = self.advance()
-            name = name_tok.literal
-            name_position = name_tok.position
+    def _parse_param_list(self) -> tuple:
+        """M12: consumes `(` ... `)` and returns `(params, param_positions)`
+        -- factored out of `_parse_fn_expr` so `_parse_method_decl` (trait/
+        impl `fn` items) can share the exact same parameter-list grammar,
+        rather than a second, independently-maintained copy of it."""
         self.expect(TokenType.PAREN_OPEN)
         params = []
         param_positions = []
@@ -716,6 +745,17 @@ class Parser:
                 params.append(param_tok.literal)
                 param_positions.append(param_tok.position)
         self.expect(TokenType.PAREN_CLOSE)
+        return params, param_positions
+
+    def _parse_fn_expr(self) -> FnExpr:
+        fn_tok = self.advance()  # FN
+        name = None
+        name_position = None
+        if self.current.type is TokenType.ID:
+            name_tok = self.advance()
+            name = name_tok.literal
+            name_position = name_tok.position
+        params, param_positions = self._parse_param_list()
         body = self.parse_block()
         return FnExpr(
             name=name,
@@ -723,6 +763,92 @@ class Parser:
             body=body,
             position=fn_tok.position,
             name_position=name_position,
+            param_positions=param_positions,
+        )
+
+    # -- M12: trait / impl / method decls ---------------------------------
+
+    def _parse_trait_decl(self) -> TraitDecl:
+        trait_tok = self.advance()  # TRAIT
+        name_tok = self.expect(TokenType.ID)
+        self.expect(TokenType.BRACE_OPEN)
+        methods = []
+        while True:
+            while self.current.type is TokenType.SEMICOLON:
+                self.advance()
+            if self.current.type is TokenType.BRACE_CLOSE:
+                break
+            methods.append(self._parse_method_decl(require_body=False))
+        close_tok = self.expect(TokenType.BRACE_CLOSE)
+        return TraitDecl(
+            name=name_tok.literal,
+            methods=methods,
+            position=trait_tok.position,
+            name_position=name_tok.position,
+            end_position=close_tok.position,
+        )
+
+    def _parse_impl_decl(self) -> ImplDecl:
+        impl_tok = self.advance()  # IMPL
+        first_tok = self.expect(TokenType.ID)
+        if self.current.type is TokenType.FOR:
+            self.advance()
+            second_tok = self.expect(TokenType.ID)
+            trait_name = first_tok.literal
+            trait_name_position = first_tok.position
+            type_name = second_tok.literal
+            type_name_position = second_tok.position
+        else:
+            trait_name = None
+            trait_name_position = None
+            type_name = first_tok.literal
+            type_name_position = first_tok.position
+        self.expect(TokenType.BRACE_OPEN)
+        methods = []
+        while True:
+            while self.current.type is TokenType.SEMICOLON:
+                self.advance()
+            if self.current.type is TokenType.BRACE_CLOSE:
+                break
+            methods.append(self._parse_method_decl(require_body=True))
+        close_tok = self.expect(TokenType.BRACE_CLOSE)
+        return ImplDecl(
+            type_name=type_name,
+            trait_name=trait_name,
+            methods=methods,
+            position=impl_tok.position,
+            type_name_position=type_name_position,
+            trait_name_position=trait_name_position,
+            end_position=close_tok.position,
+        )
+
+    def _parse_method_decl(self, require_body: bool) -> MethodDecl:
+        fn_tok = self.expect(TokenType.FN)
+        name_tok = self.expect(TokenType.ID)
+        params, param_positions = self._parse_param_list()
+        if self.current.type is TokenType.BRACE_OPEN:
+            body = self.parse_block()
+            fn = FnExpr(
+                name=name_tok.literal,
+                params=params,
+                body=body,
+                position=fn_tok.position,
+                name_position=name_tok.position,
+                param_positions=param_positions,
+            )
+        elif require_body:
+            raise SyntaxError(
+                f"Method '{name_tok.literal}' in an impl block needs a body "
+                f"at position '{self.current.position}'"
+            )
+        else:
+            fn = None
+        return MethodDecl(
+            name=name_tok.literal,
+            params=params,
+            fn=fn,
+            position=fn_tok.position,
+            name_position=name_tok.position,
             param_positions=param_positions,
         )
 
@@ -854,11 +980,7 @@ class Parser:
                     raise SyntaxError(f"'sleep_async' can only have one argument")
                 inner = SleepAsyncExpr(arg=args[0], position=sleep_tok.position)
                 return self._parse_postfix_from(DetachExpr(call=inner, position=tok.position))
-            name_tok = self.expect(TokenType.ID)
-            args = self._parse_paren_args()
-            callee = Ident(name=name_tok.literal, position=name_tok.position)
-            call_expr = Call(callee=callee, args=args, position=name_tok.position)
-            return self._parse_postfix_from(DetachExpr(call=call_expr, position=tok.position))
+            return self._parse_detach_operand(tok)
 
         if tok.type is TokenType.SLEEP_ASYNC:
             self.advance()
@@ -909,6 +1031,68 @@ class Parser:
 
     # -- helpers -----------------------------------------------------------
 
+    def _parse_detach_operand(self, detach_tok: Token):
+        """M13: `detach obj.method(args)` -- lifts M10's original
+        `detach name(args)`-only restriction (which is still handled by a
+        dedicated, simpler branch in `_parse_primary` right before this is
+        called) to any call chain rooted at a plain identifier: `detach
+        Type.method(...)` (a static path), `detach obj.a().b(...)`, etc.
+
+        Algorithm: parse a leading `ID` (optionally immediately called,
+        `ID(args)`) as `base`, then collect every following `.name` /
+        `.name(args)` postfix step *without* building any AST for them yet
+        (`steps`, a flat list of `(name_tok, args_or_None)`). `k` is the
+        index of the LAST step that has args (a real call) -- everything
+        from `base` up to and including step `k` is what actually gets
+        detached (wrapped in one `DetachExpr`); everything after step `k`
+        (necessarily all bare field accesses, e.g. a trailing `.await`) is
+        rebuilt as ordinary `FieldAccess` nodes on top of that `DetachExpr`,
+        exactly as `detach work().await` already worked pre-M13. No step
+        after `k` can itself be a call, by definition of `k` being the
+        *last* one that is.
+
+        If there is no call anywhere at all (`k == -1` and `base` is a bare
+        `Ident`, e.g. `detach p.f`), that's a syntax error -- `detach`
+        always needs *some* call to actually detach."""
+        base_tok = self.expect(TokenType.ID)
+        if self.current.type is TokenType.PAREN_OPEN:
+            base = Call(
+                callee=Ident(name=base_tok.literal, position=base_tok.position),
+                args=self._parse_paren_args(),
+                position=base_tok.position,
+            )
+        else:
+            base = Ident(name=base_tok.literal, position=base_tok.position)
+
+        steps: list = []  # list[(name_tok, args_or_None)]
+        while self.current.type is TokenType.DOT:
+            self.advance()
+            name_tok = self.expect(TokenType.ID)
+            if self.current.type is TokenType.PAREN_OPEN:
+                steps.append((name_tok, self._parse_paren_args()))
+            else:
+                steps.append((name_tok, None))
+
+        k = -1
+        for index, (_name_tok, args) in enumerate(steps):
+            if args is not None:
+                k = index
+        if k == -1 and not isinstance(base, Call):
+            raise SyntaxError(f"'detach' needs a function or method call at position '{detach_tok.position}'")
+
+        node = base
+        for name_tok, args in steps[: k + 1]:
+            if args is None:
+                node = FieldAccess(obj=node, field=name_tok.literal, position=name_tok.position)
+            else:
+                node = MethodCall(obj=node, method=name_tok.literal, args=args, position=name_tok.position)
+        node = DetachExpr(call=node, position=detach_tok.position)
+
+        for name_tok, args in steps[k + 1 :]:
+            node = FieldAccess(obj=node, field=name_tok.literal, position=name_tok.position)
+
+        return self._parse_postfix_from(node)
+
     def _parse_postfix_from(self, base):
         while self.current.type is TokenType.DOT:
             self.advance()
@@ -929,6 +1113,15 @@ class Parser:
                     type_name_position=base.position,
                     field_name_positions=field_name_positions,
                 )
+            elif self.current.type is TokenType.PAREN_OPEN:
+                # M12: `expr.method(args)` -- a method call. `base` may be
+                # any expression already built up by this same postfix loop
+                # (an Ident, a FieldAccess, another MethodCall, ...), so
+                # chains like `a.b().c.d()` fall out for free -- each `.`
+                # is handled one at a time, left to right, exactly like the
+                # existing FieldAccess branch below.
+                args = self._parse_paren_args()
+                base = MethodCall(obj=base, method=field_tok.literal, args=args, position=field_tok.position)
             else:
                 base = FieldAccess(obj=base, field=field_tok.literal, position=field_tok.position)
         return base

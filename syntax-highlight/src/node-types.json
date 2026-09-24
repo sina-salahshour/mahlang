@@ -77,6 +77,10 @@
           "named": true
         },
         {
+          "type": "impl_decl",
+          "named": true
+        },
+        {
           "type": "import_stmt",
           "named": true
         },
@@ -94,6 +98,10 @@
         },
         {
           "type": "struct_decl",
+          "named": true
+        },
+        {
+          "type": "trait_decl",
           "named": true
         },
         {
@@ -181,6 +189,10 @@
           "named": true
         },
         {
+          "type": "impl_decl",
+          "named": true
+        },
+        {
           "type": "import_stmt",
           "named": true
         },
@@ -198,6 +210,10 @@
         },
         {
           "type": "struct_decl",
+          "named": true
+        },
+        {
+          "type": "trait_decl",
           "named": true
         },
         {
@@ -733,6 +749,78 @@
     }
   },
   {
+    "type": "impl_decl",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "target": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "impl_item",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "impl_item",
+    "named": true,
+    "fields": {
+      "body": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "block",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "identifier",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "import_stmt",
     "named": true,
     "fields": {
@@ -1062,6 +1150,10 @@
           "named": true
         },
         {
+          "type": "impl_decl",
+          "named": true
+        },
+        {
           "type": "import_stmt",
           "named": true
         },
@@ -1079,6 +1171,10 @@
         },
         {
           "type": "struct_decl",
+          "named": true
+        },
+        {
+          "type": "trait_decl",
           "named": true
         },
         {
@@ -1217,6 +1313,68 @@
         },
         {
           "type": "wildcard_pattern",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "trait_decl",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "trait_item",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "trait_item",
+    "named": true,
+    "fields": {
+      "body": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "block",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "identifier",
           "named": true
         }
       ]
@@ -1389,6 +1547,10 @@
     "named": false
   },
   {
+    "type": "for",
+    "named": false
+  },
+  {
     "type": "from",
     "named": false
   },
@@ -1398,6 +1560,10 @@
   },
   {
     "type": "if",
+    "named": false
+  },
+  {
+    "type": "impl",
     "named": false
   },
   {
@@ -1450,6 +1616,10 @@
   },
   {
     "type": "struct",
+    "named": false
+  },
+  {
+    "type": "trait",
     "named": false
   },
   {

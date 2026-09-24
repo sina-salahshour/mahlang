@@ -123,6 +123,52 @@ already packaged by the parser as a synthesized, anonymous, zero-param
 the existing `FnExpr` case creates a new frame level and resolves the
 body, giving correct by-reference capture of enclosing variables with no
 new resolve logic at all.
+
+M12 adds `trait`/`impl` declarations and method calls (see
+docs/V2_DESIGN.md's M12 milestone). Top-level resolution becomes a THREE
+PHASE process instead of one linear walk, because a method body must be
+able to reference ANY top-level name -- even one written later in the
+file -- and a struct/enum/trait/impl must be usable before its own
+declaration ("hoisting"):
+
+  Phase 1: hoist top-level `struct`/`enum` declarations (so their types
+  exist), then register every top-level `trait`'s method signatures
+  (`_register_trait`) and every top-level `impl`'s headers -- method
+  lookup tables, missing/extra/self-mismatch validation, one hidden
+  global-frame slot per impl method -- (`_register_impl`). No method
+  BODY is resolved yet.
+
+  Phase 2: every other top-level statement, in original source order,
+  exactly as before M12 (ordinary `let`s, top-level expressions, etc. can
+  freely reference any struct/enum/trait/impl already registered in phase
+  1, and any earlier phase-2 statement, same as always).
+
+  Phase 3: every trait default method body and every impl method body,
+  now that phase 2 has populated the top-level scope with every other
+  top-level name -- this is what lets a method reference a `let` declared
+  textually AFTER the `impl` block (`STEP` in the spec's ordering example)
+  and what lets one impl's method call another impl fn declared later in
+  the file. `self._self_type` is set to the impl's target type name while
+  resolving that impl's own method bodies (`None` for trait default
+  bodies and everywhere else), giving `_subst_self` something to resolve
+  `Self` against; `self._self_positions` collects every position where
+  `Self` got substituted, purely so this pass can scrub those positions
+  back out of `type_position_index` afterward (a `Self` token must never
+  look like a *real* use of the impl's target type name, or an LSP rename
+  of that type would incorrectly try to rewrite the `Self` token itself).
+
+  `resolve_stmt`'s own `TraitDecl`/`ImplDecl` cases exist only to raise "not
+  allowed" errors -- `resolve_program` never routes a top-level trait/impl
+  through them (phases 1/3 handle top-level ones directly), so reaching that
+  branch at all means a NESTED trait/impl, which M12 disallows outright.
+
+  `MethodCall` resolution (`x.m(args)`/`Type.m(args)`/`Trait.m(recv, ...)`)
+  lives in `resolve_expr`'s own dispatch plus a dedicated `_resolve_path_call`
+  helper for the `obj` names a type/trait rather than a real variable --
+  exactly mirroring the existing bare-enum-unit-variant disambiguation
+  precedent (a real in-scope variable always wins first). See `ast_nodes.py`'s
+  `MethodCall` docstring for what `static_address`/`trait_name` mean to
+  codegen.py.
 """
 
 from __future__ import annotations
@@ -148,9 +194,11 @@ from .ast_nodes import (
     FnExpr,
     Ident,
     IfStmt,
+    ImplDecl,
     InputExpr,
     LetStmt,
     MatchStmt,
+    MethodCall,
     NumberLit,
     PrintStmt,
     ReturnStmt,
@@ -160,10 +208,12 @@ from .ast_nodes import (
     StructDecl,
     StructLit,
     StructPat,
+    TraitDecl,
     Unary,
     WhileStmt,
     WildcardPat,
 )
+from ..runtime_values import BUILTIN_TYPE_NAMES, SYSTEM_TRAITS
 
 
 class FrameLevel:
@@ -186,13 +236,18 @@ class Symbol:
     own actual scoping rules -- see docs/V2_DESIGN.md's M7 milestone and its
     "LSP rename" design section."""
 
-    __slots__ = ("name", "decl_position", "kind", "references")
+    __slots__ = ("name", "decl_position", "kind", "references", "type_hint")
 
     def __init__(self, name: str, decl_position: int, kind: str):
         self.name = name
         self.decl_position = decl_position
         self.kind = kind  # "let" | "fn" | "param" | "binding"
         self.references: list = []  # positions (ints) of every Ident that resolved here
+        # M13: best-effort, purely advisory syntactic type-name guess (see
+        # `Resolver._type_hint`/`_syntactic_type_hint`) -- `None` when
+        # unknown or (for anything but a `let`) never computed. Never used
+        # for codegen/dispatch, only the LSP's method hover/completion.
+        self.type_hint: str | None = None
 
 
 class Resolver:
@@ -237,6 +292,8 @@ class Resolver:
         #   ("struct", struct_name)
         #   ("enum", enum_name)
         #   ("variant", enum_name, variant_name)
+        #   ("trait", trait_name)              -- M12
+
         # Populated at both DECLARATION sites (struct/enum statements) and every
         # USE site (struct/enum literals, patterns, bare enum-unit-variant field
         # access) so hovering/go-to-definition works uniformly at either. The
@@ -270,16 +327,117 @@ class Resolver:
         # dict iteration order happens to put the declaration first.
         self.struct_field_decl_positions: dict = {}   # (struct_name, field_name) -> declaration position
         self.enum_variant_field_decl_positions: dict = {}  # (enum_name, variant_name, field_name) -> declaration position
+        # M12: trait name -> {method name -> info}, info = {"params": [param
+        # names], "is_method": bool, "default_slot": int | None}. Seeded
+        # from SYSTEM_TRAITS (runtime_values.py) -- see this module's
+        # docstring and `_register_trait`.
+        self.trait_decls: dict = {
+            trait_name: {
+                method_name: {
+                    "params": list(params),
+                    "is_method": bool(params) and params[0] == "self",
+                    "default_slot": None,
+                    # M13: no user-written declaration for a system trait.
+                    "decl_position": None,
+                }
+                for method_name, params in methods.items()
+            }
+            for trait_name, methods in SYSTEM_TRAITS.items()
+        }
+        self.system_traits: set = set(SYSTEM_TRAITS)
+        # M12: type name -> {"inherent": {name: fninfo}, "traits": {trait:
+        # {name: fninfo}}}, fninfo = {"slot": int | None, "is_method": bool,
+        # "params": int, "native": bool}. Seeded so every built-in type
+        # natively implements every system trait -- see `_register_impl`
+        # and code_interpreter.py's `NATIVE_TRAIT_METHODS`. M13 adds three
+        # more fninfo keys, purely advisory (LSP hover/go-to-definition/
+        # completion, never codegen/dispatch): "decl_position" (source
+        # position of the method's own declaration -- `None` here, natives
+        # have no user-written declaration), "param_names" (list[str],
+        # taken from the trait's own signature for a native), "return_hint"
+        # (a best-effort syntactic guess at the method's return type --
+        # `None` for every native except `Printable.to_string`, which
+        # always returns a String).
+        self.impls: dict = {
+            builtin_type: {
+                "inherent": {},
+                "traits": {
+                    trait_name: {
+                        method_name: {
+                            "slot": None,
+                            "is_method": self.trait_decls[trait_name][method_name]["is_method"],
+                            "params": len(self.trait_decls[trait_name][method_name]["params"]),
+                            "native": True,
+                            "decl_position": None,
+                            "param_names": list(self.trait_decls[trait_name][method_name]["params"]),
+                            "return_hint": "String" if (trait_name, method_name) == ("Printable", "to_string") else None,
+                        }
+                        for method_name in methods
+                    }
+                    for trait_name, methods in SYSTEM_TRAITS.items()
+                },
+            }
+            for builtin_type in BUILTIN_TYPE_NAMES
+        }
+        self.trait_decl_positions: dict = {}  # trait name -> name-token position (user traits only)
+        # M12: current impl target while resolving that impl's own method
+        # bodies (None everywhere else, including while resolving a
+        # trait's default method bodies) -- what `_subst_self` resolves a
+        # `Self` occurrence against.
+        self._self_type = None
+        # M12: source positions where `Self` was substituted for the real
+        # impl target type name -- scrubbed back out of type_position_index
+        # at the end of resolve_program so a `Self` token is never treated
+        # as a genuine use of that type name by the LSP (rename in
+        # particular). See this module's docstring.
+        self._self_positions: set = set()
+        # M13: position of a method-name token at a CALL site -> info dict
+        #   {"name": str, "candidates": [cand, ...], "receiver_type": str | None}
+        # where cand is ("impl", type_name, trait_name_or_None) or
+        # ("trait", trait_name) -- purely advisory (LSP hover/go-to-
+        # definition/completion), never used for codegen/dispatch. See
+        # `_record_dynamic_method_call`/`_resolve_path_call`.
+        self.method_call_index: dict = {}
+        # M13: position of a method-name token at a DECLARATION site ->
+        # ("impl", type_name, trait_name_or_None, method_name) or
+        # ("trait", trait_name, method_name).
+        self.method_decl_index: dict = {}
+        # M13: (start_pos, end_pos, kind, name) per top-level trait/impl
+        # block -- kind "trait" (name = trait) or "impl" (name = target
+        # type); used by the LSP to know what `self` means (which type/
+        # trait's methods to complete) at a cursor position.
+        self.member_block_ranges: list = []
+        # M13: trait name while resolving that TRAIT's own default method
+        # bodies (None everywhere else, including while resolving an impl's
+        # method bodies) -- lets `_record_dynamic_method_call` recognize
+        # `self.m(...)` inside a trait default body as a call restricted to
+        # that trait (there's no concrete `_self_type` there to hang a type
+        # hint off of).
+        self._self_trait = None
 
     # -- name table helpers ----------------------------------------------
 
-    def _declare(self, name: str, slot: int, position: int, kind: str = "let") -> None:
+    def _declare(self, name: str, slot: int, position: int, kind: str = "let") -> "Symbol":
+        # M12: `Self`/`self` are reserved names -- see this module's
+        # docstring and docs/V2_DESIGN.md's M12 milestone. `self` is only
+        # ever legitimately declared as a method's first parameter, which
+        # `_resolve_fn_expr`'s own `allow_self` gate handles by calling
+        # `_declare` with `kind="param"` for exactly that one case; any
+        # other declaration attempt (a `let`, a match binding, a plain
+        # function's parameter) is rejected here.
+        if name == "Self":
+            raise NameError(f"'Self' is reserved and cannot be declared at position {position}")
+        if name == "self" and kind != "param":
+            raise NameError(
+                f"'self' is reserved (only valid as a method's first parameter) at position {position}"
+            )
         scope = self.scopes[-1]
         if name in scope:
             raise NameError(f"Error at position {position}: variable is already defined {name}")
         symbol = Symbol(name, position, kind)
         self.position_index[position] = symbol
         scope[name] = (self.frame_stack[-1], slot, symbol)
+        return symbol
 
     def _lookup(self, name: str, position: int):
         for scope in reversed(self.scopes):
@@ -330,11 +488,214 @@ class Resolver:
     def _pop(self) -> None:
         self.scopes.pop()
 
+    # -- M12: trait/impl helpers -------------------------------------------
+
+    def _is_user_type(self, name: str) -> bool:
+        """A user-declared struct, or a user-declared enum (built-in enums
+        -- Option/Promise -- live in `enum_decls` too, but are NOT user
+        types for `impl`'s purposes -- see this module's docstring)."""
+        return name in self.struct_decls or (name in self.enum_decls and name not in BUILTIN_TYPE_NAMES)
+
+    def _is_type_name(self, name: str) -> bool:
+        return name in self.struct_decls or name in self.enum_decls or name in BUILTIN_TYPE_NAMES
+
+    def _subst_self(self, name: str, position: int) -> str:
+        """Substitute `Self` for the enclosing impl's target type name --
+        see this module's docstring. Called at every AST site `Self` can
+        legally appear (struct/enum literal and pattern type names, static
+        path calls, a bare `Type.Variant`-shaped FieldAccess) BEFORE the
+        existing resolution logic for that node runs, so every other
+        branch only ever sees a real type name, never the literal string
+        `"Self"`."""
+        if name != "Self":
+            return name
+        if self._self_type is None:
+            raise Exception(f"'Self' is only valid inside an impl block at position {position}")
+        self._self_positions.add(position)
+        return self._self_type
+
+    # -- M13: type hints (best effort, never used for codegen) ------------
+
+    @staticmethod
+    def _syntactic_type_hint(node, self_type):
+        """M13: a purely syntactic, best-effort type-name guess for `node`
+        -- used on an impl method's body TAIL in phase 1b (`_register_impl`),
+        before anything has been resolved, so it can only look at the raw
+        AST shape (in particular, `Self` is still the literal string
+        `"Self"` at this point, not yet substituted -- this function does
+        that substitution itself, purely textually). See `_type_hint` below
+        for the equivalent used on an already-resolved expression."""
+        if isinstance(node, StructLit):
+            return self_type if node.type_name == "Self" else node.type_name
+        if isinstance(node, EnumLit):
+            return self_type if node.type_name == "Self" else node.type_name
+        if isinstance(node, FieldAccess):
+            if isinstance(node.obj, Ident) and node.obj.name == "Self":
+                return self_type
+            return None
+        if isinstance(node, NumberLit):
+            return "Number"
+        if isinstance(node, StringLit):
+            return "String"
+        if isinstance(node, BoolLit):
+            return "Bool"
+        if isinstance(node, FnExpr):
+            return "Function"
+        return None
+
+    def _type_hint(self, expr) -> str | None:
+        """M13: a purely syntactic, best-effort type-name guess for an
+        ALREADY-RESOLVED expression -- see `_syntactic_type_hint` above for
+        the pre-resolution equivalent. Never used for codegen/dispatch,
+        only to narrow the LSP's method call-site candidate list."""
+        if isinstance(expr, (NumberLit, StringLit, BoolLit, FnExpr, StructLit, EnumLit)):
+            return self._syntactic_type_hint(expr, self._self_type)
+        if isinstance(expr, FieldAccess):
+            # `Self` was already substituted by the time this expression
+            # was resolved -- `enum_unit_type` (set by resolve_expr's own
+            # FieldAccess case) already holds the real type name.
+            return expr.enum_unit_type
+        if isinstance(expr, Ident):
+            if expr.name == "self" and self._self_type is not None:
+                return self._self_type
+            symbol = self.position_index.get(expr.position)
+            return symbol.type_hint if symbol is not None else None
+        if isinstance(expr, MethodCall):
+            return expr.return_hint
+        if isinstance(expr, DetachExpr):
+            return "Promise"
+        return None
+
+    def _candidates_for_type(self, type_name: str, method_name: str) -> list:
+        """M13: candidate impls providing `method_name` for `type_name` --
+        an inherent method wins outright (matching runtime dispatch); other-
+        wise every trait providing it (0, 1, or 2+ -- the ambiguous case),
+        sorted by trait name. Purely advisory (LSP), never affects dispatch
+        itself (that's `callmethod`'s own runtime lookup)."""
+        entry = self.impls.get(type_name)
+        if entry is None:
+            return []
+        if method_name in entry["inherent"]:
+            return [("impl", type_name, None)]
+        return [
+            ("impl", type_name, tr)
+            for tr in sorted(entry["traits"])
+            if method_name in entry["traits"][tr]
+        ]
+
+    def _all_candidates(self, method_name: str) -> list:
+        """M13: every `("impl", T, tr)` over all of `self.impls` whose
+        inherent/trait fns contain `method_name` -- user types first, then
+        built-ins, each group sorted by (type, trait or '') -- used when a
+        dynamic call site's receiver type isn't known at all."""
+        user: list = []
+        builtin: list = []
+        for type_name, entry in self.impls.items():
+            group = user if self._is_user_type(type_name) else builtin
+            if method_name in entry["inherent"]:
+                group.append(("impl", type_name, None))
+            for tr in entry["traits"]:
+                if method_name in entry["traits"][tr]:
+                    group.append(("impl", type_name, tr))
+        user.sort(key=lambda c: (c[1], c[2] or ""))
+        builtin.sort(key=lambda c: (c[1], c[2] or ""))
+        return user + builtin
+
+    def _fninfo_for_impl_candidate(self, cand, method_name: str):
+        """M13: the fninfo dict an `("impl", T, tr_or_None)` candidate
+        refers to -- shared by `_record_dynamic_method_call` (return-hint
+        narrowing) and the LSP (`lsp/analysis.py`'s `_method_signature_lines`
+        and friends)."""
+        _kind, type_name, trait_name = cand
+        entry = self.impls[type_name]
+        if trait_name is None:
+            return entry["inherent"][method_name]
+        return entry["traits"][trait_name][method_name]
+
+    def _record_dynamic_method_call(self, expr: MethodCall) -> None:
+        """M13: LSP call-site recording for a dynamic `x.m(...)` (`expr.obj`
+        a real variable/expression, neither `static_address` nor
+        `trait_name` set) -- populates `method_call_index` and, when every
+        candidate agrees on a non-None return type, `expr.return_hint` too.
+        Purely advisory -- see this module's docstring."""
+        hint = self._type_hint(expr.obj)
+        if hint is not None:
+            candidates = self._candidates_for_type(hint, expr.method)
+        elif (
+            isinstance(expr.obj, Ident)
+            and expr.obj.name == "self"
+            and self._self_trait is not None
+            and expr.method in self.trait_decls.get(self._self_trait, {})
+        ):
+            candidates = [("trait", self._self_trait)]
+        else:
+            candidates = self._all_candidates(expr.method)
+        self.method_call_index[expr.position] = {
+            "name": expr.method,
+            "candidates": candidates,
+            "receiver_type": hint,
+        }
+        if candidates and all(c[0] == "impl" for c in candidates):
+            hints = {self._fninfo_for_impl_candidate(c, expr.method)["return_hint"] for c in candidates}
+            if len(hints) == 1:
+                (only_hint,) = hints
+                if only_hint is not None:
+                    expr.return_hint = only_hint
+
     # -- entry point ---------------------------------------------------
 
     def resolve_program(self, stmts: list) -> None:
+        # M12: three-phase top-level resolution -- see this module's
+        # docstring for the full rationale (order-independence/"hoisting"
+        # of struct/enum/trait/impl, and method bodies seeing every
+        # top-level name regardless of textual order).
+        hoisted = set()
+        # Phase 1a: hoist top-level struct/enum declarations (registers
+        # them via the existing resolve_stmt branches).
         for stmt in stmts:
+            if isinstance(stmt, (StructDecl, EnumDecl)):
+                self.resolve_stmt(stmt)
+                hoisted.add(id(stmt))
+        # Phase 1b: traits, then impl headers (impls may reference traits,
+        # never the reverse).
+        traits = [stmt for stmt in stmts if isinstance(stmt, TraitDecl)]
+        impls = [stmt for stmt in stmts if isinstance(stmt, ImplDecl)]
+        for trait in traits:
+            self._register_trait(trait)
+        for impl in impls:
+            self._register_impl(impl)
+        # Phase 2: every other top-level statement, in original order
+        # (unchanged pre-M12 semantics).
+        for stmt in stmts:
+            if id(stmt) in hoisted or isinstance(stmt, (TraitDecl, ImplDecl)):
+                continue
             self.resolve_stmt(stmt)
+        # Phase 3: method bodies, with every top-level name now in scope.
+        for trait in traits:
+            # M13: `_self_trait` while resolving THIS trait's own default
+            # bodies -- lets `self.m(...)` inside one recognize itself as
+            # restricted to this trait (see `_record_dynamic_method_call`).
+            self._self_trait = trait.name
+            try:
+                for method in trait.methods:
+                    if method.fn is not None:
+                        # _self_type stays None: a trait's own default body
+                        # has no concrete target type to resolve `Self`
+                        # against.
+                        self._resolve_fn_expr(method.fn, allow_self=True)
+            finally:
+                self._self_trait = None
+        for impl in impls:
+            self._self_type = impl.type_name
+            try:
+                for method in impl.methods:
+                    self._resolve_fn_expr(method.fn, allow_self=True)
+            finally:
+                self._self_type = None
+        # LSP hygiene: a `Self` token must never look like a use of the
+        # real type name (rename would otherwise rewrite `Self` itself).
+        for pos in self._self_positions:
+            self.type_position_index.pop(pos, None)
 
     # -- statements ------------------------------------------------------
 
@@ -351,13 +712,17 @@ class Resolver:
                 # Declare before resolving the body -- enables self-reference
                 # (recursion) for named function bindings. See module docstring.
                 slot = self.frame_stack[-1].alloc()
-                self._declare(stmt.name, slot, name_position, kind="fn")
+                symbol = self._declare(stmt.name, slot, name_position, kind="fn")
+                symbol.type_hint = "Function"
                 stmt.address = slot
                 self._resolve_fn_expr(stmt.value)
             else:
                 self.resolve_expr(stmt.value)
                 slot = self.frame_stack[-1].alloc()
-                self._declare(stmt.name, slot, name_position, kind="let")
+                symbol = self._declare(stmt.name, slot, name_position, kind="let")
+                # M13: best-effort type hint, purely advisory (LSP) -- see
+                # `_type_hint`'s docstring.
+                symbol.type_hint = self._type_hint(stmt.value)
                 stmt.address = slot
         elif isinstance(stmt, AssignStmt):
             self.resolve_expr(stmt.target)
@@ -375,6 +740,13 @@ class Resolver:
                     f"{stmt.target.field}' at position {stmt.position}"
                 )
             self.resolve_expr(stmt.value)
+            if isinstance(stmt.target, Ident):
+                # M13: a variable reassigned to something of a different
+                # (or unknown) type loses its type hint -- conservative, see
+                # this module's docstring / the M13 spec.
+                symbol = self.position_index.get(stmt.target.position)
+                if symbol is not None and self._type_hint(stmt.value) != symbol.type_hint:
+                    symbol.type_hint = None
         elif isinstance(stmt, ExprStmt):
             self.resolve_expr(stmt.value)
         elif isinstance(stmt, PrintStmt):
@@ -429,6 +801,17 @@ class Resolver:
                 raise Exception(
                     f"Struct '{stmt.name}' is already declared at position {stmt.position}"
                 )
+            # M12: struct/enum names share a namespace with built-in type
+            # names, `Self`, and trait names -- see this module's docstring.
+            if stmt.name in BUILTIN_TYPE_NAMES or stmt.name == "Self":
+                raise Exception(
+                    f"'{stmt.name}' is a built-in type name and cannot be redeclared "
+                    f"at position {stmt.position}"
+                )
+            if stmt.name in self.trait_decls:
+                raise Exception(
+                    f"'{stmt.name}' is already declared as a trait at position {stmt.position}"
+                )
             self.struct_decls[stmt.name] = stmt.fields
             # LSP: register the declaration site in type_position_index --
             # see that dict's docstring above.
@@ -461,6 +844,16 @@ class Resolver:
                 raise Exception(
                     f"Enum '{stmt.name}' is already declared at position {stmt.position}"
                 )
+            # M12: see the identical check in the StructDecl branch above.
+            if stmt.name in BUILTIN_TYPE_NAMES or stmt.name == "Self":
+                raise Exception(
+                    f"'{stmt.name}' is a built-in type name and cannot be redeclared "
+                    f"at position {stmt.position}"
+                )
+            if stmt.name in self.trait_decls:
+                raise Exception(
+                    f"'{stmt.name}' is already declared as a trait at position {stmt.position}"
+                )
             self.enum_decls[stmt.name] = {
                 variant_name: variant_fields for variant_name, variant_fields in stmt.variants
             }
@@ -480,6 +873,16 @@ class Resolver:
                 for fname, fpos in zip(vfields, vfield_positions):
                     self.field_position_index[fpos] = ("variant_field", stmt.name, vname, fname)
                     self.enum_variant_field_decl_positions[(stmt.name, vname, fname)] = fpos
+        elif isinstance(stmt, TraitDecl):
+            # M12: `resolve_program` handles every TOP-LEVEL trait directly
+            # (phases 1b/3) and never routes it through resolve_stmt -- so
+            # reaching this branch at all means a nested `trait` (inside a
+            # function body, an if/while block, etc.), which is disallowed
+            # outright. See this module's docstring.
+            raise Exception(f"'trait' declarations are only allowed at the top level at position {stmt.position}")
+        elif isinstance(stmt, ImplDecl):
+            # Same reasoning as the TraitDecl branch above.
+            raise Exception(f"'impl' blocks are only allowed at the top level at position {stmt.position}")
         else:
             raise AssertionError(f"unhandled statement node {stmt!r}")
 
@@ -493,21 +896,357 @@ class Resolver:
             self.resolve_expr(block.tail)
         self._pop()
 
-    def _resolve_fn_expr(self, fn: FnExpr) -> None:
+    def _resolve_fn_expr(self, fn: FnExpr, allow_self: bool = False) -> None:
         new_frame = FrameLevel(depth=self.frame_stack[-1].depth + 1, parent=self.frame_stack[-1])
         self.frame_stack.append(new_frame)
         self._push()
         for index, param_name in enumerate(fn.params):
-            slot = new_frame.alloc()
             param_position = (
                 fn.param_positions[index] if index < len(fn.param_positions) else fn.position
             )
+            # M12: `self` is only a legal parameter name as a trait/impl
+            # method's very first parameter -- `allow_self` is only True
+            # when this FnExpr is a trait/impl method's own body (see
+            # `resolve_program`'s phase 3). Anywhere else (an ordinary
+            # `fn`, or `self` past index 0 even inside a method) is an
+            # error -- checked BEFORE declaring, since `_declare` itself
+            # would only catch a bare `let self = ...`/binding, not a
+            # parameter (parameters are declared with kind="param",
+            # deliberately exempted from `_declare`'s own reserved-name
+            # check for exactly the index-0 case this allows).
+            if param_name == "self" and not (allow_self and index == 0):
+                raise Exception(
+                    f"'self' is only allowed as the first parameter of a trait/impl "
+                    f"method at position {param_position}"
+                )
+            slot = new_frame.alloc()
             self._declare(param_name, slot, param_position, kind="param")
             fn.param_slots.append(slot)
         self.resolve_block(fn.body)
         self._pop()
         self.frame_stack.pop()
         fn.frame_level = new_frame
+
+    # -- M12: trait/impl registration (resolve_program's phase 1b) --------
+
+    def _register_trait(self, trait: TraitDecl) -> None:
+        """Validate and register a top-level `TraitDecl`'s method
+        signatures into `self.trait_decls` -- allocating a hidden global
+        slot for every method that HAS a default body (a bodyless/required
+        method gets no slot: there's no Closure to store). Does not touch
+        method bodies at all (see resolve_program's phase 3)."""
+        name = trait.name
+        if name == "Self" or name in BUILTIN_TYPE_NAMES:
+            raise Exception(
+                f"'{name}' is a built-in type name and cannot be redeclared at position {trait.position}"
+            )
+        if name in self.trait_decls:
+            raise Exception(f"Trait '{name}' is already declared at position {trait.position}")
+        if name in self.struct_decls or name in self.enum_decls:
+            raise Exception(f"'{name}' is already declared as a type at position {trait.position}")
+
+        seen_methods: set = set()
+        for method in trait.methods:
+            if method.name in seen_methods:
+                raise Exception(
+                    f"Trait '{name}' declares '{method.name}' more than once at position {method.position}"
+                )
+            seen_methods.add(method.name)
+            # Same `self`-placement rule `_resolve_fn_expr` enforces for a
+            # method WITH a body -- needed here too because a bodyless
+            # (required) trait method never reaches `_resolve_fn_expr` at
+            # all (there's no FnExpr to resolve).
+            for index, param_name in enumerate(method.params):
+                if param_name == "self" and index != 0:
+                    raise Exception(
+                        f"'self' is only allowed as the first parameter of a trait/impl "
+                        f"method at position {method.position}"
+                    )
+            if method.fn is not None:
+                method.slot = self.global_frame.alloc()
+
+        self.trait_decls[name] = {
+            method.name: {
+                "params": list(method.params),
+                "is_method": method.is_method,
+                "default_slot": method.slot,
+                # M13: source position of this method's own declaration
+                # (the "fn <name>" token) -- purely advisory (LSP hover/
+                # go-to-definition), see `Resolver.method_decl_index`.
+                "decl_position": method.name_position if method.name_position is not None else method.position,
+            }
+            for method in trait.methods
+        }
+        # LSP.
+        pos = trait.name_position if trait.name_position is not None else trait.position
+        self.trait_decl_positions[name] = pos
+        self.type_position_index[pos] = ("trait", name)
+        # M13: method-name declaration index + member-block range -- see
+        # `method_decl_index`/`member_block_ranges`'s own docstrings above.
+        for method in trait.methods:
+            decl_pos = method.name_position if method.name_position is not None else method.position
+            self.method_decl_index[decl_pos] = ("trait", name, method.name)
+        self.member_block_ranges.append(
+            (trait.position, trait.end_position if trait.end_position is not None else trait.position, "trait", name)
+        )
+
+    def _register_impl(self, impl: ImplDecl) -> None:
+        """Validate and register a top-level `ImplDecl`'s method headers --
+        arity/self-placement/missing-method checks against the trait (for a
+        trait impl), duplicate-across-blocks checks (for an inherent impl),
+        one hidden global slot per method this impl defines. Populates
+        `impl.registrations` with every `(method_name, slot, is_method)`
+        this impl block must `defmethod` at runtime -- its own fns PLUS, for
+        a trait impl, every inherited (not overridden) trait default.
+        Method BODIES are resolved later (resolve_program's phase 3)."""
+        type_name = impl.type_name
+        pos = impl.position
+        if type_name == "Self":
+            raise Exception(f"'Self' cannot be the target of an impl at position {pos}")
+        if not self._is_type_name(type_name):
+            raise NameError(f"Undefined type '{type_name}' in impl at position {pos}")
+        if type_name in self.struct_decls and type_name in self.enum_decls:
+            raise Exception(
+                f"'{type_name}' is ambiguous in impl: it is both a struct and an enum at position {pos}"
+            )
+
+        self.impls.setdefault(type_name, {"inherent": {}, "traits": {}})
+        entry = self.impls[type_name]
+
+        if impl.trait_name is None:
+            self._register_inherent_impl(impl, entry)
+        else:
+            self._register_trait_impl(impl, entry)
+
+        # LSP: register the type-name / trait-name use sites in the impl
+        # header (built-in types / system traits get nothing here -- they
+        # have no user-written declaration to link to).
+        if impl.type_name_position is not None:
+            if type_name in self.struct_decls:
+                self.type_position_index[impl.type_name_position] = ("struct", type_name)
+            elif type_name in self.enum_decls and type_name not in BUILTIN_TYPE_NAMES:
+                self.type_position_index[impl.type_name_position] = ("enum", type_name)
+        if impl.trait_name is not None and impl.trait_name_position is not None:
+            if impl.trait_name in self.trait_decl_positions:
+                self.type_position_index[impl.trait_name_position] = ("trait", impl.trait_name)
+
+        # M13: member-block range -- see `member_block_ranges`'s docstring.
+        self.member_block_ranges.append(
+            (impl.position, impl.end_position if impl.end_position is not None else impl.position, "impl", type_name)
+        )
+
+    def _register_inherent_impl(self, impl: ImplDecl, entry: dict) -> None:
+        type_name = impl.type_name
+        if not self._is_user_type(type_name):
+            raise Exception(
+                f"Cannot define inherent methods on built-in type '{type_name}'; declare a "
+                f"trait and 'impl YourTrait for {type_name}' instead at position {impl.position}"
+            )
+        seen: set = set()
+        for method in impl.methods:
+            if method.name in seen or method.name in entry["inherent"]:
+                raise Exception(
+                    f"Duplicate definition of '{method.name}' for '{type_name}' at position {method.position}"
+                )
+            seen.add(method.name)
+            method.slot = self.global_frame.alloc()
+            decl_pos = method.name_position if method.name_position is not None else method.position
+            entry["inherent"][method.name] = {
+                "slot": method.slot,
+                "is_method": method.is_method,
+                "params": len(method.params),
+                "native": False,
+                # M13: purely advisory (LSP) -- see `self.impls`'s docstring.
+                "decl_position": decl_pos,
+                "param_names": list(method.params),
+                "return_hint": (
+                    self._syntactic_type_hint(method.fn.body.tail, type_name)
+                    if method.fn.body.tail is not None
+                    else None
+                ),
+            }
+            impl.registrations.append((method.name, method.slot, method.is_method))
+            # M13: method-name declaration index -- see its docstring above.
+            self.method_decl_index[decl_pos] = ("impl", type_name, None, method.name)
+
+    def _register_trait_impl(self, impl: ImplDecl, entry: dict) -> None:
+        type_name = impl.type_name
+        trait_name = impl.trait_name
+        pos = impl.position
+        if trait_name not in self.trait_decls:
+            raise NameError(f"Undefined trait '{trait_name}' at position {pos}")
+        # Orphan rule: at least one of trait/type must be user-defined.
+        # Checked BEFORE the duplicate-impl check below.
+        if trait_name in self.system_traits and not self._is_user_type(type_name):
+            raise Exception(
+                f"Cannot implement built-in trait '{trait_name}' for built-in type "
+                f"'{type_name}' at position {pos}"
+            )
+        if trait_name in entry["traits"]:
+            raise Exception(f"'{type_name}' already implements '{trait_name}' at position {pos}")
+
+        trait_methods = self.trait_decls[trait_name]
+        seen: set = set()
+        provided: dict = {}
+        for method in impl.methods:
+            if method.name in seen:
+                raise Exception(
+                    f"Duplicate definition of '{method.name}' for '{type_name}' at position {method.position}"
+                )
+            seen.add(method.name)
+            trait_info = trait_methods.get(method.name)
+            if trait_info is None:
+                raise Exception(
+                    f"Method '{method.name}' is not a member of trait '{trait_name}' at position {method.position}"
+                )
+            if method.is_method != trait_info["is_method"]:
+                kind = "method (with self)" if trait_info["is_method"] else "static function (without self)"
+                raise Exception(
+                    f"Trait '{trait_name}' declares '{method.name}' as a {kind} at position {method.position}"
+                )
+            if len(method.params) != len(trait_info["params"]):
+                raise Exception(
+                    f"Method '{method.name}' has {len(method.params)} parameter(s) but trait "
+                    f"'{trait_name}' declares {len(trait_info['params'])} at position {method.position}"
+                )
+            method.slot = self.global_frame.alloc()
+            decl_pos = method.name_position if method.name_position is not None else method.position
+            provided[method.name] = {
+                "slot": method.slot,
+                "is_method": method.is_method,
+                "params": len(method.params),
+                "native": False,
+                # M13: purely advisory (LSP) -- see `self.impls`'s docstring.
+                "decl_position": decl_pos,
+                "param_names": list(method.params),
+                "return_hint": (
+                    self._syntactic_type_hint(method.fn.body.tail, type_name)
+                    if method.fn.body.tail is not None
+                    else None
+                ),
+            }
+            # M13: method-name declaration index -- see its docstring above.
+            self.method_decl_index[decl_pos] = ("impl", type_name, trait_name, method.name)
+
+        missing = [
+            name
+            for name, info in trait_methods.items()
+            if info["default_slot"] is None and name not in provided
+        ]
+        if missing:
+            raise Exception(
+                f"'{type_name}' is missing trait method(s) {sorted(missing)} required by "
+                f"'{trait_name}' at position {pos}"
+            )
+
+        trait_impl: dict = dict(provided)
+        for name, info in trait_methods.items():
+            if name in trait_impl or info["default_slot"] is None:
+                continue
+            trait_impl[name] = {
+                "slot": info["default_slot"],
+                "is_method": info["is_method"],
+                "params": len(info["params"]),
+                "native": False,
+                # M13: an INHERITED (not overridden) trait default -- its
+                # declaration is the trait's own method, and its return
+                # type isn't guessed here at all (the spec doesn't ask for
+                # syntactic analysis of a trait default's body at this
+                # call site; it's still reachable via the trait's own
+                # `method_decl_index`/hover).
+                "decl_position": info["decl_position"],
+                "param_names": list(info["params"]),
+                "return_hint": None,
+            }
+        entry["traits"][trait_name] = trait_impl
+        for method in impl.methods:
+            impl.registrations.append((method.name, provided[method.name]["slot"], provided[method.name]["is_method"]))
+        for name, info in trait_impl.items():
+            if name in provided:
+                continue
+            impl.registrations.append((name, info["slot"], info["is_method"]))
+
+    def _resolve_path_call(self, expr: MethodCall) -> None:
+        """Resolve a `MethodCall` whose `obj` is a bare `Ident` that is NOT
+        a real in-scope variable (or is the literal `Self`) -- i.e. a
+        static path call, `Trait.method(recv, ...)` or `Type.method(...)`.
+        Sets exactly one of `expr.trait_name`/`expr.static_address` (see
+        `ast_nodes.py`'s `MethodCall` docstring) or raises a clean error."""
+        name = self._subst_self(expr.obj.name, expr.obj.position)
+
+        if name in self.trait_decls:
+            info = self.trait_decls[name].get(expr.method)
+            if info is None:
+                raise Exception(f"Trait '{name}' has no method '{expr.method}' at position {expr.position}")
+            if not info["is_method"]:
+                raise Exception(
+                    f"'{name}.{expr.method}' is a static trait function; call it on a "
+                    f"concrete type, e.g. 'SomeType.{expr.method}(...)' at position {expr.position}"
+                )
+            if not expr.args:
+                raise Exception(
+                    f"'{name}.{expr.method}(...)' needs the receiver as its first argument "
+                    f"at position {expr.position}"
+                )
+            expr.trait_name = name
+            if name in self.trait_decl_positions:
+                self.type_position_index[expr.obj.position] = ("trait", name)
+            for arg in expr.args:
+                self.resolve_expr(arg)
+            # M13: LSP call-site recording -- Trait.m(recv, ...).
+            self.method_call_index[expr.position] = {
+                "name": expr.method,
+                "candidates": [("trait", name)],
+                "receiver_type": self._type_hint(expr.args[0]),
+            }
+            return
+        if self._is_type_name(name):
+            impl_entry = self.impls.get(name, {"inherent": {}, "traits": {}})
+            inherent = impl_entry["inherent"].get(expr.method)
+            if inherent is not None:
+                fninfo = inherent
+                trait_hit = None
+            else:
+                trait_hits = [
+                    (tr, fns[expr.method]) for tr, fns in impl_entry["traits"].items() if expr.method in fns
+                ]
+                if len(trait_hits) > 1:
+                    raise Exception(
+                        f"'{name}.{expr.method}' is ambiguous: provided by traits "
+                        f"{sorted(tr for tr, _ in trait_hits)} at position {expr.position}"
+                    )
+                if not trait_hits:
+                    raise Exception(f"Type '{name}' has no function '{expr.method}' at position {expr.position}")
+                trait_hit, fninfo = trait_hits[0]
+            if fninfo["native"]:
+                if not expr.args:
+                    raise Exception(
+                        f"'{name}.{expr.method}(...)' needs the receiver as its first argument "
+                        f"at position {expr.position}"
+                    )
+                expr.trait_name = trait_hit
+            else:
+                expr.static_address = (self.frame_stack[-1].depth, fninfo["slot"])
+            # M13: purely advisory return-type guess -- see `_type_hint`'s
+            # docstring. Set regardless of which branch above ran (static
+            # or native-trait): both found the same `fninfo`.
+            expr.return_hint = fninfo.get("return_hint")
+            if expr.obj.position is not None:
+                if name in self.struct_decls:
+                    self.type_position_index[expr.obj.position] = ("struct", name)
+                elif name in self.enum_decls and name not in BUILTIN_TYPE_NAMES:
+                    self.type_position_index[expr.obj.position] = ("enum", name)
+            for arg in expr.args:
+                self.resolve_expr(arg)
+            # M13: LSP call-site recording -- Type.m(...) (static or native).
+            self.method_call_index[expr.position] = {
+                "name": expr.method,
+                "candidates": [("impl", name, trait_hit)],
+                "receiver_type": name,
+            }
+            return
+
+        raise NameError(f"Undefined variable '{expr.obj.name}' at position {expr.obj.position}")
 
     # -- expressions -----------------------------------------------------
 
@@ -550,6 +1289,10 @@ class Resolver:
             self._resolve_fn_expr(expr)
             return
         if isinstance(expr, StructLit):
+            # M12: `Self { ... }` inside an impl method body -- substitute
+            # the impl's own target type name before the existing
+            # validation logic runs (see `_subst_self`).
+            expr.type_name = self._subst_self(expr.type_name, expr.position)
             declared = self.struct_decls.get(expr.type_name)
             if declared is None:
                 raise NameError(
@@ -569,6 +1312,12 @@ class Resolver:
                 self.field_position_index[fpos] = ("struct_field", expr.type_name, fname)
             return
         if isinstance(expr, EnumLit):
+            # M12: `Self.Circle { ... }` / `Self.Empty` (the latter parses
+            # as an EnumLit only when braced -- see the parser; the bare,
+            # unbraced form goes through the FieldAccess branch below).
+            expr.type_name = self._subst_self(
+                expr.type_name, expr.type_name_position if expr.type_name_position is not None else expr.position
+            )
             variants = self.enum_decls.get(expr.type_name)
             if variants is None:
                 raise NameError(f"Undefined enum type '{expr.type_name}' at position {expr.position}")
@@ -598,6 +1347,14 @@ class Resolver:
             return
         if isinstance(expr, FieldAccess):
             if isinstance(expr.obj, Ident):
+                if expr.obj.name == "Self":
+                    # M12: `Self.Empty` (bare unit-variant construction) --
+                    # substitute before the existing lookup runs. A real
+                    # variable can never be named `Self` (`_declare` rejects
+                    # it outright), so this always falls through to the
+                    # enum-unit-variant path below, never the ordinary
+                    # variable-lookup success path.
+                    expr.obj.name = self._subst_self(expr.obj.name, expr.obj.position)
                 # See module docstring for the full disambiguation rule:
                 # `Type.Variant` (no braces) parses identically to ordinary
                 # field access, so a real in-scope variable always wins
@@ -635,6 +1392,35 @@ class Resolver:
             expr.enum_unit_type = None
             self.resolve_expr(expr.obj)
             return
+        if isinstance(expr, MethodCall):
+            # M12: `expr.obj.method(args)` -- three shapes, disambiguated
+            # exactly like the existing bare-enum-unit-variant precedent (a
+            # real in-scope variable always wins first): `p.m(...)` where
+            # `p` is a real variable/expression is an ordinary dynamic
+            # method call (neither `static_address` nor `trait_name` gets
+            # set here -- codegen/the interpreter dispatch on the runtime
+            # type of `expr.obj`'s value); `Type.m(...)`/`Trait.m(recv,
+            # ...)` where the leading name is NOT a variable (or is the
+            # literal `Self`, which can never be a variable) is a static
+            # path call, resolved by `_resolve_path_call`.
+            if isinstance(expr.obj, Ident):
+                if expr.obj.name != "Self":
+                    try:
+                        expr.obj.address = self._resolve_ident_address(expr.obj.name, expr.obj.position)
+                    except NameError:
+                        pass  # not a variable -- a type/trait path, below
+                    else:
+                        for arg in expr.args:
+                            self.resolve_expr(arg)
+                        self._record_dynamic_method_call(expr)
+                        return
+                self._resolve_path_call(expr)
+                return
+            self.resolve_expr(expr.obj)
+            for arg in expr.args:
+                self.resolve_expr(arg)
+            self._record_dynamic_method_call(expr)
+            return
         if isinstance(expr, IfStmt):
             # M5: if/match/bare-block are usable as expressions (a let's
             # value, a block's tail, a call argument, ...) -- resolving
@@ -669,6 +1455,8 @@ class Resolver:
             pattern.address = slot
             return
         if isinstance(pattern, StructPat):
+            # M12: `Self { ... }` pattern inside an impl method body.
+            pattern.type_name = self._subst_self(pattern.type_name, pattern.position)
             declared = self.struct_decls.get(pattern.type_name)
             if declared is None:
                 raise NameError(
@@ -692,6 +1480,8 @@ class Resolver:
                     self.field_position_index[fpos] = ("struct_field", pattern.type_name, fname)
             return
         if isinstance(pattern, EnumPat):
+            # M12: `Self.Circle { ... }` pattern inside an impl method body.
+            pattern.type_name = self._subst_self(pattern.type_name, pattern.position)
             variants = self.enum_decls.get(pattern.type_name)
             if variants is None:
                 raise NameError(

@@ -2254,6 +2254,106 @@ node that resolved to it. Then:
     collapsed to pointers, matching the "Async" section's own precedent
     after M10).
 
+13. **M12 — Traits, `impl`, method calls, `Printable`. ✅ Landed.**
+
+    Full design reference: `docs/TRAITS.md` (language rules, dispatch,
+    system traits, and the planned `Iterable`/`for` desugaring). Summary
+    of what changed where:
+
+    - **Syntax**: `trait Name { fn m(self) fn d(self) { ... } fn s() }`
+      (bodyless = required, body = default, no `self` = static);
+      `impl Type { ... }` / `impl Trait for Type { ... }`; method calls
+      `expr.m(args)` (new `MethodCall` postfix in `_parse_postfix_from`),
+      `Type.f(args)`, `Trait.m(recv, args)`. New keywords `trait`, `impl`,
+      `for` (`for` also reserved for the future loop). `self`/`Self` stay
+      ordinary identifiers, with resolver-enforced rules.
+    - **Resolve**: `resolve_program` is now three-phase at top level —
+      (1) hoist struct/enum declarations, register traits and impl headers
+      (all impl checking — orphan rule, missing/extra methods, arity,
+      method-vs-static shape, duplicates — happens here); (2) every other
+      top-level statement, in order, unchanged; (3) trait-default and impl
+      method bodies, with every top-level name in scope. Every impl fn and
+      trait default gets a hidden global slot, so `Type.f(...)` compiles to
+      a plain `call` of that slot. `Self` is substituted by the impl's
+      target type (and scrubbed from `type_position_index` so LSP rename
+      never rewrites it). Registries `trait_decls`/`impls` are kept on the
+      resolver — the metadata a future type checker needs for trait bounds.
+    - **Codegen/VM**: method closures are created and registered
+      (`defmethod`) at program start; `x.m()` compiles to `callmethod`,
+      dispatched at runtime on `runtime_values.type_name_of(x)` (built-in
+      types: `Number`/`String`/`Bool`/`Function`/`Option`/`Promise`).
+      `invoke_sync` lets the VM call back into Mah code from inside an
+      opcode (a fresh `Task` driven by the already-re-entrant `step_task`),
+      which `print`/string `+` use to honor user `Printable` impls.
+      Built-in types implement `Printable` natively. Function values now
+      print as `<fn name>`.
+    - **Side fixes found while landing it**: removed the historical
+      400-instruction `CODE_LIMIT` (the code buffer is now a growing list;
+      `buf.code[:400]` slicing removed from the CLI and test support) —
+      any non-trivial program with impls exceeded it. The preprocessor no
+      longer alpha-renames an identifier after `.` (a field/method name
+      matching a module's top-level `fn`/`let` used to get mangled) or a
+      method's own name inside a `trait`/`impl` body.
+    - **Deliberately out of scope** (see `docs/TRAITS.md`'s "Known
+      limitations"): `for`/`Iterable`, `detach obj.m()`, calling a closure
+      stored in a field via `p.f()`, bound-method values, and LSP hover/
+      completion on method names (needs static types).
+
+    Built by the thinker/coder split (`docs/DEVELOPMENT_WORKFLOW.md`): the
+    compiler/VM/LSP core in one Sonnet dispatch from a complete spec, the
+    tree-sitter/TextMate grammars in a separate parallel one (disjoint
+    files; the TextMate change had to place the trait/impl rule before the
+    generic keyword rules, since TextMate picks the first-listed pattern on
+    a same-position tie). Verified independently: re-ran the suite, read the
+    resolver/codegen/VM diffs against the spec, and added 8 scenarios
+    beyond the spec's list (static calls three frame levels deep and from
+    closures inside methods, recursive `Printable` through `+`, control
+    flow and `print` inside `to_string`, trait defaults on built-in types,
+    methods across interleaved detached tasks, a top-level `defer` using a
+    hoisted impl) — all passed first time. Full suite: 312 tests green
+    (236 before M12). `tree-sitter parse` shows zero ERROR nodes on every
+    example and on the new syntax.
+
+14. **M13 — Field-closure calls, `detach` on method calls, method-name
+    LSP support. ✅ Landed.**
+
+    Removes three limitations M12 shipped with; design in `docs/TRAITS.md`'s
+    "Field closures, `detach` on methods, and editor support" section.
+
+    - **VM**: `callmethod`'s lookup factored into `find_method(recv, name,
+      trait, position) -> (fn, include_self)`, which falls back to calling a
+      struct/enum *field* holding a closure when there's no method (or only
+      a static fn) of that name. New `detachmethod` opcode (same operands as
+      `callmethod`, `dest` receives a Promise) reuses it plus a factored-out
+      `spawn_detached`; native targets resolve their Promise immediately.
+    - **Parser**: `_parse_detach_operand` accepts any identifier-rooted call
+      chain and detaches its last call; trailing field accesses (`.await`)
+      apply to the Promise, so `detach work().await` parses exactly as
+      before. `TraitDecl`/`ImplDecl` record `end_position`.
+    - **Resolver**: editor-only type hints (`Symbol.type_hint`,
+      `MethodCall.return_hint`, impl fninfo `return_hint` computed
+      syntactically from a body's tail), `method_call_index` (call-site ->
+      candidate impls/trait method), `method_decl_index`, and
+      `member_block_ranges` (what `self` means at a cursor position).
+    - **LSP**: method hover (exact with a hint, "possible implementations"
+      list without one), go-to-definition (may return a *list* of locations
+      — `server.py` passes it through as `Location[]`), impl-method →
+      trait-method definition, and `x.`/`Type.`/`Trait.`/`self.`/`5.`
+      member completion. Found and fixed while landing: namespace
+      completion's step used to `return []` whenever *any* identifier
+      preceded the `.`, which would have swallowed every member completion;
+      it now falls through when the identifier isn't a real namespace.
+
+    Same thinker/coder split as M12 (one Sonnet dispatch from a complete
+    spec). Verified independently: re-ran the suite, read the `find_method`/
+    `_parse_detach_operand` diffs against the spec, and added 6 scenarios
+    beyond the spec's list (`detach self.m()` twice inside a method, a
+    detached method's `defer`, a field closure returning a closure, a method
+    call on an awaited detached result, namespace completion still being
+    exclusive after the fall-through change, `self.` completion inside an
+    impl). Full suite: 358 tests green. `tree-sitter parse` needed no grammar
+    change for the new `detach` operands (zero ERROR nodes).
+
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
 it** (`make test` must stay green) — see `docs/TESTING.md` for where
@@ -2265,10 +2365,10 @@ M1 was built and documented that way.
 
 ## Status
 
-M0 through M11 are all landed (see their entries above for what changed and
+M0 through M13 are all landed (see their entries above for what changed and
 each milestone's deliberate deviations/simplifications). `docs/NEXT_PHASES.md`
 captures what's deliberately deferred still (match guards, arrays/lists,
-generics, traits, the type system -- and, as of M11, sound field-*access*
+generics, the type system -- and, as of M11, sound field-*access*
 rename, which still needs the type system) and what M0–M11 need
 to keep forward-compatible with. M7 added a real symbol table to
 `compiler/resolve.py` and rebuilt go-to-definition + added rename on top
@@ -2298,5 +2398,10 @@ type-name, enum variant-name, and struct/enum field-name rename in
 declarations/literals/explicit patterns (always single-file, since
 structs/enums can't be exported/imported across files at all) -- plain
 field *access* (`p.x`) rename remains deliberately refused, unsound
-without a real type system. All planned milestones (M0–M11) are now
-complete; see `docs/NEXT_PHASES.md` for what's next.
+without a real type system. M12 added Rust-style traits (`trait`,
+inherent and trait `impl`s, runtime method dispatch, the `Printable`
+system trait used by `print`/string `+`) -- see `docs/TRAITS.md`; M13
+added field-closure calls (`p.f()`), `detach` on method calls, and
+method-name hover/go-to-definition/completion in the LSP. All
+planned milestones (M0–M13) are now complete; see `docs/NEXT_PHASES.md`
+for what's next.

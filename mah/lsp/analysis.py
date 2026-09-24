@@ -27,6 +27,7 @@ from ..compiler.lexer import KEYWORDS, Lexer, Token, TokenType  # noqa: E402
 from ..compiler.parser import Parser  # noqa: E402
 from ..compiler.resolve import Resolver  # noqa: E402
 from ..preprocessor import BUFFER_PATH, demangle_message, preprocess  # noqa: E402
+from ..runtime_values import BUILTIN_TYPE_NAMES  # noqa: E402
 
 # --------------------------------------------------------------------------
 # Language metadata (used for hover + completion)
@@ -49,6 +50,9 @@ KEYWORD_TOKENS = {
     TokenType.NONE,
     TokenType.DEFER,
     TokenType.DETACH,
+    TokenType.TRAIT,
+    TokenType.IMPL,
+    TokenType.FOR,
 }
 
 BUILTIN_TOKENS = {
@@ -108,6 +112,20 @@ KEYWORD_DOCS = {
     "meaningful on a `Promise` you got from an explicit `detach` -- a "
     "bare, non-detached call already blocks on its own, with nothing to "
     "await.\n\n`value.await`",
+    "trait": "Declare a set of methods a type can implement. A method with "
+    "no body is required; one with a body is a default, inherited unless "
+    "the implementing type overrides it. A method whose first parameter "
+    "isn't `self` is a static function (called as `Type.fn(...)`, not on "
+    "a value).\n\n"
+    "```mah\ntrait Shape {\n\tfn area(self)\n\tfn name(self) { \"shape\" }\n\tfn unit()\n}\n```",
+    "impl": "Implement a trait for a type (`impl Trait for Type { ... }` "
+    "-- `Type` may be a built-in type like `Promise` as long as `Trait` "
+    "is your own), or give a user type its own inherent methods/functions "
+    "(`impl Type { ... }`). `Self` refers to the target type inside an "
+    "`impl` block. Call a method as `value.method()`, a static function "
+    "as `Type.function(...)`.\n\n"
+    "```mah\nstruct Point { x, y }\nimpl Point {\n\tfn new(x, y) { Self { x: x, y: y } }\n}\n```",
+    "for": "Used in `impl Trait for Type`. (Reserved for the future `for` loop.)",
 }
 
 BUILTIN_DOCS = {
@@ -144,6 +162,8 @@ COMPLETION_ENUM = 13     # LSP CompletionItemKind.Enum
 COMPLETION_ENUM_MEMBER = 20  # LSP CompletionItemKind.EnumMember
 COMPLETION_FILE = 17     # LSP CompletionItemKind.File
 COMPLETION_FOLDER = 19   # LSP CompletionItemKind.Folder
+COMPLETION_METHOD = 2    # LSP CompletionItemKind.Method (M13)
+COMPLETION_FIELD = 5     # LSP CompletionItemKind.Field (M13)
 
 SYMBOL_FUNCTION = 12
 SYMBOL_VARIABLE = 13
@@ -844,6 +864,188 @@ def _import_path_completions(text: str, path: Optional[str], offset: int):
     return items
 
 
+def _member_access_context(text: str, offset: int):
+    """M13: detect `receiver.partial` immediately before the cursor, for
+    method/field completion (`r.`, `Type.`, `Trait.`, `self.`, `5.` ...) --
+    see the M13 spec's 'Completion' section. Returns `(receiver, dot_offset)`
+    or `None` when the cursor isn't right after a `.` at all. `receiver` may
+    be empty (e.g. right after `)` or a string literal -- there's no
+    identifier immediately before the dot)."""
+    i = offset
+    while i > 0 and (text[i - 1].isalnum() or text[i - 1] in "_$"):
+        i -= 1
+    if i == 0 or text[i - 1] != ".":
+        return None
+    dot_offset = i - 1
+    k = dot_offset
+    while k > 0 and (text[k - 1].isalnum() or text[k - 1] in "_$"):
+        k -= 1
+    receiver = text[k:dot_offset]
+    return receiver, dot_offset
+
+
+def _member_access_mode(receiver: str, combined_dot: int, resolver):
+    """M13: decide what `receiver.` means at `combined_dot` -- returns
+    `(mode, target)` where `mode` is `"instance"` (methods callable on a
+    VALUE of type `target`, plus fields for a struct), `"type"` (every fn
+    on the type `target`, static included, plus variants for an enum),
+    `"trait"` (every fn of the trait `target`), or `"unknown"` (no idea --
+    every method name anywhere). See the M13 spec's 'Decide the receiver'
+    step."""
+    if receiver == "self":
+        best = None
+        for start, end, kind, name in resolver.member_block_ranges:
+            if start <= combined_dot <= end:
+                if best is None or (end - start) < (best[1] - best[0]):
+                    best = (start, end, kind, name)
+        if best is not None:
+            _start, _end, kind, name = best
+            return ("instance", name) if kind == "impl" else ("trait", name)
+        return ("unknown", None)
+    if receiver in resolver.trait_decls:
+        return ("trait", receiver)
+    if receiver in resolver.struct_decls or receiver in resolver.enum_decls or receiver in BUILTIN_TYPE_NAMES:
+        return ("type", receiver)
+    if receiver.isdigit():
+        return ("instance", "Number")
+    if receiver:
+        best_symbol = None
+        for symbol in resolver.position_index.values():
+            if symbol.name != receiver or symbol.decl_position > combined_dot:
+                continue
+            if best_symbol is None or symbol.decl_position > best_symbol.decl_position:
+                best_symbol = symbol
+        if best_symbol is not None and best_symbol.type_hint is not None:
+            return ("instance", best_symbol.type_hint)
+    return ("unknown", None)
+
+
+def _method_completion_item(resolver, cand, name: str, fninfo: dict) -> dict:
+    kind = COMPLETION_METHOD if fninfo.get("is_method") else COMPLETION_FUNCTION
+    return {"label": name, "kind": kind, "detail": _method_signature_lines(resolver, cand, name)}
+
+
+def _dedupe_completion_items(items: list[dict]) -> list[dict]:
+    """M13: dedupe by label (first wins), then sort by label for a
+    deterministic order -- see the M13 spec's 'Completion' section."""
+    seen: set = set()
+    deduped = []
+    for item in items:
+        if item["label"] in seen:
+            continue
+        seen.add(item["label"])
+        deduped.append(item)
+    deduped.sort(key=lambda it: it["label"])
+    return deduped
+
+
+def _instance_member_items(resolver, type_name: str) -> list[dict]:
+    """M13: every METHOD (not static fn) callable on a value of type
+    `type_name` (inherent + every trait, natives included), plus -- for a
+    struct -- its field names (callable via M13 part 1's `p.f(args)`)."""
+    items = []
+    entry = resolver.impls.get(type_name, {"inherent": {}, "traits": {}})
+    for method_name, fninfo in entry["inherent"].items():
+        if fninfo.get("is_method"):
+            items.append(_method_completion_item(resolver, ("impl", type_name, None), method_name, fninfo))
+    for trait_name, fns in entry["traits"].items():
+        for method_name, fninfo in fns.items():
+            if fninfo.get("is_method"):
+                items.append(_method_completion_item(resolver, ("impl", type_name, trait_name), method_name, fninfo))
+    if type_name in resolver.struct_decls:
+        for field_name in resolver.struct_decls[type_name]:
+            items.append({"label": field_name, "kind": COMPLETION_FIELD, "detail": f"field of {type_name}"})
+    return _dedupe_completion_items(items)
+
+
+def _type_member_items(resolver, type_name: str) -> list[dict]:
+    """M13: every fn (method or static) on the TYPE `type_name` (inherent +
+    every trait, natives included), plus -- for an enum -- every variant
+    name."""
+    items = []
+    entry = resolver.impls.get(type_name, {"inherent": {}, "traits": {}})
+    for method_name, fninfo in entry["inherent"].items():
+        items.append(_method_completion_item(resolver, ("impl", type_name, None), method_name, fninfo))
+    for trait_name, fns in entry["traits"].items():
+        for method_name, fninfo in fns.items():
+            items.append(_method_completion_item(resolver, ("impl", type_name, trait_name), method_name, fninfo))
+    if type_name in resolver.enum_decls:
+        for variant_name in resolver.enum_decls[type_name]:
+            items.append(
+                {"label": variant_name, "kind": COMPLETION_ENUM_MEMBER, "detail": f"variant of {type_name}"}
+            )
+    return _dedupe_completion_items(items)
+
+
+def _trait_member_items(resolver, trait_name: str) -> list[dict]:
+    """M13: every fn of `trait_name` (methods AND static functions)."""
+    items = []
+    for method_name, info in resolver.trait_decls.get(trait_name, {}).items():
+        kind = COMPLETION_METHOD if info.get("is_method") else COMPLETION_FUNCTION
+        items.append(
+            {
+                "label": method_name,
+                "kind": kind,
+                "detail": _method_signature_lines(resolver, ("trait", trait_name), method_name),
+            }
+        )
+    return _dedupe_completion_items(items)
+
+
+def _unknown_receiver_method_items(resolver) -> list[dict]:
+    """M13: every method name (`is_method` True) across every entry of
+    `resolver.impls`, deduplicated by name -- the receiver type isn't known
+    at all, so this is every possibility; `detail` lists the owning types
+    (user types first, then built-ins, each group alphabetical) so the
+    editor at least shows what it could be."""
+    owners: dict = {}
+    for type_name, entry in resolver.impls.items():
+        names: set = set()
+        for method_name, fninfo in entry["inherent"].items():
+            if fninfo.get("is_method"):
+                names.add(method_name)
+        for fns in entry["traits"].values():
+            for method_name, fninfo in fns.items():
+                if fninfo.get("is_method"):
+                    names.add(method_name)
+        for method_name in names:
+            owners.setdefault(method_name, set()).add(type_name)
+    items = []
+    for method_name in sorted(owners):
+        types = sorted(owners[method_name], key=lambda t: (not _is_user_type_name(resolver, t), t))
+        items.append({"label": method_name, "kind": COMPLETION_METHOD, "detail": ", ".join(types)})
+    return items
+
+
+def _member_access_completions(text: str, path: Optional[str], offset: int):
+    """M13: member-access completion (`r.`, `Type.`, `Trait.`, `self.` ...)
+    -- see the M13 spec's 'Completion' section. Returns a list of
+    completion items (possibly empty), returned EXCLUSIVELY (no keywords/
+    symbols mixed in), when the cursor sits in this context; `None` when it
+    doesn't (caller falls through to ordinary completion)."""
+    ctx = _member_access_context(text, offset)
+    if ctx is None:
+        return None
+    receiver, dot_offset = ctx
+
+    result = _resolve_for_navigation(text, path)
+    if result is None:
+        return []
+    pp, resolver, _tokens = result
+    combined_dot = pp.entry_to_combined(dot_offset)
+    if combined_dot is None:
+        return []
+
+    mode, target = _member_access_mode(receiver, combined_dot, resolver)
+    if mode == "unknown":
+        return _unknown_receiver_method_items(resolver)
+    if mode == "trait":
+        return _trait_member_items(resolver, target)
+    if mode == "type":
+        return _type_member_items(resolver, target)
+    return _instance_member_items(resolver, target)
+
+
 def _resolver_symbol_completion_item(symbol) -> dict:
     """Completion item for a `compiler/resolve.py` `Symbol` (variable/
     parameter/function binding) -- parallel to hover's kind labels."""
@@ -897,7 +1099,16 @@ def get_completions(
                     {"label": member, "kind": COMPLETION_VARIABLE, "detail": f"(from {os.path.basename(ns.resolved)})"}
                     for member in sorted(pp.exported_names(ns.resolved))
                 ]
-            return []
+            # `ns_name` isn't an actual namespace import -- not this
+            # context after all; fall through (M13: it may still be
+            # `receiver.partial` member-access completion, step 2b below).
+
+        # 2b. M13: method/field member-access completion (`r.`, `Type.`,
+        # `Trait.`, `self.`, `5.` ...) -- exclusive too, see
+        # `_member_access_completions`.
+        member_items = _member_access_completions(text, path, offset)
+        if member_items is not None:
+            return member_items
 
     items: list[dict] = []
 
@@ -1001,7 +1212,14 @@ def get_hover(text: str, line: int, character: int, path: Optional[str] = None) 
     type system there's no sound way to know what struct shape an
     arbitrary expression's value holds, so a field named `x` on `p` isn't
     necessarily the same `x` -- see docs/NEXT_PHASES.md's "Struct/enum/field
-    rename" section."""
+    rename" section. M13 adds *method* names (`_method_at_position`, tried
+    before the type-namespace fallback below) -- both call sites
+    (`p.m(...)`/`Type.m(...)`/`Trait.m(x, ...)`) and declaration sites
+    (a trait's own `fn`, an impl's own `fn`), using the resolver's
+    best-effort, purely syntactic type hints (`compiler/resolve.py`'s
+    `method_call_index`) to narrow a dynamic call's candidate list when
+    possible, and listing every possibility (with a note that the receiver
+    type isn't known statically) when it can't."""
     tokens, _lex_error = tokenize(text)
     offset = position_to_offset(text, line, character)
     token = _token_at_offset(tokens, offset)
@@ -1042,20 +1260,25 @@ def get_hover(text: str, line: int, character: int, path: Optional[str] = None) 
             if decl_path != pp.entry_path:
                 value += f"\n\n*declared in `{os.path.basename(decl_path)}`*"
         else:
-            type_found = _type_symbol_at_position(text, line, character, path)
-            if type_found is not None:
-                value = _type_hover_value(*type_found)
+            method_found = _method_at_position(text, line, character, path)
+            if method_found is not None:
+                mpp, mresolver, mkind, mpayload = method_found
+                value = _method_hover_value(mpp, mresolver, mkind, mpayload, text)
             else:
-                field_found = _field_symbol_at_position(text, line, character, path)
-                if field_found is None:
-                    return None
-                _resolver, kind, payload = field_found
-                if kind == "struct_field":
-                    struct_name, field_name = payload
-                    value = f"**field** `{field_name}` of struct `{struct_name}`"
+                type_found = _type_symbol_at_position(text, line, character, path)
+                if type_found is not None:
+                    value = _type_hover_value(*type_found)
                 else:
-                    enum_name, variant_name, field_name = payload
-                    value = f"**field** `{field_name}` of `{enum_name}.{variant_name}`"
+                    field_found = _field_symbol_at_position(text, line, character, path)
+                    if field_found is None:
+                        return None
+                    _resolver, kind, payload = field_found
+                    if kind == "struct_field":
+                        struct_name, field_name = payload
+                        value = f"**field** `{field_name}` of struct `{struct_name}`"
+                    else:
+                        enum_name, variant_name, field_name = payload
+                        value = f"**field** `{field_name}` of `{enum_name}.{variant_name}`"
     else:
         return None
 
@@ -1188,12 +1411,13 @@ def _symbol_at_position(text: str, line: int, character: int, path: Optional[str
 
 def _type_symbol_at_position(text: str, line: int, character: int, path: Optional[str]):
     """Like `_symbol_at_position`, but looks up the resolver's struct/enum/
-    variant namespace (`type_position_index`) instead of the ordinary
+    variant/trait namespace (`type_position_index`) instead of the ordinary
     variable/function one (`position_index`) -- see
     `compiler/resolve.py`'s `type_position_index` docstring. Returns
     `(resolver, kind, payload)` where `kind` is `"struct"`/`"enum"`/
-    `"variant"` and `payload` is the struct/enum name (a str) or, for a
-    variant, an `(enum_name, variant_name)` tuple -- or `None`."""
+    `"variant"`/`"trait"` (M12) and `payload` is the struct/enum/trait name
+    (a str) or, for a variant, an `(enum_name, variant_name)` tuple -- or
+    `None`."""
     result = _resolve_for_navigation(text, path)
     if result is None:
         return None
@@ -1240,12 +1464,189 @@ def _field_symbol_at_position(text: str, line: int, character: int, path: Option
     return resolver, "variant_field", (entry[1], entry[2], entry[3])
 
 
+def _is_user_type_name(resolver, name: str) -> bool:
+    """M13: mirrors `Resolver._is_user_type` (a user-declared struct, or a
+    user-declared enum -- built-in enums Option/Promise don't count) --
+    reimplemented here rather than reaching into that resolver-private
+    helper from across the module boundary."""
+    return name in resolver.struct_decls or (name in resolver.enum_decls and name not in BUILTIN_TYPE_NAMES)
+
+
+def _method_at_position(text: str, line: int, character: int, path: Optional[str]):
+    """M13: like `_type_symbol_at_position`, but looks up the resolver's
+    method-name namespaces (`method_call_index`/`method_decl_index` --
+    see `compiler/resolve.py`'s module docstring, 'method indexes') instead
+    of the struct/enum/variant/trait one. Returns `(pp, resolver, kind,
+    payload)` where `kind` is `"call"` (payload = the `method_call_index`
+    info dict) or `"decl"` (payload = the `method_decl_index` tuple) -- or
+    `None`."""
+    result = _resolve_for_navigation(text, path)
+    if result is None:
+        return None
+    pp, resolver, tokens = result
+    combined_offset = _combined_offset_for_position(pp, text, line, character)
+    if combined_offset is None:
+        return None
+    token = _token_at_offset(tokens, combined_offset)
+    if token is None or token.type is not TokenType.ID:
+        return None
+    call_info = resolver.method_call_index.get(token.position)
+    if call_info is not None:
+        return pp, resolver, "call", call_info
+    decl_info = resolver.method_decl_index.get(token.position)
+    if decl_info is not None:
+        return pp, resolver, "decl", decl_info
+    return None
+
+
+def _method_fninfo(resolver, cand, name: str):
+    """M13: the fninfo dict an `("impl", T, tr_or_None)` hover/completion
+    candidate refers to -- mirrors `Resolver._fninfo_for_impl_candidate`
+    (kept as a separate, LSP-side copy since it tolerates a missing entry,
+    returning `None` instead of raising, for defensive rendering)."""
+    _kind, type_name, trait_name = cand
+    entry = resolver.impls.get(type_name, {"inherent": {}, "traits": {}})
+    if trait_name is None:
+        return entry["inherent"].get(name)
+    return entry["traits"].get(trait_name, {}).get(name)
+
+
+def _method_signature_lines(resolver, cand, name: str) -> str:
+    """M13: one-line description of a method/static-fn hover/completion
+    candidate -- `("impl", T, tr_or_None)` or `("trait", Tr)` -- see the
+    M13 spec's 'LSP' section."""
+    if cand[0] == "impl":
+        _kind, type_name, trait_name = cand
+        fninfo = _method_fninfo(resolver, cand, name)
+        params = ", ".join(fninfo["param_names"]) if fninfo else ""
+        if trait_name is None:
+            return f"impl {type_name}: fn {name}({params})"
+        line = f"impl {trait_name} for {type_name}: fn {name}({params})"
+        if fninfo and fninfo.get("native"):
+            line += "  # built-in"
+        return line
+    _kind, trait_name = cand
+    info = resolver.trait_decls.get(trait_name, {}).get(name, {})
+    params = ", ".join(info.get("params", []))
+    line = f"trait {trait_name}: fn {name}({params})"
+    if info.get("default_slot") is not None:
+        line += " { ... }"
+    return line
+
+
+def _method_is_method(resolver, cand, name: str) -> bool:
+    """M13: whether `cand` (see `_method_signature_lines`) is a method
+    (`value.m()`) rather than a static function (`Type.f()`)."""
+    if cand[0] == "impl":
+        fninfo = _method_fninfo(resolver, cand, name)
+        return bool(fninfo and fninfo.get("is_method"))
+    _kind, trait_name = cand
+    info = resolver.trait_decls.get(trait_name, {}).get(name, {})
+    return bool(info.get("is_method"))
+
+
+def _method_decl_position(resolver, cand, name: str) -> Optional[int]:
+    """M13: the declaration position `cand` (see `_method_signature_lines`)
+    refers to -- `None` for a native (no user-written declaration)."""
+    if cand[0] == "impl":
+        fninfo = _method_fninfo(resolver, cand, name)
+        return fninfo.get("decl_position") if fninfo else None
+    _kind, trait_name = cand
+    info = resolver.trait_decls.get(trait_name, {}).get(name, {})
+    return info.get("decl_position")
+
+
+def _method_hover_value(pp, resolver, kind: str, payload, text: str) -> str:
+    """M13: render hover markdown for a method/static-fn call site or
+    declaration -- see `_method_at_position` and the M13 spec's 'LSP'
+    section."""
+    if kind == "decl":
+        entry_kind = payload[0]
+        if entry_kind == "impl":
+            _kind, type_name, trait_name, method_name = payload
+            header = f"**method** `{method_name}` of `{type_name}`"
+            if trait_name is not None:
+                header += f" -- implements `{trait_name}.{method_name}`"
+            sig = _method_signature_lines(resolver, ("impl", type_name, trait_name), method_name)
+            return f"{header}\n\n```mah\n{sig}\n```"
+        # entry_kind == "trait"
+        _kind, trait_name, method_name = payload
+        info = resolver.trait_decls.get(trait_name, {}).get(method_name, {})
+        req = "required" if info.get("default_slot") is None else "default"
+        header = f"**trait method** `{trait_name}.{method_name}` ({req})"
+        sig = _method_signature_lines(resolver, ("trait", trait_name), method_name)
+        value = f"{header}\n\n```mah\n{sig}\n```"
+        implementers = sorted(
+            type_name
+            for type_name, entry in resolver.impls.items()
+            if trait_name in entry["traits"] and _is_user_type_name(resolver, type_name)
+        )
+        if implementers:
+            value += f"\n\nImplemented by: {', '.join(implementers)}"
+        return value
+
+    # kind == "call"
+    info = payload
+    name = info["name"]
+    candidates = info["candidates"]
+    receiver_type = info["receiver_type"]
+
+    if not candidates:
+        if (
+            receiver_type is not None
+            and receiver_type in resolver.struct_decls
+            and name in resolver.struct_decls[receiver_type]
+        ):
+            return f"**field** `{name}` of struct `{receiver_type}` (called as a function)"
+        return f"**method** `{name}`\n\nNo known implementation."
+
+    all_static = all(not _method_is_method(resolver, c, name) for c in candidates)
+    header = f"**function** `{name}`" if all_static else f"**method** `{name}`"
+    if receiver_type is not None:
+        header += f" on `{receiver_type}`"
+
+    shown = candidates[:8]
+    lines = [_method_signature_lines(resolver, c, name) for c in shown]
+    if len(candidates) > 8:
+        lines.append(f"... and {len(candidates) - 8} more")
+    block = "\n".join(lines)
+    prefix = ""
+    if receiver_type is None and len(candidates) >= 2:
+        prefix = "*Receiver type isn't known statically -- possible implementations:*\n\n"
+    value = f"{header}\n\n{prefix}```mah\n{block}\n```"
+
+    if len(candidates) == 1:
+        decl_pos = _method_decl_position(resolver, candidates[0], name)
+        if decl_pos is not None:
+            decl_path, decl_offset = pp.map_to_source(decl_pos)
+            doc_source = text if decl_path == pp.entry_path else pp.files.get(decl_path, "")
+            doc = _leading_doc_comment(doc_source, decl_offset) if doc_source else ""
+            if doc:
+                value += f"\n\n{doc}"
+    return value
+
+
 def _type_hover_value(resolver, kind: str, payload) -> str:
-    """Render hover markdown for a struct/enum/variant -- see
+    """Render hover markdown for a struct/enum/variant/trait -- see
     `_type_symbol_at_position`."""
     def _shape(name: str, fields: list) -> str:
         return name if not fields else f"{name} {{ {', '.join(fields)} }}"
 
+    if kind == "trait":
+        # M12: read straight from `resolver.trait_decls[name]` -- {method
+        # name -> {"params": [...], "is_method": bool, "default_slot": int
+        # | None}} -- one `fn` line per method, with ` { ... }` appended
+        # for a method that has a default body (default_slot is not None).
+        name = payload
+        methods = resolver.trait_decls.get(name, {})
+        lines = [f"trait {name} {{"]
+        for method_name, info in methods.items():
+            params = ", ".join(info["params"])
+            suffix = " { ... }" if info["default_slot"] is not None else ""
+            lines.append(f"\tfn {method_name}({params}){suffix}")
+        lines.append("}")
+        body = "\n".join(lines)
+        return f"**trait** `{name}`\n\n```mah\n{body}\n```"
     if kind == "struct":
         name = payload
         fields = resolver.struct_decls.get(name, [])
@@ -1289,15 +1690,45 @@ def _identifier_length_at(source: str, offset: int) -> int:
     return end - offset
 
 
+def _location_for_combined_pos(pp, text: str, pos: int, fallback_name: str) -> dict:
+    """Build a `{"path", "range"}` go-to-definition location for a
+    combined-text position `pos`. `fallback_name` supplies the span's
+    length when `pos` doesn't sit on a real identifier's first character
+    (via `_identifier_length_at`) -- shouldn't happen for a validly
+    resolved declaration position, but this is a navigation feature, not
+    the compiler itself, so it degrades gracefully. Factored out of what
+    used to be four independent, near-identical copies of this exact
+    "map to source, pick the buffer vs. an imported file's own text,
+    measure the identifier, build the range" dance (the ordinary-symbol,
+    type-name, field-name, and -- M13 -- method-name branches of
+    `get_definition`)."""
+    decl_path, decl_offset = pp.map_to_source(pos)
+    source = text if decl_path == pp.entry_path else pp.files.get(decl_path, "")
+    length = _identifier_length_at(source, decl_offset) or len(fallback_name)
+    if decl_path == pp.entry_path:
+        return {"path": None, "range": make_range(text, decl_offset, decl_offset + length)}
+    # Declaration lives in an inlined import -- still a valid jump for
+    # go-to-definition (unlike rename, which refuses cross-file symbols
+    # outright, see `get_rename_edits`): build the range against that
+    # file's own source text.
+    return {"path": decl_path, "range": make_range(source, decl_offset, decl_offset + length)}
+
+
 def get_definition(
     text: str, line: int, character: int, path: Optional[str] = None
-) -> Optional[dict]:
+) -> Optional[dict] | list[dict]:
     """Resolve the declaration for the variable/parameter/function symbol
     under the cursor, using the resolver's real symbol table.
 
     Returns ``{"path": <abs path or None>, "range": <lsp range>}`` where a
     ``path`` of ``None`` means "the current document" -- the shape
-    `lsp/server.py`'s `_on_textDocument_definition` handler expects.
+    `lsp/server.py`'s `_on_textDocument_definition` handler expects. M13:
+    for a method call site with 2+ candidate implementations (the receiver
+    type isn't known statically -- see `compiler/resolve.py`'s
+    `method_call_index`), this returns a LIST of such dicts instead --
+    `_on_textDocument_definition` responds with a list of LSP Locations in
+    that case.
+
     Covers variables/parameters/function bindings, and (via
     `_type_symbol_at_position`/`type_position_index`) struct/enum type
     names and enum variant names. M11 adds struct/enum *field* names too
@@ -1305,9 +1736,15 @@ def get_definition(
     declarations, literals, and explicit (non-shorthand) patterns -- plain
     field *access* (`p.x`) is still never covered, deliberately (unsound
     without a real type system -- see docs/NEXT_PHASES.md's "Struct/enum/
-    field rename" section). Returns ``None`` when the file doesn't resolve
-    cleanly, the cursor isn't on an identifier, or that identifier never
-    resolved to anything (a keyword, a field-access use, ...).
+    field rename" section). M13 adds *method* names (`_method_at_position`)
+    -- both call sites (jumping to one or every candidate implementation)
+    and declaration sites (only when the declaration itself is an impl
+    method that implements a trait method -- jumps to that trait method's
+    own declaration; a trait's own required/default method, or an impl's
+    own inherent method, has nowhere further to jump). Returns ``None``
+    when the file doesn't resolve cleanly, the cursor isn't on an
+    identifier, or that identifier never resolved to anything (a keyword,
+    a field-access use, ...).
 
     Also handles the cursor sitting on an `import` directive itself -- the
     path string (`import "mathlib"`) or the namespace identifier
@@ -1338,19 +1775,44 @@ def get_definition(
     found = _symbol_at_position(text, line, character, path)
     if found is not None:
         pp, _resolver, symbol = found
-        decl_path, decl_offset = pp.map_to_source(symbol.decl_position)
-        source = text if decl_path == pp.entry_path else pp.files.get(decl_path, "")
-        length = _identifier_length_at(source, decl_offset) or len(symbol.name)
-        if decl_path == pp.entry_path:
-            return {"path": None, "range": make_range(text, decl_offset, decl_offset + length)}
-        # Declaration lives in an inlined import -- still a valid jump for
-        # go-to-definition (unlike rename, which refuses cross-file symbols
-        # outright, see `get_rename_edits`): build the range against that
-        # file's own source text.
-        return {"path": decl_path, "range": make_range(source, decl_offset, decl_offset + length)}
+        return _location_for_combined_pos(pp, text, symbol.decl_position, symbol.name)
 
-    # Not an ordinary variable/function symbol -- try the struct/enum/
-    # variant namespace instead (see `_type_symbol_at_position`).
+    # Not an ordinary variable/function symbol -- try the method-name
+    # namespace next (M13), before the struct/enum/variant/field ones
+    # below (a method name is never also a type/field name).
+    method_found = _method_at_position(text, line, character, path)
+    if method_found is not None:
+        pp, resolver, kind, payload = method_found
+        if kind == "call":
+            name = payload["name"]
+            positions = []
+            seen: set = set()
+            for cand in payload["candidates"]:
+                decl_pos = _method_decl_position(resolver, cand, name)
+                if decl_pos is None or decl_pos in seen:
+                    continue
+                seen.add(decl_pos)
+                positions.append(decl_pos)
+            if len(positions) == 1:
+                return _location_for_combined_pos(pp, text, positions[0], name)
+            if len(positions) >= 2:
+                return [_location_for_combined_pos(pp, text, pos, name) for pos in positions]
+            # 0 decl positions (every candidate is native, or there are no
+            # candidates at all) -- fall through to the branches below,
+            # which will find nothing for a method-name token either, so
+            # this ends up returning None, same as "not found".
+        else:
+            entry_kind = payload[0]
+            if entry_kind == "impl":
+                _kind, _type_name, trait_name, method_name = payload
+                if trait_name is not None:
+                    decl_pos = resolver.trait_decls.get(trait_name, {}).get(method_name, {}).get("decl_position")
+                    if decl_pos is not None:
+                        return _location_for_combined_pos(pp, text, decl_pos, method_name)
+            return None
+
+    # Not a type/variant name either -- try the struct/enum/variant
+    # namespace instead (see `_type_symbol_at_position`).
     type_found = _type_symbol_at_position(text, line, character, path)
     if type_found is not None:
         resolver, kind, payload = type_found
@@ -1364,18 +1826,17 @@ def get_definition(
         elif kind == "enum":
             decl_pos = resolver.enum_decl_positions.get(payload)
             name_for_fallback_length = payload
+        elif kind == "trait":
+            # M12: fallback-length name = payload (the trait's own name).
+            decl_pos = resolver.trait_decl_positions.get(payload)
+            name_for_fallback_length = payload
         else:
             enum_name, variant_name = payload
             decl_pos = resolver.enum_variant_decl_positions.get(enum_name, {}).get(variant_name)
             name_for_fallback_length = variant_name
         if decl_pos is None:
             return None
-        decl_path, decl_offset = pp.map_to_source(decl_pos)
-        source = text if decl_path == pp.entry_path else pp.files.get(decl_path, "")
-        length = _identifier_length_at(source, decl_offset) or len(name_for_fallback_length)
-        if decl_path == pp.entry_path:
-            return {"path": None, "range": make_range(text, decl_offset, decl_offset + length)}
-        return {"path": decl_path, "range": make_range(source, decl_offset, decl_offset + length)}
+        return _location_for_combined_pos(pp, text, decl_pos, name_for_fallback_length)
 
     # Not a type/variant name either -- try the struct/enum FIELD namespace
     # (M11). Field declarations are always single-file today (structs/enums
@@ -1399,12 +1860,7 @@ def get_definition(
     if decl_pos is None:
         # Shouldn't happen for a validly-resolved program -- defensive only.
         return None
-    decl_path, decl_offset = pp.map_to_source(decl_pos)
-    source = text if decl_path == pp.entry_path else pp.files.get(decl_path, "")
-    length = _identifier_length_at(source, decl_offset) or len(field_name)
-    if decl_path == pp.entry_path:
-        return {"path": None, "range": make_range(text, decl_offset, decl_offset + length)}
-    return {"path": decl_path, "range": make_range(source, decl_offset, decl_offset + length)}
+    return _location_for_combined_pos(pp, text, decl_pos, field_name)
 
 
 def _is_valid_mah_identifier(name: str) -> bool:

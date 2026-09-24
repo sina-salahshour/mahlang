@@ -87,7 +87,7 @@ def _run(buf, stdin: str) -> str:
     sys.stdin = io.StringIO(stdin)
     try:
         with contextlib.redirect_stdout(out):
-            run_code(buf.code[:400], buf.global_slot_count)
+            run_code(buf.code, buf.global_slot_count)
     finally:
         sys.stdin = old_stdin
     return out.getvalue()

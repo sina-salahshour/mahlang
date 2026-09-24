@@ -35,7 +35,7 @@ def _dump_cell(value) -> str:
 
 def print_code_block(buf: CodeBuffer, output_path: str | None = None):
     code_block = "\n"
-    for index, code in enumerate(buf.code[:400]):
+    for index, code in enumerate(buf.code):
         if not code:
             break
         code_block += f"{index}:\t{'|'.join(map(_dump_cell, code))}\n"
@@ -197,7 +197,7 @@ def main(argv: list[str] | None = None) -> int:
             print_code_block(buf, output_path=args.output)
         elif args.command == "run":
             buf = generate_code(file_str, pp)
-            run_code(buf.code[:400], buf.global_slot_count)
+            run_code(buf.code, buf.global_slot_count)
     except Exception as e:
         (message, *_) = e.args
         message = demangle_message(message)
