@@ -645,5 +645,32 @@ class M17PreludeLspTests(unittest.TestCase):
         self.assertTrue(location["path"].endswith("prelude.mh"))
 
 
+class CollectionMethodTests(unittest.TestCase):
+    """M19: Vector/Map native methods are known to hover and completion,
+    typed from the literal a variable was bound to."""
+
+    def _complete(self, src):
+        line = src.count("\n")
+        col = len(src.split("\n")[-1])
+        return {item["label"] for item in analysis.get_completions(src, None, line, col)}
+
+    def test_vector_completion(self):
+        labels = self._complete("let v = [1]\nv.")
+        self.assertTrue({"len", "push", "pop", "push_start", "pop_start", "copy", "index"} <= labels)
+        self.assertNotIn("keys", labels)
+
+    def test_map_completion_includes_prelude_methods(self):
+        labels = self._complete('let m = ["a": 1]\nfor let k in m { }\nm.')
+        self.assertTrue({"len", "keys", "values", "entries", "has", "remove", "copy", "map"} <= labels)
+        self.assertNotIn("push", labels)
+
+    def test_hover_on_native_method(self):
+        src = "let v = [1]\nv.push(2)\n"
+        line, col = _find(src, "push")
+        hover = analysis.get_hover(src, line, col)
+        self.assertIn("`push` on `Vector`", hover["contents"]["value"])
+        self.assertIn("fn push(self, value)", hover["contents"]["value"])
+
+
 if __name__ == "__main__":
     unittest.main()

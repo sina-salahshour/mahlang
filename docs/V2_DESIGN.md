@@ -2604,6 +2604,77 @@ node that resolved to it. Then:
       go-to-definition on loop bindings, and `examples/loops.mh`. 617
       tests green.
 
+20. **M19 — `Vector` and `Map`, `x[k]` indexing. ✅ Landed.**
+
+    Decisions taken with the user up front: Swift-style literals (`[1, 2]`,
+    `["a": 1]`, `[]`, `[:]`); `keys()`/`values()`/`entries()` are methods;
+    and reading a missing key or index, or `pop` on an empty Vector, gives
+    plain `none` rather than an error or an Option.
+
+    - **Values**: two new built-in types, `Vector` (`VectorValue`, a Python
+      list) and `Map` (`MapValue`, a dict keyed by `map_key(k)` =
+      `(type name, value)`, so `true` and `1` stay different keys while
+      `1` and `1.0` are the same one). Both are mutable references, `==`
+      by identity, always truthy. Map keys are Strings, Numbers, or Bools
+      only; anything else is a runtime error.
+    - **Syntax**: `[`/`]` tokens; `VectorLit`/`MapLit` in `_parse_primary`
+      (the first item's `:` decides which), and `Index` as a postfix in
+      `_parse_postfix_from`, also an assignment target. An index's `[` must
+      be on the same line as what it indexes, so a line starting with a
+      literal stays a new statement (the parser now remembers the previous
+      token for this, `_on_same_line`). Struct literals are allowed inside
+      brackets, as in parentheses.
+    - **Traits**: `Index { fn index(self, key) }` and `IndexAssign { fn
+      index_assign(self, key, value) }` are system traits, like
+      `Printable`. `x[k]` / `x[k] = v` compile to trait-restricted
+      `callmethod`s, so user types can implement them. Vector/Map
+      implement them natively. `SYSTEM_TRAIT_NATIVE_TYPES` now records
+      which built-in types implement which system trait (previously all of
+      them implemented all of them, which was only true of `Printable`).
+    - **Negative indices** count from the end, like Python (`v[-1]` is
+      the last item), for both reads and writes — added right after
+      landing, at the user's request.
+    - **Slicing** (also a follow-up request): `v[a..b]`/`v[a..=b]`/
+      `v[a..]`/`v[..b]` return a new Vector with Python's slice rules
+      (negative bounds from the end, out-of-range bounds clamped, never an
+      error). The VM's native `index` recognizes the prelude's
+      `Range`/`FromRange`/`ToRange` structs by type name, the first place
+      the VM knows about a prelude type; it's specified in
+      `docs/MAHC_FORMAT.md` §6.9 so other VMs do the same. Assigning to a
+      slice is a runtime error.
+    - **`copy(deep = false)`** on Vector and Map (follow-up requests): a
+      native shallow copy, or with `deep: true` a copy of every Vector/Map/
+      struct/enum reachable from it (a memo keeps shared objects shared
+      and makes cycles terminate). This needed native methods with
+      optional, keyword-passable parameters: `NativeMethod.optional`,
+      bound by the same `_bind_params` as a Mah function with defaults
+      (`docs/MAHC_FORMAT.md` §6.7).
+    - **`reduce()` with no arguments** collects any Iterable into a new
+      Vector (prelude: `f` defaults to `none`, then `__Iter.collect`).
+      `reduce(initial: x)` without a function is an error (via the
+      prelude's missing-method stopgap, like `require_number`).
+    - **Native methods**: Vector `len`/`push`/`pop`/`push_start`/
+      `pop_start`, Map `len`/`keys`/`values`/`has`/`remove`. `keys()`/
+      `values()` return new Vectors (snapshots).
+    - **Prelude**: `impl Iterable for Vector` (a live index-based
+      `VectorIterator`), `impl Iterable for Map` (iterates its keys via the
+      `keys()` snapshot, so removing while looping is safe), and `impl Map
+      { fn entries(self) }` returning a Vector of `MapEntry { key, value }`.
+    - **Bytecode 1.3**: `vector`/`map` opcodes (0x38/0x39), the new value
+      types, native methods, and native Index/IndexAssign targets —
+      `docs/MAHC_FORMAT.md` §4.6/§5/§6.6/§6.7/§6.9/§7.
+    - **Editors**: tree-sitter `vector_literal`/`map_literal`/`map_pair`/
+      `index_expr` (no new conflicts), bracket punctuation, and the new
+      built-in type/trait names in both highlighters. The LSP needed no
+      changes beyond the resolver: literals give a `Vector`/`Map` type
+      hint, so `v.` completes the right methods and hover describes them.
+    - **Intended test changes**: the bytecode-version assertions moved from
+      minor 2 to 3, and a rename test that declared its own `struct
+      Vector` now uses `Vec2`, since `Vector` is a built-in type name.
+    - Tests: `tests/test_collections.py` (parsing, Vector/Map behavior,
+      user `Index` impls, errors, bytecode gating), LSP completion/hover,
+      and `examples/collections.mh`. 670 tests green.
+
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
 it** (`make test` must stay green) — see `docs/TESTING.md` for where
@@ -2615,7 +2686,7 @@ M1 was built and documented that way.
 
 ## Status
 
-M0 through M18 are all landed (see their entries above for what changed and
+M0 through M19 are all landed (see their entries above for what changed and
 each milestone's deliberate deviations/simplifications). `docs/NEXT_PHASES.md`
 captures what's deliberately deferred still (match guards, arrays/lists,
 generics, the type system -- and, as of M11, sound field-*access*
@@ -2659,6 +2730,7 @@ compiler's output a portable, versioned binary format (`.mahc`, see
 default parameter values and keyword arguments (bytecode 1.1); M17 added
 ranges, range patterns, iterators (the Mah-source prelude), and
 `!`/`<=`/`>=` (bytecode 1.2); M18 added `for` loops, `break value`, and
-loops as expressions (no bytecode change). All
-planned milestones (M0–M18) are now complete; see `docs/NEXT_PHASES.md`
+loops as expressions (no bytecode change); M19 added `Vector`, `Map`, and
+`x[k]` indexing (bytecode 1.3). All
+planned milestones (M0–M19) are now complete; see `docs/NEXT_PHASES.md`
 for what's next.

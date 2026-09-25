@@ -119,7 +119,7 @@
       "patterns": [
         {
           "name": "support.type.builtin.mah",
-          "match": "\\b(Number|String|Bool|Function|Option|Promise|Printable)\\b"
+          "match": "\\b(Number|String|Bool|Function|Option|Promise|Vector|Map|Printable|Index|IndexAssign)\\b"
         },
         {
           "name": "entity.name.type.mah",
@@ -128,11 +128,11 @@
       ]
     },
     "builtin-types": {
-      "comment": "Built-in type names (`Number`, `String`, `Bool`, `Function`, `Option`, `Promise`) and the built-in `Printable` trait, wherever they appear as a bare identifier outside an impl header (which `#trait-impl-decl` already handles via `#builtin-type-name`).",
+      "comment": "Built-in type names (`Number`, `String`, `Bool`, `Function`, `Option`, `Promise`, `Vector`, `Map`) and the built-in `Printable`/`Index`/`IndexAssign` traits, wherever they appear as a bare identifier outside an impl header (which `#trait-impl-decl` already handles via `#builtin-type-name`).",
       "patterns": [
         {
           "name": "support.type.builtin.mah",
-          "match": "\\b(Number|String|Bool|Function|Option|Promise|Printable)\\b"
+          "match": "\\b(Number|String|Bool|Function|Option|Promise|Vector|Map|Printable|Index|IndexAssign)\\b"
         }
       ]
     },

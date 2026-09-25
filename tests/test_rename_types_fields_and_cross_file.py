@@ -147,9 +147,9 @@ class StructFieldRenameTests(unittest.TestCase):
     def test_rename_struct_field_does_not_touch_unrelated_struct_with_same_field_name(self):
         text = (
             "struct Point { x, y }\n"
-            "struct Vector { x, y }\n"
+            "struct Vec2 { x, y }\n"
             "let p = Point { x: 1, y: 2 }\n"
-            "let v = Vector { x: 3, y: 4 }\n"
+            "let v = Vec2 { x: 3, y: 4 }\n"
             "match p { Point { x: px, y: py } => { print(px) } }\n"
         )
         decl_offset = text.index("x")  # the `x` in `struct Point { x, y }`
@@ -157,14 +157,14 @@ class StructFieldRenameTests(unittest.TestCase):
         self.assertIsNotNone(result)
         edits = _only_edits(result)
         # Point's field decl + Point-literal's `x:` label + Point-pattern's
-        # explicit `x:` label = 3 -- Vector's own `x` must be untouched.
+        # explicit `x:` label = 3 -- Vec2's own `x` must be untouched.
         self.assertEqual(len(edits), 3)
         self.assertTrue(all(e["newText"] == "px_coord" for e in edits))
         applied = _apply_edits(text, edits)
         self.assertIn("struct Point { px_coord, y }", applied)
-        self.assertIn("struct Vector { x, y }", applied)  # untouched
+        self.assertIn("struct Vec2 { x, y }", applied)  # untouched
         self.assertIn("Point { px_coord: 1, y: 2 }", applied)
-        self.assertIn("Vector { x: 3, y: 4 }", applied)  # untouched
+        self.assertIn("Vec2 { x: 3, y: 4 }", applied)  # untouched
         self.assertIn("Point { px_coord: px, y: py }", applied)
 
 

@@ -82,9 +82,12 @@ the same disambiguation rule as enum unit variants.
 ## System traits
 
 A system trait is declared by the runtime, not by user code
-(`runtime_values.SYSTEM_TRAITS`). Every built-in type implements every
-system trait **natively** (Python functions in `code_interpreter.py`'s
-`NATIVE_TRAIT_METHODS`), and user types opt in with a normal `impl`.
+(`runtime_values.SYSTEM_TRAITS`). Built-in types implement them
+**natively** (entries in the VM's initial method table, in
+`code_interpreter.py`), and user types opt in with a normal `impl`. Every
+built-in type is `Printable`; since M19 not every built-in type implements
+every system trait (`runtime_values.SYSTEM_TRAIT_NATIVE_TYPES` says which
+do, and the resolver seeds only those impls).
 Runtime features that need behavior from a value go through the trait
 rather than hard-coding per-type logic.
 
@@ -166,6 +169,27 @@ while true {                            # `continue` jumps here
   VM-side fast path for `RangeIterator.next` is the obvious first
   optimization.
 - `for` is shared with `impl Tr for T`; `in` became a reserved keyword in M18.
+
+### `Index` / `IndexAssign` (M19)
+
+```mah
+trait Index { fn index(self, key) }                     # x[key]
+trait IndexAssign { fn index_assign(self, key, value) } # x[key] = value
+```
+
+Runtime-declared, like `Printable`: `Vector` and `Map` implement both
+natively (see `docs/MAHC_FORMAT.md` §6.9), and any user type can implement
+either one. The compiler turns `x[k]` into a trait-restricted `callmethod`
+(`Index.index(x, k)`), and `x[k] = v` into `IndexAssign.index_assign(x, k,
+v)`, so indexing a value that doesn't implement them fails with
+"'Number' does not implement trait 'Index'". They're separate traits
+because read-only indexable types are useful (a user `Grid` view, and
+later Strings).
+
+Vector/Map *iteration* isn't native: the prelude has `impl Iterable for
+Vector` (a live `VectorIterator` over the index) and `impl Iterable for
+Map` (its `keys()` snapshot), plus `Map.entries()` returning `MapEntry {
+key, value }` structs, all written in Mah on top of the native methods.
 
 Other system traits likely to follow the same pattern: `Eq` (for `==` on
 structs), `Ord` (`<`/`>`), `Awaitable`.

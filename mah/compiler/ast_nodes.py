@@ -527,6 +527,32 @@ class ImplDecl:
 
 
 @dataclass
+class VectorLit:
+    """M19: `[a, b, c]` (`[]` is an empty Vector)."""
+
+    items: list
+    position: int  # the `[`
+
+
+@dataclass
+class MapLit:
+    """M19: `[k1: v1, k2: v2]` (`[:]` is an empty Map)."""
+
+    pairs: list  # list[tuple[key_expr, value_expr]]
+    position: int  # the `[`
+
+
+@dataclass
+class Index:
+    """M19: `obj[key]` -- `Index.index(obj, key)`; as an assignment target
+    (`obj[key] = v`), `IndexAssign.index_assign(obj, key, v)`."""
+
+    obj: object
+    key: object
+    position: int  # the `[`
+
+
+@dataclass
 class MethodCall:
     obj: object  # receiver expression, or an Ident naming a type/trait
     method: str

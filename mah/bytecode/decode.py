@@ -438,6 +438,10 @@ def _parse_code(payload: bytes, ctx: dict) -> list:
                 raise MahcFormatError(
                     f"'matchenum' at instruction {i}: variant index {variant} out of range for type {t}"
                 )
+        elif op == "map":
+            items, _dest = instr.args
+            if len(items) % 2 != 0:
+                raise MahcFormatError(f"'map' at instruction {i}: needs an even number of addresses, got {len(items)}")
         elif op == "matchrange":
             _value, lo, hi, _incl, _dest = instr.args
             if lo is None and hi is None:

@@ -210,6 +210,9 @@ from .ast_nodes import (
     ErrorNode,
     ExprStmt,
     ForStmt,
+    Index,
+    MapLit,
+    VectorLit,
     FieldAccess,
     FnExpr,
     Ident,
@@ -495,6 +498,14 @@ class Codegen:
         elif isinstance(target, FieldAccess):
             obj_addr = self.gen_expr(target.obj)
             self.buf.emit(("setfield", obj_addr, target.field, src_addr))
+        elif isinstance(target, Index):
+            # M19: `obj[key] = v` is `IndexAssign.index_assign(obj, key, v)`.
+            obj_addr = self.gen_expr(target.obj)
+            key_addr = self.gen_expr(target.key)
+            self.buf.emit(
+                ("callmethod", obj_addr, ("index_assign", (key_addr, src_addr), "IndexAssign", target.position), None)
+            )
+            self.buf.emit(("retval", None, None, self._temp()))
         else:
             raise AssertionError(f"unhandled assignment target {target!r}")
 
@@ -870,6 +881,29 @@ class Codegen:
         if isinstance(expr, WhileStmt):
             dest = self._temp()
             self._gen_while_into(expr, dest)
+            return dest
+        if isinstance(expr, VectorLit):
+            # M19: `vector` -- docs/MAHC_FORMAT.md #6.9.
+            items = tuple(self.gen_expr(item) for item in expr.items)
+            dest = self._temp()
+            self.buf.emit(("vector", items, None, dest))
+            return dest
+        if isinstance(expr, MapLit):
+            # M19: `map` takes the keys and values interleaved, k1 v1 k2 v2.
+            flat = []
+            for key, value in expr.pairs:
+                flat.append(self.gen_expr(key))
+                flat.append(self.gen_expr(value))
+            dest = self._temp()
+            self.buf.emit(("map", tuple(flat), None, dest))
+            return dest
+        if isinstance(expr, Index):
+            # M19: `obj[key]` is `Index.index(obj, key)`.
+            obj_addr = self.gen_expr(expr.obj)
+            key_addr = self.gen_expr(expr.key)
+            dest = self._temp()
+            self.buf.emit(("callmethod", obj_addr, ("index", (key_addr,), "Index", expr.position), None))
+            self.buf.emit(("retval", None, None, dest))
             return dest
         if isinstance(expr, ForStmt):
             dest = self._temp()

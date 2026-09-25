@@ -289,6 +289,9 @@ class _Lowerer:
             values = tuple(pairs_dict[f] for f in declared)
             n = self._variant_index(type_name, variant)
             return Instr("enum", (t, n, values, a3))
+        if op in ("vector", "map"):
+            # M19: `a1` is the item (or interleaved key/value) address list.
+            return Instr(op, (a1, a3))
         if op == "getfield":
             return Instr("getfield", (a1, self.intern_str(a2), a3))
         if op == "setfield":

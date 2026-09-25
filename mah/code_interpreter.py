@@ -62,10 +62,13 @@ from .runtime_values import (
     EnumInstance,
     Frame,
     MahRuntimeError,
+    MapValue,
     NONE_VALUE,
     PromiseInstance,
     StructInstance,
     Task,
+    VectorValue,
+    map_key,
     type_name_of,
 )
 
@@ -107,6 +110,10 @@ class NativeMethod(NamedTuple):
 
     arity: int
     impl: object
+    # M19 (1.3): optional parameters after the `arity` required ones --
+    # `((name, default), ...)`. They can be passed positionally or by
+    # keyword (`v.copy(deep: true)`); the required ones stay positional-only.
+    optional: tuple = ()
 
 
 def _bind_params(param_count: int, params, values: list, kwargs: list, label: str) -> list:
@@ -178,6 +185,16 @@ def _bind_method_call(recv, fn, include_self: bool, name: str, values: list, kwa
     # docs/MAHC_FORMAT.md #6.7). M17: a native's arity (excluding the
     # receiver) may be nonzero (`String.char_at`'s `i`), so this validates
     # against `fn.arity` instead of hardcoding 0.
+    if isinstance(fn, NativeMethod) and fn.optional:
+        # Same binding rules (and messages) as a Mah function whose last
+        # parameters have defaults. Required natives' parameters have no
+        # names, so they get unmatchable placeholder names.
+        params = [(f"#{i}", False) for i in range(fn.arity)] + [(name, True) for name, _d in fn.optional]
+        bound = _bind_params(len(params), params, values, kwargs, label)
+        for i, (_name, default) in enumerate(fn.optional):
+            if bound[fn.arity + i] is ABSENT:
+                bound[fn.arity + i] = default
+        return [recv] + bound
     if kwargs:
         raise MahRuntimeError(f"{label} got an unexpected keyword argument '{kwargs[0][0]}'")
     arity = fn.arity if isinstance(fn, NativeMethod) else 0
@@ -371,6 +388,10 @@ def _link_instr(instr, strings: list, constants: list, types: list, natives: lis
     if op == "enum":
         t_idx, variant_idx, values, dest = a
         return ("enum", types[t_idx], variant_idx, values, dest)
+    if op == "vector":
+        return ("vector", a[0], a[1])
+    if op == "map":
+        return ("map", a[0], a[1])
     if op == "getfield":
         obj, field_idx, dest = a
         return ("getfield", obj, strings[field_idx], dest)
@@ -520,6 +541,170 @@ def _string_char_at(s: str, i: Any) -> str:
     return s[int(i)]
 
 
+# -- M19: Vector / Map natives (docs/MAHC_FORMAT.md #6.7/#6.9) ----------------
+
+def _vector_position(vec: VectorValue, i: Any) -> int | None:
+    """The list position a Vector index names, or `None` when it names no
+    item (fractional, or outside `-len <= i < len`). Negative indices count
+    from the end, like Python's: `-1` is the last item. A non-Number index
+    is a runtime error rather than `None`: it's always a bug."""
+    if not _is_number(i):
+        raise MahRuntimeError(f"Vector index must be a Number, got {type_name_of(i)}")
+    if i != i.to_integral_value():
+        return None
+    n = len(vec.items)
+    pos = int(i)
+    if pos < 0:
+        pos += n
+    if pos < 0 or pos >= n:
+        return None
+    return pos
+
+
+# The prelude's range structs (`a..b`, `a..=b`, `a..`, `..b`, `..=b`); a
+# Vector indexed by one of them returns a slice.
+_RANGE_TYPE_NAMES = ("Range", "FromRange", "ToRange")
+
+
+def _slice_bound(v: Any) -> int:
+    if not _is_number(v) or v != v.to_integral_value():
+        shown = _format_number(v) if _is_number(v) else type_name_of(v)
+        raise MahRuntimeError(f"Vector slice bounds must be integer Numbers, got {shown}")
+    return int(v)
+
+
+def _vector_slice(vec: VectorValue, r: StructInstance) -> VectorValue:
+    """`v[a..b]` and friends -- docs/MAHC_FORMAT.md #6.9. Python's slice
+    rules: a negative bound counts from the end, then both bounds are
+    clamped into `0..len`, so a range reaching past either end just gives
+    the items that exist (never an error). An inclusive end includes the
+    item it names. Always a new Vector."""
+    n = len(vec.items)
+    fields = r.fields
+    start = _slice_bound(fields["start"]) if "start" in fields else 0
+    if start < 0:
+        start += n
+    if "end" in fields:
+        stop = _slice_bound(fields["end"])
+        if stop < 0:
+            stop += n
+        if fields.get("inclusive") is True:
+            stop += 1
+    else:
+        stop = n
+    start = min(max(start, 0), n)
+    stop = min(max(stop, 0), n)
+    return VectorValue(vec.items[start:stop])
+
+
+def _vector_index(vec: VectorValue, i: Any) -> Any:
+    if isinstance(i, StructInstance) and i.type_name in _RANGE_TYPE_NAMES:
+        return _vector_slice(vec, i)
+    pos = _vector_position(vec, i)
+    return NONE_VALUE if pos is None else vec.items[pos]
+
+
+def _vector_index_assign(vec: VectorValue, i: Any, value: Any) -> Any:
+    if isinstance(i, StructInstance) and i.type_name in _RANGE_TYPE_NAMES:
+        raise MahRuntimeError("Can't assign to a Vector slice (v[a..b] = ...); assign items one at a time")
+    pos = _vector_position(vec, i)
+    if pos is None:
+        raise MahRuntimeError(
+            f"Vector index {_format_number(i)} is out of range for a Vector of length {len(vec.items)} "
+            f"(use push to add items)"
+        )
+    vec.items[pos] = value
+    return NONE_VALUE
+
+
+def _vector_push(vec: VectorValue, value: Any) -> Any:
+    vec.items.append(value)
+    return NONE_VALUE
+
+
+def _vector_push_start(vec: VectorValue, value: Any) -> Any:
+    vec.items.insert(0, value)
+    return NONE_VALUE
+
+
+def _vector_pop(vec: VectorValue) -> Any:
+    return vec.items.pop() if vec.items else NONE_VALUE
+
+
+def _vector_pop_start(vec: VectorValue) -> Any:
+    return vec.items.pop(0) if vec.items else NONE_VALUE
+
+
+def _deep_copy(value: Any, memo: dict) -> Any:
+    """`copy(deep: true)`: copy Vectors, Maps, and struct/enum instances all
+    the way down. Everything else is shared: immutable values, functions,
+    `none` (a single shared value), and Promises (scheduler state). `memo`
+    maps already-copied objects to their copies, so shared sub-objects stay
+    shared in the copy and cycles terminate -- like Python's deepcopy."""
+    if value is NONE_VALUE or isinstance(value, PromiseInstance):
+        return value
+    if isinstance(value, (VectorValue, MapValue, StructInstance, EnumInstance)):
+        done = memo.get(id(value))
+        if done is not None:
+            return done
+    if isinstance(value, VectorValue):
+        out = VectorValue([])
+        memo[id(value)] = out
+        out.items = [_deep_copy(v, memo) for v in value.items]
+        return out
+    if isinstance(value, MapValue):
+        out = MapValue()
+        memo[id(value)] = out
+        # keys are Strings/Numbers/Bools: immutable, never copied
+        out.entries = {k: (key, _deep_copy(v, memo)) for k, (key, v) in value.entries.items()}
+        return out
+    if isinstance(value, StructInstance):
+        out = StructInstance(value.type_name, {})
+        memo[id(value)] = out
+        out.fields = {k: _deep_copy(v, memo) for k, v in value.fields.items()}
+        return out
+    if isinstance(value, EnumInstance):
+        out = EnumInstance(value.type_name, value.variant, {})
+        memo[id(value)] = out
+        out.fields = {k: _deep_copy(v, memo) for k, v in value.fields.items()}
+        return out
+    return value
+
+
+def _collection_copy(value: Any, deep: Any) -> Any:
+    if truthy(deep):
+        return _deep_copy(value, {})
+    if isinstance(value, VectorValue):
+        return VectorValue(list(value.items))
+    return MapValue(dict(value.entries))
+
+
+def _map_key_of(key: Any) -> tuple:
+    k = map_key(key)
+    if k is None:
+        raise MahRuntimeError(f"Map keys must be a String, Number, or Bool, got {type_name_of(key)}")
+    return k
+
+
+def _map_index(m: MapValue, key: Any) -> Any:
+    entry = m.entries.get(_map_key_of(key))
+    return NONE_VALUE if entry is None else entry[1]
+
+
+def _map_index_assign(m: MapValue, key: Any, value: Any) -> Any:
+    k = _map_key_of(key)
+    old = m.entries.get(k)
+    # an existing key keeps its original spelling (`1` stays `1` after
+    # `m[1.0] = ...`) and its position in insertion order
+    m.entries[k] = (key if old is None else old[0], value)
+    return NONE_VALUE
+
+
+def _map_remove(m: MapValue, key: Any) -> Any:
+    entry = m.entries.pop(_map_key_of(key), None)
+    return NONE_VALUE if entry is None else entry[1]
+
+
 def _format_value(val: Any, recurse) -> str:
     """Structural (non-`Printable`-aware) formatting -- `recurse` is called
     for every nested value (an enum payload, a struct field) so `to_str`
@@ -540,6 +725,12 @@ def _format_value(val: Any, recurse) -> str:
     if isinstance(val, StructInstance):
         inner = ", ".join(f"{k}: {recurse(v)}" for k, v in val.fields.items())
         return f"{val.type_name} {{ {inner} }}"
+    if isinstance(val, VectorValue):
+        return "[" + ", ".join(recurse(v) for v in val.items) + "]"
+    if isinstance(val, MapValue):
+        if not val.entries:
+            return "[:]"
+        return "[" + ", ".join(f"{recurse(k)}: {recurse(v)}" for k, v in val.entries.values()) + "]"
     if isinstance(val, Decimal):
         return _format_number(val)
     if isinstance(val, str):
@@ -632,6 +823,37 @@ def _execute(linked: LinkedProgram) -> None:
         NativeMethod(0, lambda fn: Decimal(fn.param_count)),
         True,
     )
+    # M19 (1.3): Vector/Map native inherent methods and their native
+    # Index/IndexAssign impls.
+    for (type_name, method_name), native in {
+        ("Vector", "len"): NativeMethod(0, lambda v: Decimal(len(v.items))),
+        ("Vector", "push"): NativeMethod(1, _vector_push),
+        ("Vector", "pop"): NativeMethod(0, _vector_pop),
+        ("Vector", "push_start"): NativeMethod(1, _vector_push_start),
+        ("Vector", "pop_start"): NativeMethod(0, _vector_pop_start),
+        ("Vector", "copy"): NativeMethod(0, _collection_copy, (("deep", False),)),
+        ("Map", "len"): NativeMethod(0, lambda m: Decimal(len(m.entries))),
+        ("Map", "keys"): NativeMethod(0, lambda m: VectorValue([k for k, _v in m.entries.values()])),
+        ("Map", "values"): NativeMethod(0, lambda m: VectorValue([v for _k, v in m.entries.values()])),
+        ("Map", "has"): NativeMethod(1, lambda m, key: _map_key_of(key) in m.entries),
+        ("Map", "remove"): NativeMethod(1, _map_remove),
+        ("Map", "copy"): NativeMethod(0, _collection_copy, (("deep", False),)),
+    }.items():
+        method_table.setdefault((type_name, method_name), {"inherent": None, "traits": {}})["inherent"] = (
+            native,
+            True,
+        )
+    for type_name, index, index_assign in (
+        ("Vector", _vector_index, _vector_index_assign),
+        ("Map", _map_index, _map_index_assign),
+    ):
+        method_table.setdefault((type_name, "index"), {"inherent": None, "traits": {}})["traits"]["Index"] = (
+            NativeMethod(1, index),
+            True,
+        )
+        method_table.setdefault((type_name, "index_assign"), {"inherent": None, "traits": {}})["traits"][
+            "IndexAssign"
+        ] = (NativeMethod(2, index_assign), True)
 
     ctx = NativeContext(to_string=lambda v: to_str(v), schedule_timer=lambda secs, p: schedule_timer(secs, p))
 
@@ -934,6 +1156,13 @@ def _execute(linked: LinkedProgram) -> None:
                 else:
                     fields = {name: _read(frame, addr) for name, addr in zip(variant_fields, values)}
                     _write(frame, dest, EnumInstance(type_info.name, variant_name, fields))
+            case ("vector", item_addrs, dest):
+                _write(frame, dest, VectorValue([_read(frame, a) for a in item_addrs]))
+            case ("map", pair_addrs, dest):
+                m = MapValue()
+                for j in range(0, len(pair_addrs), 2):
+                    _map_index_assign(m, _read(frame, pair_addrs[j]), _read(frame, pair_addrs[j + 1]))
+                _write(frame, dest, m)
             case ("getfield", obj_addr, field_name, dest):
                 obj = _read(frame, obj_addr)
                 if not isinstance(obj, (StructInstance, EnumInstance)):

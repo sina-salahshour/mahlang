@@ -39,6 +39,8 @@ let y = {
 | `Function` | `fn(a) { a }` | first-class closures, captured by reference |
 | struct / enum | user-declared | reference semantics (assigning copies the reference) |
 | `Promise` | from `detach` / `sleep_async` | see Async |
+| `Vector` | `[1, 2, 3]`, `[]` | growable zero-indexed list, by reference; see Vectors and Maps |
+| `Map` | `["a": 1, "b": 2]`, `[:]` | String/Number/Bool keys, insertion-ordered, by reference; see Vectors and Maps |
 | `Range`, `FromRange`, `ToRange` | `5..10`, `1..`, `..10` | built-in structs, see Ranges |
 
 **Truthiness**: `false`, `none`, `0`, and `""` are falsy; everything else is
@@ -59,6 +61,7 @@ loosest of all, `&`/`|` share one level, and `%` shares a level with
 | 4 | `*` `/` `//` | left |
 | 5 | unary `-`, `!` (not) | `!a == b` is `(!a) == b` |
 | 6 | `**` | right: `-2 ** 2` is `-(2 ** 2)` = `-4` |
+| 7 | `x.field`, `x.method()`, `x[key]` | postfix, left to right: `m["k"].len()` |
 
 - `!x` is `true` when `x` is falsy (see Truthiness) and `false` otherwise.
   There is no `&&` or `||`: use `&` and `|`.
@@ -69,7 +72,8 @@ loosest of all, `&`/`|` share one level, and `%` shares a level with
   to text: `"n = " + 5` is `"n = 5"`. `"ab" * 3` is `"ababab"`.
 - `//` truncates toward zero; `%` takes the sign of the left operand.
 - `==` compares Numbers/Strings/Bools/`none` by value and everything else
-  (structs, enums, `some(..)`, functions) by identity. Different types are
+  (structs, enums, `some(..)`, functions, Vectors, Maps) by identity:
+  `[1] == [1]` is `false`. Different types are
   never equal (`true == 1` is `false`).
 - Parenthesize whenever you're unsure.
 
@@ -257,11 +261,11 @@ print("mah".map(fn(c) { c + "!" }).reduce(fn(a, b) { a + b }))   # m!a!h!
 - Programs that use ranges or iterators can't declare their own types or
   traits named `Range`, `FromRange`, `ToRange`, `Iterable`, `Iterator`, or
   the adapter types (`Mapped`, `Filtered`, `Skipped`, `Taken`, and their
-  `...Iterator` types).
+  `...Iterator` types), `VectorIterator`, or `MapEntry`.
 - A range's end must be on the same line as its `..`: `let f = 1..` at the
   end of a line is an open-ended `FromRange`, and the next line is a new
   statement.
-- Every **`Iterable`** (ranges except `ToRange`, Strings, and your own types
+- Every **`Iterable`** (ranges except `ToRange`, Strings, Vectors, Maps, and your own types
   that implement it) has these methods, all lazy except `reduce`:
   - `map(f)`: `f(value)` or `f(value, index)` gives each new item.
   - `filter(f)`: keeps items where `f(value)` or `f(value, index)` is truthy.
@@ -269,6 +273,9 @@ print("mah".map(fn(c) { c + "!" }).reduce(fn(a, b) { a + b }))   # m!a!h!
   - `reduce(f, initial)`: like JavaScript: `f(acc, value)` or `f(acc,
     value, index)`. Without `initial` the first item starts the
     accumulator, and an empty Iterable gives `none`.
+  - `reduce()` with no arguments collects the items into a new Vector:
+    `(1..4).reduce()` is `[1, 2, 3]`, `"ab".reduce()` is `[a, b]`. (There's
+    no separate `collect`.)
 - An Iterable can be iterated again (each pass starts over). Nothing
   consumes an infinite `1..` except `take`, so `(1..).reduce(f)` never ends.
 - **Your own types**: implement `Iterable` (an `iter` method returning an
@@ -297,6 +304,93 @@ print(it.next(), it.next(), it.next())                         # some(1) some(2)
 for let n, let i in (1..=2).map(fn(x) { x * 10 }) {
     print(i, n)                 # 0 10, then 1 20
 }
+```
+
+## Vectors and Maps
+
+```mah
+let v = [10, 20, 30]
+v.push(40)                      # add at the end; push_start(x) adds at the start
+print(v[0], v.len())            # 10 4 (zero-indexed)
+v[1] = 21                       # replace an existing item
+print(v[-1], v[99])             # 40 none: -1 is the last item; a missing index reads as none
+print(v.pop(), v.pop_start())   # 40 10 (none when the Vector is empty)
+for let x, let i in v { print(i, x) }       # 0 21, then 1 30
+
+let w = [0, 1, 2, 3, 4, 5]
+print(w[1..3], w[2..], w[..=1], w[-2..])   # [1, 2] [2, 3, 4, 5] [0, 1] [4, 5]
+print(w[3..100])                # [3, 4, 5]: a range past the end just stops there
+
+let m = ["a": 1, "b": 2]
+m["c"] = 3                      # add or replace
+print(m["a"], m["zzz"], m.len())            # 1 none 3
+print(m.has("b"), m.remove("b"), m)         # true 2 [a: 1, c: 3]
+for let key in m { print(key, m[key]) }     # a 1, then c 3 (keys, insertion order)
+print(m.keys(), m.values())                 # [a, c] [1, 3]
+for let e in m.entries() { print(e.key, e.value) }   # MapEntry { key, value }
+let empty_vector = []
+let empty_map = [:]
+```
+
+- **Slicing**: indexing a Vector with a range (`v[a..b]`, `v[a..=b]`,
+  `v[a..]`, `v[..b]`, `v[..=b]`) returns a **new** Vector of those items.
+  Like Python, negative bounds count from the end and bounds past either
+  end are clamped instead of raising (`v[..40]` is the whole Vector,
+  `v[10..]` of a short one is `[]`). Bounds must be integers. You can't
+  assign to a slice (`v[0..2] = ...` is a runtime error).
+- **Vector** methods: `len()`, `push(x)`, `pop()`, `push_start(x)`,
+  `pop_start()`, `copy(deep = false)`. `pop`/`pop_start` return the removed item, or `none` when
+  empty. Negative indices count from the end, like Python: `v[-1]` is the
+  last item, `v[-2]` the one before it (reading and writing). Reading an
+  index outside `-len..len`, or a fractional one, gives `none`;
+  **writing** there is a runtime error (use `push`). A non-Number index is
+  a runtime error.
+- **Map** methods: `len()`, `has(k)`, `remove(k)` (the removed value, or
+  `none`), `copy(deep = false)`, and `keys()`, `values()`, `entries()`, which each return a new
+  Vector (a snapshot: changing the Map afterwards doesn't change it).
+  `entries()` holds `MapEntry { key, value }` structs. Reading a missing
+  key gives `none`, so `m[k]` can't tell a missing key from a stored `none`:
+  use `m.has(k)`.
+- Map keys must be Strings, Numbers, or Bools (anything else is a runtime
+  error). `1` and `1.0` are the same key; `1`, `"1"`, and `true` are three
+  different keys.
+- Both are **Iterable**, so `for`, `map`, `filter`, `skip`, `take`, and
+  `reduce` work on them. A Vector iterates its items (live: items pushed
+  during the loop are reached too); a Map iterates its keys (a snapshot,
+  so removing keys while looping is safe).
+- Both are references: `let w = v` then `w.push(1)` changes `v` too. Use
+  `let w = v.copy()` for an independent one. `copy()` is **shallow**: a
+  Vector of Vectors gets a new outer Vector sharing the same inner ones.
+  `copy(deep: true)` also copies every Vector, Map, struct, and enum value
+  inside, all the way down (functions and Promises are still shared):
+
+```mah
+let grid = [[0, 0], [0, 0]]
+let shallow = grid.copy()
+let deep = grid.copy(deep: true)
+grid[0][0] = 1
+print(shallow[0][0], deep[0][0])   # 1 0
+```
+- Printing shows `[1, 2]` and `[a: 1, b: 2]` (Strings inside are printed
+  without quotes, like everywhere else).
+- A `[` on a new line starts a new Vector/Map literal, not an index into
+  the previous line's value: write `x[0]` with the `[` right after `x`.
+- **Your own types** can support `x[k]` by implementing the `Index` trait
+  (`fn index(self, key)`) and `x[k] = v` with `IndexAssign`
+  (`fn index_assign(self, key, value)`):
+
+```mah
+struct Grid { width, cells }
+impl Index for Grid {
+    fn index(self, p) { self.cells[p.y * self.width + p.x] }
+}
+impl IndexAssign for Grid {
+    fn index_assign(self, p, value) { self.cells[p.y * self.width + p.x] = value }
+}
+struct Point { x, y }
+let g = Grid { width: 2, cells: [0, 0, 0, 0] }
+g[Point { x: 1, y: 1 }] = 9
+print(g[Point { x: 1, y: 1 }])  # 9
 ```
 
 ## Traits and methods
@@ -335,7 +429,8 @@ print(Shape.area(r))            # trait-qualified call
 - `impl Type { }` only works for your own structs/enums. `impl Trait for
   Type { }` works if the trait or the type is yours, so `impl MyTrait for
   Number` is fine. Built-in type names: `Number`, `String`, `Bool`,
-  `Function`, `Option`, `Promise`.
+  `Function`, `Option`, `Promise`, `Vector`, `Map`. Built-in traits:
+  `Printable`, `Index`, `IndexAssign`.
 - The impl must define every required method, with the same parameters.
 - If two traits give one type the same method name, call it as
   `Trait.name(value)`.
@@ -414,7 +509,9 @@ before anything runs.
 
 ## Not available (don't use these)
 
-- Arrays/lists/maps, indexing (`a[0]`), `collect`/`for_each`/`count`.
+- Tuples, sets, assigning to a slice (`v[1..3] = ...`),
+  `collect` (use `reduce()`), `for_each`/`count`, Vector `insert`/`remove`/`sort`/`contains`,
+  indexing Strings (`s[0]`: use `s.char_at(0)`).
 - `for x in ...` without `let`, C-style `for (i = 0; ...)`, destructuring in
   `for` bindings, labeled `break`/`continue`.
 - String methods other than `len`/`char_at` (no `split`, `replace`, ...), string indexing.

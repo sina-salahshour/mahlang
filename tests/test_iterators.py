@@ -371,7 +371,7 @@ class PreludePlumbingTests(unittest.TestCase):
         program = compile_program(
             text='match 1..10 { 1..5 => { print("a") } _ => { print("b") } }'
         )
-        self.assertEqual(program.minor, 2)
+        self.assertEqual(program.minor, 3)  # M19 bumped the current minor to 3
         self.assertEqual(decode(encode(program)), program)
 
     def test_hand_built_minor_1_program_with_matchrange_is_rejected(self):

@@ -25,13 +25,25 @@ code_interpreter.py.
 from decimal import Decimal
 
 # M12: names of the built-in types, as seen by `impl` and method dispatch.
-BUILTIN_TYPE_NAMES = ("Number", "String", "Bool", "Function", "Option", "Promise")
+BUILTIN_TYPE_NAMES = ("Number", "String", "Bool", "Function", "Option", "Promise", "Vector", "Map")
 
 # M12: system traits -- trait name -> {method name -> parameter names}.
-# Every built-in type implements every system trait natively
-# (code_interpreter.py's NATIVE_TRAIT_METHODS); user types opt in via
-# `impl Printable for T`. Future: Iterable/Iterator for `for` loops.
-SYSTEM_TRAITS = {"Printable": {"to_string": ["self"]}}
+# User types opt in with a normal `impl`. M19 adds `Index` (`x[k]`) and
+# `IndexAssign` (`x[k] = v`).
+SYSTEM_TRAITS = {
+    "Printable": {"to_string": ["self"]},
+    "Index": {"index": ["self", "key"]},
+    "IndexAssign": {"index_assign": ["self", "key", "value"]},
+}
+
+# M19: which built-in types natively implement each system trait (the VM's
+# initial method table, docs/MAHC_FORMAT.md #6.7). Every built-in type is
+# Printable; only Vector and Map are indexable.
+SYSTEM_TRAIT_NATIVE_TYPES = {
+    "Printable": BUILTIN_TYPE_NAMES,
+    "Index": ("Vector", "Map"),
+    "IndexAssign": ("Vector", "Map"),
+}
 
 
 class Frame:
@@ -69,6 +81,40 @@ class StructInstance:
     def __init__(self, type_name, fields):
         self.type_name = type_name
         self.fields = fields  # dict[str, Any]
+
+
+class VectorValue:
+    """M19: a Vector -- a growable, zero-indexed list of values, mutable and
+    by reference like a struct."""
+
+    __slots__ = ("items",)
+
+    def __init__(self, items):
+        self.items = items  # list[Any]
+
+
+class MapValue:
+    """M19: a Map -- String/Number/Bool keys to values, in insertion order,
+    mutable and by reference. `entries` is keyed by `map_key(key)` (which
+    keeps `true` and `1` apart, unlike a plain Python dict) and holds the
+    original `(key, value)`."""
+
+    __slots__ = ("entries",)
+
+    def __init__(self, entries=None):
+        self.entries = entries if entries is not None else {}  # dict[tuple, tuple[Any, Any]]
+
+
+def map_key(key):
+    """M19: the dict key a Mah Map stores `key` under, or `None` if `key`
+    can't be a Map key (only Strings, Numbers, and Bools can)."""
+    if isinstance(key, bool):
+        return ("Bool", key)
+    if isinstance(key, (int, float, Decimal)):
+        return ("Number", key)
+    if isinstance(key, str):
+        return ("String", key)
+    return None
 
 
 class EnumInstance:
@@ -213,4 +259,8 @@ def type_name_of(value) -> str:
         return "Function"
     if isinstance(value, (StructInstance, EnumInstance)):
         return value.type_name
+    if isinstance(value, VectorValue):
+        return "Vector"
+    if isinstance(value, MapValue):
+        return "Map"
     return "Unknown"

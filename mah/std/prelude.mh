@@ -39,8 +39,16 @@ trait Iterable {
     # Like JavaScript's: f(acc, value) or f(acc, value, index). Without an
     # initial value the first item is the starting accumulator (and the
     # first index passed to f is 1). An empty Iterable with no initial
-    # value gives `none`.
-    fn reduce(self, f, initial = __NoInitial {}) {
+    # value gives `none`. With no arguments at all, `reduce()` collects the
+    # items into a new Vector.
+    fn reduce(self, f = none, initial = __NoInitial {}) {
+        if f == none {
+            match initial {
+                __NoInitial {} => { return __Iter.collect(self) }
+                # Mah can't raise an error yet: see require_number below.
+                _ => { initial.reduce_needs_a_function_when_given_an_initial_value() }
+            }
+        }
         let it = self.iter()
         let acc = initial
         let index = 0
@@ -82,6 +90,12 @@ impl __Iter {
 
     fn call_reduce(f, acc, value, index) {
         if f.arity() == 2 { f(acc, value) } else { f(acc, value, index) }
+    }
+
+    fn collect(iterable) {
+        let out = []
+        for let value in iterable { out.push(value) }
+        out
     }
 
     # Ranges count up by adding 1, which only makes sense for Numbers
@@ -272,5 +286,52 @@ impl Iterator for TakenIterator {
         } else {
             none
         }
+    }
+}
+
+# -- vectors and maps -------------------------------------------------------
+#
+# Vector and Map are built-in types (see docs/MAHC_FORMAT.md #6.9): their
+# storage, `len`/`push`/`pop`/`push_start`/`pop_start`/`keys`/`values`/
+# `has`/`remove`, and indexing (the Index/IndexAssign system traits) are
+# native. Iteration and `entries` are ordinary Mah, here.
+
+# A Vector iterates over its items, in order. It's live: items pushed while
+# looping are reached too.
+struct VectorIterator { vec, index }
+
+impl Iterable for Vector {
+    fn iter(self) { VectorIterator { vec: self, index: 0 } }
+}
+
+impl Iterator for VectorIterator {
+    fn next(self) {
+        if self.index < self.vec.len() {
+            let value = self.vec[self.index]
+            self.index = self.index + 1
+            some(value)
+        } else {
+            none
+        }
+    }
+}
+
+# A Map iterates over its keys, in insertion order. `keys()` is a snapshot,
+# so changing the map while looping over it is safe.
+impl Iterable for Map {
+    fn iter(self) { self.keys().iter() }
+}
+
+# One key/value pair of a Map, from `entries()`.
+struct MapEntry { key, value }
+
+impl Map {
+    # A Vector of MapEntry, in insertion order (a snapshot, like keys()).
+    fn entries(self) {
+        let out = []
+        for let key in self.keys() {
+            out.push(MapEntry { key: key, value: self[key] })
+        }
+        out
     }
 }

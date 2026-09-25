@@ -86,6 +86,8 @@
 "}" @punctuation.bracket
 "(" @punctuation.bracket
 ")" @punctuation.bracket
+"[" @punctuation.bracket
+"]" @punctuation.bracket
 
 ; Wildcard pattern
 (wildcard_pattern) @variable.builtin
@@ -179,4 +181,5 @@
 ; -- also matched generically by text wherever else they appear.
 ((identifier) @type.builtin
   (#any-of? @type.builtin
-    "Number" "String" "Bool" "Function" "Option" "Promise" "Printable"))
+    "Number" "String" "Bool" "Function" "Option" "Promise" "Vector" "Map"
+    "Printable" "Index" "IndexAssign"))

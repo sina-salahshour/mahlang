@@ -191,6 +191,9 @@ from .ast_nodes import (
     ErrorNode,
     ExprStmt,
     ForStmt,
+    Index,
+    MapLit,
+    VectorLit,
     FieldAccess,
     FnExpr,
     Ident,
@@ -215,7 +218,7 @@ from .ast_nodes import (
     WhileStmt,
     WildcardPat,
 )
-from ..runtime_values import BUILTIN_TYPE_NAMES, SYSTEM_TRAITS
+from ..runtime_values import BUILTIN_TYPE_NAMES, SYSTEM_TRAIT_NATIVE_TYPES, SYSTEM_TRAITS
 
 
 class FrameLevel:
@@ -391,6 +394,9 @@ class Resolver:
                         for method_name in methods
                     }
                     for trait_name, methods in SYSTEM_TRAITS.items()
+                    # M19: not every built-in type implements every
+                    # system trait (only Vector/Map are indexable).
+                    if builtin_type in SYSTEM_TRAIT_NATIVE_TYPES[trait_name]
                 },
             }
             for builtin_type in BUILTIN_TYPE_NAMES
@@ -419,6 +425,31 @@ class Resolver:
             "param_names": ["self", "i"],
             "return_hint": "String",
         }
+        # M19: Vector/Map native inherent methods (docs/MAHC_FORMAT.md #6.7).
+        # (type, name, extra parameter names, return hint)
+        for type_name, method_name, extra_params, return_hint in (
+            ("Vector", "len", [], "Number"),
+            ("Vector", "push", ["value"], None),
+            ("Vector", "pop", [], None),
+            ("Vector", "push_start", ["value"], None),
+            ("Vector", "pop_start", [], None),
+            ("Vector", "copy", ["deep"], "Vector"),
+            ("Map", "len", [], "Number"),
+            ("Map", "keys", [], "Vector"),
+            ("Map", "values", [], "Vector"),
+            ("Map", "has", ["key"], "Bool"),
+            ("Map", "remove", ["key"], None),
+            ("Map", "copy", ["deep"], "Map"),
+        ):
+            self.impls[type_name]["inherent"][method_name] = {
+                "slot": None,
+                "is_method": True,
+                "params": 1 + len(extra_params),
+                "native": True,
+                "decl_position": None,
+                "param_names": ["self"] + extra_params,
+                "return_hint": return_hint,
+            }
         self.impls["Function"]["inherent"]["arity"] = {
             "slot": None,
             "is_method": True,
@@ -635,6 +666,10 @@ class Resolver:
             return "Bool"
         if isinstance(node, FnExpr):
             return "Function"
+        if isinstance(node, VectorLit):
+            return "Vector"
+        if isinstance(node, MapLit):
+            return "Map"
         return None
 
     def _type_hint(self, expr) -> str | None:
@@ -642,7 +677,7 @@ class Resolver:
         ALREADY-RESOLVED expression -- see `_syntactic_type_hint` above for
         the pre-resolution equivalent. Never used for codegen/dispatch,
         only to narrow the LSP's method call-site candidate list."""
-        if isinstance(expr, (NumberLit, StringLit, BoolLit, FnExpr, StructLit, EnumLit)):
+        if isinstance(expr, (NumberLit, StringLit, BoolLit, FnExpr, StructLit, EnumLit, VectorLit, MapLit)):
             return self._syntactic_type_hint(expr, self._self_type)
         if isinstance(expr, FieldAccess):
             # `Self` was already substituted by the time this expression
@@ -1626,6 +1661,19 @@ class Resolver:
             return
         if isinstance(expr, Block):
             self.resolve_block(expr)
+            return
+        if isinstance(expr, VectorLit):
+            for item in expr.items:
+                self.resolve_expr(item)
+            return
+        if isinstance(expr, MapLit):
+            for key, value in expr.pairs:
+                self.resolve_expr(key)
+                self.resolve_expr(value)
+            return
+        if isinstance(expr, Index):
+            self.resolve_expr(expr.obj)
+            self.resolve_expr(expr.key)
             return
         raise AssertionError(f"unhandled expression node {expr!r}")
 

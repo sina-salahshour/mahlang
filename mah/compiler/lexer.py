@@ -15,6 +15,8 @@ class TokenType(Enum):
     SEMICOLON = ";"
     BRACE_OPEN = "{"
     BRACE_CLOSE = "}"
+    BRACKET_OPEN = "["
+    BRACKET_CLOSE = "]"
     PAREN_OPEN = "("
     PAREN_CLOSE = ")"
     COMMA = ","
@@ -116,6 +118,8 @@ _SINGLE_CHAR = {
     ";": TokenType.SEMICOLON,
     "{": TokenType.BRACE_OPEN,
     "}": TokenType.BRACE_CLOSE,
+    "[": TokenType.BRACKET_OPEN,
+    "]": TokenType.BRACKET_CLOSE,
     "(": TokenType.PAREN_OPEN,
     ")": TokenType.PAREN_CLOSE,
     ",": TokenType.COMMA,

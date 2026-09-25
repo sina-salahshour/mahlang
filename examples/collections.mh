@@ -1,0 +1,49 @@
+# Vectors and Maps.
+
+# A Vector is a growable, zero-indexed list.
+let v = [10, 20, 30]
+v.push(40)                      # add at the end
+v.push_start(0)                 # add at the start
+print(v, v.len())               # [0, 10, 20, 30, 40] 5
+v[1] = 11                       # replace an item
+print(v[1], v[99])              # 11 none (a missing index reads as none)
+print(v.pop(), v.pop_start())   # 40 0 (pop on an empty Vector gives none)
+
+for let x, let i in v {
+    print(i, x)
+}
+print(v.map(fn(x) { x * 2 }).reduce(fn(a, b) { a + b }))   # 122
+
+# A Map stores values under String, Number, or Bool keys, in insertion
+# order.
+let ages = ["ada": 36, "alan": 41]
+ages["grace"] = 85
+ages["ada"] = 37
+print(ages, ages["ada"], ages["nobody"])     # a missing key reads as none
+
+# Looping over a Map gives its keys.
+for let name in ages {
+    print(name, "is", ages[name])
+}
+
+print(ages.keys(), ages.values())
+for let e in ages.entries() {
+    print(e.key + ": " + e.value)
+}
+print(ages.has("alan"), ages.remove("alan"), ages.has("alan"))
+
+# Your own types can support `x[k]` and `x[k] = v` too.
+struct Point { x, y }
+struct Grid { width, cells }
+
+impl Index for Grid {
+    fn index(self, p) { self.cells[p.y * self.width + p.x] }
+}
+
+impl IndexAssign for Grid {
+    fn index_assign(self, p, value) { self.cells[p.y * self.width + p.x] = value }
+}
+
+let grid = Grid { width: 2, cells: [".", ".", ".", "."] }
+grid[Point { x: 1, y: 0 }] = "#"
+print(grid[Point { x: 1, y: 0 }], grid.cells)

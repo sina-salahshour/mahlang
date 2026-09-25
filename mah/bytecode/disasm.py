@@ -138,6 +138,10 @@ def _instr_line(r: _Renderer, i: int, instr) -> str:
             f"type={r.type_name(a[0])} variant={r.variant_name(a[0], a[1])} "
             f"values={_addr_list(a[2])} dest={_addr(a[3])}"
         )
+    elif op == "vector":
+        rendered = f"items={_addr_list(a[0])} dest={_addr(a[1])}"
+    elif op == "map":
+        rendered = f"pairs={_addr_list(a[0])} dest={_addr(a[1])}"
     elif op == "getfield":
         rendered = f"obj={_addr(a[0])} field={r.s(a[1])} dest={_addr(a[2])}"
     elif op == "setfield":

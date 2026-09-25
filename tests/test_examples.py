@@ -77,6 +77,20 @@ class ExampleTests(unittest.TestCase):
             "3\n",
         )
 
+    def test_collections(self):
+        out = run_file(example_path("collections.mh"))
+        self.assertEqual(
+            out,
+            "[0, 10, 20, 30, 40] 5\n11 none\n40 0\n"
+            "0 11\n1 20\n2 30\n122\n"
+            "[ada: 37, alan: 41, grace: 85] 37 none\n"
+            "ada is 37\nalan is 41\ngrace is 85\n"
+            "[ada, alan, grace] [37, 41, 85]\n"
+            "ada: 37\nalan: 41\ngrace: 85\n"
+            "true 41 false\n"
+            "# [., #, ., .]\n",
+        )
+
     def test_loops(self):
         out = run_file(example_path("loops.mh"))
         self.assertEqual(

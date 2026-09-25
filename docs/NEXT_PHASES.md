@@ -42,8 +42,9 @@ a guard in later a small addition instead of a rewrite.
 
 ## Arrays / lists
 
-Not designed in detail yet. Sketch, consistent with `V2_DESIGN.md`'s heap
-model:
+Landed as M19's `Vector` (and `Map`) -- see `docs/V2_DESIGN.md`'s M19 entry
+and `docs/MAHC_FORMAT.md` §6.9. What's still open from this sketch is
+pattern matching over them (the last bullet). The original sketch:
 
 - A new heap object kind, `ArrayInstance` (wraps a Python list of element
   values — immediates or heap pointers, same as struct/enum fields).

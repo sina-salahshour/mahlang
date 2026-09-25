@@ -33,6 +33,9 @@ from .ast_nodes import (
     ErrorNode,
     ExprStmt,
     ForStmt,
+    Index,
+    MapLit,
+    VectorLit,
     FieldAccess,
     FnExpr,
     Ident,
@@ -93,6 +96,7 @@ _COMPARE_OPS = {
 # special-cases) -- the only tokens that can be a range's end value.
 _RANGE_END_STARTERS = {
     TokenType.NUMBER,
+    TokenType.BRACKET_OPEN,
     TokenType.STRING,
     TokenType.ID,
     TokenType.PAREN_OPEN,
@@ -172,6 +176,10 @@ class Parser:
     def __init__(self, lexer: Lexer) -> None:
         self.lexer = lexer
         self.current: Token = lexer.get_next_token()
+        # M19: the most recently consumed token -- `_on_same_line` needs its
+        # end to tell `x[0]` (indexing) from `x` then a `[...]` literal
+        # starting the next statement.
+        self._prev: Token | None = None
         # See docs/V2_DESIGN.md's M2 milestone: a bare struct literal is
         # disallowed directly in an `if`/`while` condition position (the
         # same restriction Rust and Go apply), since `if x { ... }` would
@@ -190,7 +198,16 @@ class Parser:
     def advance(self) -> Token:
         tok = self.current
         self.current = self.lexer.get_next_token()
+        self._prev = tok
         return tok
+
+    def _on_same_line(self) -> bool:
+        """M19: whether the current token starts on the line the previous
+        token ended on."""
+        if self._prev is None:
+            return True
+        start = self._prev.position + len(self._prev.literal)
+        return "\n" not in self.lexer.input_str[start : self.current.position]
 
     def expect(self, token_type: TokenType) -> Token:
         if self.current.type is not token_type:
@@ -277,7 +294,7 @@ class Parser:
                     # field-chain/struct-lit/enum-lit), literals, etc. via
                     # _parse_primary.
 
-                if self.current.type is TokenType.ASSIGN and isinstance(expr, (Ident, FieldAccess)):
+                if self.current.type is TokenType.ASSIGN and isinstance(expr, (Ident, FieldAccess, Index)):
                     self.advance()
                     value = self.parse_expr()
                     stmts.append(AssignStmt(target=expr, value=value, position=expr.position))
@@ -551,7 +568,7 @@ class Parser:
             inner_block = Block(stmts=[inner_stmt], position=inner_stmt.position, tail=None)
         else:
             expr = self.parse_expr()
-            if self.current.type is TokenType.ASSIGN and isinstance(expr, (Ident, FieldAccess)):
+            if self.current.type is TokenType.ASSIGN and isinstance(expr, (Ident, FieldAccess, Index)):
                 self.advance()
                 value = self.parse_expr()
                 inner_stmt = AssignStmt(target=expr, value=value, position=expr.position)
@@ -1219,6 +1236,9 @@ class Parser:
         if tok.type is TokenType.BRACE_OPEN:
             return self._parse_postfix_from(self.parse_block())
 
+        if tok.type is TokenType.BRACKET_OPEN:
+            return self._parse_postfix_from(self._parse_bracket_literal())
+
         if tok.type is TokenType.ID:
             self.advance()
             if self.current.type is TokenType.PAREN_OPEN:
@@ -1386,8 +1406,79 @@ class Parser:
 
         return self._parse_postfix_from(node)
 
+    def _parse_bracket_literal(self):
+        """M19: `[a, b]` (Vector), `[k: v, ...]` (Map), `[]`, `[:]`. The
+        first item decides which: a `:` after it makes a Map. A trailing
+        comma is allowed. Brackets delimit their contents, so a bare
+        struct literal is fine inside, as in parentheses."""
+        open_tok = self.advance()  # BRACKET_OPEN
+        old = self._struct_literal_allowed
+        self._struct_literal_allowed = True
+        try:
+            if self.current.type is TokenType.COLON:
+                self.advance()
+                self.expect(TokenType.BRACKET_CLOSE)
+                return MapLit(pairs=[], position=open_tok.position)
+            if self.current.type is TokenType.BRACKET_CLOSE:
+                self.advance()
+                return VectorLit(items=[], position=open_tok.position)
+            first = self.parse_expr()
+            if self.current.type is TokenType.COLON:
+                self.advance()
+                pairs = [(first, self.parse_expr())]
+                while self.current.type is TokenType.COMMA:
+                    self.advance()
+                    if self.current.type is TokenType.BRACKET_CLOSE:
+                        break
+                    key = self.parse_expr()
+                    if self.current.type is not TokenType.COLON:
+                        raise SyntaxError(
+                            f"Every item in a Map literal needs 'key: value' at position '{self.current.position}'"
+                        )
+                    self.advance()
+                    pairs.append((key, self.parse_expr()))
+                self.expect(TokenType.BRACKET_CLOSE)
+                return MapLit(pairs=pairs, position=open_tok.position)
+            items = [first]
+            while self.current.type is TokenType.COMMA:
+                self.advance()
+                if self.current.type is TokenType.BRACKET_CLOSE:
+                    break
+                items.append(self.parse_expr())
+                if self.current.type is TokenType.COLON:
+                    raise SyntaxError(
+                        f"A Vector literal can't contain 'key: value' items (a Map literal needs one "
+                        f"for every item) at position '{self.current.position}'"
+                    )
+            self.expect(TokenType.BRACKET_CLOSE)
+            return VectorLit(items=items, position=open_tok.position)
+        finally:
+            self._struct_literal_allowed = old
+
+    def _parse_index(self, base):
+        """M19: `base[key]`. Brackets delimit the key, so a bare struct
+        literal is fine inside."""
+        open_tok = self.advance()  # BRACKET_OPEN
+        old = self._struct_literal_allowed
+        self._struct_literal_allowed = True
+        try:
+            key = self.parse_expr()
+        finally:
+            self._struct_literal_allowed = old
+        self.expect(TokenType.BRACKET_CLOSE)
+        return Index(obj=base, key=key, position=open_tok.position)
+
     def _parse_postfix_from(self, base):
-        while self.current.type is TokenType.DOT:
+        """`.field`, `.method(args)`, and (M19) `[key]`, left to right. An
+        index's `[` must be on the same line as what it indexes: Mah has no
+        significant newlines, so otherwise `foo()` followed by a line
+        starting with `[1, 2].len()` would silently parse as `foo()[1, ...`."""
+        while True:
+            if self.current.type is TokenType.BRACKET_OPEN and self._on_same_line():
+                base = self._parse_index(base)
+                continue
+            if self.current.type is not TokenType.DOT:
+                break
             self.advance()
             field_tok = self.expect(TokenType.ID)
             if (

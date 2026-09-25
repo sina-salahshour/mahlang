@@ -441,6 +441,9 @@ module.exports = grammar({
         $.binary_expr,
         $.unary_expr,
         $.field_access,
+        $.index_expr,
+        $.vector_literal,
+        $.map_literal,
         $.call_expr,
         $.struct_literal,
         $.enum_literal,
@@ -474,7 +477,7 @@ module.exports = grammar({
       prec.right(
         PREC.ASSIGN,
         seq(
-          field("target", choice($.identifier, $.field_access)),
+          field("target", choice($.identifier, $.field_access, $.index_expr)),
           "=",
           field("value", $.expr),
         ),
@@ -535,6 +538,29 @@ module.exports = grammar({
 
     field_access: ($) =>
       prec(PREC.POSTFIX, seq($.expr, ".", field("field", $.identifier))),
+
+    // M19: `x[k]`. The real parser only treats `[` as indexing when it's on
+    // the same line as `x` (otherwise it starts a Vector literal on a new
+    // statement); a highlighter doesn't need that distinction.
+    index_expr: ($) =>
+      prec(
+        PREC.POSTFIX,
+        seq(field("object", $.expr), "[", field("index", $.expr), "]"),
+      ),
+
+    // M19: `[1, 2, 3]`, `[]`.
+    vector_literal: ($) =>
+      seq("[", optional(seq($.expr, repeat(seq(",", $.expr)), optional(","))), "]"),
+
+    // M19: `["a": 1, "b": 2]`, `[:]`.
+    map_literal: ($) =>
+      seq(
+        "[",
+        choice(":", seq($.map_pair, repeat(seq(",", $.map_pair)), optional(","))),
+        "]",
+      ),
+
+    map_pair: ($) => seq(field("key", $.expr), ":", field("value", $.expr)),
 
     // compiler/parser.py's real `Call.callee` is always a bare identifier
     // -- but `field("function", ...)` also accepts a `field_access` chain

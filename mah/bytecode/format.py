@@ -1,4 +1,4 @@
-"""Format constants for `.mahc` version 1.2 -- the single source of truth
+"""Format constants for `.mahc` version 1.3 -- the single source of truth
 mirroring docs/MAHC_FORMAT.md. Every other module in this package (and the
 VM, `mah/code_interpreter.py`) imports its constants from here rather than
 hard-coding a section id/opcode/tag number a second time.
@@ -13,13 +13,17 @@ operators, and the native inherent methods `String.len`/`String.char_at`/
 Ranges, iterators, and their adapters aren't VM features at all: they're
 ordinary Mah code (the compiler's prelude, `mah/std/prelude.mh`) compiled
 like any user program.
+
+M19 bumps MINOR to 3: Vectors and Maps -- the `vector`/`map` opcodes, the
+built-in types `Vector`/`Map`, their native inherent methods, and the
+`Index`/`IndexAssign` system traits (docs/MAHC_FORMAT.md #6.7/#6.9).
 """
 
 from __future__ import annotations
 
 MAGIC = b"MAHC"
 MAJOR = 1
-MINOR = 2
+MINOR = 3
 
 # -- section ids (docs/MAHC_FORMAT.md #3) -----------------------------------
 SEC_STRINGS = 0x01
@@ -129,6 +133,8 @@ OPCODES: dict[str, tuple[int, tuple[str, ...]]] = {
     "matchenum": (0x35, ("A", "T", "N", "A")),
     "matchfail": (0x36, ()),
     "matchrange": (0x37, ("A", "A?", "A?", "B", "A")),  # M17 (1.2)
+    "vector": (0x38, ("A*", "A")),  # M19 (1.3)
+    "map": (0x39, ("A*", "A")),  # M19 (1.3)
     "deferpush": (0x40, ()),
     "deferadd": (0x41, ("A",)),
     "deferpeek": (0x42, ("A",)),
@@ -154,4 +160,6 @@ OPCODE_SINCE_MINOR: dict[str, int] = {
     "ge": 2,
     "not": 2,
     "matchrange": 2,
+    "vector": 3,
+    "map": 3,
 }

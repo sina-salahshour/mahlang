@@ -1,4 +1,4 @@
-# The `.mahc` bytecode format (version 1.2)
+# The `.mahc` bytecode format (version 1.3)
 
 `mah build prog.mh` compiles a program (its entry file plus everything it
 imports) into a single `.mahc` file; `mah runc prog.mahc` runs one. This
@@ -242,6 +242,8 @@ Opcodes (semantics in §6):
 | `0x35` | `matchenum` | value `A`, type `T`, variant `N`, dest `A` |
 | `0x36` | `matchfail` | — |
 | `0x37` | `matchrange` *(1.2)* | value `A`, lo `A?`, hi `A?`, inclusive `B`, dest `A` |
+| `0x38` | `vector` *(1.3)* | items `A*`, dest `A` |
+| `0x39` | `map` *(1.3)* | pairs `A*` (`k1 v1 k2 v2 …`), dest `A` |
 | `0x40` | `deferpush` | — |
 | `0x41` | `deferadd` | closure `A` |
 | `0x42` | `deferpeek` | dest `A` |
@@ -250,14 +252,16 @@ Opcodes (semantics in §6):
 | `0x50` | `native` | fn `X`, args `A*`, dest `A?` |
 
 All other opcode values are reserved. Opcodes, operand kinds, and natives
-marked *(1.1)* **must not** appear in a file whose minor version is 0, and
-those marked *(1.2)* not in one whose minor version is below 2.
+marked *(1.1)* **must not** appear in a file whose minor version is 0,
+those marked *(1.2)* not in one whose minor version is below 2, and those
+marked *(1.3)* not in one whose minor version is below 3.
 
 In the `*kw` opcodes, `kwnames` names the **last** `len(kwnames)` entries
 of `args`, in order; the entries before them are positional. `len(kwnames)
 ≤ len(args)`, and the names are distinct (validated at load). `native`'s `args` count **must**
 equal the native's declared arity (validated at load). `struct`/`enum`'s
-`values` count **must** equal the type's/variant's field count.
+`values` count **must** equal the type's/variant's field count. `map`'s
+`pairs` count **must** be even (validated at load).
 
 ### 4.7 DEBUG (`0x80`, optional)
 ```
@@ -283,11 +287,14 @@ debug` (the default) writes it; `--target release` omits it.
 | `Option` | enum type 0; `none` is a single shared value |
 | `Promise` | enum type 1, plus scheduler state (§6.4) |
 | `Function` | a closure: (function index, defining frame) |
+| `Vector` *(1.3)* | an ordered, growable list of values, indexed from `0`; **mutable, by reference** |
+| `Map` *(1.3)* | an insertion-ordered table from keys (Strings, Numbers, Bools) to values; **mutable, by reference** (§6.9) |
 | user struct | (type, field values in declaration order), **mutable, by reference** |
 | user enum | (type, variant, field values), mutable, by reference |
 
 The **type name** of a value (used by method dispatch): `Number`,
-`String`, `Bool`, `Function`, `Option`, `Promise`, or the user type's name.
+`String`, `Bool`, `Function`, `Option`, `Promise`, `Vector`, `Map`, or the
+user type's name.
 
 **Truthiness** (`jmpf`, `and`, `or`): `false`, `none`, the Number `0`, and
 the empty String are falsy; every other value is truthy.
@@ -361,7 +368,7 @@ the empty String are falsy; every other value is truthy.
 - `neg`: Number negation.
 - `eq`/`neq`: Numbers compare numerically, Strings by content, Bools by
   value, `none` equals only `none`; every other value (structs, enums
-  including `some(..)`, functions, promises) is equal only to itself
+  including `some(..)`, functions, promises, Vectors, Maps) is equal only to itself
   (identity). Values of different types are never equal. Result: Bool.
 - `lt`/`gt`, and *(1.2)* `le`/`ge` (≤ / ≥): two Numbers, or two Strings
   (by Unicode code point sequence); anything else is a runtime error.
@@ -450,6 +457,10 @@ Encoders drain scopes with ordinary `call`/`retval` instructions.
      `Promise.Pending`, `Promise.Settled { value: 1 }`).
    - struct: `Type { f1: v1, f2: v2 }`, fields in declaration order.
    - Function: `<fn NAME>`, or `<fn>` for an anonymous function.
+   - Vector *(1.3)*: `[` + the items' `to_string`s joined by `, ` + `]`
+     (`[]` when empty).
+   - Map *(1.3)*: `[` + `to_string(k) + ": " + to_string(v)` for each entry
+     in insertion order, joined by `, `, + `]`; `[:]` when empty.
 
 ### 6.7 Methods
 (Terminology: a *native target* here is the VM's own built-in
@@ -460,16 +471,35 @@ The VM keeps a **method table** keyed by `(type name, method name)`; each
 entry holds at most one *inherent* target and at most one target per trait
 name. A target is (function value or native, `is_method`).
 - Initially: for every built-in type name (`Number`, `String`, `Bool`,
-  `Function`, `Option`, `Promise`), a native target for trait `Printable`,
-  method `to_string`, `is_method` true, computing §6.6 step 2.
+  `Function`, `Option`, `Promise`, and *(1.3)* `Vector`, `Map`), a native
+  target for trait `Printable`, method `to_string`, `is_method` true,
+  computing §6.6 step 2.
+- Also initially *(1.3)*, native targets for `Vector` and `Map` for trait
+  `Index`, method `index` (one argument, `key`), and trait `IndexAssign`,
+  method `index_assign` (two arguments, `key`, `value`), `is_method` true,
+  behaving as §6.9 describes. Encoders compile `x[k]` to `callmethod x
+  "index" [k] "Index"` and `x[k] = v` to `callmethod x "index_assign" [k,
+  v] "IndexAssign"` (each followed by `retval`), so a user type that
+  `defmethod`s those traits is indexable the same way.
 - Also initially *(1.2)*, native **inherent** methods (all `is_method`
-  true; arguments after the receiver are positional, keyword arguments are
-  a runtime error):
+  true; arguments after the receiver are positional, and keyword arguments
+  are a runtime error, except that *(1.3)* a parameter shown below as
+  `name = default` is optional and may also be passed by keyword; binding
+  then follows §6.1 as for a function with that defaulted parameter):
   | type | method | behavior |
   |---|---|---|
   | `String` | `len()` | the number of Unicode code points, as a Number |
   | `String` | `char_at(i)` | the code point at index `i` (an integer Number, `0 ≤ i < len`) as a one-character String; anything else is a runtime error |
   | `Function` | `arity()` | the function's `param_count` (including defaulted parameters) |
+  | `Vector` *(1.3)* | `len()` | the number of items |
+  | `Vector` *(1.3)* | `push(x)` / `push_start(x)` | append `x` at the end / insert it at index 0; returns `none` |
+  | `Vector` *(1.3)* | `pop()` / `pop_start()` | remove and return the last / first item, or `none` if empty |
+  | `Vector` *(1.3)* | `copy(deep = false)` | a new Vector with the same items. Shallow unless `deep` is truthy; deep copies are described in §6.9 |
+  | `Map` *(1.3)* | `len()` | the number of entries |
+  | `Map` *(1.3)* | `keys()` / `values()` | a new Vector of the keys / values, in insertion order |
+  | `Map` *(1.3)* | `has(k)` | Bool: whether `k` is present (a non-key `k` is a runtime error, §6.9) |
+  | `Map` *(1.3)* | `remove(k)` | remove `k`'s entry and return its value, or `none` if absent |
+  | `Map` *(1.3)* | `copy(deep = false)` | a new Map with the same entries in the same order; shallow unless `deep` is truthy (§6.9) |
   Wrong argument counts give the usual `Argument Count is invalid.
   method 'NAME' accepts N arguments but M was given`.
 - `defmethod c type trait name is_method`: set the inherent target
@@ -492,7 +522,8 @@ name. A target is (function value or native, `is_method`).
   5. otherwise call the target with `recv` as the first positional argument,
      followed by `args`. A function target is invoked like `call`/`callkw`
      (binding counts `recv`); a native target sets the return register
-     directly (keyword arguments → runtime error). Either way, `retval`
+     directly (keyword arguments → runtime error, except for a native's
+     optional parameters, see above). Either way, `retval`
      follows.
 
 ### 6.8 Runtime errors
@@ -507,6 +538,46 @@ Structured errors (error values, a way to catch or propagate them) are
 planned. They'll arrive as a minor version: new opcodes, and probably a
 built-in error type alongside `Option`/`Promise`. Nothing in 1.0 has to
 change for that.
+
+### 6.9 Vectors and Maps *(1.3)*
+- `vector items dest`: `dest ←` a new Vector holding the values at `items`,
+  in order.
+- `map pairs dest`: `dest ←` a new, empty Map, then for each `(k, v)` pair
+  in order, `index_assign(map, k, v)` as below (so a later duplicate key
+  replaces the value but keeps the first key's position).
+- **Vector indices**: an index must be a Number, otherwise a runtime error.
+  An integer index `i` with `0 ≤ i < length` names the item at `i`; one
+  with `-length ≤ i < 0` names the item at `length + i` (so `-1` is the
+  last item). `index(v, i)` returns the named item, or `none` when `i`
+  names no item (fractional, or outside `-length ≤ i < length`).
+- **Vector slices**: when the index given to a Vector's `index` is a struct
+  instance whose type name is `Range` (fields `start`, `end`, `inclusive`),
+  `FromRange` (`start`), or `ToRange` (`end`, `inclusive`) — the shapes the
+  prelude's range syntax builds — `index` returns a **new** Vector holding
+  a slice instead. Each present bound must be an integer Number (else a
+  runtime error). `start` defaults to `0` and `end` to the length; a
+  negative bound has the length added to it; an inclusive `end` then has
+  `1` added; finally both are clamped into `0 … length`, and the result is
+  the items from `start` up to (not including) `end` — empty if `start ≥
+  end`. Out-of-range bounds are never an error. `index_assign` with a
+  range index is a runtime error.
+- **Deep copy** (`copy(deep: true)`): copies every Vector, Map, and struct
+  and enum instance reachable from the receiver; every other value
+  (Numbers, Strings, Bools, Functions, `none`, Promises) is shared, not
+  copied. An object reachable twice is copied once, so sharing (and cycles)
+  inside the original is reproduced in the copy. `index_assign(v, i, x)` replaces
+  the item and returns `none`; when `i` names no item it's a runtime error.
+- **Map keys** must be Strings, Numbers, or Bools; any other key given to
+  `index`, `index_assign`, `has`, `remove`, or `map` is a runtime error.
+  Two keys are the same key when they're equal by `eq` (§6.2): so `1` and
+  `1.0` are one key, while `1`, `"1"`, and `true` are three.
+  `index(m, k)` returns `k`'s value, or `none` if absent.
+  `index_assign(m, k, v)` sets it and returns `none`: a new key goes at the
+  end of the insertion order, an existing key keeps its position and its
+  original key value (after `m[1] = a` then `m[1.0] = b`, the key is still
+  `1`).
+- Iteration, `map`/`filter`/… and `Map.entries()` aren't VM features: the
+  prelude implements them in Mah on top of the methods above (§7).
 
 ## 7. Versioning and extension rules
 
@@ -528,7 +599,11 @@ change for that.
   compiler's *prelude*, `mah/std/prelude.mh`) compiled into the file like
   the user's own code, as ordinary TYPES entries, functions, and
   `defmethod`s. A VM needs nothing beyond the list above to run them.
-- Planned growth, for orientation: arrays (a new value type, an opcode to
-  build one, `Iterable`/`Iterator` native trait impls — see
-  `docs/TRAITS.md`), string utilities, filesystem, networking, and process
-  natives, structured errors.
+- **1.3** added the `Vector` and `Map` value types, the `vector`/`map`
+  opcodes that build them, their native inherent methods (§6.7), and the
+  native `Index`/`IndexAssign` targets behind `x[k]`/`x[k] = v` (§6.9).
+  Iterating them and `Map.entries()` are prelude code again (`impl
+  Iterable for Vector`/`Map`, the `MapEntry` struct), needing nothing more
+  from a VM.
+- Planned growth, for orientation: string utilities, filesystem,
+  networking, and process natives, structured errors.
