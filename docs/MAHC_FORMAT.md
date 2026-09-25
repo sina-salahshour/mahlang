@@ -474,10 +474,11 @@ name. A target is (function value or native, `is_method`).
   `Function`, `Option`, `Promise`, and *(1.3)* `Vector`, `Map`), a native
   target for trait `Printable`, method `to_string`, `is_method` true,
   computing §6.6 step 2.
-- Also initially *(1.3)*, native targets for `Vector` and `Map` for trait
-  `Index`, method `index` (one argument, `key`), and trait `IndexAssign`,
-  method `index_assign` (two arguments, `key`, `value`), `is_method` true,
-  behaving as §6.9 describes. Encoders compile `x[k]` to `callmethod x
+- Also initially *(1.3)*, native targets for `Vector`, `Map`, and
+  `String` for trait `Index`, method `index` (one argument, `key`), and for
+  `Vector` and `Map` (not `String`: Strings are immutable) for trait
+  `IndexAssign`, method `index_assign` (two arguments, `key`, `value`),
+  `is_method` true, behaving as §6.9 describes. Encoders compile `x[k]` to `callmethod x
   "index" [k] "Index"` and `x[k] = v` to `callmethod x "index_assign" [k,
   v] "IndexAssign"` (each followed by `retval`), so a user type that
   `defmethod`s those traits is indexable the same way.
@@ -561,6 +562,12 @@ change for that.
   the items from `start` up to (not including) `end` — empty if `start ≥
   end`. Out-of-range bounds are never an error. `index_assign` with a
   range index is a runtime error.
+- **String indices** follow the Vector rules above with code points as
+  the items (the same code points `len`/`char_at` count): `index(s, i)`
+  returns the one-character String at `i` (negative from the end), or
+  `none` when `i` names none, and a range index returns the substring with
+  the Vector slice rules (clamped, never an error). A non-Number index, or
+  a non-integer slice bound, is a runtime error.
 - **Deep copy** (`copy(deep: true)`): copies every Vector, Map, and struct
   and enum instance reachable from the receiver; every other value
   (Numbers, Strings, Bools, Functions, `none`, Promises) is shared, not

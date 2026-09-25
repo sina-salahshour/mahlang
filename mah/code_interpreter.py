@@ -543,16 +543,16 @@ def _string_char_at(s: str, i: Any) -> str:
 
 # -- M19: Vector / Map natives (docs/MAHC_FORMAT.md #6.7/#6.9) ----------------
 
-def _vector_position(vec: VectorValue, i: Any) -> int | None:
-    """The list position a Vector index names, or `None` when it names no
-    item (fractional, or outside `-len <= i < len`). Negative indices count
-    from the end, like Python's: `-1` is the last item. A non-Number index
-    is a runtime error rather than `None`: it's always a bug."""
+def _seq_position(n: int, i: Any, type_label: str) -> int | None:
+    """The position an index names in a Vector or String of length `n`, or
+    `None` when it names no item (fractional, or outside `-n <= i < n`).
+    Negative indices count from the end, like Python's: `-1` is the last
+    item. A non-Number index is a runtime error rather than `None`: it's
+    always a bug."""
     if not _is_number(i):
-        raise MahRuntimeError(f"Vector index must be a Number, got {type_name_of(i)}")
+        raise MahRuntimeError(f"{type_label} index must be a Number, got {type_name_of(i)}")
     if i != i.to_integral_value():
         return None
-    n = len(vec.items)
     pos = int(i)
     if pos < 0:
         pos += n
@@ -561,51 +561,70 @@ def _vector_position(vec: VectorValue, i: Any) -> int | None:
     return pos
 
 
+def _vector_position(vec: VectorValue, i: Any) -> int | None:
+    return _seq_position(len(vec.items), i, "Vector")
+
+
 # The prelude's range structs (`a..b`, `a..=b`, `a..`, `..b`, `..=b`); a
-# Vector indexed by one of them returns a slice.
+# Vector or String indexed by one of them returns a slice.
 _RANGE_TYPE_NAMES = ("Range", "FromRange", "ToRange")
 
 
-def _slice_bound(v: Any) -> int:
+def _is_range(v: Any) -> bool:
+    return isinstance(v, StructInstance) and v.type_name in _RANGE_TYPE_NAMES
+
+
+def _slice_bound(v: Any, type_label: str) -> int:
     if not _is_number(v) or v != v.to_integral_value():
         shown = _format_number(v) if _is_number(v) else type_name_of(v)
-        raise MahRuntimeError(f"Vector slice bounds must be integer Numbers, got {shown}")
+        raise MahRuntimeError(f"{type_label} slice bounds must be integer Numbers, got {shown}")
     return int(v)
 
 
-def _vector_slice(vec: VectorValue, r: StructInstance) -> VectorValue:
-    """`v[a..b]` and friends -- docs/MAHC_FORMAT.md #6.9. Python's slice
-    rules: a negative bound counts from the end, then both bounds are
-    clamped into `0..len`, so a range reaching past either end just gives
-    the items that exist (never an error). An inclusive end includes the
-    item it names. Always a new Vector."""
-    n = len(vec.items)
+def _slice_bounds(n: int, r: StructInstance, type_label: str) -> tuple[int, int]:
+    """`x[a..b]` and friends on a Vector or String of length `n` --
+    docs/MAHC_FORMAT.md #6.9. Python's slice rules: a negative bound counts
+    from the end, then both bounds are clamped into `0..n`, so a range
+    reaching past either end just gives the items that exist (never an
+    error). An inclusive end includes the item it names. Returns Python
+    `start, stop` (empty when `start >= stop`)."""
     fields = r.fields
-    start = _slice_bound(fields["start"]) if "start" in fields else 0
+    start = _slice_bound(fields["start"], type_label) if "start" in fields else 0
     if start < 0:
         start += n
     if "end" in fields:
-        stop = _slice_bound(fields["end"])
+        stop = _slice_bound(fields["end"], type_label)
         if stop < 0:
             stop += n
         if fields.get("inclusive") is True:
             stop += 1
     else:
         stop = n
-    start = min(max(start, 0), n)
-    stop = min(max(stop, 0), n)
-    return VectorValue(vec.items[start:stop])
+    return min(max(start, 0), n), min(max(stop, 0), n)
 
 
 def _vector_index(vec: VectorValue, i: Any) -> Any:
-    if isinstance(i, StructInstance) and i.type_name in _RANGE_TYPE_NAMES:
-        return _vector_slice(vec, i)
+    if _is_range(i):
+        start, stop = _slice_bounds(len(vec.items), i, "Vector")
+        return VectorValue(vec.items[start:stop])  # always a new Vector
     pos = _vector_position(vec, i)
     return NONE_VALUE if pos is None else vec.items[pos]
 
 
+def _string_index(s: str, i: Any) -> Any:
+    """String's native `Index`: `s[i]` is the code point at `i` as a
+    one-character String (`none` when `i` names none), `s[a..b]` a
+    substring -- the same index and slice rules as a Vector's. Strings are
+    immutable, so there's no `IndexAssign`."""
+    if _is_range(i):
+        start, stop = _slice_bounds(len(s), i, "String")
+        return s[start:stop]
+    pos = _seq_position(len(s), i, "String")
+    return NONE_VALUE if pos is None else s[pos]
+
+
 def _vector_index_assign(vec: VectorValue, i: Any, value: Any) -> Any:
-    if isinstance(i, StructInstance) and i.type_name in _RANGE_TYPE_NAMES:
+    if _is_range(i):
         raise MahRuntimeError("Can't assign to a Vector slice (v[a..b] = ...); assign items one at a time")
     pos = _vector_position(vec, i)
     if pos is None:
@@ -843,6 +862,10 @@ def _execute(linked: LinkedProgram) -> None:
             native,
             True,
         )
+    method_table.setdefault(("String", "index"), {"inherent": None, "traits": {}})["traits"]["Index"] = (
+        NativeMethod(1, _string_index),
+        True,
+    )
     for type_name, index, index_assign in (
         ("Vector", _vector_index, _vector_index_assign),
         ("Map", _map_index, _map_index_assign),

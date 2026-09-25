@@ -301,6 +301,45 @@ class CopyTests(unittest.TestCase):
             run_source("[].push(value: 1)")
 
 
+class StringIndexTests(unittest.TestCase):
+    def test_characters(self):
+        src = 'let s = "héllo"\nprint(s[0], s[1], s[4], s[-1], s[-5])'
+        self.assertEqual(run_source(src), "h é o o h\n")
+
+    def test_missing_index_reads_none(self):
+        src = 'let s = "ab"\nprint(s[2], s[-3], s[0.5], ""[0])'
+        self.assertEqual(run_source(src), "none none none none\n")
+
+    def test_slices(self):
+        src = 'let s = "hello"\nprint(s[1..3], s[..2], s[2..], s[-3..], s[..=-2], s[1..100])'
+        self.assertEqual(run_source(src), "el he llo llo hell ello\n")
+
+    def test_empty_slices(self):
+        src = 'let s = "hello"\nprint("|" + s[9..] + s[3..1] + ""[0..2] + "|")'
+        self.assertEqual(run_source(src), "||\n")
+
+    def test_result_is_a_string(self):
+        src = 'let s = "abc"\nprint(s[0] + s[1..].len(), s[0..2] == "ab")'
+        self.assertEqual(run_source(src), "a2 true\n")
+
+    def test_trait_qualified_call(self):
+        self.assertEqual(run_source('print(Index.index("ab", 1))'), "b\n")
+
+    def test_strings_are_immutable(self):
+        with self.assertRaisesRegex(Exception, r"'String' does not implement trait 'IndexAssign'"):
+            run_source('let s = "ab"\ns[0] = "c"')
+
+    def test_bad_indices(self):
+        with self.assertRaisesRegex(Exception, r"String index must be a Number, got String"):
+            run_source('print("ab"["x"])')
+        with self.assertRaisesRegex(Exception, r"String slice bounds must be integer Numbers, got 0.5"):
+            run_source('print("ab"[0.5..1])')
+
+    def test_cannot_reimplement_index_for_string(self):
+        with self.assertRaisesRegex(Exception, r"Cannot implement built-in trait 'Index' for built-in type 'String'"):
+            run_source("impl Index for String { fn index(self, k) { 1 } }")
+
+
 class MapTests(unittest.TestCase):
     def test_literal_read_write(self):
         src = """

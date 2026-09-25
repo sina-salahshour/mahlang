@@ -38,10 +38,11 @@ SYSTEM_TRAITS = {
 
 # M19: which built-in types natively implement each system trait (the VM's
 # initial method table, docs/MAHC_FORMAT.md #6.7). Every built-in type is
-# Printable; only Vector and Map are indexable.
+# Printable; Vector, Map, and String are indexable, and Strings, being
+# immutable, don't implement IndexAssign.
 SYSTEM_TRAIT_NATIVE_TYPES = {
     "Printable": BUILTIN_TYPE_NAMES,
-    "Index": ("Vector", "Map"),
+    "Index": ("Vector", "Map", "String"),
     "IndexAssign": ("Vector", "Map"),
 }
 

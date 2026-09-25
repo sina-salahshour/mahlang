@@ -33,7 +33,7 @@ let y = {
 | type | literals / how you get one | notes |
 |---|---|---|
 | `Number` | `42`, `3.14`, `-7` | decimal numbers (28 significant digits); `10 / 4` is `2.5` |
-| `String` | `"hi\n"` | escapes `\n \t \" \\`; immutable; only `s.len()` and `s.char_at(i)` (no indexing); iterable, see Iterators |
+| `String` | `"hi\n"` | escapes `\n \t \" \\`; immutable; `s.len()`, `s.char_at(i)`, `s[i]`, `s[a..b]` (see Vectors and Maps); iterable, see Iterators |
 | `Bool` | `true`, `false` | |
 | `Option` | `none`, `some(x)` | Mah's null. `none` is falsy; `some(x)` is always truthy |
 | `Function` | `fn(a) { a }` | first-class closures, captured by reference |
@@ -375,6 +375,16 @@ print(shallow[0][0], deep[0][0])   # 1 0
   without quotes, like everywhere else).
 - A `[` on a new line starts a new Vector/Map literal, not an index into
   the previous line's value: write `x[0]` with the `[` right after `x`.
+- **Strings** can be indexed and sliced the same way, read-only: `s[0]`
+  is the first character (a one-character String), `s[-1]` the last,
+  `s[1..3]` a substring, and an index past the end gives `none`. Indices
+  count characters (Unicode code points), like `len()` and `char_at`:
+
+```mah
+let s = "héllo"
+print(s[1], s[-1], s[9], s[1..3], s[..=1], s[2..])   # é o none él hé llo
+```
+
 - **Your own types** can support `x[k]` by implementing the `Index` trait
   (`fn index(self, key)`) and `x[k] = v` with `IndexAssign`
   (`fn index_assign(self, key, value)`):
@@ -511,7 +521,7 @@ before anything runs.
 
 - Tuples, sets, assigning to a slice (`v[1..3] = ...`),
   `collect` (use `reduce()`), `for_each`/`count`, Vector `insert`/`remove`/`sort`/`contains`,
-  indexing Strings (`s[0]`: use `s.char_at(0)`).
+  assigning into a String (`s[0] = "x"`: Strings are immutable).
 - `for x in ...` without `let`, C-style `for (i = 0; ...)`, destructuring in
   `for` bindings, labeled `break`/`continue`.
 - String methods other than `len`/`char_at` (no `split`, `replace`, ...), string indexing.

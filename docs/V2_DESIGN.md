@@ -2642,6 +2642,10 @@ node that resolved to it. Then:
       the VM knows about a prelude type; it's specified in
       `docs/MAHC_FORMAT.md` §6.9 so other VMs do the same. Assigning to a
       slice is a runtime error.
+    - **String implements `Index`** (follow-up request, read-only since
+      Strings are immutable): `s[i]` is a one-character String and
+      `s[a..b]` a substring, sharing the Vector index/slice code
+      (`_seq_position`/`_slice_bounds`) and its rules.
     - **`copy(deep = false)`** on Vector and Map (follow-up requests): a
       native shallow copy, or with `deep: true` a copy of every Vector/Map/
       struct/enum reachable from it (a memo keeps shared objects shared

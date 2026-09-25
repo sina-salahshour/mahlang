@@ -178,13 +178,14 @@ trait IndexAssign { fn index_assign(self, key, value) } # x[key] = value
 ```
 
 Runtime-declared, like `Printable`: `Vector` and `Map` implement both
-natively (see `docs/MAHC_FORMAT.md` §6.9), and any user type can implement
+natively, `String` implements only `Index` (it's immutable; see
+`docs/MAHC_FORMAT.md` §6.9), and any user type can implement
 either one. The compiler turns `x[k]` into a trait-restricted `callmethod`
 (`Index.index(x, k)`), and `x[k] = v` into `IndexAssign.index_assign(x, k,
 v)`, so indexing a value that doesn't implement them fails with
 "'Number' does not implement trait 'Index'". They're separate traits
 because read-only indexable types are useful (a user `Grid` view, and
-later Strings).
+String).
 
 Vector/Map *iteration* isn't native: the prelude has `impl Iterable for
 Vector` (a live `VectorIterator` over the index) and `impl Iterable for
