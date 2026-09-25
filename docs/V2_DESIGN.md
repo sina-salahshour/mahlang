@@ -2718,6 +2718,55 @@ node that resolved to it. Then:
     - Tests: `tests/test_guards_detach.py`, and `examples/match.mh`/
       `examples/detach_any.mh`. 726 tests green.
 
+22. **M21 — type annotation syntax and `let` shadowing. ✅ Landed.**
+
+    Step one of the static type system in `docs/TYPES.md`: annotations are
+    parsed, stored, and name-checked, and otherwise ignored. Codegen,
+    bytecode and runtime behavior are unchanged.
+
+    - **Syntax**: `->` token; `name: Type` on parameters, `let`, `for`
+      bindings, struct and enum fields; `-> Type` returns on `fn` items,
+      anonymous `fn`s and trait/impl methods (bodyless trait methods too);
+      `<T, U: Bound + Other, V = Default>` type parameter lists on `fn`,
+      `struct`, `enum`, `trait`, `impl` and methods; generic impl headers
+      (`impl<T> Iterable<T> for Vector<T>`). Types are `NamedType(name,
+      args)` and `FnType(params, ret)` AST nodes. `self` can't be
+      annotated.
+    - **Resolver**: every annotation is queued while resolving and
+      validated at the end of `resolve_program`, once every
+      struct/enum/trait is known: unknown names, wrong `<...>` arity,
+      `Function` used as a type, `Self` outside a trait/impl, type
+      parameters (scoped to their item, nested closures see outer ones)
+      that shadow a type or repeat, bounds that aren't traits, and
+      default ordering. An inherent impl must name its target bare or with
+      exactly its own type parameters. In impl headers the `<...>` may be
+      left off (every pre-M21 impl does), and arity is checked only when
+      it's written. Annotation uses of struct/enum/trait names go into
+      `type_position_index`, so go-to-definition and rename cover them.
+    - **Shadowing**: `_declare` takes `allow_shadow`, passed only by the
+      `let` statement branch, so a same-scope `let` makes a new variable
+      (new slot and symbol) while `fn`, parameters, and pattern/`for`
+      bindings still can't repeat. The `let`'s value is resolved first, so
+      it sees the old binding.
+    - **Prelude**: `Iterator<T>`/`Iterable<T>` and every impl/struct header
+      got type parameters (headers only; method signatures are M23). The
+      preprocessor's prelude trigger set is unchanged (tested).
+    - **Editors**: tree-sitter `named_type`/`function_type`/
+      `type_arguments`/`type_parameters`/`field_decl` and annotations on
+      every declaration (all examples and the prelude parse with no
+      errors), highlighted as `@type`. TextMate: `->`, capitalized names
+      in type positions, and generic `impl`/`fn` headers.
+    - **Intended test changes**: `tests/test_language.py`'s same-scope
+      duplicate `let` test now asserts shadowing works, and a duplicate
+      `fn` test keeps the error covered.
+    - Not done: the LSP's token-scanning `collect_symbols` (document
+      symbols) would misread annotated parameters, but it's already dead
+      code (it references a nonexistent `TokenType.Def`).
+    - Tests: `tests/test_type_syntax.py` (parsing, validation, identical
+      release bytecode with and without annotations, shadowing, LSP rename/
+      definition through annotations, imports of generic functions).
+      773 tests green.
+
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
 it** (`make test` must stay green) — see `docs/TESTING.md` for where
@@ -2729,7 +2778,7 @@ M1 was built and documented that way.
 
 ## Status
 
-M0 through M20 are all landed (see their entries above for what changed and
+M0 through M21 are all landed (see their entries above for what changed and
 each milestone's deliberate deviations/simplifications). `docs/NEXT_PHASES.md`
 captures what's deliberately deferred still (arrays/lists pattern matching,
 generics, the type system -- and, as of M11, sound field-*access*

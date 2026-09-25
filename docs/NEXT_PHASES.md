@@ -86,6 +86,11 @@ the planned `for` desugaring.
 
 ## The type system
 
+**Superseded (2026-09-25) by [`TYPES.md`](TYPES.md)**, a static design:
+optional annotations, inference, generics, and three strictness levels.
+The runtime-types-as-values idea below is kept for a later narrowing/
+`match`-on-type phase.
+
 The headline future feature, and the one most worth designing carefully
 before touching, because its execution model affects everything above it.
 

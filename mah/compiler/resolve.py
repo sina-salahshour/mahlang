@@ -196,6 +196,9 @@ from .ast_nodes import (
     VectorLit,
     FieldAccess,
     FnExpr,
+    FnType,
+    NamedType,
+    TypeParam,
     Ident,
     IfStmt,
     ImplDecl,
@@ -203,6 +206,7 @@ from .ast_nodes import (
     LetStmt,
     MatchStmt,
     MethodCall,
+    MethodDecl,
     NumberLit,
     PrintStmt,
     RangePat,
@@ -219,6 +223,25 @@ from .ast_nodes import (
     WildcardPat,
 )
 from ..runtime_values import BUILTIN_TYPE_NAMES, SYSTEM_TRAIT_NATIVE_TYPES, SYSTEM_TRAITS
+
+# M21 (syntax only -- see docs/TYPES.md): known type names' arity (the
+# number of `<...>` type arguments they require -- exactly that many, no
+# more, no fewer). `Function` is deliberately absent -- it's rejected
+# outright as a static type (`_validate_type_expr`), and `Self`/a type
+# parameter in scope are handled specially, not through this table.
+_BUILTIN_TYPE_ARITY = {
+    "Number": 0,
+    "String": 0,
+    "Bool": 0,
+    "Unknown": 0,
+    "Never": 0,
+    "None": 0,
+    "Vector": 1,
+    "Option": 1,
+    "Promise": 1,
+    "Map": 2,
+}
+_SYSTEM_TRAIT_ARITY = {"Printable": 0, "Index": 2, "IndexAssign": 2}
 
 
 class FrameLevel:
@@ -495,9 +518,41 @@ class Resolver:
         # hint off of).
         self._self_trait = None
 
+        # M21 (syntax only -- see docs/TYPES.md and this module's docstring
+        # for the "validated after all declarations are known" design):
+        # struct/enum/trait name -> its own declared `type_params` (list of
+        # TypeParam), for `_type_arity`'s "declared struct/enum/trait" arity
+        # row. Populated as each declaration is registered.
+        self.struct_type_params: dict = {}
+        self.enum_type_params: dict = {}
+        self.trait_type_params: dict = {}
+        # M21: every TypeExpr found in an annotation, recorded as
+        # `(type_expr, frozenset(type param names in scope),
+        # inside_trait_or_impl)` -- validated all at once, at the very end
+        # of `resolve_program` (after phase 3), once every struct/enum/
+        # trait/type-param is known program-wide, regardless of the
+        # textual order declarations and their uses appear in.
+        self._pending_type_exprs: list = []
+        # M21: every `<...>` type-parameter LIST found (a fn/method's own,
+        # or a struct/enum/trait/impl's own), recorded as
+        # `(type_params, frozenset(enclosing type param names),
+        # inside_trait_or_impl)` -- validated the same way (duplicate
+        # names, a name shadowing a known type, bounds naming a trait,
+        # default-value ordering).
+        self._pending_type_params: list = []
+        # M21: stack of frozensets of type-parameter names currently in
+        # scope from ENCLOSING `fn`/method bodies (nested closures see
+        # outer type params) -- `_resolve_fn_expr` pushes/pops this; the
+        # impl/trait method loop in `resolve_program`'s phase 3 seeds it
+        # with the impl's/trait's own type params before resolving each
+        # method body.
+        self._fn_type_param_stack: list = []
+
     # -- name table helpers ----------------------------------------------
 
-    def _declare(self, name: str, slot: int, position: int, kind: str = "let") -> "Symbol":
+    def _declare(
+        self, name: str, slot: int, position: int, kind: str = "let", allow_shadow: bool = False
+    ) -> "Symbol":
         # M12: `Self`/`self` are reserved names -- see this module's
         # docstring and docs/V2_DESIGN.md's M12 milestone. `self` is only
         # ever legitimately declared as a method's first parameter, which
@@ -512,7 +567,13 @@ class Resolver:
                 f"'self' is reserved (only valid as a method's first parameter) at position {position}"
             )
         scope = self.scopes[-1]
-        if name in scope:
+        # M21: Rust-style same-scope `let` shadowing -- a `let` statement
+        # redeclaring a name already in this exact scope replaces the
+        # scope's binding (a fresh Symbol/slot, which the caller already
+        # allocated) instead of raising. Only the LetStmt branch passes
+        # `allow_shadow`; `fn`, parameters, and pattern/`for` bindings still
+        # raise -- see docs/TYPES.md's "Shadowing" section.
+        if name in scope and not allow_shadow:
             raise NameError(f"Error at position {position}: variable is already defined {name}")
         symbol = Symbol(name, position, kind)
         self.position_index[position] = symbol
@@ -638,6 +699,205 @@ class Resolver:
             raise Exception(f"'Self' is only valid inside an impl block at position {position}")
         self._self_positions.add(position)
         return self._self_type
+
+    # -- M21: type annotations (syntax only -- see docs/TYPES.md) ---------
+
+    def _type_arity(self, name: str):
+        """The number of `<...>` type arguments `name` requires, or `None`
+        if it isn't a known type name at all (a type parameter in scope and
+        `Self` are handled by the caller, not here -- both need context this
+        purely-namespace lookup doesn't have)."""
+        if name in _BUILTIN_TYPE_ARITY:
+            return _BUILTIN_TYPE_ARITY[name]
+        if name in _SYSTEM_TRAIT_ARITY:
+            return _SYSTEM_TRAIT_ARITY[name]
+        if name in self.struct_decls:
+            return len(self.struct_type_params.get(name, []))
+        if name in self.enum_decls:
+            return len(self.enum_type_params.get(name, []))
+        if name in self.trait_decls:
+            return len(self.trait_type_params.get(name, []))
+        return None
+
+    def _current_type_param_scope(self) -> frozenset:
+        """Type parameter names visible from the fn/method body currently
+        being resolved (the union already includes every enclosing one --
+        see `_fn_type_param_stack`'s docstring), or `frozenset()` at the top
+        level."""
+        if not self._fn_type_param_stack:
+            return frozenset()
+        return self._fn_type_param_stack[-1]
+
+    def _inside_trait_or_impl_now(self) -> bool:
+        """Whether the code currently being resolved lexically lives inside
+        a trait's default-method body or an impl's own method body -- i.e.
+        whether `Self` is meaningful right here. Impl/trait HEADERS and
+        method SIGNATURES are registered with this hardcoded `True` instead
+        (see `_register_method_type_annotations`/`_register_trait`/
+        `_register_impl`), since `self._self_type`/`self._self_trait` are
+        only set once phase 3 resolves a method's actual body."""
+        return self._self_type is not None or self._self_trait is not None
+
+    def _validate_type_expr(self, texpr, tp_scope: frozenset, inside_trait_or_impl: bool) -> None:
+        """Validate one TypeExpr (`NamedType` | `FnType`), recursively --
+        unknown type names, `Function` used as a static type, wrong arity,
+        `Self` outside a trait/impl. Only ever called once every
+        struct/enum/trait/type-param is known program-wide (the very end of
+        `resolve_program`) -- see `_pending_type_exprs`'s docstring. Also
+        registers `type_position_index` for every struct/enum/trait name
+        used, so LSP go-to-definition/hover/rename of that type cover its
+        uses in annotations automatically."""
+        if isinstance(texpr, FnType):
+            for p in texpr.params:
+                self._validate_type_expr(p, tp_scope, inside_trait_or_impl)
+            if texpr.ret is not None:
+                self._validate_type_expr(texpr.ret, tp_scope, inside_trait_or_impl)
+            return
+        name = texpr.name
+        pos = texpr.position
+        if name == "Function":
+            raise Exception(
+                f"'Function' can't be used as a type; write fn(...) -> ... at position {pos}"
+            )
+        if name == "Self":
+            if not inside_trait_or_impl:
+                raise Exception(f"'Self' is only a type inside a trait or impl at position {pos}")
+            if texpr.args:
+                raise Exception(f"Type 'Self' takes 0 type argument(s), got {len(texpr.args)} at position {pos}")
+            return
+        if name in tp_scope:
+            if texpr.args:
+                raise Exception(
+                    f"Type '{name}' takes 0 type argument(s), got {len(texpr.args)} at position {pos}"
+                )
+            return
+        arity = self._type_arity(name)
+        if arity is None:
+            raise Exception(f"Unknown type '{name}' at position {pos}")
+        if len(texpr.args) != arity:
+            raise Exception(
+                f"Type '{name}' takes {arity} type argument(s), got {len(texpr.args)} at position {pos}"
+            )
+        # LSP: register this use site -- see type_position_index's docstring
+        # (module-level). Pre-seeded built-ins (Option/Promise, the system
+        # traits) have no user-written declaration to link to, so they're
+        # deliberately left out, exactly like every other use of this dict.
+        if name in self.struct_decls:
+            self.type_position_index[pos] = ("struct", name)
+        elif name in self.enum_decls and name not in ("Option", "Promise"):
+            self.type_position_index[pos] = ("enum", name)
+        elif name in self.trait_decls and name not in _SYSTEM_TRAIT_ARITY:
+            self.type_position_index[pos] = ("trait", name)
+        for arg in texpr.args:
+            self._validate_type_expr(arg, tp_scope, inside_trait_or_impl)
+
+    def _validate_type_param_list(self, type_params: list, enclosing_scope: frozenset, inside_trait_or_impl: bool) -> None:
+        """Validate one `<...>` type-parameter list -- duplicate names, a
+        name shadowing a known type, a bound that isn't a declared trait,
+        and default-value ordering (once a type parameter has a default,
+        every later one needs one too). Bounds/defaults may reference any
+        sibling in this same list (`U = Vector<T>`), not just `T`s declared
+        textually before `U` -- Mah doesn't otherwise order-check within a
+        single declaration header."""
+        own_names = frozenset(tp.name for tp in type_params)
+        full_scope = enclosing_scope | own_names
+        seen: set = set()
+        seen_default = False
+        for tp in type_params:
+            if tp.name in seen:
+                raise Exception(f"Duplicate type parameter '{tp.name}' at position {tp.position}")
+            seen.add(tp.name)
+            if tp.name == "Self" or self._type_arity(tp.name) is not None:
+                raise Exception(f"Type parameter '{tp.name}' shadows a type at position {tp.position}")
+            for bound in tp.bounds:
+                self._validate_type_expr(bound, full_scope, inside_trait_or_impl)
+                if not (isinstance(bound, NamedType) and bound.name in self.trait_decls):
+                    label = bound.name if isinstance(bound, NamedType) else "fn(...)"
+                    raise Exception(
+                        f"Bound '{label}' on '{tp.name}' is not a trait at position {bound.position}"
+                    )
+            if tp.default is not None:
+                seen_default = True
+                self._validate_type_expr(tp.default, full_scope, inside_trait_or_impl)
+            elif seen_default:
+                raise Exception(
+                    f"Type parameter '{tp.name}' needs a default because an earlier one has one "
+                    f"at position {tp.position}"
+                )
+
+    def _register_method_type_annotations(
+        self, method: MethodDecl, enclosing_scope: frozenset, inside_trait_or_impl: bool
+    ) -> None:
+        """Record a trait/impl method's own `<...>`/param types/return type
+        for deferred validation -- shared by `_register_trait` (trait
+        methods) and `_register_impl` (impl methods). `method.fn`'s own
+        copies of these three fields are the SAME objects (see the parser),
+        so `_resolve_fn_expr` must not re-register them later."""
+        own_scope = frozenset(tp.name for tp in method.type_params)
+        full_scope = enclosing_scope | own_scope
+        self._pending_type_params.append((method.type_params, enclosing_scope, inside_trait_or_impl))
+        for ptype in method.param_types:
+            if ptype is not None:
+                self._pending_type_exprs.append((ptype, full_scope, inside_trait_or_impl))
+        if method.return_type is not None:
+            self._pending_type_exprs.append((method.return_type, full_scope, inside_trait_or_impl))
+
+    def _record_type_expr(self, texpr) -> None:
+        """Queue one annotation met while resolving ordinary code (a `let`
+        or `for` binding), with the type parameters in scope right here."""
+        self._pending_type_exprs.append(
+            (texpr, self._current_type_param_scope(), self._inside_trait_or_impl_now())
+        )
+
+    def _record_decl_types(self, type_params: list, field_types: list) -> None:
+        """Queue a struct's/enum's own `<...>` list and field annotations.
+        Field types see only the declaration's own type parameters."""
+        own_scope = frozenset(tp.name for tp in type_params)
+        self._pending_type_params.append((type_params, frozenset(), False))
+        for texpr in field_types:
+            if texpr is not None:
+                self._pending_type_exprs.append((texpr, own_scope, False))
+
+    def _record_impl_header_types(self, impl: ImplDecl) -> None:
+        """Queue an impl's `<...>` list and the type arguments of its
+        target and trait (when written). An inherent impl's target must be written with
+        no arguments or with exactly the impl's own type parameters, in
+        order (`impl<A, B> Pair<A, B>`), since the checker gives inherent
+        methods to every instantiation of the type."""
+        impl_scope = frozenset(tp.name for tp in impl.type_params)
+        self._pending_type_params.append((impl.type_params, frozenset(), False))
+        target = NamedType(
+            name=impl.type_name, args=impl.type_args, position=impl.type_name_position or impl.position
+        )
+        # Leaving the `<...>` off an impl's target or trait is allowed
+        # (every impl written before M21 does), so arity is only checked
+        # when arguments are written.
+        if impl.type_args:
+            self._pending_type_exprs.append((target, impl_scope, False))
+        if impl.trait_name is not None and impl.trait_args:
+            trait = NamedType(
+                name=impl.trait_name,
+                args=impl.trait_args,
+                position=impl.trait_name_position or impl.position,
+            )
+            self._pending_type_exprs.append((trait, impl_scope, False))
+        if impl.trait_name is None and impl.type_args:
+            own = [tp.name for tp in impl.type_params]
+            written = [a.name if isinstance(a, NamedType) and not a.args else None for a in impl.type_args]
+            if written != own:
+                raise Exception(
+                    f"An inherent impl must be for '{impl.type_name}' or '{impl.type_name}<"
+                    f"{', '.join(own) or '...'}>' with its own type parameters at position {target.position}"
+                )
+
+    def _validate_pending_types(self) -> None:
+        """Run every deferred check recorded via `_pending_type_params`/
+        `_pending_type_exprs` -- called once, at the very end of
+        `resolve_program`. See both fields' docstrings above."""
+        for type_params, enclosing_scope, inside_trait_or_impl in self._pending_type_params:
+            self._validate_type_param_list(type_params, enclosing_scope, inside_trait_or_impl)
+        for texpr, tp_scope, inside_trait_or_impl in self._pending_type_exprs:
+            self._validate_type_expr(texpr, tp_scope, inside_trait_or_impl)
 
     # -- M13: type hints (best effort, never used for codegen) ------------
 
@@ -805,6 +1065,7 @@ class Resolver:
             # bodies -- lets `self.m(...)` inside one recognize itself as
             # restricted to this trait (see `_record_dynamic_method_call`).
             self._self_trait = trait.name
+            self._fn_type_param_stack.append(frozenset(tp.name for tp in trait.type_params))
             try:
                 for method in trait.methods:
                     if method.fn is not None:
@@ -814,17 +1075,24 @@ class Resolver:
                         self._resolve_fn_expr(method.fn, allow_self=True)
             finally:
                 self._self_trait = None
+                self._fn_type_param_stack.pop()
         for impl in impls:
             self._self_type = impl.type_name
+            self._fn_type_param_stack.append(frozenset(tp.name for tp in impl.type_params))
             try:
                 for method in impl.methods:
                     self._resolve_fn_expr(method.fn, allow_self=True)
             finally:
                 self._self_type = None
+                self._fn_type_param_stack.pop()
         # LSP hygiene: a `Self` token must never look like a use of the
         # real type name (rename would otherwise rewrite `Self` itself).
         for pos in self._self_positions:
             self.type_position_index.pop(pos, None)
+        # M21: every annotation's type names are validated last, now that
+        # every struct/enum/trait/type-param in the whole program is known
+        # -- see `_pending_type_exprs`/`_pending_type_params`'s docstrings.
+        self._validate_pending_types()
 
     # -- statements ------------------------------------------------------
 
@@ -837,6 +1105,8 @@ class Resolver:
             # `stmt.position` if `name_position` was never set (shouldn't
             # happen via the parser, but keeps this defensive).
             name_position = stmt.name_position if stmt.name_position is not None else stmt.position
+            if stmt.type_ann is not None:
+                self._record_type_expr(stmt.type_ann)
             if isinstance(stmt.value, FnExpr):
                 # Declare before resolving the body -- enables self-reference
                 # (recursion) for named function bindings. See module docstring.
@@ -848,7 +1118,7 @@ class Resolver:
             else:
                 self.resolve_expr(stmt.value)
                 slot = self.frame_stack[-1].alloc()
-                symbol = self._declare(stmt.name, slot, name_position, kind="let")
+                symbol = self._declare(stmt.name, slot, name_position, kind="let", allow_shadow=True)
                 # M13: best-effort type hint, purely advisory (LSP) -- see
                 # `_type_hint`'s docstring.
                 symbol.type_hint = self._type_hint(stmt.value)
@@ -903,6 +1173,9 @@ class Resolver:
             # bindings get their own scope layer directly enclosing the
             # body's block scope (like a match arm's pattern bindings).
             self.resolve_expr(stmt.iterable)
+            for annotation in (stmt.value_type, stmt.index_type):
+                if annotation is not None:
+                    self._record_type_expr(annotation)
             self._push()
             slot = self.frame_stack[-1].alloc()
             self._declare(stmt.value_name, slot, stmt.value_position, kind="let")
@@ -970,6 +1243,8 @@ class Resolver:
                     f"'{stmt.name}' is already declared as a trait at position {stmt.position}"
                 )
             self.struct_decls[stmt.name] = stmt.fields
+            self._record_decl_types(stmt.type_params, stmt.field_types)
+            self.struct_type_params[stmt.name] = stmt.type_params
             if self._is_system_decl(stmt.position):
                 self._system_types.add(stmt.name)
             # LSP: register the declaration site in type_position_index --
@@ -1017,6 +1292,10 @@ class Resolver:
             self.enum_decls[stmt.name] = {
                 variant_name: variant_fields for variant_name, variant_fields in stmt.variants
             }
+            self.enum_type_params[stmt.name] = stmt.type_params
+            self._record_decl_types(
+                stmt.type_params, [t for types in stmt.variant_field_types for t in types]
+            )
             if self._is_system_decl(stmt.position):
                 self._system_types.add(stmt.name)
             # LSP: register the enum's and each variant's declaration site
@@ -1059,6 +1338,23 @@ class Resolver:
         self._pop()
 
     def _resolve_fn_expr(self, fn: FnExpr, allow_self: bool = False) -> None:
+        # M21: this fn's own type parameters join those of every enclosing
+        # fn (and, for a method, its trait's/impl's, seeded by
+        # resolve_program's phase 3) for its annotations and its body.
+        outer_scope = self._current_type_param_scope()
+        inside = self._inside_trait_or_impl_now()
+        full_scope = outer_scope | frozenset(tp.name for tp in fn.type_params)
+        self._pending_type_params.append((fn.type_params, outer_scope, inside))
+        for annotation in [*fn.param_types, fn.return_type]:
+            if annotation is not None:
+                self._pending_type_exprs.append((annotation, full_scope, inside))
+        self._fn_type_param_stack.append(full_scope)
+        try:
+            self._resolve_fn_expr_body(fn, allow_self)
+        finally:
+            self._fn_type_param_stack.pop()
+
+    def _resolve_fn_expr_body(self, fn: FnExpr, allow_self: bool) -> None:
         new_frame = FrameLevel(depth=self.frame_stack[-1].depth + 1, parent=self.frame_stack[-1])
         self.frame_stack.append(new_frame)
         self._push()
@@ -1125,6 +1421,14 @@ class Resolver:
             raise Exception(f"Trait '{name}' is already declared at position {trait.position}")
         if name in self.struct_decls or name in self.enum_decls:
             raise Exception(f"'{name}' is already declared as a type at position {trait.position}")
+        # M21: a bodyless method's signature has no FnExpr to carry it
+        # through `_resolve_fn_expr`, so its annotations are recorded here.
+        self.trait_type_params[name] = trait.type_params
+        trait_scope = frozenset(tp.name for tp in trait.type_params)
+        self._pending_type_params.append((trait.type_params, frozenset(), True))
+        for method in trait.methods:
+            if method.fn is None:
+                self._register_method_type_annotations(method, trait_scope, True)
 
         seen_methods: set = set()
         for method in trait.methods:
@@ -1206,6 +1510,7 @@ class Resolver:
         pos = impl.position
         if type_name == "Self":
             raise Exception(f"'Self' cannot be the target of an impl at position {pos}")
+        self._record_impl_header_types(impl)
         if not self._is_type_name(type_name):
             raise NameError(f"Undefined type '{type_name}' in impl at position {pos}")
         if type_name in self.struct_decls and type_name in self.enum_decls:

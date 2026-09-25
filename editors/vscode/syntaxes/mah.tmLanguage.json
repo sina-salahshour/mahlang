@@ -16,6 +16,7 @@
     { "include": "#fn-decl" },
     { "include": "#builtins" },
     { "include": "#builtin-types" },
+    { "include": "#type-annotations" },
     { "include": "#self-identifiers" },
     { "include": "#await-field" },
     { "include": "#function-calls" },
@@ -96,7 +97,7 @@
         },
         {
           "comment": "`impl Shape for Rect { ... }` -- trait impl: both the trait name and the implementing type are type references. Listed before the no-`for` form below so it wins the tie for `impl` headers that do have a `for`.",
-          "match": "\\b(impl)\\s+([A-Za-z_$][A-Za-z0-9_$]*)\\s+(for)\\s+([A-Za-z_$][A-Za-z0-9_$]*)",
+          "match": "\\b(impl)(?:\\s*<[^{]*?>)?\\s*\\b([A-Za-z_$][A-Za-z0-9_$]*)(?:\\s*<[^{]*?>)?\\s+(for)\\s+([A-Za-z_$][A-Za-z0-9_$]*)",
           "captures": {
             "1": { "name": "storage.type.mah" },
             "2": { "patterns": [{ "include": "#builtin-type-name" }] },
@@ -106,7 +107,7 @@
         },
         {
           "comment": "`impl Rect { ... }` -- inherent impl: the implementing type.",
-          "match": "\\b(impl)\\s+([A-Za-z_$][A-Za-z0-9_$]*)",
+          "match": "\\b(impl)(?:\\s*<[^{]*?>)?\\s*\\b([A-Za-z_$][A-Za-z0-9_$]*)",
           "captures": {
             "1": { "name": "storage.type.mah" },
             "2": { "patterns": [{ "include": "#builtin-type-name" }] }
@@ -119,7 +120,7 @@
       "patterns": [
         {
           "name": "support.type.builtin.mah",
-          "match": "\\b(Number|String|Bool|Function|Option|Promise|Vector|Map|Printable|Index|IndexAssign)\\b"
+          "match": "\\b(Number|String|Bool|Function|Option|Promise|Vector|Map|Printable|Index|IndexAssign|Unknown|Never|None)\\b"
         },
         {
           "name": "entity.name.type.mah",
@@ -132,7 +133,22 @@
       "patterns": [
         {
           "name": "support.type.builtin.mah",
-          "match": "\\b(Number|String|Bool|Function|Option|Promise|Vector|Map|Printable|Index|IndexAssign)\\b"
+          "match": "\\b(Number|String|Bool|Function|Option|Promise|Vector|Map|Printable|Index|IndexAssign|Unknown|Never|None)\\b"
+        }
+      ]
+    },
+    "type-annotations": {
+      "comment": "M21 (docs/TYPES.md): `->` before a return type, and a capitalized name in a type position -- after `:` (a parameter, `let`, field or bound), `->`, `<`, `,` or `+` -- as a type. Built-in type names are matched earlier by `#builtin-types`.",
+      "patterns": [
+        {
+          "name": "keyword.operator.arrow.mah",
+          "match": "->"
+        },
+        {
+          "match": "(?:(?<=:)|(?<=->)|(?<=<)|(?<=,)|(?<=\\+))\\s*([A-Z][A-Za-z0-9_$]*)\\b",
+          "captures": {
+            "1": { "name": "entity.name.type.mah" }
+          }
         }
       ]
     },
@@ -165,7 +181,7 @@
       "patterns": [
         {
           "comment": "`fn name(...)` -- named function declarations (anonymous `fn(...)` falls through to the plain storage-keyword rule).",
-          "match": "\\b(fn)\\s+([A-Za-z_$][A-Za-z0-9_$]*)\\s*(?=\\()",
+          "match": "\\b(fn)\\s+([A-Za-z_$][A-Za-z0-9_$]*)\\s*(?=[(<])",
           "captures": {
             "1": { "name": "storage.type.mah" },
             "2": { "name": "entity.name.function.mah" }

@@ -47,6 +47,9 @@ from .ast_nodes import (
     MatchStmt,
     MethodCall,
     MethodDecl,
+    NamedType,
+    FnType,
+    TypeParam,
     NumberLit,
     PrintStmt,
     RangePat,
@@ -496,6 +499,10 @@ class Parser:
         if tok.type is TokenType.LET:
             self.advance()
             name_tok = self.expect(TokenType.ID)
+            type_ann = None
+            if self.current.type is TokenType.COLON:
+                self.advance()
+                type_ann = self._parse_type()
             self.expect(TokenType.ASSIGN)
             value = self.parse_expr()
             return LetStmt(
@@ -503,6 +510,7 @@ class Parser:
                 value=value,
                 position=tok.position,
                 name_position=name_tok.position,
+                type_ann=type_ann,
             )
 
         if tok.type is TokenType.STRUCT:
@@ -614,11 +622,19 @@ class Parser:
         for_tok = self.advance()  # FOR
         self._expect_for_let()
         value_tok = self.expect(TokenType.ID)
+        value_type = None
+        if self.current.type is TokenType.COLON:
+            self.advance()
+            value_type = self._parse_type()
         index_tok = None
+        index_type = None
         if self.current.type is TokenType.COMMA:
             self.advance()
             self._expect_for_let()
             index_tok = self.expect(TokenType.ID)
+            if self.current.type is TokenType.COLON:
+                self.advance()
+                index_type = self._parse_type()
         self.expect(TokenType.IN)
         iterable = self._parse_condition_expr()
         body = self.parse_block()
@@ -630,6 +646,8 @@ class Parser:
             position=for_tok.position,
             value_position=value_tok.position,
             index_position=index_tok.position if index_tok is not None else None,
+            value_type=value_type,
+            index_type=index_type,
         )
 
     def _expect_for_let(self) -> None:
@@ -858,21 +876,35 @@ class Parser:
         sub = BindPat(name=name_tok.literal, position=name_tok.position)
         return (name_tok.literal, sub, None)
 
+    def _parse_field_decl(self):
+        """M21: `NAME [":" type]` -- a struct field or enum variant field.
+        Returns `(name, position, type_or_None)`."""
+        field_tok = self.expect(TokenType.ID)
+        ftype = None
+        if self.current.type is TokenType.COLON:
+            self.advance()
+            ftype = self._parse_type()
+        return field_tok.literal, field_tok.position, ftype
+
     def _parse_struct_decl(self) -> StructDecl:
         struct_tok = self.advance()  # STRUCT
         name_tok = self.expect(TokenType.ID)
+        type_params = self._parse_type_params()
         self.expect(TokenType.BRACE_OPEN)
         fields = []
         field_positions = []
+        field_types = []
         if self.current.type is TokenType.ID:
-            field_tok = self.advance()
-            fields.append(field_tok.literal)
-            field_positions.append(field_tok.position)
+            fname, fpos, ftype = self._parse_field_decl()
+            fields.append(fname)
+            field_positions.append(fpos)
+            field_types.append(ftype)
             while self.current.type is TokenType.COMMA:
                 self.advance()
-                field_tok = self.expect(TokenType.ID)
-                fields.append(field_tok.literal)
-                field_positions.append(field_tok.position)
+                fname, fpos, ftype = self._parse_field_decl()
+                fields.append(fname)
+                field_positions.append(fpos)
+                field_types.append(ftype)
         self.expect(TokenType.BRACE_CLOSE)
         return StructDecl(
             name=name_tok.literal,
@@ -880,26 +912,36 @@ class Parser:
             position=struct_tok.position,
             name_position=name_tok.position,
             field_positions=field_positions,
+            type_params=type_params,
+            field_types=field_types,
         )
 
     def _parse_enum_decl(self) -> EnumDecl:
         enum_tok = self.advance()  # ENUM
         name_tok = self.expect(TokenType.ID)
+        type_params = self._parse_type_params()
         self.expect(TokenType.BRACE_OPEN)
         variants = []
         variant_positions = []
         variant_field_positions_list = []
+        variant_field_types_list = []
         if self.current.type is not TokenType.BRACE_CLOSE:
-            variant_name, variant_fields, variant_pos, variant_field_positions = self._parse_enum_variant()
+            variant_name, variant_fields, variant_pos, variant_field_positions, variant_field_types = (
+                self._parse_enum_variant()
+            )
             variants.append((variant_name, variant_fields))
             variant_positions.append(variant_pos)
             variant_field_positions_list.append(variant_field_positions)
+            variant_field_types_list.append(variant_field_types)
             while self.current.type is TokenType.COMMA:
                 self.advance()
-                variant_name, variant_fields, variant_pos, variant_field_positions = self._parse_enum_variant()
+                variant_name, variant_fields, variant_pos, variant_field_positions, variant_field_types = (
+                    self._parse_enum_variant()
+                )
                 variants.append((variant_name, variant_fields))
                 variant_positions.append(variant_pos)
                 variant_field_positions_list.append(variant_field_positions)
+                variant_field_types_list.append(variant_field_types)
         self.expect(TokenType.BRACE_CLOSE)
         return EnumDecl(
             name=name_tok.literal,
@@ -908,6 +950,8 @@ class Parser:
             name_position=name_tok.position,
             variant_positions=variant_positions,
             variant_field_positions=variant_field_positions_list,
+            type_params=type_params,
+            variant_field_types=variant_field_types_list,
         )
 
     def _parse_enum_variant(self):
@@ -916,53 +960,159 @@ class Parser:
             self.advance()
             fields = []
             field_positions = []
+            field_types = []
             if self.current.type is TokenType.ID:
-                field_tok = self.advance()
-                fields.append(field_tok.literal)
-                field_positions.append(field_tok.position)
+                fname, fpos, ftype = self._parse_field_decl()
+                fields.append(fname)
+                field_positions.append(fpos)
+                field_types.append(ftype)
                 while self.current.type is TokenType.COMMA:
                     self.advance()
-                    field_tok = self.expect(TokenType.ID)
-                    fields.append(field_tok.literal)
-                    field_positions.append(field_tok.position)
+                    fname, fpos, ftype = self._parse_field_decl()
+                    fields.append(fname)
+                    field_positions.append(fpos)
+                    field_types.append(ftype)
             self.expect(TokenType.BRACE_CLOSE)
-            return (name_tok.literal, fields, name_tok.position, field_positions)
-        return (name_tok.literal, [], name_tok.position, [])
+            return (name_tok.literal, fields, name_tok.position, field_positions, field_types)
+        return (name_tok.literal, [], name_tok.position, [], [])
 
     def _parse_param_list(self) -> tuple:
         """M12: consumes `(` ... `)` and returns `(params, param_positions,
-        defaults)` -- factored out of `_parse_fn_expr` so `_parse_method_decl`
-        (trait/impl `fn` items) can share the exact same parameter-list
-        grammar, rather than a second, independently-maintained copy of it.
+        param_types, defaults)` -- factored out of `_parse_fn_expr` so
+        `_parse_method_decl` (trait/impl `fn` items) can share the exact
+        same parameter-list grammar, rather than a second, independently-
+        maintained copy of it.
 
         M16: each parameter may be followed by `= expr` giving its default
         value -- `defaults` is parallel to `params`/`param_positions`, each
         entry either that expression or `None`. Struct literals are allowed
         in a default expression (there's no `if`/`while`-condition-style
-        ambiguity here)."""
+        ambiguity here).
+
+        M21 (see docs/TYPES.md): each parameter may also be preceded by
+        `: type` (before the default) -- `param_types` is parallel too, one
+        entry (a TypeExpr or `None`) per parameter. `self` can't be
+        annotated (it's always `Self`)."""
         self.expect(TokenType.PAREN_OPEN)
         params = []
         param_positions = []
+        param_types = []
         defaults = []
         if self.current.type is TokenType.ID:
-            param_tok = self.advance()
-            params.append(param_tok.literal)
-            param_positions.append(param_tok.position)
-            defaults.append(self._parse_optional_default())
+            name, pos, ptype, default = self._parse_one_param()
+            params.append(name)
+            param_positions.append(pos)
+            param_types.append(ptype)
+            defaults.append(default)
             while self.current.type is TokenType.COMMA:
                 self.advance()
-                param_tok = self.expect(TokenType.ID)
-                params.append(param_tok.literal)
-                param_positions.append(param_tok.position)
-                defaults.append(self._parse_optional_default())
+                name, pos, ptype, default = self._parse_one_param()
+                params.append(name)
+                param_positions.append(pos)
+                param_types.append(ptype)
+                defaults.append(default)
         self.expect(TokenType.PAREN_CLOSE)
-        return params, param_positions, defaults
+        return params, param_positions, param_types, defaults
+
+    def _parse_one_param(self):
+        param_tok = self.expect(TokenType.ID)
+        ptype = None
+        if self.current.type is TokenType.COLON:
+            colon_tok = self.current
+            if param_tok.literal == "self":
+                raise SyntaxError(
+                    f"'self' can't have a type annotation (it's always Self) "
+                    f"at position '{colon_tok.position}'"
+                )
+            self.advance()
+            ptype = self._parse_type()
+        default = self._parse_optional_default()
+        return param_tok.literal, param_tok.position, ptype, default
 
     def _parse_optional_default(self):
         if self.current.type is TokenType.ASSIGN:
             self.advance()
             return self.parse_expr()
         return None
+
+    # -- M21: types (syntax only -- see docs/TYPES.md) ---------------------
+    #
+    # `type := "fn" "(" [type {"," type}] ")" ["->" type] | NAME ["<" type
+    # {"," type} ">"] | "(" type ")"`. Reached only from positions the
+    # grammar unambiguously introduces with `:`, `->`, or right after
+    # `fn`/`struct`/`enum`/`trait`/`impl` NAME -- `<`/`>` never collide with
+    # the comparison operators, which only ever appear inside an ordinary
+    # expression, a completely different parse path.
+
+    def _parse_type(self):
+        if self.current.type is TokenType.FN:
+            fn_tok = self.advance()
+            self.expect(TokenType.PAREN_OPEN)
+            params = []
+            if self.current.type is not TokenType.PAREN_CLOSE:
+                params.append(self._parse_type())
+                while self.current.type is TokenType.COMMA:
+                    self.advance()
+                    params.append(self._parse_type())
+            self.expect(TokenType.PAREN_CLOSE)
+            ret = None
+            if self.current.type is TokenType.ARROW:
+                self.advance()
+                ret = self._parse_type()
+            return FnType(params=params, ret=ret, position=fn_tok.position)
+        if self.current.type is TokenType.PAREN_OPEN:
+            self.advance()
+            inner = self._parse_type()
+            self.expect(TokenType.PAREN_CLOSE)
+            return inner
+        name_tok = self.expect(TokenType.ID)
+        args = []
+        if self.current.type is TokenType.LT:
+            args = self._parse_type_args()
+        return NamedType(name=name_tok.literal, args=args, position=name_tok.position)
+
+    def _parse_type_args(self) -> list:
+        """The `<...>` after a NAME in type position -- `Vector<Number>`,
+        `Map<K, V>`. Assumes the current token is `<`."""
+        self.expect(TokenType.LT)
+        args = [self._parse_type()]
+        while self.current.type is TokenType.COMMA:
+            self.advance()
+            args.append(self._parse_type())
+        self.expect(TokenType.GT)
+        return args
+
+    def _parse_type_params(self) -> list:
+        """`type_params := "<" type_param {"," type_param} ">"`. Returns
+        `[]` when the current token isn't `<` (every caller's generic
+        parameter list is optional)."""
+        if self.current.type is not TokenType.LT:
+            return []
+        self.advance()  # LT
+        params = [self._parse_type_param()]
+        while self.current.type is TokenType.COMMA:
+            self.advance()
+            params.append(self._parse_type_param())
+        self.expect(TokenType.GT)
+        return params
+
+    def _parse_type_param(self) -> TypeParam:
+        """`type_param := NAME [":" type {"+" type}] ["=" type]`. Bounds are
+        parsed as ordinary types -- the resolver (not the parser) rejects a
+        bound that doesn't name a declared trait."""
+        name_tok = self.expect(TokenType.ID)
+        bounds = []
+        if self.current.type is TokenType.COLON:
+            self.advance()
+            bounds.append(self._parse_type())
+            while self.current.type is TokenType.ADD:
+                self.advance()
+                bounds.append(self._parse_type())
+        default = None
+        if self.current.type is TokenType.ASSIGN:
+            self.advance()
+            default = self._parse_type()
+        return TypeParam(name=name_tok.literal, bounds=bounds, default=default, position=name_tok.position)
 
     def _parse_fn_expr(self) -> FnExpr:
         fn_tok = self.advance()  # FN
@@ -972,7 +1122,12 @@ class Parser:
             name_tok = self.advance()
             name = name_tok.literal
             name_position = name_tok.position
-        params, param_positions, defaults = self._parse_param_list()
+        type_params = self._parse_type_params()
+        params, param_positions, param_types, defaults = self._parse_param_list()
+        return_type = None
+        if self.current.type is TokenType.ARROW:
+            self.advance()
+            return_type = self._parse_type()
         body = self.parse_block()
         return FnExpr(
             name=name,
@@ -982,6 +1137,9 @@ class Parser:
             name_position=name_position,
             param_positions=param_positions,
             defaults=defaults,
+            type_params=type_params,
+            param_types=param_types,
+            return_type=return_type,
         )
 
     # -- M12: trait / impl / method decls ---------------------------------
@@ -989,6 +1147,7 @@ class Parser:
     def _parse_trait_decl(self) -> TraitDecl:
         trait_tok = self.advance()  # TRAIT
         name_tok = self.expect(TokenType.ID)
+        type_params = self._parse_type_params()
         self.expect(TokenType.BRACE_OPEN)
         methods = []
         while True:
@@ -1004,23 +1163,31 @@ class Parser:
             position=trait_tok.position,
             name_position=name_tok.position,
             end_position=close_tok.position,
+            type_params=type_params,
         )
 
     def _parse_impl_decl(self) -> ImplDecl:
         impl_tok = self.advance()  # IMPL
+        type_params = self._parse_type_params()
         first_tok = self.expect(TokenType.ID)
+        first_args = self._parse_type_args() if self.current.type is TokenType.LT else []
         if self.current.type is TokenType.FOR:
             self.advance()
             second_tok = self.expect(TokenType.ID)
+            second_args = self._parse_type_args() if self.current.type is TokenType.LT else []
             trait_name = first_tok.literal
             trait_name_position = first_tok.position
+            trait_args = first_args
             type_name = second_tok.literal
             type_name_position = second_tok.position
+            type_args = second_args
         else:
             trait_name = None
             trait_name_position = None
+            trait_args = []
             type_name = first_tok.literal
             type_name_position = first_tok.position
+            type_args = first_args
         self.expect(TokenType.BRACE_OPEN)
         methods = []
         while True:
@@ -1038,12 +1205,20 @@ class Parser:
             type_name_position=type_name_position,
             trait_name_position=trait_name_position,
             end_position=close_tok.position,
+            type_params=type_params,
+            type_args=type_args,
+            trait_args=trait_args,
         )
 
     def _parse_method_decl(self, require_body: bool) -> MethodDecl:
         fn_tok = self.expect(TokenType.FN)
         name_tok = self.expect(TokenType.ID)
-        params, param_positions, defaults = self._parse_param_list()
+        type_params = self._parse_type_params()
+        params, param_positions, param_types, defaults = self._parse_param_list()
+        return_type = None
+        if self.current.type is TokenType.ARROW:
+            self.advance()
+            return_type = self._parse_type()
         if self.current.type is TokenType.BRACE_OPEN:
             body = self.parse_block()
             fn = FnExpr(
@@ -1054,6 +1229,9 @@ class Parser:
                 name_position=name_tok.position,
                 param_positions=param_positions,
                 defaults=defaults,
+                type_params=type_params,
+                param_types=param_types,
+                return_type=return_type,
             )
         elif require_body:
             raise SyntaxError(
@@ -1070,6 +1248,9 @@ class Parser:
             name_position=name_tok.position,
             param_positions=param_positions,
             defaults=defaults,
+            type_params=type_params,
+            param_types=param_types,
+            return_type=return_type,
         )
 
     # -- expressions (precedence chain, lowest to highest binding) --------

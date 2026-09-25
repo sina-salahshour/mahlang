@@ -15,7 +15,7 @@
 
 # A cursor over a sequence: `next` returns `some(item)`, or `none` once the
 # sequence is exhausted.
-trait Iterator {
+trait Iterator<T> {
     fn next(self)
 }
 
@@ -23,7 +23,7 @@ trait Iterator {
 # fresh Iterator. Every Iterable gets the adapters below. They're lazy:
 # `map`/`filter`/`skip`/`take` only describe a new Iterable, and nothing
 # runs until something pulls items (`reduce`, or a `for` loop).
-trait Iterable {
+trait Iterable<T> {
     fn iter(self)
 
     # f(value) or f(value, index)
@@ -123,7 +123,7 @@ struct ToRange { end, inclusive }
 struct RangeIterator { current, end, inclusive }
 struct FromRangeIterator { current }
 
-impl Iterable for Range {
+impl Iterable<Number> for Range {
     fn iter(self) {
         __Iter.require_number(self.start)
         __Iter.require_number(self.end)
@@ -131,7 +131,7 @@ impl Iterable for Range {
     }
 }
 
-impl Iterator for RangeIterator {
+impl Iterator<Number> for RangeIterator {
     fn next(self) {
         # M17 part B: `<=`/`>=` exist now -- simplify the inclusive check
         # (was `(self.current < self.end) | (self.current == self.end)`).
@@ -150,14 +150,14 @@ impl Iterator for RangeIterator {
     }
 }
 
-impl Iterable for FromRange {
+impl Iterable<Number> for FromRange {
     fn iter(self) {
         __Iter.require_number(self.start)
         FromRangeIterator { current: self.start }
     }
 }
 
-impl Iterator for FromRangeIterator {
+impl Iterator<Number> for FromRangeIterator {
     fn next(self) {
         let value = self.current
         self.current = self.current + 1
@@ -187,11 +187,11 @@ impl Printable for ToRange {
 # one-character String.
 struct StringIterator { text, index }
 
-impl Iterable for String {
+impl Iterable<String> for String {
     fn iter(self) { StringIterator { text: self, index: 0 } }
 }
 
-impl Iterator for StringIterator {
+impl Iterator<String> for StringIterator {
     fn next(self) {
         if self.index < self.text.len() {
             let c = self.text.char_at(self.index)
@@ -208,14 +208,14 @@ impl Iterator for StringIterator {
 # Each adapter is an Iterable (so adapters chain) whose `iter` builds a fresh
 # Iterator over a fresh iterator of its source: iterating twice starts over.
 
-struct Mapped { source, f }
-struct MappedIterator { it, f, index }
+struct Mapped<T, U> { source, f }
+struct MappedIterator<T, U> { it, f, index }
 
-impl Iterable for Mapped {
+impl<T, U> Iterable<U> for Mapped<T, U> {
     fn iter(self) { MappedIterator { it: self.source.iter(), f: self.f, index: 0 } }
 }
 
-impl Iterator for MappedIterator {
+impl<T, U> Iterator<U> for MappedIterator<T, U> {
     fn next(self) {
         match self.it.next() {
             some(value) => {
@@ -228,14 +228,14 @@ impl Iterator for MappedIterator {
     }
 }
 
-struct Filtered { source, f }
-struct FilteredIterator { it, f, index }
+struct Filtered<T> { source, f }
+struct FilteredIterator<T> { it, f, index }
 
-impl Iterable for Filtered {
+impl<T> Iterable<T> for Filtered<T> {
     fn iter(self) { FilteredIterator { it: self.source.iter(), f: self.f, index: 0 } }
 }
 
-impl Iterator for FilteredIterator {
+impl<T> Iterator<T> for FilteredIterator<T> {
     fn next(self) {
         while true {
             match self.it.next() {
@@ -251,14 +251,14 @@ impl Iterator for FilteredIterator {
     }
 }
 
-struct Skipped { source, n }
-struct SkippedIterator { it, remaining }
+struct Skipped<T> { source, n }
+struct SkippedIterator<T> { it, remaining }
 
-impl Iterable for Skipped {
+impl<T> Iterable<T> for Skipped<T> {
     fn iter(self) { SkippedIterator { it: self.source.iter(), remaining: self.n } }
 }
 
-impl Iterator for SkippedIterator {
+impl<T> Iterator<T> for SkippedIterator<T> {
     fn next(self) {
         while self.remaining > 0 {
             self.remaining = self.remaining - 1
@@ -271,14 +271,14 @@ impl Iterator for SkippedIterator {
     }
 }
 
-struct Taken { source, n }
-struct TakenIterator { it, remaining }
+struct Taken<T> { source, n }
+struct TakenIterator<T> { it, remaining }
 
-impl Iterable for Taken {
+impl<T> Iterable<T> for Taken<T> {
     fn iter(self) { TakenIterator { it: self.source.iter(), remaining: self.n } }
 }
 
-impl Iterator for TakenIterator {
+impl<T> Iterator<T> for TakenIterator<T> {
     fn next(self) {
         if self.remaining > 0 {
             self.remaining = self.remaining - 1
@@ -298,13 +298,13 @@ impl Iterator for TakenIterator {
 
 # A Vector iterates over its items, in order. It's live: items pushed while
 # looping are reached too.
-struct VectorIterator { vec, index }
+struct VectorIterator<T> { vec, index }
 
-impl Iterable for Vector {
+impl<T> Iterable<T> for Vector<T> {
     fn iter(self) { VectorIterator { vec: self, index: 0 } }
 }
 
-impl Iterator for VectorIterator {
+impl<T> Iterator<T> for VectorIterator<T> {
     fn next(self) {
         if self.index < self.vec.len() {
             let value = self.vec[self.index]
@@ -318,12 +318,12 @@ impl Iterator for VectorIterator {
 
 # A Map iterates over its keys, in insertion order. `keys()` is a snapshot,
 # so changing the map while looping over it is safe.
-impl Iterable for Map {
+impl<K, V> Iterable<K> for Map<K, V> {
     fn iter(self) { self.keys().iter() }
 }
 
 # One key/value pair of a Map, from `entries()`.
-struct MapEntry { key, value }
+struct MapEntry<K, V> { key, value }
 
 impl Map {
     # A Vector of MapEntry, in insertion order (a snapshot, like keys()).

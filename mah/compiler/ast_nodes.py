@@ -95,6 +95,46 @@ from decimal import Decimal
 from typing import Optional
 
 
+# -- M21: type annotations (syntax only -- see docs/TYPES.md) ------------
+#
+# `TypeExpr` means `NamedType | FnType` throughout this file's comments.
+# The parser stores these on the nodes below; nothing else (resolve.py's
+# name-validation aside) reads them yet -- codegen/bytecode/the VM are
+# unaffected. A parenthesized type `(T)` is not its own node: the parser
+# just returns the inner type.
+
+
+@dataclass
+class NamedType:
+    """A type annotation naming a type: `Number`, `Vector<T>`, `Self`, `T`."""
+
+    name: str
+    args: list  # list[TypeExpr], [] when there's no `<...>`
+    position: int  # the NAME token
+
+
+@dataclass
+class FnType:
+    """`fn(A, B) -> R` in type position. `ret` is `None` when there's no `->`
+    (`fn(A)` alone means "returns `None`", per docs/TYPES.md -- M21 doesn't
+    act on that meaning at all, it just parses/stores the shape)."""
+
+    params: list  # list[TypeExpr]
+    ret: Optional[object]
+    position: int  # the `fn` token
+
+
+@dataclass
+class TypeParam:
+    """One entry of a `<...>` type parameter list: `T`, `T: Printable + Other`,
+    `A = Vector<T>`."""
+
+    name: str
+    bounds: list  # list[TypeExpr]
+    default: Optional[object]  # TypeExpr or None
+    position: int  # the NAME token
+
+
 # -- expressions -------------------------------------------------------
 
 
@@ -208,6 +248,14 @@ class EnumDecl:
     # list). E.g. for `enum Shape { Circle { r }, Empty }`, this is
     # `[[pos_of_r], []]`. See `compiler/resolve.py`'s `field_position_index`.
     variant_field_positions: list = field(default_factory=list, repr=False)
+    # M21 (syntax only -- see docs/TYPES.md): `enum NAME<type_params>`'s
+    # generic parameter list -- list[TypeParam], `[]` when there's no
+    # `<...>`.
+    type_params: list = field(default_factory=list, repr=False)
+    # M21: one list per entry in `.variants`, same order/shape as
+    # `variant_field_positions` -- each inner entry is that field's `: type`
+    # annotation (a TypeExpr) or `None`.
+    variant_field_types: list = field(default_factory=list, repr=False)
 
 
 @dataclass
@@ -321,6 +369,9 @@ class LetStmt:
     # LetStmt was declared in (depth is always implicitly 0 from its own
     # declaration site).
     address: Optional[int] = field(default=None, repr=False)
+    # M21 (syntax only -- see docs/TYPES.md): this `let`'s `: type`
+    # annotation, or `None` when absent.
+    type_ann: Optional[object] = field(default=None, repr=False)
 
 
 @dataclass
@@ -387,6 +438,10 @@ class ForStmt:
     # bindings; `index_address` stays None when there's no index binding.
     value_address: Optional[int] = field(default=None, repr=False)
     index_address: Optional[int] = field(default=None, repr=False)
+    # M21 (syntax only -- see docs/TYPES.md): each binding's own `: type`
+    # annotation (`for let v: Number, let i: Number in ...`), or `None`.
+    value_type: Optional[object] = field(default=None, repr=False)
+    index_type: Optional[object] = field(default=None, repr=False)
 
 
 @dataclass
@@ -457,6 +512,16 @@ class FnExpr:
     # non-call `detach` operand (`detach { ... }`), so codegen can reject
     # `return`/`break`/`continue` that would escape it with a clear error.
     detached: bool = field(default=False, repr=False)
+    # M21 (syntax only -- see docs/TYPES.md): `fn NAME<type_params>(...)`'s
+    # generic parameter list -- list[TypeParam], `[]` when there's no
+    # `<...>`. Ignored by everything past the resolver's name validation.
+    type_params: list = field(default_factory=list, repr=False)
+    # M21: parallel to `params` -- each entry is that parameter's `: type`
+    # annotation (a TypeExpr) or `None`. The parser always fills one entry
+    # per parameter (never left short like `defaults` isn't either).
+    param_types: list = field(default_factory=list, repr=False)
+    # M21: this fn's `-> type` annotation, or `None` when absent.
+    return_type: Optional[object] = field(default=None, repr=False)
 
 
 @dataclass
@@ -472,6 +537,13 @@ class StructDecl:
     # M11: set by the parser -- one position per entry in `.fields`, same
     # order. See `compiler/resolve.py`'s `field_position_index` docstring.
     field_positions: list = field(default_factory=list, repr=False)
+    # M21 (syntax only -- see docs/TYPES.md): `struct NAME<type_params>`'s
+    # generic parameter list -- list[TypeParam], `[]` when there's no
+    # `<...>`.
+    type_params: list = field(default_factory=list, repr=False)
+    # M21: parallel to `.fields` -- each entry is that field's `: type`
+    # annotation (a TypeExpr) or `None`.
+    field_types: list = field(default_factory=list, repr=False)
 
 
 # -- M12: traits / impls / method calls ----------------------------------
@@ -495,6 +567,15 @@ class MethodDecl:
     # Recorded even for a bodyless (required) trait method (`fn is None`) so
     # the resolver can reject a default there with a clean message.
     defaults: list = field(default_factory=list, repr=False)
+    # M21 (syntax only -- see `FnExpr`'s own fields above and docs/TYPES.md):
+    # same three fields as `FnExpr` -- recorded here too (not just on
+    # `.fn`) so a bodyless (required) trait method, which has no `FnExpr` at
+    # all, still carries its own signature annotations. When `fn` is not
+    # `None`, its `type_params`/`param_types`/`return_type` are set to these
+    # exact same objects.
+    type_params: list = field(default_factory=list, repr=False)
+    param_types: list = field(default_factory=list, repr=False)
+    return_type: Optional[object] = field(default=None, repr=False)
 
     @property
     def is_method(self) -> bool:
@@ -512,6 +593,10 @@ class TraitDecl:
     # `self` means at a cursor position inside a trait default body) --
     # see `compiler/resolve.py`'s module docstring.
     end_position: Optional[int] = field(default=None, repr=False)
+    # M21 (syntax only -- see docs/TYPES.md): `trait NAME<type_params>`'s
+    # generic parameter list -- list[TypeParam], `[]` when there's no
+    # `<...>`.
+    type_params: list = field(default_factory=list, repr=False)
 
 
 @dataclass
@@ -529,6 +614,15 @@ class ImplDecl:
     # registers at runtime -- its own fns PLUS inherited trait defaults
     # (for trait impls). Codegen emits one `defmethod` per entry.
     registrations: list = field(default_factory=list, repr=False)
+    # M21 (syntax only -- see docs/TYPES.md): `impl<type_params> ...`'s own
+    # generic parameter list -- list[TypeParam], `[]` when there's no
+    # `<...>` right after `impl`.
+    type_params: list = field(default_factory=list, repr=False)
+    # M21: the target's `<...>` (`impl<T> Pair<T, T>`'s `[T, T]`) and the
+    # trait's `<...>` (`impl<T> Show<T> for Pair`'s `[T]`) -- each a
+    # list[TypeExpr], `[]` when absent.
+    type_args: list = field(default_factory=list, repr=False)
+    trait_args: list = field(default_factory=list, repr=False)
 
 
 @dataclass

@@ -121,6 +121,12 @@
 (impl_decl name: (identifier) @type)
 (impl_decl target: (identifier) @type)
 
+; M21: type annotations and generic parameter lists.
+(named_type name: (identifier) @type)
+(type_parameter name: (identifier) @type)
+(field_decl name: (identifier) @property)
+"->" @operator
+
 ; Enum/struct member (variant/field) names.
 ;
 ; `_field_init`/`_pattern_field` are hidden rules (leading `_`), so their
@@ -182,4 +188,4 @@
 ((identifier) @type.builtin
   (#any-of? @type.builtin
     "Number" "String" "Bool" "Function" "Option" "Promise" "Vector" "Map"
-    "Printable" "Index" "IndexAssign"))
+    "Printable" "Index" "IndexAssign" "Unknown" "Never" "None"))

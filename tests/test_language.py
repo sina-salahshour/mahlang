@@ -163,9 +163,14 @@ class ErrorTests(unittest.TestCase):
         with self.assertRaises(NameError):
             run_source("print(nope)")
 
-    def test_duplicate_let_in_same_scope_raises(self):
+    def test_duplicate_let_in_same_scope_shadows(self):
+        # Intended change (M21): a same-scope `let` redeclaration used to be
+        # an error. It now declares a new variable, Rust-style.
+        self.assertEqual(run_source("let x = 1\nlet x = 2\nprint(x)"), "2\n")
+
+    def test_duplicate_fn_in_same_scope_raises(self):
         with self.assertRaises(NameError):
-            run_source("let x = 1\nlet x = 2")
+            run_source("fn g() { 1 }\nfn g() { 2 }")
 
     def test_shadowing_in_nested_block_is_allowed(self):
         # A `let` in a nested block may reuse an outer name -- only

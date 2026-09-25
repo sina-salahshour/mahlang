@@ -18,6 +18,11 @@ another language.
   more code follows on the same block. When in doubt, add `;`.
 - Blocks are `{ ... }`. The **last expression without a trailing `;`** is the
   block's value (its "tail"); a block with no tail has the value `none`.
+- `let` may reuse a name in the same scope: it declares a **new** variable
+  (shadowing), and its value can still use the old one: `let x = 1` then
+  `let x = "one: " + x`. Closures that captured the old `x` keep it. `fn`
+  names, parameters, and pattern bindings can't be declared twice in one
+  scope.
 
 ```mah
 let x = 1            # declare
@@ -519,6 +524,44 @@ print(r.await)                  # 5
 - The program exits once the main code is done **and** no detached work
   is still pending.
 
+## Type annotations
+
+Declarations can carry optional types. **Only the type names are checked
+for now** (an unknown type or a wrong number of `<...>` arguments is a
+compile error). The type checker that will use them is still to come, so
+today annotations document intent and change nothing when the program
+runs.
+
+```mah
+fn add(a: Number, b: Number = 1) -> Number { a + b }
+let label: String = "total"
+let scale: fn(Number) -> Number = fn(n: Number) -> Number { n * 2 }
+
+struct Pair<A, B> { left: A, right: B }        # generic struct
+enum Tree<T> { Leaf, Node { value: T } }       # generic enum
+fn first<T>(v: Vector<T>) -> T { v[0] }        # generic function
+fn show<T: Printable>(x: T) -> String { x.to_string() }   # bound: T implements Printable
+
+trait Container<T> {
+    fn get(self, i: Number) -> T
+}
+impl<T> Container<T> for Vector<T> {
+    fn get(self, i) { self[i] }
+}
+for let v: Number, let i: Number in [10, 20] { print(i, v) }
+print(add(label.len()), scale(4), first([5]), show(Pair { left: 1, right: "x" }.left))
+```
+
+- Types: `Number`, `String`, `Bool`, `Vector<T>`, `Map<K, V>`, `Option<T>`,
+  `Promise<T>`, your structs/enums/traits (with their `<...>` arguments),
+  a type parameter, `fn(A, B) -> R` (no `->` means it returns `none`),
+  `Self` (inside `trait`/`impl`), `None` (the type of `none`), `Never`,
+  and `Unknown` (anything).
+- `self` is never annotated. Type arguments are never written at a call
+  (`first(v)`, not `first<Number>(v)`).
+- `Function` is not a type in annotations: write `fn(...) -> ...`.
+- In `impl` headers the `<...>` can be left off (`impl Iterable for P`).
+
 ## Modules
 
 ```mah
@@ -553,7 +596,7 @@ before anything runs.
   `for` bindings, labeled `break`/`continue`.
 - String methods other than `len`/`char_at` (no `split`, `replace`, ...).
 - `&&`, `||`, `+=`, `++`, ternary `?:`.
-- Type annotations, generics, classes/inheritance, exceptions/`try`.
+- Type checking (annotations are accepted but not checked yet), classes/inheritance, exceptions/`try`.
 - Variadic parameters (`*args`, `**kwargs`); only `print` takes any number of arguments.
 - File, network, or OS access (planned as future built-ins).
 - `null`/`nil`/`undefined`: use `none`.

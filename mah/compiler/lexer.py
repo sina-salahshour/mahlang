@@ -27,6 +27,10 @@ class TokenType(Enum):
     # single `.` (and `..=` before `..`) in `get_next_token`.
     DOTDOT = ".."
     DOTDOT_EQ = "..="
+    # M21: `->` -- function return types / fn-type in type position (see
+    # docs/TYPES.md). Nothing valid in Mah wrote `->` before this, so no
+    # existing program's meaning changes.
+    ARROW = "->"
     # operators
     ADD = "+"
     SUB = "-"
@@ -146,6 +150,7 @@ _TWO_CHAR = {
     "=>": TokenType.FAT_ARROW,
     "<=": TokenType.LE,
     ">=": TokenType.GE,
+    "->": TokenType.ARROW,
 }
 
 

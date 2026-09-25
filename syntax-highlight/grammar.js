@@ -145,23 +145,72 @@ module.exports = grammar({
       seq("export", choice($.let_stmt, $.fn_stmt, $.identifier)),
 
     let_stmt: ($) =>
-      seq("let", field("name", $.identifier), "=", field("value", $.expr)),
+      seq(
+        "let",
+        field("name", $.identifier),
+        optional($._type_annotation),
+        "=",
+        field("value", $.expr),
+      ),
+
+    // -- M21: type annotations (see docs/TYPES.md) ----------------------
+    //
+    // Only ever reached from declaration positions (`:` after a declared
+    // name, `->` after a parameter list, `<` right after a declared
+    // name/`impl`), so `<`/`>` here never compete with the comparison
+    // operators inside expressions.
+    _type_annotation: ($) => seq(":", field("type", $._type)),
+
+    _return_type: ($) => seq("->", field("return_type", $._type)),
+
+    _type: ($) => choice($.named_type, $.function_type, seq("(", $._type, ")")),
+
+    named_type: ($) =>
+      prec.right(seq(field("name", $.identifier), optional($.type_arguments))),
+
+    function_type: ($) =>
+      prec.right(
+        seq(
+          "fn",
+          "(",
+          optional(seq($._type, repeat(seq(",", $._type)))),
+          ")",
+          optional(seq("->", field("return_type", $._type))),
+        ),
+      ),
+
+    type_arguments: ($) => seq("<", $._type, repeat(seq(",", $._type)), ">"),
+
+    type_parameters: ($) =>
+      seq("<", $.type_parameter, repeat(seq(",", $.type_parameter)), ">"),
+
+    type_parameter: ($) =>
+      seq(
+        field("name", $.identifier),
+        optional(seq(":", $.named_type, repeat(seq("+", $.named_type)))),
+        optional(seq("=", field("default", $._type))),
+      ),
 
     struct_decl: ($) =>
       seq(
         "struct",
         field("name", $.identifier),
+        optional($.type_parameters),
         "{",
-        optional($._name_list),
+        optional($._field_decls),
         "}",
       ),
 
-    _name_list: ($) => seq($.identifier, repeat(seq(",", $.identifier))),
+    _field_decls: ($) => seq($.field_decl, repeat(seq(",", $.field_decl))),
+
+    field_decl: ($) =>
+      seq(field("name", $.identifier), optional($._type_annotation)),
 
     enum_decl: ($) =>
       seq(
         "enum",
         field("name", $.identifier),
+        optional($.type_parameters),
         "{",
         optional($._enum_variants),
         "}",
@@ -172,7 +221,7 @@ module.exports = grammar({
     enum_variant: ($) =>
       seq(
         field("name", $.identifier),
-        optional(seq("{", optional($._name_list), "}")),
+        optional(seq("{", optional($._field_decls), "}")),
       ),
 
     // Trait declaration (top-level item). Items are `fn NAME(params)`
@@ -190,6 +239,7 @@ module.exports = grammar({
       seq(
         "trait",
         field("name", $.identifier),
+        optional($.type_parameters),
         "{",
         repeat($.trait_item),
         "}",
@@ -199,9 +249,11 @@ module.exports = grammar({
       seq(
         "fn",
         field("name", $.identifier),
+        optional($.type_parameters),
         "(",
         optional($._params),
         ")",
+        optional($._return_type),
         optional(field("body", $.block)),
       ),
 
@@ -214,8 +266,12 @@ module.exports = grammar({
     impl_decl: ($) =>
       seq(
         "impl",
+        optional($.type_parameters),
         field("name", $.identifier),
-        optional(seq("for", field("target", $.identifier))),
+        optional($.type_arguments),
+        optional(
+          seq("for", field("target", $.identifier), optional($.type_arguments)),
+        ),
         "{",
         repeat($.impl_item),
         "}",
@@ -225,9 +281,11 @@ module.exports = grammar({
       seq(
         "fn",
         field("name", $.identifier),
+        optional($.type_parameters),
         "(",
         optional($._params),
         ")",
+        optional($._return_type),
         field("body", $.block),
       ),
 
@@ -255,7 +313,10 @@ module.exports = grammar({
         "for",
         "let",
         field("value", $.identifier),
-        optional(seq(",", "let", field("index", $.identifier))),
+        optional($._type_annotation),
+        optional(
+          seq(",", "let", field("index", $.identifier), optional($._type_annotation)),
+        ),
         "in",
         field("iterable", $.expr),
         field("body", $.block),
@@ -290,9 +351,11 @@ module.exports = grammar({
       seq(
         "fn",
         field("name", $.identifier),
+        optional($.type_parameters),
         "(",
         optional($._params),
         ")",
+        optional($._return_type),
         field("body", $.block),
       ),
 
@@ -300,9 +363,11 @@ module.exports = grammar({
       seq(
         "fn",
         optional(field("name", $.identifier)),
+        optional($.type_parameters),
         "(",
         optional($._params),
         ")",
+        optional($._return_type),
         field("body", $.block),
       ),
 
@@ -319,6 +384,7 @@ module.exports = grammar({
     param: ($) =>
       seq(
         field("name", $.identifier),
+        optional($._type_annotation),
         optional(seq("=", field("default", $.expr))),
       ),
 
