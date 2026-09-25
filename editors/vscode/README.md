@@ -52,7 +52,7 @@ Then either:
 
   ```sh
   npx @vscode/vsce package
-  code --install-extension mah-language-0.2.0.vsix
+  code --install-extension mah-language-0.3.0.vsix
   ```
 
   (Also available as `make build-vscode` from the repo root.)

@@ -191,6 +191,8 @@ class Server:
             "renameProvider": True,
             "hoverProvider": True,
             "completionProvider": {"triggerCharacters": [".", "\""]},
+            # M21b: `mah format` (docs/FORMAT.md) on the whole document.
+            "documentFormattingProvider": True,
         }
         self._respond(
             request_id,
@@ -339,6 +341,11 @@ class Server:
             target_uri = uri if file_path in (raw_entry_path, entry_path) else path_to_uri(file_path)
             changes[target_uri] = edits
         self._respond(request_id, {"changes": changes})
+
+    def _on_textDocument_formatting(self, request_id, params: dict) -> None:
+        uri = params.get("textDocument", {}).get("uri")
+        text = self._documents.get(uri, "")
+        self._respond(request_id, analysis.get_formatting_edits(text))
 
     def _on_textDocument_codeAction(self, request_id, params: dict) -> None:
         uri = params.get("textDocument", {}).get("uri")

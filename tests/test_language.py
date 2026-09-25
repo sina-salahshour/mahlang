@@ -243,3 +243,41 @@ class ErrorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CallAnyExpressionTests(unittest.TestCase):
+    """A call's `(` may follow any expression, not just a name or
+    `.method`: `f(1)(2)`, `handlers[0](x)`, `(fn(x) { x })(5)`. Like an
+    index's `[`, it must be on the same line as what it calls."""
+
+    def test_call_the_result_of_a_call(self):
+        src = "fn adder(a) { fn(b) { a + b } }\nprint(adder(1)(2))\nfn f() { fn() { fn() { 3 } } }\nprint(f()()())"
+        self.assertEqual(run_source(src).split(), ["3", "3"])
+
+    def test_call_an_indexed_function(self):
+        self.assertEqual(run_source("let hs = [fn(x) { x * 2 }]\nprint(hs[0](21))").strip(), "42")
+
+    def test_call_a_parenthesized_or_inline_function(self):
+        self.assertEqual(
+            run_source("print((fn(x) { x + 1 })(5))\nprint(fn(x) { x + 1 }(5))").split(), ["6", "6"]
+        )
+
+    def test_keyword_arguments_and_detach(self):
+        src = (
+            "fn f(a) { fn(b, c = 0) { a + b + c } }\n"
+            "print(f(1)(2, c: 3))\n"
+            "let p = detach f(1)(2)\n"
+            "print(p.await)"
+        )
+        self.assertEqual(run_source(src).split(), ["6", "3"])
+
+    def test_paren_on_the_next_line_is_not_a_call(self):
+        # `(g)()` on its own line is a new statement, not a call of the
+        # previous line's value.
+        self.assertEqual(run_source("fn g() { 7 }\nprint(g())\n(g)()").strip(), "7")
+        with self.assertRaises(SyntaxError):
+            run_source("fn f(x) { x }\nprint(f(1)\n(2))")
+
+    def test_calling_a_non_function_is_a_runtime_error(self):
+        with self.assertRaises(Exception):
+            run_source("fn f() { 5 }\nprint(f()(1))")

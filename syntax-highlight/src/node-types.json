@@ -135,11 +135,23 @@
         "required": true,
         "types": [
           {
+            "type": "call_expr",
+            "named": true
+          },
+          {
             "type": "field_access",
             "named": true
           },
           {
             "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "index_expr",
+            "named": true
+          },
+          {
+            "type": "paren_expr",
             "named": true
           }
         ]

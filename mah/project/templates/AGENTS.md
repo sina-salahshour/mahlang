@@ -27,7 +27,12 @@ mah build                   # write every [[target]] from mah-project.toml
 mah build --target release  # write one target
 mah runc build/{{name}}.mahc   # run a compiled file
 mah dis build/{{name}}.mahc    # show the compiled bytecode
+mah format                  # lay out every .mh file in the standard style
+mah format --check          # list files that aren't formatted (exit 1 if any)
 ```
+
+Run `mah format` after editing Mah code. It only changes whitespace and
+refuses to touch a file with a syntax error.
 
 A compile error (syntax, undefined name, wrong struct fields) is reported
 before anything runs. A runtime error stops the program and says where it

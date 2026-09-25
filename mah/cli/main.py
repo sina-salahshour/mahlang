@@ -23,7 +23,7 @@ from ..project.manifest import MANIFEST_NAME, MahProjectError, find_manifest, lo
 
 sys.tracebacklimit = 0
 
-_SUBCOMMANDS = {"run", "build", "runc", "dis", "lsp", "init"}
+_SUBCOMMANDS = {"run", "build", "runc", "dis", "lsp", "init", "format"}
 
 
 def read_file(file_name):
@@ -192,6 +192,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="write the disassembly to PATH instead of printing it",
     )
 
+    format_parser = subparsers.add_parser(
+        "format", help="rewrite .mh files in the standard layout (only whitespace changes)"
+    )
+    format_parser.add_argument(
+        "paths", nargs="*",
+        help="files or directories to format ('-' formats stdin to stdout); defaults to the "
+             "current project, or the current directory outside a project",
+    )
+    format_parser.add_argument(
+        "--check", action="store_true",
+        help="change nothing; list the files that would change and exit 1 if any would",
+    )
+
     lsp_parser = subparsers.add_parser("lsp", help="start the Mah language server (speaks LSP over stdio)")
     lsp_parser.add_argument(
         "--version", action="store_true",
@@ -256,6 +269,10 @@ def main(argv: list[str] | None = None) -> int:
             _report_runtime_error(e)
             return 1
         return 0
+
+    if args.command == "format":
+        from ..format.cli import run_format
+        return run_format(args.paths, args.check)
 
     if args.command == "dis":
         data = read_file_bytes(args.file)

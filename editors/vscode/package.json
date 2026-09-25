@@ -2,7 +2,7 @@
   "name": "mah-language",
   "displayName": "Mah Language",
   "description": "Syntax highlighting and language server support (hover, go-to-definition, rename, completion, diagnostics) for the Mah programming language.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "mahlang",
   "license": "MIT",
   "icon": "icons/mah.png",

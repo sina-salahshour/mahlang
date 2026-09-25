@@ -644,7 +644,12 @@ module.exports = grammar({
       prec(
         PREC.POSTFIX,
         seq(
-          field("function", choice($.identifier, $.field_access)),
+          // Any call result, index or parenthesized value can be called
+          // too: `f(1)(2)`, `handlers[0](x)`, `(fn(x) { x })(5)`.
+          field(
+            "function",
+            choice($.identifier, $.field_access, $.call_expr, $.index_expr, $.paren_expr),
+          ),
           "(",
           optional($._args),
           ")",

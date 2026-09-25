@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.3.0
+
+Like 0.2.0, the extension client (`src/extension.ts`) is unchanged: new
+editor features come from the `mah lsp` server, and highlighting from
+`syntaxes/mah.tmLanguage.json`.
+
+- **Format document** (and format-on-save) is new: the server now provides
+  document formatting, the same layout as `mah format`. It only ever
+  changes whitespace, and leaves a file with a syntax error alone.
+- **Highlighting** for everything added to Mah since 0.2.0:
+  - `trait`/`impl`/`for` declarations, `self`/`Self`, and the built-in type
+    and trait names (`Number`, `String`, `Bool`, `Option`, `Promise`,
+    `Vector`, `Map`, `Printable`, `Index`, `IndexAssign`, `Unknown`,
+    `Never`, `None`);
+  - keyword arguments (`area(w: 2, h: 5)`), distinct from struct fields;
+  - `for let v in ...` loops, the range operators `..` / `..=`, and
+    Vector/Map brackets;
+  - type annotations: `->` and type names after `:`, `->` and inside
+    `<...>`, including generic `fn`/`impl` headers
+    (`impl<T> Iterable<T> for Vector<T>`).
+- **Language server** improvements that show up in the editor: hover and
+  completion know about traits, methods and the new built-in types;
+  renaming a struct/enum/trait also renames its uses in type annotations,
+  and go-to-definition works from an annotation; diagnostics cover the new
+  syntax (match guards, `detach` on any expression, calling any expression
+  like `f(1)(2)`, same-scope `let` shadowing, and type-name errors in
+  annotations).
+
 ## 0.2.0
 
 All changes below are entirely in the `mah lsp` server this extension

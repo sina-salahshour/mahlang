@@ -138,6 +138,9 @@ fn early(n) {
 }
 let twice = fn(f, x) { f(f(x)) }   # anonymous function value
 print(twice(fn(v) { v * 2 }, 3))   # 12
+fn adder(a) { fn(b) { a + b } }   # functions can return functions...
+print(adder(1)(2))                 # ...and any value can be called: 3
+print((fn(x) { x + 1 })(5))        # 6
 
 fn counter() {
     let n = 0
@@ -149,6 +152,10 @@ print(c())                          # 2
 ```
 
 - Recursion works.
+- A call's `(` must be on the same line as what it calls (like an index's
+  `[`): a line starting with `(` is a new statement. A statement that
+  *starts* with an anonymous `fn` is a function value, not a call, so write
+  `(fn() { ... })()` to call one immediately.
 
 ### Default values and keyword arguments
 

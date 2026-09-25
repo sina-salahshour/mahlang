@@ -412,6 +412,21 @@ def _clean_message(message: str) -> str:
     return _POSITION_RE.sub("", message).strip()
 
 
+def get_formatting_edits(text: str) -> list[dict]:
+    """`textDocument/formatting`: one edit replacing the whole document
+    with `mah format`'s output, or no edits when it's already formatted or
+    can't be formatted (a syntax error, which diagnostics already show)."""
+    from ..format import FormatError, format_source
+
+    try:
+        formatted = format_source(text)
+    except FormatError:
+        return []
+    if formatted == text:
+        return []
+    return [{"range": make_range(text, 0, len(text)), "newText": formatted}]
+
+
 def get_diagnostics(text: str, path: Optional[str] = None) -> list[dict]:
     """Compile ``text`` (resolving imports) and return LSP diagnostics.
 

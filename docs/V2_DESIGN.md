@@ -2767,6 +2767,57 @@ node that resolved to it. Then:
       definition through annotations, imports of generic functions).
       773 tests green.
 
+23. **M21b — `mah format`. ✅ Landed.** Design and rules in
+    `docs/FORMAT.md`; code in `mah/format/`.
+
+    - **Only whitespace changes**: tokens are never added, removed or
+      reordered. Each result is verified before it's returned: same token
+      sequence, same comments in the same order, and the same AST (positions
+      dropped). If verification fails, the file is left alone and a
+      `FormatError` explains why.
+    - **Structure from the parser, text from the lexer**: comments and blank
+      lines are recovered from the gaps between tokens, so the lexer is
+      unchanged. `import`/`export` are blanked out for parsing (they're
+      preprocessor syntax). The AST supplies statement starts, which `{`
+      opens a block/`match`/`impl` body, generic `<`, and unary `-`.
+    - **Layout**: a small prettier-style document printer (`doc.py`). Groups
+      go flat if they fit in 100 columns. Blocks are inline only if they
+      were one line with at most one statement. The blocks of an
+      if/elif/else chain break together. A trailing closure is hugged. A
+      Vector/Map/struct literal written across lines stays broken. Trailing
+      comments are aligned. Two tokens that would lex differently when
+      touching (`100.. =>`) keep a space.
+    - **Found while building it**: the parser wraps a `defer` statement and
+      a `detach` operand in brace-less `Block`s; the formatter only takes
+      statements from blocks written with braces.
+    - **CLI**: `mah format [PATH ...] [--check]`, `-` for stdin. Defaults to
+      the project root (or the current directory), skipping `build/` and
+      hidden directories. **LSP**: `textDocument/formatting`.
+    - `FormatOptions` (`line_width`, `indent`, `max_blank_lines`) is one
+      object, ready for a `[format]` manifest section later.
+    - Tests: `tests/test_format.py`. Golden cases per rule; every example,
+      the prelude and every language-reference code block formats,
+      verifies and is idempotent; verification catches changed tokens, lost
+      comments and a newline before an index; CLI and LSP. 802 tests green.
+
+24. **Calls on any expression. ✅ Landed** (a parser gap found while testing
+    M21b, not a design decision). A call's `(` used to be recognized only
+    directly after a name (`f(...)`, built in `_parse_primary`) or after
+    `.method(...)`. Now `_parse_postfix_from` also accepts `(args)` after
+    any expression: `f(1)(2)`, `handlers[0](x)`, `(fn(x) { x })(5)`,
+    `fn(x) { x }(5)` inside an expression. The resolver, codegen and VM
+    already handled a `Call` whose callee is any expression, so only the
+    parser changed. Like an index's `[`, the `(` must be on the same line
+    (`_on_same_line`), so a line starting with `(` is still a new statement.
+    A statement that *starts* with `fn` still goes straight to
+    `_parse_fn_expr` (a declaration or a function value), so calling an
+    anonymous function immediately there needs parentheses. Tree-sitter's
+    `call_expr` accepts call/index/paren callees. The formatter keeps `}(`
+    and `}[` tight, and it now walks a statement's start back over leading
+    `(` (parentheses have no AST node), so `(g)()` on its own line stays
+    its own statement. Tests: `tests/test_language.py`'s
+    `CallAnyExpressionTests`, `tests/test_parser.py`, `tests/test_format.py`.
+
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
 it** (`make test` must stay green) — see `docs/TESTING.md` for where
@@ -2778,7 +2829,7 @@ M1 was built and documented that way.
 
 ## Status
 
-M0 through M21 are all landed (see their entries above for what changed and
+M0 through M21 (and M21b, `mah format`) are all landed (see their entries above for what changed and
 each milestone's deliberate deviations/simplifications). `docs/NEXT_PHASES.md`
 captures what's deliberately deferred still (arrays/lists pattern matching,
 generics, the type system -- and, as of M11, sound field-*access*

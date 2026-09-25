@@ -1618,13 +1618,21 @@ class Parser:
         return Index(obj=base, key=key, position=open_tok.position)
 
     def _parse_postfix_from(self, base):
-        """`.field`, `.method(args)`, and (M19) `[key]`, left to right. An
-        index's `[` must be on the same line as what it indexes: Mah has no
-        significant newlines, so otherwise `foo()` followed by a line
-        starting with `[1, 2].len()` would silently parse as `foo()[1, ...`."""
+        """`.field`, `.method(args)`, (M19) `[key]`, and a call `(args)` on
+        any expression (`f(1)(2)`, `handlers[0](x)`, `(fn(x) { x })(5)`),
+        left to right. A plain `name(args)` never gets here: `_parse_primary`
+        builds that call itself. An index's `[` and a call's `(` must be on
+        the same line as what they apply to: Mah has no significant
+        newlines, so otherwise `foo()` followed by a line starting with
+        `[1, 2].len()` or `(a + b)` would silently continue the expression."""
         while True:
             if self.current.type is TokenType.BRACKET_OPEN and self._on_same_line():
                 base = self._parse_index(base)
+                continue
+            if self.current.type is TokenType.PAREN_OPEN and self._on_same_line():
+                paren_tok = self.current
+                args, kwargs = self._parse_paren_args()
+                base = Call(callee=base, args=args, position=paren_tok.position, kwargs=kwargs)
                 continue
             if self.current.type is not TokenType.DOT:
                 break

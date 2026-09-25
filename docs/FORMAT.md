@@ -1,7 +1,7 @@
 # `mah format`
 
-Status: **design, not implemented** (milestone M21b, after M21's type
-syntax).
+Status: **implemented** (milestone M21b, see `docs/V2_DESIGN.md`). Code in
+`mah/format/`.
 
 `mah format` rewrites Mah source into one consistent layout. It uses the
 lexer to find tokens and the parser to learn the structure (where each
@@ -18,13 +18,15 @@ changes the whitespace between tokens: spaces, newlines, indentation,
 blank lines. Comments are kept, word for word.
 
 That makes it safe by construction. Mah's parser ignores newlines except
-in one place: a postfix `[` (indexing) must be on the same line as what it
-indexes (`_on_same_line` in the parser). A line starting with `[` is a new
-Vector literal. So the formatter:
+in a few places, all of which need two tokens on the same line: a postfix
+`[` (indexing) and what it indexes (a line starting with `[` is a new
+Vector literal), a range's `..` and its end, and `break`/`return` and
+their value. So the formatter:
 
-- never puts a newline before a `[` that had none, and never removes one
-  that was there;
-- and nothing else about newlines can change a program's meaning.
+- only ever breaks lines between statements, after an opening bracket or
+  comma, and before a closing bracket, never inside those pairs;
+- keeps a newline between statements, so a `[` that started a new
+  statement still does.
 
 It does **not** add or remove `;`, parentheses, or trailing commas.
 Those are tokens. (A future `--fix` mode could, separately.)
@@ -40,9 +42,10 @@ name, and exits nonzero.
 ## Inputs the parser can't read directly
 
 - `import ...` statements and the `export` keyword are handled by the
-  preprocessor, not the parser. The formatter finds them with the
-  preprocessor's own tolerant scanner and replaces them with spaces of the
-  same length before parsing, so every other token keeps its position.
+  preprocessor, not the parser. The formatter finds them among the
+  lexer's tokens (the same shapes the preprocessor accepts) and replaces
+  them with spaces of the same length before parsing, so every other token
+  keeps its position.
   Then it prints them back normalized: `import "lib.mh"`, `import m from
   "lib"`, `export fn f...`, `export name`.
 - A file with a syntax error isn't formatted: "can't format FILE: <the
@@ -65,9 +68,9 @@ Own-line comments are re-indented to the depth of the code that follows
 them (or, before a `}`, to the depth inside the block). Trailing comments
 stay at the end of their line with one space before the `#`. A run of
 consecutive lines that all end in a trailing comment gets the comments
-aligned to one column, `max(code end) + 2`, like gofmt does, as long as
-that column stays within `line_width`. A comment's text is kept exactly,
-except for trailing whitespace.
+aligned one space after the longest line's code, like gofmt. A comment's
+text is kept exactly, except for trailing whitespace. A trailing comment
+after a closing bracket doesn't force that bracket's group to break.
 
 A gap that contains a comment always keeps a line break where the comment
 ends (a trailing comment ends its line, by definition).
@@ -91,7 +94,9 @@ ends (a trailing comment ends its line, by definition).
   statement or tail, contains no comment, and the whole line fits in
   `line_width`. Otherwise it's broken: `{` ends the line, each statement
   on its own line one indent deeper, `}` on its own line at the outer
-  depth. `} else {` / `} elif ... {` stay joined.
+  depth. `} else {` / `} elif ... {` stay joined. The blocks of one
+  `if`/`elif`/`else` chain are inline or broken **together**: if the whole
+  chain doesn't fit on one line, every block in it is broken.
 - `match` arms: one arm per line, one indent inside the `match { }`.
 - `struct`/`enum`/`trait`/`impl` bodies follow the bracket-group rule
   below for their field/variant lists, and the block rule for method
@@ -112,6 +117,10 @@ of comma-separated items. A group is laid out:
   own line at the outer depth. Items are laid out recursively with the
   same rules. No trailing comma is added, and an existing one is kept.
 - An item that contains a comment forces its group to break.
+- **Hugging**: when only the last argument of a call spans lines (a
+  closure, a block, a broken literal), the call's parentheses stay put and
+  only that argument breaks: `v.map(fn(x) {` ... `})`, not one argument per
+  line.
 
 Lines that are still too long after breaking every group on them (a
 long binary expression or method chain with no groups left) are left as
@@ -122,9 +131,9 @@ operator.
 
 | Where | Rule | Example |
 |---|---|---|
-| binary operators `+ - * / // % ** == != < > <= >= & \| .. ..= = => ->` | one space each side | `a + b`, `1..n`, `x => {` |
+| binary operators `+ - * / // % ** == != < > <= >= & \| = => ->` | one space each side | `a + b`, `x => {` |
+| range operators `..` `..=` | no space either side | `1..n`, `a..`, `..=b` |
 | unary `-` and `!` | no space after | `-x`, `!done` |
-| range with a missing side | no space on the missing side | `a..`, `..=b` |
 | `,` | no space before, one after (or line end) | `f(a, b)` |
 | `;` | no space before; newline after, unless inside an inline block | `x = 1;` |
 | `:` (type annotation, kwarg, struct field, map pair, bound) | no space before, one after | `a: Number`, `f(x: 1)` |
@@ -136,6 +145,7 @@ operator.
 | generic `<` `>` | no space inside or before `<` | `Vector<Number>` |
 | keywords | one space after (`let`, `fn`, `if`, `return`, `detach`, ...); `fn(` in a type or anonymous fn has none | `fn(x) { }` |
 | `#` trailing comment | see Comments | |
+| any two tokens that would lex as something else when touching | one space | `100.. =>` (not `100..=>`) |
 
 The AST settles every ambiguous token: which `-` is unary, which `<` is a
 generic bracket (the ones following a type NAME that has arguments, or
@@ -168,13 +178,19 @@ format-on-save for free through that.
 
 ## Implementation notes
 
-- `mah/format/`: `trivia.py` (gaps, comments, blank lines), `layout.py`
-  (a small Wadler-style document model: text, line, group, indent), and
-  `formatter.py` (AST-annotated tokens into documents, `format_source(text,
-  options) -> str`, the safety verification).
+- `mah/format/`: `doc.py` (a small Wadler/prettier-style document model
+  and printer: text, lines, groups, indent, line suffixes for trailing
+  comments), `formatter.py` (tokens and their gaps, the facts taken from
+  the AST, the bracket tree, the layout rules, and the verification),
+  `cli.py` (`mah format`).
 - The document model's `group` is "flat if it fits, else break", decided
   outermost first. That's the standard algorithm, and it makes the bracket
   rules above fall out directly.
+- The parser also builds brace-less blocks (around a `defer` statement or
+  a `detach` operand); only blocks whose `{` is in the source have
+  statements of their own for layout purposes.
+- AST comparison drops positions, including the one stored inside each
+  keyword argument's tuple.
 - Tests: every `examples/*.mh` and every template doc code block must be
   **idempotent** (formatting twice gives the same text as once) and pass
   the safety verification. Plus golden tests: small inputs with their

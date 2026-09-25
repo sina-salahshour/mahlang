@@ -154,7 +154,11 @@ python -m mah build ./examples/structs.mh            # compile to portable bytec
 python -m mah build ./examples/structs.mh --target release -o out.mahc   # no debug info
 python -m mah runc ./examples/structs.mahc           # run compiled bytecode
 python -m mah dis ./examples/structs.mahc            # show it as readable instructions
+python -m mah format ./examples                      # rewrite .mh files in the standard layout
 ```
+
+`mah format` only ever changes whitespace, and checks that before writing
+(`--check` lists files that would change instead; see `docs/FORMAT.md`).
 
 `mah <file>` (no subcommand) is shorthand for `mah run <file>` (or `mah
 runc` for a `.mahc` file). The `.mahc` format is specified in
@@ -254,6 +258,7 @@ currently provides:
   an `import` path string, into the file it points at
 - rename (single-file only for now — see `docs/NEXT_PHASES.md` for what
   cross-file rename and struct/enum/field rename would take)
+- document formatting, the same as `mah format`
 
 (Completion, document symbols, and code actions existed in an earlier
 version of the server and are currently disabled pending a rewrite onto

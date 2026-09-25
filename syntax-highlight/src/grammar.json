@@ -2650,6 +2650,18 @@
                 {
                   "type": "SYMBOL",
                   "name": "field_access"
+                },
+                {
+                  "type": "SYMBOL",
+                  "name": "call_expr"
+                },
+                {
+                  "type": "SYMBOL",
+                  "name": "index_expr"
+                },
+                {
+                  "type": "SYMBOL",
+                  "name": "paren_expr"
                 }
               ]
             }

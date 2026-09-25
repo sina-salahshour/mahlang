@@ -288,6 +288,14 @@ class DetachParsingTests(unittest.TestCase):
         self.assertIsInstance(expr.obj, DetachExpr)
         self.assertIsInstance(expr.obj.call.callee, FnExpr)
 
+    def test_call_on_a_call_result(self):
+        program = Parser(Lexer("f(1)(2, k: 3)")).parse_program()
+        outer = program[0].value
+        self.assertIsInstance(outer, Call)
+        self.assertIsInstance(outer.callee, Call)
+        self.assertEqual(outer.callee.callee.name, "f")
+        self.assertEqual([k for k, _v, _p in outer.kwargs], ["k"])
+
     def test_detach_call_is_not_wrapped(self):
         program = Parser(Lexer("detach f(1)")).parse_program()
         expr = program[0].value
