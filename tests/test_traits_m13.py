@@ -177,9 +177,11 @@ class DetachAnyCallChainTests(unittest.TestCase):
         """
         self.assertEqual(run_source(src), "fast\nslow\n35\n")
 
-    def test_detach_of_a_non_call_is_a_parse_error(self):
-        _program, parser = parse_source("struct S { f }\nlet s = S { f: 1 }\nlet p = detach s.f")
-        self.assertTrue(parser.errors)
+    def test_detach_of_a_field_access_detaches_the_whole_chain(self):
+        # Intentional change: this used to be a parse error (no call to
+        # detach). Now any expression can be detached.
+        src = "struct S { f }\nlet s = S { f: 1 }\nlet p = detach s.f\nprint(p.await)"
+        self.assertEqual(run_source(src), "1\n")
 
 
 class ResolverTypeHintTests(unittest.TestCase):

@@ -63,3 +63,15 @@ fn sum_list(lst) {
 }
 
 print(sum_list(make_list(5)))
+
+# Guards: `pattern if cond => ...` only matches when `cond` is also true.
+fn classify(n) {
+    match n {
+        0 => { "zero" }
+        x if x < 0 => { "negative" }
+        x if x % 2 == 0 => { "even" }
+        _ => { "odd" }
+    }
+}
+
+print(classify(-3), classify(0), classify(4), classify(7))

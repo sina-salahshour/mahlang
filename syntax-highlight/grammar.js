@@ -340,7 +340,12 @@ module.exports = grammar({
       seq("match", field("subject", $.expr), "{", repeat($.match_arm), "}"),
 
     match_arm: ($) =>
-      seq(field("pattern", $._pattern), "=>", field("body", $.block)),
+      seq(
+        field("pattern", $._pattern),
+        optional(seq("if", field("guard", $.expr))),
+        "=>",
+        field("body", $.block),
+      ),
 
     // -- patterns -----------------------------------------------------
     //
@@ -657,32 +662,21 @@ module.exports = grammar({
 
     input_call: ($) => seq("input", "(", ")"),
 
-    // M10 (async): `detach <call>` normally wraps a call expression (see
-    // docs/V2_DESIGN.md's M10 milestone -- compiler/parser.py parses this
-    // by directly consuming `ID ( args )`, never the general expression
-    // grammar, so `.await` binds to the Promise `detach` produces rather
-    // than to the inner call's own result). One exception: `detach
-    // sleep_async(ms)` -- `sleep_async` isn't a real Closure call at all
-    // (a dedicated builtin, see `sleep_async_call` below), and detaching
-    // it is purely a codegen-time choice (skip the auto-await a bare
-    // `sleep_async(ms)` otherwise gets), not a real Task -- but it's still
-    // valid, real syntax the parser accepts, so it needs to parse here
-    // too. `.await` itself needs no dedicated rule at all -- it's an
-    // ordinary `field_access` with field name "await", already covered
-    // generically above -- but only once `detach_expr` itself has already
-    // reduced: right after `detach call_expr`, a `.` is ambiguous between
-    // extending the inner call into its OWN `field_access` (wrong --
-    // would mean `detach (foo().field)`) and finishing `detach_expr` first
-    // so the `.` applies to the whole `detach_expr` instead (right --
-    // `(detach foo()).field`, matching the real parser's
-    // `_parse_postfix_from(DetachExpr(...))`). Giving `detach_expr` a
-    // higher precedence than `PREC.POSTFIX` resolves this in favor of
-    // reducing `detach_expr` immediately.
+    // `detach <operand>`: any expression can be detached (compiler/
+    // parser.py's `_parse_detach` -- a call is detached directly, anything
+    // else is wrapped in a closure). `.await` needs no dedicated rule --
+    // it's an ordinary `field_access` with field name "await" -- but it
+    // must apply to the Promise `detach` produces, not to the operand:
+    // right after `detach foo()`, a `.` is ambiguous between extending the
+    // operand and finishing `detach_expr` first. Giving `detach_expr` a
+    // higher precedence than `PREC.POSTFIX` reduces it immediately, so
+    // `detach foo().await` is `(detach foo()).await` (and, likewise,
+    // `detach a + b` is `(detach a) + b`, as in the real parser). The real
+    // parser detaches a whole non-await postfix chain (`detach s.f` is
+    // detach of `s.f`); this grammar stops at the first `.`, which only
+    // affects the shape of the highlight tree, not the colors.
     detach_expr: ($) =>
-      prec(
-        PREC.POSTFIX + 1,
-        seq("detach", field("call", choice($.call_expr, $.sleep_async_call))),
-      ),
+      prec(PREC.POSTFIX + 1, seq("detach", field("operand", $.expr))),
 
     sleep_async_call: ($) => seq("sleep_async", "(", $.expr, ")"),
 

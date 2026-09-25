@@ -2679,6 +2679,45 @@ node that resolved to it. Then:
       user `Index` impls, errors, bytecode gating), LSP completion/hover,
       and `examples/collections.mh`. 670 tests green.
 
+21. **M20 — match guards and `detach` on any expression. ✅ Landed.**
+
+    Decision taken with the user up front: a detached expression's value
+    stays a `Promise` you `.await` explicitly (no implicit awaiting when a
+    Promise is used), and any expression can be detached, not just a block.
+
+    - **Match guards**: `pattern if cond => { ... }`. `MatchArm.guard` is
+      parsed after the pattern (`=>` ends it). The resolver resolves it in
+      the arm's scope, after the pattern, so it sees the pattern's
+      bindings. Codegen emits it as one more failable check in the arm's
+      `failure_jumps`, after the pattern's own checks, exactly as
+      `docs/NEXT_PHASES.md` sketched. A falsy guard moves to the next arm;
+      if no arm is left, it's the usual `matchfail`.
+    - **`detach <expr>`**: the operand is any primary expression with its
+      postfix chain (`_parse_detach`, replacing M13's
+      `_parse_detach_operand`). Trailing `.await` steps are peeled off and
+      put back on top of the `DetachExpr`, so `detach f().await` and
+      `detach { ... }.await` await the Promise. A `Call`/`MethodCall`/
+      `sleep_async` operand compiles as before: its arguments are evaluated
+      in the caller and only the call becomes a task. Anything else is
+      wrapped in a synthesized zero-param `FnExpr` (flagged `detached`)
+      whose call is detached, the same desugaring `defer` uses. So the
+      whole expression runs in the new task and captures by reference. No
+      new opcodes or bytecode version.
+    - `return`, and `break`/`continue` with no loop inside the detached
+      expression, are compile errors ("can't leave a detached expression"):
+      codegen keeps a stack of the `FnExpr`s being compiled and checks the
+      innermost one's `detached` flag.
+    - **Intended test changes**: `detach 5` and `detach s.f` used to be parse
+      errors (no call); `tests/test_parser.py` and `tests/test_traits_m13.py`
+      now assert they parse/run.
+    - Also fixed in the project template's language reference: it still
+      listed string indexing (added in M19) as not available.
+    - Editors: tree-sitter `match_arm` gets an optional `if` guard, and
+      `detach_expr` takes any `expr`. TextMate needed nothing (`if`/`detach`
+      are already keywords). LSP hover docs for `match`/`detach` updated.
+    - Tests: `tests/test_guards_detach.py`, and `examples/match.mh`/
+      `examples/detach_any.mh`. 726 tests green.
+
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
 it** (`make test` must stay green) — see `docs/TESTING.md` for where
@@ -2690,9 +2729,9 @@ M1 was built and documented that way.
 
 ## Status
 
-M0 through M19 are all landed (see their entries above for what changed and
+M0 through M20 are all landed (see their entries above for what changed and
 each milestone's deliberate deviations/simplifications). `docs/NEXT_PHASES.md`
-captures what's deliberately deferred still (match guards, arrays/lists,
+captures what's deliberately deferred still (arrays/lists pattern matching,
 generics, the type system -- and, as of M11, sound field-*access*
 rename, which still needs the type system) and what M0–M11 need
 to keep forward-compatible with. M7 added a real symbol table to

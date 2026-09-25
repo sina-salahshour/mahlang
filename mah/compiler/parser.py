@@ -668,9 +668,17 @@ class Parser:
 
     def _parse_match_arm(self) -> MatchArm:
         pattern = self._parse_pattern()
+        guard = None
+        if self.current.type is TokenType.IF:
+            # `pattern if cond => { ... }`: the arm only matches when the
+            # pattern does and then `cond` (which can use its bindings) is
+            # truthy. `=>` ends the condition, so no struct-literal
+            # suppression is needed here.
+            self.advance()
+            guard = self.parse_expr()
         arrow_tok = self.expect(TokenType.FAT_ARROW)
         body = self.parse_block()
-        return MatchArm(pattern=pattern, body=body, position=arrow_tok.position)
+        return MatchArm(pattern=pattern, body=body, position=arrow_tok.position, guard=guard)
 
     # -- patterns ------------------------------------------------------
     #
@@ -1276,19 +1284,7 @@ class Parser:
 
         if tok.type is TokenType.DETACH:
             self.advance()
-            if self.current.type is TokenType.SLEEP_ASYNC:
-                # `detach sleep_async(ms)` -- the one builtin-shaped
-                # exception to "detach wraps a plain ID(...) call": see
-                # DetachExpr's own comment and codegen.py for why this
-                # compiles completely differently from an ordinary
-                # detached call.
-                sleep_tok = self.advance()
-                args = self._parse_no_kwargs_args(sleep_tok, "sleep_async")
-                if len(args) != 1:
-                    raise SyntaxError(f"'sleep_async' can only have one argument")
-                inner = SleepAsyncExpr(arg=args[0], position=sleep_tok.position)
-                return self._parse_postfix_from(DetachExpr(call=inner, position=tok.position))
-            return self._parse_detach_operand(tok)
+            return self._parse_detach(tok)
 
         if tok.type is TokenType.SLEEP_ASYNC:
             self.advance()
@@ -1339,72 +1335,44 @@ class Parser:
 
     # -- helpers -----------------------------------------------------------
 
-    def _parse_detach_operand(self, detach_tok: Token):
-        """M13: `detach obj.method(args)` -- lifts M10's original
-        `detach name(args)`-only restriction (which is still handled by a
-        dedicated, simpler branch in `_parse_primary` right before this is
-        called) to any call chain rooted at a plain identifier: `detach
-        Type.method(...)` (a static path), `detach obj.a().b(...)`, etc.
+    def _parse_detach(self, detach_tok: Token):
+        """`detach <operand>`, where the operand is any primary expression
+        with its postfix chain: a call (`detach f(x)`, `detach
+        obj.m(x)`), `detach sleep_async(ms)`, or anything else (`detach {
+        ... }`, `detach for ...`, `detach while ...`, `detach if ...`,
+        `detach (a + b)`, `detach v[0]`).
 
-        Algorithm: parse a leading `ID` (optionally immediately called,
-        `ID(args)`) as `base`, then collect every following `.name` /
-        `.name(args)` postfix step *without* building any AST for them yet
-        (`steps`, a flat list of `(name_tok, args_or_None)`). `k` is the
-        index of the LAST step that has args (a real call) -- everything
-        from `base` up to and including step `k` is what actually gets
-        detached (wrapped in one `DetachExpr`); everything after step `k`
-        (necessarily all bare field accesses, e.g. a trailing `.await`) is
-        rebuilt as ordinary `FieldAccess` nodes on top of that `DetachExpr`,
-        exactly as `detach work().await` already worked pre-M13. No step
-        after `k` can itself be a call, by definition of `k` being the
-        *last* one that is.
+        A trailing `.await` belongs to the Promise, not to the operand, so
+        `detach f().await` still awaits what `detach` produced (as it did
+        since M10). Those steps are peeled off the operand and put back on
+        top of the `DetachExpr`.
 
-        If there is no call anywhere at all (`k == -1` and `base` is a bare
-        `Ident`, e.g. `detach p.f`), that's a syntax error -- `detach`
-        always needs *some* call to actually detach."""
-        base_tok = self.expect(TokenType.ID)
-        if self.current.type is TokenType.PAREN_OPEN:
-            args, kwargs = self._parse_paren_args()
-            base = Call(
-                callee=Ident(name=base_tok.literal, position=base_tok.position),
-                args=args,
-                position=base_tok.position,
-                kwargs=kwargs,
+        A call (or `sleep_async`) is detached directly: its callee and
+        arguments are evaluated now, in the current task, and only the call
+        runs as a new task. Any other operand is wrapped in a synthesized
+        zero-param closure and that closure's call is detached, the same
+        desugaring `defer` uses for its body, so the whole expression runs
+        in the new task and captures enclosing variables by reference."""
+        operand = self._parse_primary()
+        awaits = []
+        while isinstance(operand, FieldAccess) and operand.field == "await":
+            awaits.append(operand)
+            operand = operand.obj
+        if not isinstance(operand, (Call, MethodCall, SleepAsyncExpr)):
+            closure = FnExpr(
+                name=None,
+                params=[],
+                body=Block(stmts=[], position=operand.position, tail=operand),
+                position=detach_tok.position,
+                name_position=None,
+                param_positions=[],
+                detached=True,
             )
-        else:
-            base = Ident(name=base_tok.literal, position=base_tok.position)
-
-        steps: list = []  # list[(name_tok, call_info_or_None)] -- call_info = (args, kwargs)
-        while self.current.type is TokenType.DOT:
-            self.advance()
-            name_tok = self.expect(TokenType.ID)
-            if self.current.type is TokenType.PAREN_OPEN:
-                steps.append((name_tok, self._parse_paren_args()))
-            else:
-                steps.append((name_tok, None))
-
-        k = -1
-        for index, (_name_tok, call_info) in enumerate(steps):
-            if call_info is not None:
-                k = index
-        if k == -1 and not isinstance(base, Call):
-            raise SyntaxError(f"'detach' needs a function or method call at position '{detach_tok.position}'")
-
-        node = base
-        for name_tok, call_info in steps[: k + 1]:
-            if call_info is None:
-                node = FieldAccess(obj=node, field=name_tok.literal, position=name_tok.position)
-            else:
-                args, kwargs = call_info
-                node = MethodCall(
-                    obj=node, method=name_tok.literal, args=args, position=name_tok.position, kwargs=kwargs
-                )
-        node = DetachExpr(call=node, position=detach_tok.position)
-
-        for name_tok, _call_info in steps[k + 1 :]:
-            node = FieldAccess(obj=node, field=name_tok.literal, position=name_tok.position)
-
-        return self._parse_postfix_from(node)
+            operand = Call(callee=closure, args=[], position=detach_tok.position, kwargs=[])
+        node = DetachExpr(call=operand, position=detach_tok.position)
+        for await_node in reversed(awaits):
+            node = FieldAccess(obj=node, field="await", position=await_node.position)
+        return node
 
     def _parse_bracket_literal(self):
         """M19: `[a, b]` (Vector), `[k: v, ...]` (Map), `[]`, `[:]`. The

@@ -264,17 +264,35 @@ class DetachParsingTests(unittest.TestCase):
     consuming `ID ( args )` rather than through the general expression
     grammar."""
 
-    def test_detach_rejects_a_non_call_operand(self):
-        # M6's forgiving parser (see the `test_bare_expression_statement_
-        # requires_semicolon_unless_last` note above) means a bad `detach`
-        # operand is collected into `parser.errors` rather than raised out
-        # of `parse_program()` -- `self.expect(TokenType.ID)` is what
-        # actually raises the underlying SyntaxError here (`5` is a
-        # NUMBER, not an ID), caught by `_parse_block_items`'s recovery.
+    def test_detach_wraps_a_non_call_operand_in_a_closure(self):
+        # Intentional change: `detach` used to reject any operand that
+        # wasn't a call. Now a non-call operand is wrapped in a synthesized
+        # zero-param closure whose call is what gets detached.
         lexer = Lexer("detach 5")
         parser = Parser(lexer)
-        parser.parse_program()  # must not raise
-        self.assertEqual(len(parser.errors), 1)
+        program = parser.parse_program()
+        self.assertEqual(parser.errors, [])
+        expr = program[0].value
+        self.assertIsInstance(expr, DetachExpr)
+        self.assertIsInstance(expr.call, Call)
+        self.assertIsInstance(expr.call.callee, FnExpr)
+        self.assertTrue(expr.call.callee.detached)
+        self.assertEqual(expr.call.args, [])
+        self.assertEqual(expr.call.callee.body.tail.value, 5)
+
+    def test_detach_block_keeps_trailing_await_outside(self):
+        program = Parser(Lexer("detach { 1 }.await")).parse_program()
+        expr = program[0].value
+        self.assertIsInstance(expr, FieldAccess)
+        self.assertEqual(expr.field, "await")
+        self.assertIsInstance(expr.obj, DetachExpr)
+        self.assertIsInstance(expr.obj.call.callee, FnExpr)
+
+    def test_detach_call_is_not_wrapped(self):
+        program = Parser(Lexer("detach f(1)")).parse_program()
+        expr = program[0].value
+        self.assertIsInstance(expr.call, Call)
+        self.assertEqual(expr.call.callee.name, "f")
 
 
 class LspPositionFieldTests(unittest.TestCase):

@@ -147,7 +147,7 @@ themselves emit no instructions in `gen_stmt` (like `StructDecl`/
 
 M13 extends `detach` to accept a `MethodCall` operand (`detach
 obj.method(args)`, `detach Type.method(args)`, `detach Trait.method(recv,
-...)`), not just a plain `Call` -- see the parser's `_parse_detach_operand`.
+...)`), not just a plain `Call` -- see the parser's `_parse_detach`.
 New opcode: `detachmethod` -- same operand shape as `callmethod` (`arg1` =
 receiver address, `arg2` = `(method_name, arg_addrs_tuple_excluding_
 receiver, trait_name_or_None, source_position)`), but `dest` receives a
@@ -292,6 +292,9 @@ class Codegen:
         # start of the current function's (or the top-level program's) own
         # body -- see `_emit_defer_unwind`/`gen_block`/`_gen_fn_expr`.
         self._defer_depth = 0
+        # The FnExprs currently being compiled, innermost last -- see
+        # `_reject_in_detached`.
+        self._fn_stack: list = []
         # M14: the source position (a combined-text offset) attributed to
         # whatever gets emitted next -- see `gen_stmt`/`gen_expr`/
         # `_gen_pattern_check` and `CodeBuffer.current_pos`/`positions`.
@@ -611,6 +614,11 @@ class Codegen:
         for arm in stmt.arms:
             failure_jumps = []  # list[(cond_addr, placeholder_addr)]
             self._gen_pattern_check(arm.pattern, scrutinee_addr, failure_jumps)
+            if arm.guard is not None:
+                # A guard is one more failable check after the pattern's
+                # own, with its bindings already stored.
+                guard_addr = self.gen_expr(arm.guard)
+                failure_jumps.append((guard_addr, self.buf.emit((None, None, None, None))))
             self._gen_block_into(arm.body, dest)
             end_jumps.append(self.buf.emit((None, None, None, None)))
             next_arm_target = self.buf.code_pointer
@@ -687,6 +695,7 @@ class Codegen:
 
     def _gen_break(self, stmt: BreakStmt) -> None:
         if not self._while_stack:
+            self._reject_in_detached("break", stmt.position)
             raise Exception(f"'break' used outside a loop at position {stmt.position}")
         loop_ctx = self._while_stack[-1]
         if stmt.value is not None:
@@ -699,12 +708,26 @@ class Codegen:
 
     def _gen_continue(self, stmt: ContinueStmt) -> None:
         if not self._while_stack:
+            self._reject_in_detached("continue", stmt.position)
             raise Exception(f"'continue' used outside a loop at position {stmt.position}")
         self._emit_defer_unwind(self._defer_depth - self._while_stack[-1]["defer_depth_at_entry"])
         target = self._while_stack[-1]["continue_target"]
         self.buf.emit(("jmp", None, None, target))
 
+    def _reject_in_detached(self, keyword: str, position) -> None:
+        """A `detach`ed non-call expression runs inside a synthesized
+        closure (see the parser's `_parse_detach`), so a `return`/`break`/
+        `continue` directly in it can't reach the enclosing function or
+        loop. Reject it rather than letting `return` quietly settle the
+        Promise or `break` report a misleading "outside a loop"."""
+        if self._fn_stack and self._fn_stack[-1].detached:
+            raise Exception(
+                f"'{keyword}' can't leave a detached expression at position {position} "
+                f"(it runs as its own task)"
+            )
+
     def _gen_return(self, stmt: ReturnStmt) -> None:
+        self._reject_in_detached("return", stmt.position)
         if self._fn_depth == 0:
             raise Exception(f"return keyword used outside function at position {stmt.position}")
         if stmt.value is not None:
@@ -920,6 +943,7 @@ class Codegen:
         code_address = self.buf.code_pointer
         self.frame_stack.append(fn.frame_level)
         self._fn_depth += 1
+        self._fn_stack.append(fn)
         # M9: save/reset/restore the defer-depth counter around compiling
         # this function's own body, exactly parallel to frame_stack/
         # _fn_depth above -- essential so a nested function's own return
@@ -974,6 +998,7 @@ class Codegen:
         self._while_stack = saved_while_stack
         self._defer_depth = saved_defer_depth
         self._fn_depth -= 1
+        self._fn_stack.pop()
         slot_count = self.frame_stack.pop().next_slot
         self.buf.emit(("jmp", None, None, self.buf.code_pointer), address=skip_placeholder)
         dest = self._temp()

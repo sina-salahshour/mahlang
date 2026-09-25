@@ -96,8 +96,10 @@ KEYWORD_DOCS = {
     "or struct-shaped (named fields).\n\n"
     "```mah\nenum Shape {\n\tCircle { r },\n\tEmpty\n}\n```",
     "match": "Pattern-match a value against a sequence of patterns, running "
-    "the first arm whose pattern matches.\n\n"
-    "```mah\nmatch value {\n\tsome(x) => { print(x) }\n\tnone => { print(\"nothing\") }\n}\n```",
+    "the first arm whose pattern matches. An arm can add a guard, "
+    "`pattern if cond => ...`: it only matches when `cond` (which can use "
+    "the pattern's bindings) is also truthy.\n\n"
+    "```mah\nmatch value {\n\tsome(x) if x > 0 => { print(x) }\n\tsome(_) => { print(\"not positive\") }\n\tnone => { print(\"nothing\") }\n}\n```",
     "some": "Construct a value wrapping `x` in the built-in `Option` type -- "
     "the `Some`-equivalent, always truthy regardless of `x`.\n\n`some(x)`",
     "none": "The built-in `Option` type's empty value -- Mah's null "
@@ -110,13 +112,14 @@ KEYWORD_DOCS = {
     "(falling through, or via return/break/continue) -- LIFO order among "
     "multiple defers in the same block, Zig-style, not function-scoped "
     "like Go.\n\n```mah\nfn process(name) {\n\tlet r = open(name)\n\tdefer close(r)\n\t...\n}\n```",
-    "detach": "Start a function call running immediately, synchronously -- "
-    "runs to completion in place unless it hits a real suspension (like a "
-    "bare `sleep_async` inside it), in which case it hands back a "
-    "still-pending `Promise` instead of blocking. Never itself a "
-    "scheduling boundary. `.await` is only needed once you've opted out "
-    "of blocking this way -- a bare, non-detached call never needs it.\n\n"
-    "```mah\nlet p = detach fetch_thing()\n...\nlet result = p.await\n```",
+    "detach": "Run an expression as a new task and get a `Promise` for its "
+    "value. It starts immediately and runs until it hits a real suspension "
+    "(like a bare `sleep_async` inside it), then the caller continues. "
+    "Any expression works: a call (its arguments are evaluated first, in "
+    "the caller), or a block, loop, `if`, `match`, etc. (run whole in the "
+    "new task, seeing surrounding variables by reference; `return`/"
+    "`break`/`continue` can't leave it). Use `.await` to get the value.\n\n"
+    "```mah\nlet p = detach fetch_thing()\nlet q = detach {\n\tsleep_async(10);\n\t2 + 3\n};\nprint(p.await, q.await)\n```",
     "await": "Suspend the current execution until this `Promise` settles "
     "(`Promise.Settled { value }`), then yield `value`. Written as a "
     "postfix pseudo-field (`value.await`), not a prefix keyword. Only "

@@ -1,0 +1,25 @@
+# `detach` works on any expression, not just a call. A block, loop, `if`,
+# `match`, ... runs as its own task, and the Promise holds its value.
+
+let name = "Mah"
+let five = detach {
+    sleep_async(5);
+    2 + 3
+};
+
+let total = 0
+let summing = detach for let i in 1..=4 {
+    sleep_async(1);
+    total = total + i;
+};
+
+print("total so far: " + total)   # 0: the loop is waiting on its first sleep
+print("Hello, " + name + "! " + five.await)
+summing.await
+print("total: " + total)           # 10
+
+let sign = detach match -4 {
+    x if x < 0 => { "negative" }
+    _ => { "not negative" }
+};
+print(sign.await)

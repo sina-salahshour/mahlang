@@ -925,6 +925,8 @@ class Resolver:
                 # precedent).
                 self._push()
                 self.resolve_pattern(arm.pattern)
+                if arm.guard is not None:
+                    self.resolve_expr(arm.guard)
                 self.resolve_block(arm.body)
                 self._pop()
         elif isinstance(stmt, BreakStmt):

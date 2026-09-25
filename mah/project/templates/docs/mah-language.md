@@ -231,8 +231,22 @@ fn describe(x) {
 print(describe(10))                         # 10 to 15
 ```
 
+- **Guards**: `pattern if cond => { ... }` only matches when the pattern
+  does and `cond` (which can use the pattern's bindings) is truthy;
+  otherwise the next arm is tried.
+
+```mah
+fn sign(n) {
+    match n {
+        0 => { "zero" }
+        x if x < 0 => { "negative" }
+        _ => { "positive" }
+    }
+}
+```
+
 - Every arm body is a `{ }` block. Arms are tried top to bottom; if none
-  matches it's a runtime error. There are no guards (`if` in arms).
+  matches it's a runtime error.
 - Struct/enum patterns must list **every** field of that struct/variant.
 
 ## Ranges and iterators
@@ -485,7 +499,20 @@ let p = detach fetch(21)        # starts it; you get a Promise back
 print("meanwhile")
 print(p.await)                  # waits for the result: 42
 let q = detach obj.method(1)    # methods can be detached too
+let r = detach {                # so can any expression: a block, a loop,
+    sleep_async(10);            # an `if`, a `match`, `(a + b)`, ...
+    2 + 3
+};
+print(r.await)                  # 5
 ```
+
+- Detaching a call evaluates its arguments right away, in the caller; only
+  the call itself runs as the new task. Any other expression runs entirely
+  in the new task and sees surrounding variables by reference (it reads
+  their values when it runs, not when you detach it).
+- `detach` binds tightly: `detach a + b` is `(detach a) + b`; write
+  `detach (a + b)`. `return`, and a `break`/`continue` for a loop outside
+  the detached expression, are compile errors inside it.
 
 - `value.await` waits for a Promise. A Promise is an enum:
   `Promise.Pending` or `Promise.Settled { value }`.
@@ -524,7 +551,7 @@ before anything runs.
   assigning into a String (`s[0] = "x"`: Strings are immutable).
 - `for x in ...` without `let`, C-style `for (i = 0; ...)`, destructuring in
   `for` bindings, labeled `break`/`continue`.
-- String methods other than `len`/`char_at` (no `split`, `replace`, ...), string indexing.
+- String methods other than `len`/`char_at` (no `split`, `replace`, ...).
 - `&&`, `||`, `+=`, `++`, ternary `?:`.
 - Type annotations, generics, classes/inheritance, exceptions/`try`.
 - Variadic parameters (`*args`, `**kwargs`); only `print` takes any number of arguments.

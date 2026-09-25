@@ -1031,6 +1031,31 @@
           }
         },
         {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SEQ",
+              "members": [
+                {
+                  "type": "STRING",
+                  "value": "if"
+                },
+                {
+                  "type": "FIELD",
+                  "name": "guard",
+                  "content": {
+                    "type": "SYMBOL",
+                    "name": "expr"
+                  }
+                }
+              ]
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
           "type": "STRING",
           "value": "=>"
         },
@@ -2385,19 +2410,10 @@
           },
           {
             "type": "FIELD",
-            "name": "call",
+            "name": "operand",
             "content": {
-              "type": "CHOICE",
-              "members": [
-                {
-                  "type": "SYMBOL",
-                  "name": "call_expr"
-                },
-                {
-                  "type": "SYMBOL",
-                  "name": "sleep_async_call"
-                }
-              ]
+              "type": "SYMBOL",
+              "name": "expr"
             }
           }
         ]

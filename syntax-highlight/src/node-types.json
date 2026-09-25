@@ -242,16 +242,12 @@
     "type": "detach_expr",
     "named": true,
     "fields": {
-      "call": {
+      "operand": {
         "multiple": false,
         "required": true,
         "types": [
           {
-            "type": "call_expr",
-            "named": true
-          },
-          {
-            "type": "sleep_async_call",
+            "type": "expr",
             "named": true
           }
         ]
@@ -1073,6 +1069,16 @@
         "types": [
           {
             "type": "block",
+            "named": true
+          }
+        ]
+      },
+      "guard": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "expr",
             "named": true
           }
         ]

@@ -252,9 +252,10 @@ class InputExpr:
 class DetachExpr:
     call: object  # M13: a Call node, a MethodCall node, or (for `detach
                    # sleep_async(ms)`) a SleepAsyncExpr node -- the operand
-                   # `detach` wraps; see the parser's `_parse_detach_operand`
-                   # for why this must already be one of those three shapes
-                   # by construction, and codegen.py for why each compiles
+                   # `detach` wraps. Any other operand (`detach { ... }`)
+                   # arrives as a Call of a synthesized zero-param closure;
+                   # see the parser's `_parse_detach`. Codegen explains why
+                   # each of the three shapes compiles
                    # completely differently (an ordinary Call/MethodCall
                    # spins up a real Task; sleep_async isn't a real Closure
                    # call at all, so "detaching" it just means skipping the
@@ -452,6 +453,10 @@ class FnExpr:
     # parser (`_parse_param_list`); once a parameter has a default, every
     # later one must too (resolve.py enforces this).
     defaults: list = field(default_factory=list, repr=False)
+    # set by the parser: True for the closure it synthesizes around a
+    # non-call `detach` operand (`detach { ... }`), so codegen can reject
+    # `return`/`break`/`continue` that would escape it with a clear error.
+    detached: bool = field(default=False, repr=False)
 
 
 @dataclass
@@ -669,6 +674,10 @@ class MatchArm:
     pattern: object
     body: Block
     position: int
+    # `pattern if cond => ...`: an expression checked after the pattern
+    # matches (its bindings are in scope); a falsy guard moves on to the
+    # next arm. `None` when the arm has no guard.
+    guard: Optional[object] = None
 
 
 @dataclass
