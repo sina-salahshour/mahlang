@@ -149,12 +149,37 @@ reported with their real `file:line:column`.
 ## Getting started
 
 ```sh
-python -m mah run ./examples/prime_numbers.mh      # run a file, from a repo checkout
-python -m mah build ./examples/structs.mh          # see the compiled bytecode instead
-python -m mah build ./examples/structs.mh -o out.txt   # ...or write that dump to a file
+python -m mah run ./examples/prime_numbers.mh        # compile and run a file, from a repo checkout
+python -m mah build ./examples/structs.mh            # compile to portable bytecode: structs.mahc
+python -m mah build ./examples/structs.mh --target release -o out.mahc   # no debug info
+python -m mah runc ./examples/structs.mahc           # run compiled bytecode
+python -m mah dis ./examples/structs.mahc            # show it as readable instructions
 ```
 
-`mah <file>` (no subcommand) is shorthand for `mah run <file>`.
+`mah <file>` (no subcommand) is shorthand for `mah run <file>` (or `mah
+runc` for a `.mahc` file). The `.mahc` format is specified in
+`docs/MAHC_FORMAT.md`, in enough detail to write a VM for it in any
+language.
+
+### Projects
+
+```sh
+mah init my-app        # or `mah init` to turn the current directory into a project
+cd my-app
+mah run                # runs the entry point from mah-project.toml (src/main.mh)
+mah build              # writes every [[target]], e.g. build/my-app.mahc
+mah build --target release
+```
+
+`mah init` creates `mah-project.toml` (package name, version, entry point,
+and build targets, each with a `debug` or `release` profile), `src/main.mh`,
+a `.gitignore`, and docs for coding agents: `AGENTS.md` (plus a `CLAUDE.md`
+that imports it) and `docs/mah-language.md`, a complete language reference
+written so an LLM can write correct Mah without guessing. `mah run` and
+`mah build` find the manifest from any subdirectory. The templates live in
+`mah/project/templates/` and must be kept in sync with the language (see
+`.claude/skills/mah-add-feature/SKILL.md` step 9). `[dependencies]` is
+reserved for third-party packages, which aren't supported yet.
 
 ### Installing the `mah` command
 
@@ -169,6 +194,7 @@ make uninstall-mah
 ```sh
 mah path/to/program.mh
 mah build path/to/program.mh
+mah init my-app
 mah lsp                # starts the language server (see below) -- editors run this for you
 ```
 
@@ -297,6 +323,8 @@ Not yet built, but designed for and tracked in `docs/NEXT_PHASES.md`:
   build log
 - `docs/NEXT_PHASES.md` — detailed design notes for everything in
   "Where this is going" above
+- `docs/TRAITS.md` — traits, `impl`, method dispatch, and system traits
+- `docs/MAHC_FORMAT.md` — the portable `.mahc` bytecode format (normative)
 - `docs/TESTING.md` — the testing policy referenced above
 - `docs/DEVELOPMENT_WORKFLOW.md` — how this project's own development is
   split across planning, implementation, and verification

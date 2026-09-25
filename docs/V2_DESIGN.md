@@ -2412,6 +2412,53 @@ node that resolved to it. Then:
     unrelated meanings of "native"). Full suite: 396 tests green.
     `examples/traits.mh` compiles to 1246 bytes (debug) / 862 (release).
 
+16. **M15 — `mah init`, `mah-project.toml`, project-aware `run`/`build`. ✅ Landed.**
+
+    - **`mah init [DIR]`** (`mah/project/init.py`) creates the project
+      directory if needed, derives a package name from the directory
+      (`My Tool` → `my-tool`), and writes the templates in
+      `mah/project/templates/`: `mah-project.toml`, `src/main.mh`, `.gitignore`,
+      `AGENTS.md`, `CLAUDE.md` (just `@AGENTS.md`), and
+      `docs/mah-language.md`. It never overwrites an existing file and
+      refuses a directory that already has a manifest.
+    - **`docs/mah-language.md`** is a self-contained reference aimed at LLMs.
+      It spells out Mah's deviations from mainstream languages (no `<=`/`>=`/
+      `!`, `&`/`|` sharing one precedence level, `%` at the `+` level,
+      `-2 ** 2 == -4`, no trailing commas, no arrays/`for`/string methods)
+      and ends with an explicit "Not available" list. Its code blocks were
+      checked against the real compiler while writing it, which caught two
+      mistakes (a trailing enum comma, and a struct literal missing a field),
+      and a test keeps compiling them so the doc can't drift from the
+      language.
+    - **`mah-project.toml`** (`mah/project/manifest.py`, read with stdlib
+      `tomllib`): `[package]` `name`/`version`/`entry` (default `src/main.mh`),
+      `[[target]]` `name`/`profile` (`debug`|`release`)/`out`, and
+      `[dependencies]`, reserved for third-party packages and required to be
+      empty for now. Validation is strict: unknown keys (with a
+      `did you mean [[target]]?` hint), bad profiles, and duplicate target
+      names or outputs are errors naming the manifest.
+    - **CLI**: `mah run` with no file (or with a directory) finds the
+      manifest in the current directory or a parent and runs the entry; `mah
+      build` with no file builds every target, or one with `--target NAME`,
+      compiling once per profile. The file forms are unchanged.
+
+    Same thinker/coder split. I wrote the templates and the language
+    reference myself, since accuracy about Mah's quirks was the point.
+    Verified: the suite, plus a manual session (init with a space in the
+    name, run from a subdirectory, a runtime error located in
+    `src/lib.mh#2:5`, a compile error, a bad manifest, re-init). That turned
+    up one bug, fixed with a test: the `Next: cd My Tool && mah run` hint
+    wasn't shell-quoted. Full suite: 428 tests green.
+
+    Follow-up: the entry point moved to `src/main.mh` (also the manifest's
+    default `entry`). `init` now copies *every* file under the templates
+    directory instead of a hardcoded list, so evolving the template means
+    editing files only. And since the templates teach LLMs the language,
+    keeping them current is now step 9 of the `mah-add-feature` skill,
+    backed by `TemplateDriftTests`: every lexer keyword, built-in type, and
+    system trait must appear in `docs/mah-language.md`, and `AGENTS.md` must
+    agree with the manifest template's entry. 431 tests green.
+
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
 it** (`make test` must stay green) — see `docs/TESTING.md` for where
@@ -2423,7 +2470,7 @@ M1 was built and documented that way.
 
 ## Status
 
-M0 through M14 are all landed (see their entries above for what changed and
+M0 through M15 are all landed (see their entries above for what changed and
 each milestone's deliberate deviations/simplifications). `docs/NEXT_PHASES.md`
 captures what's deliberately deferred still (match guards, arrays/lists,
 generics, the type system -- and, as of M11, sound field-*access*
@@ -2462,6 +2509,7 @@ system trait used by `print`/string `+`) -- see `docs/TRAITS.md`; M13
 added field-closure calls (`p.f()`), `detach` on method calls, and
 method-name hover/go-to-definition/completion in the LSP; M14 made the
 compiler's output a portable, versioned binary format (`.mahc`, see
-`docs/MAHC_FORMAT.md`) that the VM runs exclusively. All
-planned milestones (M0–M14) are now complete; see `docs/NEXT_PHASES.md`
+`docs/MAHC_FORMAT.md`) that the VM runs exclusively; M15 added projects
+(`mah init`, `mah-project.toml`, project-aware `run`/`build`). All
+planned milestones (M0–M15) are now complete; see `docs/NEXT_PHASES.md`
 for what's next.

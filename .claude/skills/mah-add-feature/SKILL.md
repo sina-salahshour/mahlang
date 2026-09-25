@@ -161,8 +161,30 @@ not just in the compiler:
   keyword/construct, matching the pattern already there for existing
   keywords/builtins.
 
+## 9. Project templates (`mah/project/templates/`) — do this too
+
+`mah init` copies this directory into every new project, and two of its
+files are documentation that users and **LLMs rely on to write Mah
+correctly**. A language change isn't done until they describe it:
+
+- **`docs/mah-language.md`**: the complete language reference. Add the new
+  syntax or builtin with a short, *compiling* example, and remove the item
+  from its "Not available" list if you've lifted a limitation (e.g. arrays,
+  `for`, string methods). Keep the gotchas section honest.
+- **`AGENTS.md`**: update it if commands, the project layout, or the
+  manifest (`mah-project.toml` template) change.
+- `init` copies every file in the directory (`gitignore` → `.gitignore`),
+  with `{{name}}` replaced by the package name. Adding a template file needs
+  no code change.
+- `tests/test_project.py` enforces what it can: every doc example compiles
+  (`DocsSanityTests`), and every keyword, built-in type, and system trait
+  appears in the reference (`TemplateDriftTests`). A failure there after a
+  language change means **update the doc**, not the test.
+
 ## Common mistakes
 
+- Forgetting step 9 — new projects then ship docs that teach LLMs the old
+  language.
 - Skipping step 7 — an example file that "looks right" when you eyeball
   its output is not a regression test; the next change can silently break
   it with nothing catching it.

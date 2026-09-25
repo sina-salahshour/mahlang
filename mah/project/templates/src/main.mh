@@ -1,0 +1,7 @@
+# Entry point of {{name}}. Run it with `mah run`.
+
+fn greet(name) {
+    "Hello, " + name + "!"
+}
+
+print(greet("{{name}}"))

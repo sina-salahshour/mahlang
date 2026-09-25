@@ -1,0 +1,23 @@
+# Mah project manifest -- read by `mah run` and `mah build`.
+
+[package]
+name = "{{name}}"
+version = "0.1.0"        # your project's own version
+entry = "src/main.mh"    # the file `mah run` executes (relative to this file)
+
+# Build outputs. `mah build` writes every [[target]]; `mah build --target NAME`
+# writes just one.
+#   profile = "debug"    keeps source locations, so runtime errors say where
+#   profile = "release"  strips them: a smaller file, errors give no location
+[[target]]
+name = "debug"
+profile = "debug"
+out = "build/{{name}}-debug.mahc"
+
+[[target]]
+name = "release"
+profile = "release"
+out = "build/{{name}}.mahc"
+
+# Third-party packages will be declared here. Not supported yet, so keep it empty.
+[dependencies]

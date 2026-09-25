@@ -2,6 +2,7 @@
 import argparse
 import os
 import re
+import shlex
 import sys
 
 from ..bytecode.decode import decode
@@ -16,10 +17,12 @@ from ..compiler.lexer import Lexer
 from ..compiler.parser import Parser
 from ..compiler.resolve import Resolver
 from ..preprocessor import demangle_message, preprocess
+from ..project.init import init_project
+from ..project.manifest import MANIFEST_NAME, MahProjectError, find_manifest, load_project
 
 sys.tracebacklimit = 0
 
-_SUBCOMMANDS = {"run", "build", "runc", "dis", "lsp"}
+_SUBCOMMANDS = {"run", "build", "runc", "dis", "lsp", "init"}
 
 
 def read_file(file_name):
@@ -107,6 +110,44 @@ def _default_mahc_path(source_path: str) -> str:
     return root + ".mahc"
 
 
+def _resolve_project(file_arg: str | None):
+    """M15: shared project-mode lookup for `run`/`build` -- `file_arg` is
+    `None` (search upward from the current directory) or a directory
+    (scoped lookup, no upward search). Loads and validates the manifest,
+    then checks the entry file exists (same error either command reports).
+    Returns `(project, None)` on success, or `(None, exit_code)` once the
+    error has already been printed to stderr."""
+    if file_arg is None:
+        manifest_path = find_manifest(os.getcwd())
+        if manifest_path is None:
+            print(
+                f"error: no FILE given and no {MANIFEST_NAME} found in {os.getcwd()} or its parents",
+                file=sys.stderr,
+            )
+            return None, 2
+    else:
+        manifest_path = os.path.join(file_arg, MANIFEST_NAME)
+        if not os.path.isfile(manifest_path):
+            print(f"error: {file_arg} has no {MANIFEST_NAME}", file=sys.stderr)
+            return None, 2
+
+    try:
+        project = load_project(manifest_path)
+    except MahProjectError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return None, 2
+
+    if not os.path.isfile(project.entry):
+        rel_entry = os.path.relpath(project.entry, project.root)
+        print(
+            f"error: entry file {rel_entry} (from {manifest_path}) does not exist",
+            file=sys.stderr,
+        )
+        return None, 2
+
+    return project, None
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mah",
@@ -114,20 +155,43 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command")
 
-    run_parser = subparsers.add_parser("run", help="compile and run a .mh file")
-    run_parser.add_argument("file", help="path to the .mh file to run")
+    run_parser = subparsers.add_parser(
+        "run", help="compile and run a .mh file, or the current project's entry point"
+    )
+    run_parser.add_argument(
+        "file", nargs="?", default=None,
+        help="path to the .mh file to run, or a project directory (defaults to the "
+             "current project, found by searching upward from the current directory)",
+    )
 
-    build_parser = subparsers.add_parser("build", help="compile a .mh file to a .mahc bytecode file")
-    build_parser.add_argument("file", help="path to the .mh file to compile")
+    build_parser = subparsers.add_parser(
+        "build", help="compile a .mh file, or the current project's targets, to .mahc bytecode"
+    )
+    build_parser.add_argument(
+        "file", nargs="?", default=None,
+        help="path to the .mh file to compile, or a project directory (defaults to the "
+             "current project, found by searching upward from the current directory)",
+    )
     build_parser.add_argument(
         "-o", "--out", metavar="PATH",
-        help="write the .mahc file to PATH instead of alongside the source file",
+        help="write the .mahc file to PATH instead of alongside the source file "
+             "(single-file mode only)",
     )
     build_parser.add_argument(
-        "--target", choices=("debug", "release"), default="debug",
-        help="'debug' (default) includes source positions for runtime error messages; "
-             "'release' omits them and produces a smaller file",
+        # M15: no `choices=` -- in project mode `--target` names a
+        # `[[target]]` entry, not just "debug"/"release"; single-file mode
+        # validates the value manually (see main()) so it still only
+        # accepts "debug"/"release" there.
+        "--target", default=None,
+        help="single-file mode: 'debug' (default) includes source positions for runtime "
+             "error messages, 'release' omits them; project mode: the name of one "
+             "[[target]] entry to build (default: build all of them)",
     )
+
+    init_parser = subparsers.add_parser(
+        "init", help="create a new Mah project (in DIR, or the current directory)"
+    )
+    init_parser.add_argument("directory", nargs="?", default=".", help="where to create the project")
 
     runc_parser = subparsers.add_parser("runc", help="run a compiled .mahc bytecode file")
     runc_parser.add_argument("file", help="path to the .mahc file to run")
@@ -177,6 +241,21 @@ def main(argv: list[str] | None = None) -> int:
         from ..lsp.server import main as lsp_main
         return lsp_main(["--version"] if args.version else [])
 
+    if args.command == "init":
+        try:
+            name, created, skipped = init_project(args.directory)
+        except MahProjectError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        print(f"Created Mah project '{name}' in {args.directory}")
+        for rel in created:
+            print(f"  {rel}")
+        if skipped:
+            print(f"skipped (already exist): {', '.join(skipped)}")
+        cd_prefix = "" if args.directory == "." else f"cd {shlex.quote(args.directory)} && "
+        print(f"Next: {cd_prefix}mah run")
+        return 0
+
     if args.command == "runc":
         data = read_file_bytes(args.file)
         try:
@@ -204,6 +283,57 @@ def main(argv: list[str] | None = None) -> int:
                 f.write(text)
         return 0
 
+    # M15: `run`/`build` are project-aware -- a missing or directory FILE
+    # means "operate on the project found by (a directory-scoped or
+    # upward-searching) manifest lookup" instead of a single .mh file.
+    # `project` stays `None` for ordinary single-file mode; `targets` is
+    # only ever set for a project `build` (the list of `[[target]]`
+    # entries to actually write, already resolved from `--target`).
+    project = None
+    targets = None
+
+    if args.command == "run":
+        if args.file is None or os.path.isdir(args.file):
+            project, err = _resolve_project(args.file)
+            if err is not None:
+                return err
+            args.file = project.entry
+
+    elif args.command == "build":
+        if args.file is None or os.path.isdir(args.file):
+            if args.out is not None:
+                print(
+                    "error: --out can't be used when building a project; "
+                    "set 'out' in its [[target]] entries",
+                    file=sys.stderr,
+                )
+                return 2
+            project, err = _resolve_project(args.file)
+            if err is not None:
+                return err
+            args.file = project.entry
+            if not project.targets:
+                print(f"error: {project.manifest_path} has no [[target]] entries", file=sys.stderr)
+                return 2
+            if args.target is None:
+                targets = list(project.targets)
+            else:
+                targets = [t for t in project.targets if t.name == args.target]
+                if not targets:
+                    available = ", ".join(t.name for t in project.targets)
+                    print(
+                        f"error: no target named '{args.target}' in {project.manifest_path} "
+                        f"(available: {available})",
+                        file=sys.stderr,
+                    )
+                    return 2
+        elif args.target is not None and args.target not in ("debug", "release"):
+            print(
+                "error: --target must be 'debug' or 'release' when building a single file",
+                file=sys.stderr,
+            )
+            return 2
+
     entry_str = read_file(args.file)
     pp = preprocess(args.file, entry_str)
 
@@ -227,8 +357,26 @@ def main(argv: list[str] | None = None) -> int:
     # no-op on an already-located runtime error message -- this comment
     # exists so that stays true on purpose, not by accident.
     try:
-        if args.command == "build":
-            data = compile_to_bytes(path=args.file, text=entry_str, target=args.target)
+        if args.command == "build" and project is not None:
+            # Compile the entry once per distinct profile among the
+            # targets being built (usually just "debug" and/or "release"),
+            # then reuse each compiled result for every target that shares
+            # that profile.
+            compiled_by_profile = {}
+            for t in targets:
+                if t.profile not in compiled_by_profile:
+                    compiled_by_profile[t.profile] = compile_to_bytes(
+                        path=project.entry, text=entry_str, target=t.profile
+                    )
+            for t in targets:
+                os.makedirs(os.path.dirname(t.out), exist_ok=True)
+                with open(t.out, "wb") as f:
+                    f.write(compiled_by_profile[t.profile])
+                rel_out = os.path.relpath(t.out, os.getcwd())
+                print(f"built {t.name} ({t.profile}) -> {rel_out}")
+        elif args.command == "build":
+            build_target = args.target if args.target is not None else "debug"
+            data = compile_to_bytes(path=args.file, text=entry_str, target=build_target)
             out_path = args.out if args.out is not None else _default_mahc_path(args.file)
             with open(out_path, "wb") as f:
                 f.write(data)
