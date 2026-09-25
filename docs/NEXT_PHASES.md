@@ -204,6 +204,41 @@ Landed as M10 -- see docs/V2_DESIGN.md's M10 milestone for what shipped
 and docs/prototypes/async_model.py for the original validated spike this
 is based on.
 
+## TODO: `detach` on a block
+
+Requested 2026-09-25, not scheduled yet. Allow `detach` to take a block
+expression, not only a call:
+
+```mah
+let x = detach {
+    2 + 3
+};
+"Hello, " + name + "!" + x
+```
+
+Likely design, which fits what exists today: `detach { ... }` behaves like
+detaching an anonymous zero-argument closure, `detach (fn() { ... })()`.
+The block runs immediately as a new task (it can `sleep_async`/`.await`
+inside), captures surrounding variables by reference like any closure, and
+the expression's value is a `Promise` for the block's tail value. That's
+the parser-level desugaring M9's `defer` already uses for its body (a
+synthesized zero-param `FnExpr`), so it needs no new resolve logic or
+bytecode.
+
+**Open question to settle before implementing:** in the example, `x` is used
+directly in string concatenation. With today's semantics `x` is a `Promise`,
+so that would print `Hello, …!Promise.Settled { value: 5 }`, and the user
+would write `x.await`. If the intent is for a detached value to be awaited
+implicitly when it's *used*, that's a much bigger change to the async model
+(every operator and call site would have to await Promise operands). Confirm
+which is wanted.
+
+Keep in mind: `return`/`break`/`continue` inside a detached block (they'd
+apply to the synthesized closure, not the enclosing function or loop, so
+probably reject `break`/`continue` there with a clear error), the
+tree-sitter/TextMate grammars (`detach_expr` currently only wraps a call),
+and the project template's `docs/mah-language.md`.
+
 ## Cross-file rename
 
 Landed as M11 -- see docs/V2_DESIGN.md's M11 milestone for what shipped

@@ -362,9 +362,7 @@ class Codegen:
         elif isinstance(stmt, ExprStmt):
             self.gen_expr(stmt.value)
         elif isinstance(stmt, PrintStmt):
-            for arg in stmt.args:
-                addr = self.gen_expr(arg)
-                self.buf.emit(("print", addr, None, None))
+            self._gen_print(stmt)
         elif isinstance(stmt, IfStmt):
             self._gen_if_into(stmt, self._temp())
         elif isinstance(stmt, WhileStmt):
@@ -457,6 +455,33 @@ class Codegen:
             self.buf.emit(("=", tail_addr, None, dest))
         else:
             self.buf.emit(("ld", NONE_VALUE, None, dest))
+
+    def _gen_print(self, stmt: PrintStmt) -> None:
+        """M16: `print(a, b, ..., sep: expr, end: expr)` -- evaluate every
+        positional argument, then `sep` and `end` if written (left to right,
+        all before any output, so side effects happen even when `sep` has
+        nothing to separate), then compile to a `write` (native `io.write`,
+        no newline) per piece: `a`, `sep`, `b`, `sep`, ..., last arg, `end`.
+        `sep` defaults to `" "`, `end` to `"\n"`; an unwritten default that
+        would never be written (`sep` with fewer than two arguments) isn't
+        loaded at all."""
+        arg_addrs = [self.gen_expr(arg) for arg in stmt.args]
+        sep_addr = None
+        if stmt.sep is not None or len(arg_addrs) > 1:
+            sep_addr = self._gen_print_option(stmt.sep, " ")
+        end_addr = self._gen_print_option(stmt.end, "\n")
+        for index, addr in enumerate(arg_addrs):
+            if index > 0:
+                self.buf.emit(("write", sep_addr, None, None))
+            self.buf.emit(("write", addr, None, None))
+        self.buf.emit(("write", end_addr, None, None))
+
+    def _gen_print_option(self, expr, default_text: str) -> tuple:
+        if expr is not None:
+            return self.gen_expr(expr)
+        tmp = self._temp()
+        self.buf.emit(("ld", default_text, None, tmp))
+        return tmp
 
     def _gen_store(self, target, src_addr) -> None:
         if isinstance(target, Ident):
@@ -696,7 +721,11 @@ class Codegen:
             callee_addr = self.gen_expr(call.callee)
             arg_addrs = tuple(self.gen_expr(a) for a in call.args)
             dest = self._temp()
-            self.buf.emit(("detach", callee_addr, arg_addrs, dest))
+            if not call.kwargs:
+                self.buf.emit(("detach", callee_addr, arg_addrs, dest))
+            else:
+                kw_names, kw_addrs = self._gen_kwargs(call.kwargs)
+                self.buf.emit(("detachkw", callee_addr, (arg_addrs + kw_addrs, kw_names), dest))
             return dest
         if isinstance(expr, SleepAsyncExpr):
             # Bare (non-detached) `sleep_async(ms)` auto-awaits its own
@@ -792,6 +821,25 @@ class Codegen:
         # "used outside a loop" error.
         saved_while_stack = self._while_stack
         self._while_stack = []
+        # M16: prologue -- for each parameter with a default, right after
+        # entering the function and before the body: emit a placeholder
+        # `jmpset`, compute the default expression and move it into the
+        # parameter's own slot, then backpatch the placeholder to skip
+        # straight past that move when the parameter was already bound
+        # (its slot holds anything but the ABSENT marker) -- see
+        # docs/MAHC_FORMAT.md #6.1. Evaluation order is parameter order,
+        # each default resolved (by resolve.py) to see only earlier
+        # parameters and outer names, matching this left-to-right emission.
+        for index, default_expr in enumerate(fn.defaults):
+            if default_expr is None:
+                continue
+            param_slot = fn.param_slots[index]
+            jmpset_placeholder = self.buf.emit((None, None, None, None))
+            src = self.gen_expr(default_expr)
+            self.buf.emit(("=", src, None, (0, param_slot)))
+            self.buf.emit(
+                ("jmpset", (0, param_slot), None, self.buf.code_pointer), address=jmpset_placeholder
+            )
         # M5: implicit return of the body block's tail value if it falls
         # off the end -- `none` when there's no tail, a strict superset of
         # M1's "always none" trailer (unconditionally appended, dead code
@@ -807,14 +855,45 @@ class Codegen:
         slot_count = self.frame_stack.pop().next_slot
         self.buf.emit(("jmp", None, None, self.buf.code_pointer), address=skip_placeholder)
         dest = self._temp()
-        self.buf.emit(("closure", code_address, (slot_count, len(fn.param_slots), fn.name), dest))
+        # M16: closure metadata gains the parameter names and per-parameter
+        # has-default flags (parallel tuples) -- lower.py's PARAMS section
+        # (docs/MAHC_FORMAT.md #4.5a) needs both to bind keyword arguments
+        # and know which parameters may be left unbound.
+        self.buf.emit(
+            (
+                "closure",
+                code_address,
+                (
+                    slot_count,
+                    len(fn.param_slots),
+                    fn.name,
+                    tuple(fn.params),
+                    tuple(d is not None for d in fn.defaults),
+                ),
+                dest,
+            )
+        )
         return dest
+
+    def _gen_kwargs(self, kwargs: list) -> tuple:
+        """M16: `kwargs` (list[(name, value_expr, name_position)]) -> a
+        `(names_tuple, value_addrs_tuple)` pair -- names in source order,
+        values evaluated left to right (after every positional argument),
+        matching `docs/MAHC_FORMAT.md #4.6`'s `*kw` convention (`kwnames`
+        names the LAST `len(kwnames)` entries of the full `args` list)."""
+        names = tuple(name for name, _value, _pos in kwargs)
+        addrs = tuple(self.gen_expr(value) for _name, value, _pos in kwargs)
+        return names, addrs
 
     def _gen_call(self, expr: Call) -> tuple:
         callee_addr = self.gen_expr(expr.callee)
         arg_addrs = tuple(self.gen_expr(a) for a in expr.args)
         dest = self._temp()
-        self.buf.emit(("call", callee_addr, arg_addrs, None))
+        if not expr.kwargs:
+            self.buf.emit(("call", callee_addr, arg_addrs, None))
+        else:
+            kw_names, kw_addrs = self._gen_kwargs(expr.kwargs)
+            self.buf.emit(("callkw", callee_addr, (arg_addrs + kw_addrs, kw_names), None))
         self.buf.emit(("retval", None, None, dest))
         return dest
 
@@ -824,19 +903,36 @@ class Codegen:
         docstring for the `defmethod`/`callmethod` opcode shapes."""
         if expr.static_address is not None:
             # `Type.fn(args)` resolved at compile time to a specific hidden
-            # global slot -- an ordinary `call`, no runtime dispatch at all.
+            # global slot -- an ordinary `call`/`callkw`, no runtime
+            # dispatch at all.
             arg_addrs = tuple(self.gen_expr(a) for a in expr.args)
             dest = self._temp()
-            self.buf.emit(("call", expr.static_address, arg_addrs, None))
+            if not expr.kwargs:
+                self.buf.emit(("call", expr.static_address, arg_addrs, None))
+            else:
+                kw_names, kw_addrs = self._gen_kwargs(expr.kwargs)
+                self.buf.emit(("callkw", expr.static_address, (arg_addrs + kw_addrs, kw_names), None))
             self.buf.emit(("retval", None, None, dest))
             return dest
         if expr.trait_name is not None:
             # `Trait.m(recv, ...)` / `BuiltinType.m(recv)` (native impl) --
-            # the receiver is `args[0]`, dispatch restricted to this trait.
+            # the receiver is `args[0]` (always positional), dispatch
+            # restricted to this trait.
             recv = self.gen_expr(expr.args[0])
             rest = tuple(self.gen_expr(a) for a in expr.args[1:])
             dest = self._temp()
-            self.buf.emit(("callmethod", recv, (expr.method, rest, expr.trait_name, expr.position), None))
+            if not expr.kwargs:
+                self.buf.emit(("callmethod", recv, (expr.method, rest, expr.trait_name, expr.position), None))
+            else:
+                kw_names, kw_addrs = self._gen_kwargs(expr.kwargs)
+                self.buf.emit(
+                    (
+                        "callmethodkw",
+                        recv,
+                        (expr.method, rest + kw_addrs, kw_names, expr.trait_name, expr.position),
+                        None,
+                    )
+                )
             self.buf.emit(("retval", None, None, dest))
             return dest
         # Ordinary dynamic method call: `expr.obj.method(args)`, dispatch on
@@ -844,7 +940,13 @@ class Codegen:
         recv = self.gen_expr(expr.obj)
         arg_addrs = tuple(self.gen_expr(a) for a in expr.args)
         dest = self._temp()
-        self.buf.emit(("callmethod", recv, (expr.method, arg_addrs, None, expr.position), None))
+        if not expr.kwargs:
+            self.buf.emit(("callmethod", recv, (expr.method, arg_addrs, None, expr.position), None))
+        else:
+            kw_names, kw_addrs = self._gen_kwargs(expr.kwargs)
+            self.buf.emit(
+                ("callmethodkw", recv, (expr.method, arg_addrs + kw_addrs, kw_names, None, expr.position), None)
+            )
         self.buf.emit(("retval", None, None, dest))
         return dest
 
@@ -856,22 +958,44 @@ class Codegen:
         `callmethod`/`retval` -- see this module's docstring."""
         if call.static_address is not None:
             # `detach Type.fn(args)` resolved at compile time to a specific
-            # hidden global slot -- an ordinary `detach`, no runtime
-            # dispatch at all (the callee address is just that slot).
+            # hidden global slot -- an ordinary `detach`/`detachkw`, no
+            # runtime dispatch at all (the callee address is just that
+            # slot).
             arg_addrs = tuple(self.gen_expr(a) for a in call.args)
             dest = self._temp()
-            self.buf.emit(("detach", call.static_address, arg_addrs, dest))
+            if not call.kwargs:
+                self.buf.emit(("detach", call.static_address, arg_addrs, dest))
+            else:
+                kw_names, kw_addrs = self._gen_kwargs(call.kwargs)
+                self.buf.emit(("detachkw", call.static_address, (arg_addrs + kw_addrs, kw_names), dest))
             return dest
         if call.trait_name is not None:
             # `detach Trait.m(recv, ...)` / `detach BuiltinType.m(recv)`.
             recv = self.gen_expr(call.args[0])
             rest = tuple(self.gen_expr(a) for a in call.args[1:])
             dest = self._temp()
-            self.buf.emit(("detachmethod", recv, (call.method, rest, call.trait_name, call.position), dest))
+            if not call.kwargs:
+                self.buf.emit(("detachmethod", recv, (call.method, rest, call.trait_name, call.position), dest))
+            else:
+                kw_names, kw_addrs = self._gen_kwargs(call.kwargs)
+                self.buf.emit(
+                    (
+                        "detachmethodkw",
+                        recv,
+                        (call.method, rest + kw_addrs, kw_names, call.trait_name, call.position),
+                        dest,
+                    )
+                )
             return dest
         # Ordinary dynamic method call: `detach obj.method(args)`.
         recv = self.gen_expr(call.obj)
         arg_addrs = tuple(self.gen_expr(a) for a in call.args)
         dest = self._temp()
-        self.buf.emit(("detachmethod", recv, (call.method, arg_addrs, None, call.position), dest))
+        if not call.kwargs:
+            self.buf.emit(("detachmethod", recv, (call.method, arg_addrs, None, call.position), dest))
+        else:
+            kw_names, kw_addrs = self._gen_kwargs(call.kwargs)
+            self.buf.emit(
+                ("detachmethodkw", recv, (call.method, arg_addrs + kw_addrs, kw_names, None, call.position), dest)
+            )
         return dest

@@ -161,6 +161,17 @@ class Lexer:
             else:
                 break
 
+    def peek_token(self) -> Token:
+        """M16: look at the next token without consuming it -- used by the
+        parser to decide whether an argument-list item is a keyword
+        argument (`ID COLON`) or an ordinary positional expression (which
+        may itself start with an `ID`, e.g. a bare variable reference or a
+        struct literal)."""
+        saved_position = self.position
+        tok = self.get_next_token()
+        self.position = saved_position
+        return tok
+
     def get_next_token(self) -> Token:
         self._skip_trivia()
         text = self.input_str

@@ -50,6 +50,15 @@ def _io_print(ctx: NativeContext, args) -> object:
     return NONE_VALUE
 
 
+def _io_write(ctx: NativeContext, args) -> object:
+    """M16 (1.1): like `io.print`, but with no trailing newline -- the
+    building block `print(sep:, end:)` compiles to (docs/MAHC_FORMAT.md
+    #4.4)."""
+    (value,) = args
+    ctx.stdout.write(ctx.to_string(value))
+    return NONE_VALUE
+
+
 def _io_input(ctx: NativeContext, args) -> object:
     raw = ""
     started = False
@@ -88,6 +97,7 @@ def _time_sleep_async(ctx: NativeContext, args) -> object:
 # name -> (arity, impl) -- docs/MAHC_FORMAT.md #4.4's version 1.0 table.
 NATIVES: dict[str, tuple[int, object]] = {
     "io.print": (1, _io_print),
+    "io.write": (1, _io_write),
     "io.input": (0, _io_input),
     "math.sin": (1, _math_sin),
     "math.cos": (1, _math_cos),

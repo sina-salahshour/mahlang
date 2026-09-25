@@ -137,6 +137,10 @@
         {
           "type": "expr",
           "named": true
+        },
+        {
+          "type": "keyword_argument",
+          "named": true
         }
       ]
     }
@@ -666,7 +670,7 @@
       "required": false,
       "types": [
         {
-          "type": "identifier",
+          "type": "param",
           "named": true
         }
       ]
@@ -702,7 +706,7 @@
       "required": false,
       "types": [
         {
-          "type": "identifier",
+          "type": "param",
           "named": true
         }
       ]
@@ -814,7 +818,7 @@
       "required": false,
       "types": [
         {
-          "type": "identifier",
+          "type": "param",
           "named": true
         }
       ]
@@ -850,6 +854,32 @@
     "type": "input_call",
     "named": true,
     "fields": {}
+  },
+  {
+    "type": "keyword_argument",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "value": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "expr",
+            "named": true
+          }
+        ]
+      }
+    }
   },
   {
     "type": "let_stmt",
@@ -976,6 +1006,32 @@
     "fields": {}
   },
   {
+    "type": "param",
+    "named": true,
+    "fields": {
+      "default": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "expr",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "paren_expr",
     "named": true,
     "fields": {},
@@ -1000,6 +1056,10 @@
       "types": [
         {
           "type": "expr",
+          "named": true
+        },
+        {
+          "type": "keyword_argument",
           "named": true
         }
       ]
@@ -1374,7 +1434,7 @@
       "required": false,
       "types": [
         {
-          "type": "identifier",
+          "type": "param",
           "named": true
         }
       ]

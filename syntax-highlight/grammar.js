@@ -256,7 +256,21 @@ module.exports = grammar({
         field("body", $.block),
       ),
 
-    _params: ($) => seq($.identifier, repeat(seq(",", $.identifier))),
+    _params: ($) => seq($.param, repeat(seq(",", $.param))),
+
+    // A single parameter, with an optional default value (M11: default
+    // parameter values, see `fn area(w, h = 1, scale = 1) { ... }`). The
+    // default is any expression -- a literal, a struct literal
+    // (`b = B { n: 0 }`), an anonymous `fn` expression (`f = fn(v) { v }`),
+    // etc. -- so it's just `$.expr`, same as everywhere else a value is
+    // expected. `self` is an ordinary parameter name here too, same as
+    // before this milestone (see the highlight queries for how it's
+    // special-cased); it's simply never given a default in practice.
+    param: ($) =>
+      seq(
+        field("name", $.identifier),
+        optional(seq("=", field("default", $.expr))),
+      ),
 
     if_expr: ($) =>
       seq(
@@ -418,7 +432,32 @@ module.exports = grammar({
         ),
       ),
 
-    _args: ($) => seq($.expr, repeat(seq(",", $.expr))),
+    // M11 (keyword arguments): an argument list is a mix of ordinary
+    // positional expressions and `name: value` keyword arguments (see
+    // `keyword_argument` below) -- real Mah requires the keyword ones to
+    // come after all positional ones (`area(2, scale: 3)`, never
+    // `area(scale: 3, 2)`), but this grammar doesn't enforce that
+    // ordering, matching this file's established, documented convention of
+    // being deliberately more permissive than the real hand-written parser
+    // where enforcing it would cost real grammar complexity for no
+    // highlighting benefit (see e.g. `assignment_expr`, `call_expr`'s
+    // `function` field above).
+    _args: ($) => seq($._arg, repeat(seq(",", $._arg))),
+
+    _arg: ($) => choice($.expr, $.keyword_argument),
+
+    // `name: value` keyword argument at a call site (`area(w: 2, h: 5)`,
+    // `r.scaled(k: 3, add: 1)`, `print("a", sep: ", ")`,
+    // `detach slow(ms: 1, v: 7)`). Shares its `name ":" value` shape with
+    // `_field_init` (struct-literal field init), but the two never mix --
+    // `_field_init` only ever appears inside a `{ ... }` (struct/enum
+    // literal), `keyword_argument` only inside a call's `( ... )` -- so a
+    // struct literal passed as a plain positional argument
+    // (`f(Point { x: 1, y: 2 })`) is unaffected: `Point { x: 1, y: 2 }`
+    // parses as an ordinary `$.expr` (a `struct_literal`), matched by the
+    // `_arg` alternative, not this one.
+    keyword_argument: ($) =>
+      seq(field("name", $.identifier), ":", field("value", $.expr)),
 
     // Deliberately NOT wrapped in `prec(PREC.POSTFIX, ...)` -- see the
     // `conflicts` entry above. Left at the default precedence so it ties

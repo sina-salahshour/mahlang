@@ -25,8 +25,9 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from mah.bytecode.decode import decode
+from mah.bytecode.disasm import disassemble
 from mah.bytecode.encode import encode
-from mah.bytecode.format import MahcFormatError
+from mah.bytecode.format import SEC_PARAMS, MahcFormatError
 from mah.bytecode.leb128 import read_varint, read_varuint, write_varint, write_varuint
 from mah.bytecode.program import Const, FunctionDecl, Instr, NativeRef, Program
 from mah.cli.main import main as cli_main
@@ -86,7 +87,10 @@ class RoundTripTests(unittest.TestCase):
         for name in _EXAMPLE_FILES:
             with self.subTest(example=name):
                 data = compile_bytes(path=example_path(name))
-                self.assertEqual(data[:8], b"MAHC\x01\x00\x00\x00")
+                # M16: the reference encoder now writes minor version 1
+                # (default parameter values + keyword-argument calls +
+                # `io.write`) -- see docs/MAHC_FORMAT.md #7.
+                self.assertEqual(data[:8], b"MAHC\x01\x00\x01\x00")
 
     def test_decoded_bytes_run_the_same_as_the_source(self):
         for name, stdin in (("traits.mh", ""), ("enums.mh", "")):
@@ -135,8 +139,10 @@ class LoaderValidationTests(unittest.TestCase):
         self.assertIn("major", str(cm.exception))
 
     def test_unsupported_minor_version(self):
+        # M16: this VM now implements minor version 1, so the smallest
+        # genuinely unsupported minor version is 2.
         data = bytearray(compile_bytes(text="print(1)"))
-        data[6] = 1
+        data[6] = 2
         with self.assertRaises(MahcFormatError) as cm:
             decode(bytes(data))
         self.assertIn("minor", str(cm.exception))
@@ -148,11 +154,16 @@ class LoaderValidationTests(unittest.TestCase):
         self.assertIn("truncated", str(cm.exception))
 
     def test_unknown_required_section_after_code(self):
+        # M16: 0x07 is now PARAMS (a known required section in 1.1), so the
+        # first genuinely unknown required id is 0x08; re-adding 0x07 is a
+        # duplicate instead -- both must be rejected, with the right reason.
         data = compile_bytes(text="print(1)", target="release")
-        bad = data + bytes([0x07]) + write_varuint(0)
         with self.assertRaises(MahcFormatError) as cm:
-            decode(bad)
-        self.assertIn("0x07", str(cm.exception))
+            decode(data + bytes([0x08]) + write_varuint(0))
+        self.assertIn("unknown required section 0x08", str(cm.exception))
+        with self.assertRaises(MahcFormatError) as cm:
+            decode(data + bytes([0x07]) + write_varuint(0))
+        self.assertIn("duplicate required section 0x07", str(cm.exception))
 
     def test_unknown_opcode(self):
         program = _minimal_program([Instr("halt", ())])
@@ -356,7 +367,10 @@ class CliTests(unittest.TestCase):
             mahc = os.path.join(td, "traits.mahc")
             _rc, out = self._run_main(["dis", mahc])
             self.assertIn("callmethod", out)
-            self.assertIn("io.print", out)
+            # M16: `print(...)` now compiles to `io.write` (once per piece:
+            # each argument, `sep`, and `end`), not `io.print` -- see
+            # docs/MAHC_FORMAT.md #4.4/codegen.py's `_gen_print`.
+            self.assertIn("io.write", out)
 
     def test_runc_on_garbage_file_exits_2(self):
         with tempfile.TemporaryDirectory() as td:
@@ -462,6 +476,106 @@ class CliRuntimeErrorTests(unittest.TestCase):
                     self.assertEqual(
                         err.getvalue(), "RuntimeError: 'Number' has no method 'nope' at position #3:3\n"
                     )
+
+
+def _strip_section(data: bytes, section_id: int) -> bytes:
+    """Remove one section (by id) from an already-encoded `.mahc` file,
+    keeping everything else byte-for-byte -- used to build a "well-formed
+    except this required section is missing" file out of a real compiled
+    one, rather than hand-assembling the whole thing."""
+    header, body = data[:8], data[8:]
+    out = bytearray(header)
+    pos = 0
+    while pos < len(body):
+        sec_id = body[pos]
+        length, next_pos = read_varuint(body, pos + 1)
+        end = next_pos + length
+        if sec_id != section_id:
+            out += body[pos:end]
+        pos = end
+    return bytes(out)
+
+
+class ParamsAndKwargsBytecodeTests(unittest.TestCase):
+    """M16: default parameter values + keyword-argument calls -- the
+    PARAMS section (docs/MAHC_FORMAT.md #4.5a), `jmpset`, the `*kw`
+    opcodes/operand kind `S*`, and minor-version gating (#7)."""
+
+    def test_header_is_minor_1_and_params_section_has_names_and_defaults(self):
+        data = compile_bytes(text="fn f(a, b = 1) { a }")
+        self.assertEqual(data[:8], b"MAHC\x01\x00\x01\x00")
+        program = decode(data)
+        fn = next(
+            f for f in program.functions if f.name is not None and program.strings[f.name] == "f"
+        )
+        resolved = [(program.strings[name_idx], has_default) for name_idx, has_default in fn.params]
+        self.assertEqual(resolved, [("a", False), ("b", True)])
+
+    def test_disasm_of_defaults_and_kwargs_contains_jmpset_and_callkw(self):
+        program = compile_program(
+            text=(
+                "fn area(w, h = 1, scale = 1) { w * h * scale }\n"
+                "print(area(2))\n"
+                "print(area(2, scale: 3))\n"
+            )
+        )
+        text = disassemble(program)
+        self.assertIn("jmpset", text)
+        self.assertIn("callkw", text)
+
+    def test_hand_built_minor_0_program_without_params_runs(self):
+        program = _minimal_program(
+            [
+                Instr("loadk", (0, (0, 0))),
+                Instr("native", (0, ((0, 0),), None)),
+                Instr("halt", ()),
+            ],
+            strings=["hi", "io.print"],
+            constants=[Const(5, 0)],
+            natives=[NativeRef(1, 1)],
+        )
+        self.assertIsNone(program.functions[0].params)
+        data = encode(program)
+        self.assertEqual(data[:8], b"MAHC\x01\x00\x00\x00")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            run_bytes(data)
+        self.assertEqual(out.getvalue(), "hi\n")
+
+    def test_minor_0_program_with_callkw_is_rejected(self):
+        program = _minimal_program([Instr("callkw", ((0, 0), (), ())), Instr("halt", ())])
+        with self.assertRaises(MahcFormatError) as cm:
+            decode(encode(program))
+        self.assertIn("callkw", str(cm.exception))
+
+    def test_minor_0_program_with_io_write_native_is_rejected(self):
+        program = _minimal_program(
+            [Instr("native", (0, ((0, 0),), None)), Instr("halt", ())],
+            strings=["hi", "io.write"],
+            constants=[Const(5, 0)],
+            natives=[NativeRef(1, 1)],
+        )
+        with self.assertRaises(MahcFormatError) as cm:
+            decode(encode(program))
+        self.assertIn("io.write", str(cm.exception))
+
+    def test_minor_1_file_missing_params_section_is_rejected(self):
+        data = compile_bytes(text="print(1)")
+        stripped = _strip_section(data, SEC_PARAMS)
+        with self.assertRaises(MahcFormatError) as cm:
+            decode(stripped)
+        self.assertIn("0x07", str(cm.exception))
+
+    def test_round_trip_still_holds_for_every_example(self):
+        # M16: every example is now compiled/round-tripped at minor 1
+        # (PARAMS section, possibly `jmpset`/`callkw` if it uses defaults
+        # or keyword arguments) -- RoundTripTests above already exercises
+        # this on every `make test` run; this just names the requirement
+        # explicitly for this milestone.
+        for name in _EXAMPLE_FILES:
+            with self.subTest(example=name):
+                program = compile_program(path=example_path(name))
+                self.assertEqual(decode(encode(program)), program)
 
 
 if __name__ == "__main__":

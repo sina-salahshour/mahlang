@@ -19,6 +19,7 @@
     { "include": "#self-identifiers" },
     { "include": "#await-field" },
     { "include": "#function-calls" },
+    { "include": "#paren-body" },
     { "include": "#operators" },
     { "include": "#punctuation" }
   ],
@@ -204,6 +205,33 @@
           "name": "entity.name.type.mah"
         }
       ]
+    },
+    "paren-body": {
+      "comment": "Contents of any parenthesized region -- call args (`area(w: 2, h: 5)`), print args, `detach`ed call args, fn/trait/impl parameter lists, and plain grouping. Tracked as a balanced begin/end region (rather than the flat, single-pass `match` style most of this grammar uses) purely so a bare `name:` directly inside the parens -- a call-site keyword argument -- can be scoped distinctly from a struct-literal field init one brace level down (`f(Point { x: 1, y: 2 })`'s `x:`/`y:`, handled by `#brace-body` below, is NOT a keyword argument). Everything else inside falls through to `$self`, so numbers/strings/operators/nested calls etc. highlight exactly as they did before this region existed.",
+      "begin": "\\(",
+      "beginCaptures": { "0": { "name": "punctuation.section.parens.mah" } },
+      "end": "\\)",
+      "endCaptures": { "0": { "name": "punctuation.section.parens.mah" } },
+      "patterns": [
+        {
+          "comment": "Keyword argument name: `name: value` (`area(w: 2, h: 5)`, `r.scaled(k: 3, add: 1)`, `print(\"a\", sep: \", \")`, `detach slow(ms: 1, v: 7)`).",
+          "match": "\\b([A-Za-z_$][A-Za-z0-9_$]*)\\s*(:)(?!:)",
+          "captures": {
+            "1": { "name": "variable.parameter.mah" },
+            "2": { "name": "punctuation.separator.delimiter.mah" }
+          }
+        },
+        { "include": "#brace-body" },
+        { "include": "$self" }
+      ]
+    },
+    "brace-body": {
+      "comment": "Contents of any braced region nested inside a call's parens -- a struct/enum literal passed as a positional argument (`f(Point { x: 1, y: 2 })`), a block, etc. Consumed as an opaque balanced unit so its own `name:` field inits aren't mistaken for keyword arguments by the enclosing `#paren-body`. Not part of the root `patterns`/`$self` list -- a `{ ... }` outside any parens keeps highlighting exactly as before (flat, via `#punctuation`).",
+      "begin": "\\{",
+      "beginCaptures": { "0": { "name": "punctuation.section.braces.mah" } },
+      "end": "\\}",
+      "endCaptures": { "0": { "name": "punctuation.section.braces.mah" } },
+      "patterns": [{ "include": "#brace-body" }, { "include": "$self" }]
     },
     "operators": {
       "patterns": [

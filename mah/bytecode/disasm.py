@@ -30,6 +30,10 @@ def _addr_list(addrs) -> str:
     return "[" + ", ".join(_addr(a) for a in addrs) + "]"
 
 
+def _str_list(r: "_Renderer", indices) -> str:
+    return "[" + ", ".join(r.s(i) for i in indices) + "]"
+
+
 class _Renderer:
     def __init__(self, program: Program):
         self.p = program
@@ -87,6 +91,8 @@ def _instr_line(r: _Renderer, i: int, instr) -> str:
         rendered = f"target={a[0]}"
     elif op == "jmpf":
         rendered = f"cond={_addr(a[0])} target={a[1]}"
+    elif op == "jmpset":
+        rendered = f"param={_addr(a[0])} target={a[1]}"
     elif op in ("add", "sub", "mul", "div", "idiv", "mod", "pow", "eq", "neq", "lt", "gt", "and", "or"):
         rendered = f"a={_addr(a[0])} b={_addr(a[1])} dest={_addr(a[2])}"
     elif op == "neg":
@@ -95,19 +101,33 @@ def _instr_line(r: _Renderer, i: int, instr) -> str:
         rendered = f"fn={r.func(a[0])} dest={_addr(a[1])}"
     elif op == "call":
         rendered = f"callee={_addr(a[0])} args={_addr_list(a[1])}"
+    elif op == "callkw":
+        rendered = f"callee={_addr(a[0])} args={_addr_list(a[1])} kwnames={_str_list(r, a[2])}"
     elif op == "ret":
         rendered = f"value={_addr(a[0])}"
     elif op == "retval":
         rendered = f"dest={_addr(a[0])}"
     elif op == "callmethod":
         rendered = f"recv={_addr(a[0])} name={r.s(a[1])} args={_addr_list(a[2])} trait={r.s_opt(a[3])}"
+    elif op == "callmethodkw":
+        rendered = (
+            f"recv={_addr(a[0])} name={r.s(a[1])} args={_addr_list(a[2])} "
+            f"kwnames={_str_list(r, a[3])} trait={r.s_opt(a[4])}"
+        )
     elif op == "defmethod":
         rendered = f"closure={_addr(a[0])} type={r.s(a[1])} trait={r.s_opt(a[2])} name={r.s(a[3])} is_method={a[4]}"
     elif op == "detach":
         rendered = f"callee={_addr(a[0])} args={_addr_list(a[1])} dest={_addr(a[2])}"
+    elif op == "detachkw":
+        rendered = f"callee={_addr(a[0])} args={_addr_list(a[1])} kwnames={_str_list(r, a[2])} dest={_addr(a[3])}"
     elif op == "detachmethod":
         rendered = (
             f"recv={_addr(a[0])} name={r.s(a[1])} args={_addr_list(a[2])} trait={r.s_opt(a[3])} dest={_addr(a[4])}"
+        )
+    elif op == "detachmethodkw":
+        rendered = (
+            f"recv={_addr(a[0])} name={r.s(a[1])} args={_addr_list(a[2])} kwnames={_str_list(r, a[3])} "
+            f"trait={r.s_opt(a[4])} dest={_addr(a[5])}"
         )
     elif op == "await":
         rendered = f"promise={_addr(a[0])} dest={_addr(a[1])}"
@@ -174,7 +194,16 @@ def disassemble(program: Program) -> str:
     lines.append("FUNCTIONS:")
     for i, fn in enumerate(program.functions):
         name = program.strings[fn.name] if fn.name is not None else "<anon>"
-        lines.append(f"  {i}: entry={fn.entry} slots={fn.slot_count} params={fn.param_count} name={name}")
+        if fn.params is not None:
+            params_text = ", ".join(
+                f"{program.strings[pname]}=" if has_default else program.strings[pname]
+                for pname, has_default in fn.params
+            )
+        else:
+            params_text = str(fn.param_count)  # 1.0 file: no names/defaults
+        lines.append(
+            f"  {i}: entry={fn.entry} slots={fn.slot_count} params=({params_text}) name={name}"
+        )
 
     debug_by_pc: dict[int, tuple[int, int, int]] = {}
     if program.debug is not None:

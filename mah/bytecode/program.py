@@ -42,6 +42,11 @@ class FunctionDecl:
     slot_count: int
     param_count: int
     name: int | None = None  # string index, or None (anonymous)
+    # M16 (1.1, PARAMS section, docs/MAHC_FORMAT.md #4.5a): list[tuple[int,
+    # bool]] -- (parameter name string index, has_default), in parameter
+    # order, length always == param_count. `None` for a 1.0 file (no PARAMS
+    # section at all -- every parameter is unnamed and required).
+    params: list | None = None
 
 
 @dataclass

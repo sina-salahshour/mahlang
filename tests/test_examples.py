@@ -24,8 +24,9 @@ class ExampleTests(unittest.TestCase):
         out = run_file(example_path("strings.mh"))
         self.assertEqual(
             out,
-            "Hello\n"
-            "World\n"
+            # M16: `print(greeting, target)` now joins its arguments with a
+            # single space (the default `sep`) instead of one per line.
+            "Hello World\n"
             "Hello World!\n"
             "greeting is indeed Hello\n"
             "greeting and target are different\n"

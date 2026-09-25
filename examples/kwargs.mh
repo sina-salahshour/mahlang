@@ -1,0 +1,40 @@
+# Demonstrates M16: default parameter values and keyword-argument calls,
+# and print's sep/end keyword options (see docs/MAHC_FORMAT.md's PARAMS
+# section and *kw opcodes).
+
+# 1. Default values -- once a parameter has one, every later one must too.
+fn area(w, h = 1, scale = 1) {
+	w * h * scale
+}
+print(area(2))
+print(area(2, 3))
+print(area(2, scale: 3))
+print(area(w: 2, h: 5))
+
+# 2. A default may use an earlier parameter, and is evaluated fresh on
+# every call that doesn't pass it.
+fn greet(name, greeting = "Hello, " + name) {
+	greeting
+}
+print(greet("mah"))
+print(greet("mah", "yo"))
+
+# 3. Defaults and keyword arguments work the same for methods.
+struct Rect { w, h }
+impl Rect {
+	fn new(w = 1, h = 1) {
+		Rect { w: w, h: h }
+	}
+	fn scaled(self, k = 2) {
+		self.w * k * self.h
+	}
+}
+let r = Rect.new(w: 3, h: 4)
+print(r.scaled())
+print(r.scaled(k: 10))
+
+# 4. print's own keyword options: sep (default " ") and end (default "\n").
+print("a", "b")
+print("a", "b", sep: ", ", end: "!\n")
+print("no trailing newline", end: "")
+print()

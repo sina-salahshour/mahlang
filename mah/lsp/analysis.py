@@ -77,8 +77,14 @@ KEYWORD_DOCS = {
     "```mah\nreturn expr\n```",
     "fn": "Define a function. With a name, it's sugar for binding a closure "
     "value to that name; without one, it's an anonymous closure expression "
-    "usable anywhere (assigned, returned, passed as an argument).\n\n"
-    "```mah\nfn name(a, b) {\n\treturn a + b\n}\n\nlet add = fn(a, b) { a + b }\n```",
+    "usable anywhere (assigned, returned, passed as an argument). A "
+    "parameter may have a default value (`h = 1`), evaluated at call time "
+    "whenever it's left unbound; every parameter after the first defaulted "
+    "one needs a default too. Any parameter can also be passed by keyword "
+    "at the call site (`name: value`), in any order, after the positional "
+    "arguments.\n\n"
+    "```mah\nfn name(a, b) {\n\treturn a + b\n}\n\nlet add = fn(a, b) { a + b }\n\n"
+    "fn area(w, h = 1) { w * h }\narea(2)        # 2\narea(2, h: 3)  # 6\n```",
     "struct": "Declare a fixed-shape struct type (field names only, no types).\n\n"
     "```mah\nstruct Point { x, y }\nlet p = Point { x: 1, y: 2 }\n```",
     "enum": "Declare an enum type: each variant is either a unit (no payload) "
@@ -129,7 +135,10 @@ KEYWORD_DOCS = {
 }
 
 BUILTIN_DOCS = {
-    "print": "Print one or more values, each on its own line.\n\n`print(a, b, ...)`",
+    "print": "Print zero or more values' `to_string`, joined by `sep` "
+    "(default: a single space), followed by `end` (default: a newline). "
+    "`print()` alone just prints `end`.\n\n"
+    "`print(a, b, ..., sep: \" \", end: \"\\n\")`",
     "input": "Read an integer from standard input.\n\n`input()`",
     "sin": "Sine of a number, in radians.\n\n`sin(x)`",
     "cos": "Cosine of a number, in radians.\n\n`cos(x)`",

@@ -2459,6 +2459,49 @@ node that resolved to it. Then:
     system trait must appear in `docs/mah-language.md`, and `AGENTS.md` must
     agree with the manifest template's entry. 431 tests green.
 
+17. **M16 — Default parameter values, keyword arguments, `print(sep:, end:)`. ✅ Landed.**
+
+    - **Language**: `fn area(w, h = 1, scale = 1)`; call with `area(2,
+      scale: 3)` (keyword syntax `name: value`, matching struct literals).
+      Defaults must be trailing, can use earlier parameters, and are
+      evaluated on every call inside the callee (so `b = B { n: 0 }` gives a
+      fresh struct each time). `self` can't have a default, and a trait's
+      bodyless methods can't declare them. Positional-after-keyword and
+      repeated keywords are syntax errors. Everything that depends on the
+      callee (unknown keyword, multiple values, missing required argument,
+      too many positional) is a runtime error, because calls are dynamic.
+    - **`print`** is `print(args..., sep: " ", end: "\n")`. The default
+      separator changed from newline to **space** (the user's choice), so
+      `print(a, b)` now prints one line and `print()` prints a newline.
+      Three existing expectations changed accordingly (see the M16 test
+      notes in `tests/test_examples.py`/`tests/test_traits.py`/
+      `tests/test_bytecode.py`).
+    - **Bytecode 1.1** (the first minor-version bump, done exactly the way
+      the format was designed to grow): a new required PARAMS section
+      (parameter names + default flags), `jmpset` for the default-value
+      prologue, `callkw`/`callmethodkw`/`detachkw`/`detachmethodkw` with an
+      `S*` keyword-name operand, and an `io.write` native (print lowers to
+      one `io.write` per piece). Existing opcodes keep their meaning; the VM
+      still loads 1.0 files, whose parameters are unnamed and required. The
+      binding algorithm and its error messages are normative in
+      `docs/MAHC_FORMAT.md` §6.1.
+
+    Thinker/coder split again, plus a parallel grammar agent; both were
+    interrupted by a network outage mid-task and resumed from their own
+    transcripts without redoing work. Verified: the suite; the binding
+    algorithm read against §6.1; 10 extra probes (a default capturing an
+    enclosing function's parameter, trait default methods with defaults,
+    `Self` + keyword static calls with `h = w`, keyword evaluation order,
+    `defer` reading a defaulted parameter, recursion with keyword defaults)
+    turned into tests. That surfaced two small fixes:
+    `print(sep: f())` with no other arguments skipped evaluating `f()` (now
+    evaluated, consistent with "all arguments are evaluated before
+    printing"), and a duplicated PARAMS section was reported as an
+    "unknown" section. An older loader test had been silently re-purposed
+    by PARAMS taking id 0x07, and now checks both the unknown (0x08) and
+    duplicate (0x07) cases. The template language reference was updated
+    and its examples checked against real output. 486 tests green.
+
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
 it** (`make test` must stay green) — see `docs/TESTING.md` for where
@@ -2470,7 +2513,7 @@ M1 was built and documented that way.
 
 ## Status
 
-M0 through M15 are all landed (see their entries above for what changed and
+M0 through M16 are all landed (see their entries above for what changed and
 each milestone's deliberate deviations/simplifications). `docs/NEXT_PHASES.md`
 captures what's deliberately deferred still (match guards, arrays/lists,
 generics, the type system -- and, as of M11, sound field-*access*
@@ -2510,6 +2553,7 @@ added field-closure calls (`p.f()`), `detach` on method calls, and
 method-name hover/go-to-definition/completion in the LSP; M14 made the
 compiler's output a portable, versioned binary format (`.mahc`, see
 `docs/MAHC_FORMAT.md`) that the VM runs exclusively; M15 added projects
-(`mah init`, `mah-project.toml`, project-aware `run`/`build`). All
-planned milestones (M0–M15) are now complete; see `docs/NEXT_PHASES.md`
+(`mah init`, `mah-project.toml`, project-aware `run`/`build`); M16 added
+default parameter values and keyword arguments (bytecode 1.1). All
+planned milestones (M0–M16) are now complete; see `docs/NEXT_PHASES.md`
 for what's next.

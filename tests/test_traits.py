@@ -30,7 +30,9 @@ class HappyPathTests(unittest.TestCase):
         p.scale(10)
         print(p.x, p.y)
         """
-        self.assertEqual(run_source(src), "5\n20\n30\n")
+        # M16: `print(p.x, p.y)` now joins with the default `sep` (a
+        # single space) instead of printing each argument on its own line.
+        self.assertEqual(run_source(src), "5\n20 30\n")
 
     def test_self_and_chaining_and_fn_declared_later_in_same_impl(self):
         src = """

@@ -405,8 +405,19 @@ class Parser:
 
         if tok.type is TokenType.PRINT:
             self.advance()
-            args = self._parse_paren_args()
-            return PrintStmt(args=args, position=tok.position)
+            args, kwargs = self._parse_paren_args()
+            sep = None
+            end = None
+            for name, value, name_position in kwargs:
+                if name == "sep":
+                    sep = value
+                elif name == "end":
+                    end = value
+                else:
+                    raise SyntaxError(
+                        f"print() got an unexpected keyword argument '{name}' at position '{name_position}'"
+                    )
+            return PrintStmt(args=args, position=tok.position, sep=sep, end=end)
 
         if tok.type is TokenType.LET:
             self.advance()
@@ -728,24 +739,39 @@ class Parser:
         return (name_tok.literal, [], name_tok.position, [])
 
     def _parse_param_list(self) -> tuple:
-        """M12: consumes `(` ... `)` and returns `(params, param_positions)`
-        -- factored out of `_parse_fn_expr` so `_parse_method_decl` (trait/
-        impl `fn` items) can share the exact same parameter-list grammar,
-        rather than a second, independently-maintained copy of it."""
+        """M12: consumes `(` ... `)` and returns `(params, param_positions,
+        defaults)` -- factored out of `_parse_fn_expr` so `_parse_method_decl`
+        (trait/impl `fn` items) can share the exact same parameter-list
+        grammar, rather than a second, independently-maintained copy of it.
+
+        M16: each parameter may be followed by `= expr` giving its default
+        value -- `defaults` is parallel to `params`/`param_positions`, each
+        entry either that expression or `None`. Struct literals are allowed
+        in a default expression (there's no `if`/`while`-condition-style
+        ambiguity here)."""
         self.expect(TokenType.PAREN_OPEN)
         params = []
         param_positions = []
+        defaults = []
         if self.current.type is TokenType.ID:
             param_tok = self.advance()
             params.append(param_tok.literal)
             param_positions.append(param_tok.position)
+            defaults.append(self._parse_optional_default())
             while self.current.type is TokenType.COMMA:
                 self.advance()
                 param_tok = self.expect(TokenType.ID)
                 params.append(param_tok.literal)
                 param_positions.append(param_tok.position)
+                defaults.append(self._parse_optional_default())
         self.expect(TokenType.PAREN_CLOSE)
-        return params, param_positions
+        return params, param_positions, defaults
+
+    def _parse_optional_default(self):
+        if self.current.type is TokenType.ASSIGN:
+            self.advance()
+            return self.parse_expr()
+        return None
 
     def _parse_fn_expr(self) -> FnExpr:
         fn_tok = self.advance()  # FN
@@ -755,7 +781,7 @@ class Parser:
             name_tok = self.advance()
             name = name_tok.literal
             name_position = name_tok.position
-        params, param_positions = self._parse_param_list()
+        params, param_positions, defaults = self._parse_param_list()
         body = self.parse_block()
         return FnExpr(
             name=name,
@@ -764,6 +790,7 @@ class Parser:
             position=fn_tok.position,
             name_position=name_position,
             param_positions=param_positions,
+            defaults=defaults,
         )
 
     # -- M12: trait / impl / method decls ---------------------------------
@@ -825,7 +852,7 @@ class Parser:
     def _parse_method_decl(self, require_body: bool) -> MethodDecl:
         fn_tok = self.expect(TokenType.FN)
         name_tok = self.expect(TokenType.ID)
-        params, param_positions = self._parse_param_list()
+        params, param_positions, defaults = self._parse_param_list()
         if self.current.type is TokenType.BRACE_OPEN:
             body = self.parse_block()
             fn = FnExpr(
@@ -835,6 +862,7 @@ class Parser:
                 position=fn_tok.position,
                 name_position=name_tok.position,
                 param_positions=param_positions,
+                defaults=defaults,
             )
         elif require_body:
             raise SyntaxError(
@@ -850,6 +878,7 @@ class Parser:
             position=fn_tok.position,
             name_position=name_tok.position,
             param_positions=param_positions,
+            defaults=defaults,
         )
 
     # -- expressions (precedence chain, lowest to highest binding) --------
@@ -934,9 +963,9 @@ class Parser:
         if tok.type is TokenType.ID:
             self.advance()
             if self.current.type is TokenType.PAREN_OPEN:
-                args = self._parse_paren_args()
+                args, kwargs = self._parse_paren_args()
                 callee = Ident(name=tok.literal, position=tok.position)
-                node = Call(callee=callee, args=args, position=tok.position)
+                node = Call(callee=callee, args=args, position=tok.position, kwargs=kwargs)
             elif self.current.type is TokenType.BRACE_OPEN and self._struct_literal_allowed:
                 node = self._parse_struct_lit(tok)
             else:
@@ -948,14 +977,14 @@ class Parser:
 
         if tok.type is TokenType.SIN:
             self.advance()
-            args = self._parse_paren_args()
+            args = self._parse_no_kwargs_args(tok, "sin")
             if len(args) != 1:
                 raise SyntaxError(f"'sin' can only have one argument")
             return self._parse_postfix_from(SinExpr(arg=args[0], position=tok.position))
 
         if tok.type is TokenType.COS:
             self.advance()
-            args = self._parse_paren_args()
+            args = self._parse_no_kwargs_args(tok, "cos")
             if len(args) != 1:
                 raise SyntaxError(f"'cos' can only have one argument")
             return self._parse_postfix_from(CosExpr(arg=args[0], position=tok.position))
@@ -975,7 +1004,7 @@ class Parser:
                 # compiles completely differently from an ordinary
                 # detached call.
                 sleep_tok = self.advance()
-                args = self._parse_paren_args()
+                args = self._parse_no_kwargs_args(sleep_tok, "sleep_async")
                 if len(args) != 1:
                     raise SyntaxError(f"'sleep_async' can only have one argument")
                 inner = SleepAsyncExpr(arg=args[0], position=sleep_tok.position)
@@ -984,7 +1013,7 @@ class Parser:
 
         if tok.type is TokenType.SLEEP_ASYNC:
             self.advance()
-            args = self._parse_paren_args()
+            args = self._parse_no_kwargs_args(tok, "sleep_async")
             if len(args) != 1:
                 raise SyntaxError(f"'sleep_async' can only have one argument")
             return self._parse_postfix_from(SleepAsyncExpr(arg=args[0], position=tok.position))
@@ -1056,15 +1085,17 @@ class Parser:
         always needs *some* call to actually detach."""
         base_tok = self.expect(TokenType.ID)
         if self.current.type is TokenType.PAREN_OPEN:
+            args, kwargs = self._parse_paren_args()
             base = Call(
                 callee=Ident(name=base_tok.literal, position=base_tok.position),
-                args=self._parse_paren_args(),
+                args=args,
                 position=base_tok.position,
+                kwargs=kwargs,
             )
         else:
             base = Ident(name=base_tok.literal, position=base_tok.position)
 
-        steps: list = []  # list[(name_tok, args_or_None)]
+        steps: list = []  # list[(name_tok, call_info_or_None)] -- call_info = (args, kwargs)
         while self.current.type is TokenType.DOT:
             self.advance()
             name_tok = self.expect(TokenType.ID)
@@ -1074,21 +1105,24 @@ class Parser:
                 steps.append((name_tok, None))
 
         k = -1
-        for index, (_name_tok, args) in enumerate(steps):
-            if args is not None:
+        for index, (_name_tok, call_info) in enumerate(steps):
+            if call_info is not None:
                 k = index
         if k == -1 and not isinstance(base, Call):
             raise SyntaxError(f"'detach' needs a function or method call at position '{detach_tok.position}'")
 
         node = base
-        for name_tok, args in steps[: k + 1]:
-            if args is None:
+        for name_tok, call_info in steps[: k + 1]:
+            if call_info is None:
                 node = FieldAccess(obj=node, field=name_tok.literal, position=name_tok.position)
             else:
-                node = MethodCall(obj=node, method=name_tok.literal, args=args, position=name_tok.position)
+                args, kwargs = call_info
+                node = MethodCall(
+                    obj=node, method=name_tok.literal, args=args, position=name_tok.position, kwargs=kwargs
+                )
         node = DetachExpr(call=node, position=detach_tok.position)
 
-        for name_tok, args in steps[k + 1 :]:
+        for name_tok, _call_info in steps[k + 1 :]:
             node = FieldAccess(obj=node, field=name_tok.literal, position=name_tok.position)
 
         return self._parse_postfix_from(node)
@@ -1120,8 +1154,10 @@ class Parser:
                 # chains like `a.b().c.d()` fall out for free -- each `.`
                 # is handled one at a time, left to right, exactly like the
                 # existing FieldAccess branch below.
-                args = self._parse_paren_args()
-                base = MethodCall(obj=base, method=field_tok.literal, args=args, position=field_tok.position)
+                args, kwargs = self._parse_paren_args()
+                base = MethodCall(
+                    obj=base, method=field_tok.literal, args=args, position=field_tok.position, kwargs=kwargs
+                )
             else:
                 base = FieldAccess(obj=base, field=field_tok.literal, position=field_tok.position)
         return base
@@ -1157,18 +1193,65 @@ class Parser:
             field_name_positions=field_name_positions,
         )
 
-    def _parse_paren_args(self) -> list:
+    def _parse_no_kwargs_args(self, tok: Token, label: str) -> list:
+        """M16: `sin`/`cos`/`sleep_async` -- built-ins with a fixed,
+        unnamed single parameter -- never accept keyword arguments."""
+        args, kwargs = self._parse_paren_args()
+        if kwargs:
+            raise SyntaxError(f"'{label}' doesn't take keyword arguments at position '{tok.position}'")
+        return args
+
+    def _is_kwarg_start(self) -> bool:
+        """M16: an argument-list item is a keyword argument exactly when
+        it's `ID COLON` -- distinguished from a bare `ID` (an ordinary
+        variable reference) and from `ID { ... }` (a struct literal, whose
+        first field also starts `ID COLON` one token later, but only after
+        a `{`, which `peek_token` -- one token of lookahead -- never sees
+        here) by peeking one token ahead without consuming it."""
+        return self.current.type is TokenType.ID and self.lexer.peek_token().type is TokenType.COLON
+
+    def _parse_paren_args(self) -> tuple:
+        """Consumes `(` ... `)` and returns `(args, kwargs)` -- `args` the
+        positional argument expressions, in order; `kwargs` a parallel list
+        of `(name, value_expr, name_position)` for every `name: expr` item,
+        in source order, after every positional one. M16: enforces the two
+        purely-syntactic call-site rules (a keyword argument can't be
+        followed by a positional one; the same keyword can't appear twice
+        in one call) -- everything else about a call's arguments (unknown
+        keyword, missing required parameter, ...) is dynamic and checked at
+        runtime instead, since the callee isn't known statically here."""
         self.expect(TokenType.PAREN_OPEN)
         args = []
+        kwargs = []
+        seen_kwargs: set = set()
         old = self._struct_literal_allowed
         self._struct_literal_allowed = True
         try:
             if self.current.type is not TokenType.PAREN_CLOSE:
-                args.append(self.parse_expr())
+                self._parse_one_arg(args, kwargs, seen_kwargs)
                 while self.current.type is TokenType.COMMA:
                     self.advance()
-                    args.append(self.parse_expr())
+                    self._parse_one_arg(args, kwargs, seen_kwargs)
         finally:
             self._struct_literal_allowed = old
         self.expect(TokenType.PAREN_CLOSE)
-        return args
+        return args, kwargs
+
+    def _parse_one_arg(self, args: list, kwargs: list, seen_kwargs: set) -> None:
+        if self._is_kwarg_start():
+            name_tok = self.advance()
+            self.expect(TokenType.COLON)
+            if name_tok.literal in seen_kwargs:
+                raise SyntaxError(
+                    f"keyword argument '{name_tok.literal}' given more than once "
+                    f"at position '{name_tok.position}'"
+                )
+            seen_kwargs.add(name_tok.literal)
+            value = self.parse_expr()
+            kwargs.append((name_tok.literal, value, name_tok.position))
+            return
+        if kwargs:
+            raise SyntaxError(
+                f"positional argument after a keyword argument at position '{self.current.position}'"
+            )
+        args.append(self.parse_expr())

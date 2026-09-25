@@ -1,14 +1,18 @@
-"""Format constants for `.mahc` version 1.0 -- the single source of truth
+"""Format constants for `.mahc` version 1.1 -- the single source of truth
 mirroring docs/MAHC_FORMAT.md. Every other module in this package (and the
 VM, `mah/code_interpreter.py`) imports its constants from here rather than
 hard-coding a section id/opcode/tag number a second time.
+
+M16 bumps MINOR to 1: default parameter values + keyword-argument calls
+(the PARAMS section, `jmpset`, the `*kw` opcodes, operand kind `S*`) and
+the `io.write` native -- see docs/MAHC_FORMAT.md #4.5a/#4.6/#7.
 """
 
 from __future__ import annotations
 
 MAGIC = b"MAHC"
 MAJOR = 1
-MINOR = 0
+MINOR = 1
 
 # -- section ids (docs/MAHC_FORMAT.md #3) -----------------------------------
 SEC_STRINGS = 0x01
@@ -17,9 +21,14 @@ SEC_TYPES = 0x03
 SEC_NATIVES = 0x04
 SEC_FUNCTIONS = 0x05
 SEC_CODE = 0x06
+SEC_PARAMS = 0x07  # M16 (1.1): required iff minor >= 1 -- docs/MAHC_FORMAT.md #4.5a
 SEC_DEBUG = 0x80
 
 REQUIRED_SECTIONS = (SEC_STRINGS, SEC_CONSTANTS, SEC_TYPES, SEC_NATIVES, SEC_FUNCTIONS, SEC_CODE)
+# M16: PARAMS joins the required-section list only for minor >= 1 files --
+# see decode.py's `_read_sections`, which picks between this and
+# `REQUIRED_SECTIONS` once it has read the file's own minor version.
+REQUIRED_SECTIONS_V1 = REQUIRED_SECTIONS + (SEC_PARAMS,)
 
 # -- constant tags (docs/MAHC_FORMAT.md #4.2) -------------------------------
 TAG_NONE = 0
@@ -49,10 +58,19 @@ BUILTIN_TYPES = (
 # -- natives (docs/MAHC_FORMAT.md #4.4) -------------------------------------
 NATIVE_ARITIES = {
     "io.print": 1,
+    "io.write": 1,  # M16 (1.1)
     "io.input": 0,
     "math.sin": 1,
     "math.cos": 1,
     "time.sleep_async": 1,
+}
+
+# M16: which minor version introduced each 1.1+ native -- a 1.0 file
+# ('minor' == 0) using one is rejected at load (docs/MAHC_FORMAT.md #4.6's
+# "must not appear in a file whose minor version is 0"). Absent = present
+# since 1.0.
+NATIVE_SINCE_MINOR = {
+    "io.write": 1,
 }
 
 # -- opcodes (docs/MAHC_FORMAT.md #4.6) --------------------------------------
@@ -65,6 +83,7 @@ OPCODES: dict[str, tuple[int, tuple[str, ...]]] = {
     "loadk": (0x02, ("K", "A")),
     "jmp": (0x03, ("L",)),
     "jmpf": (0x04, ("A", "L")),
+    "jmpset": (0x05, ("A", "L")),  # M16 (1.1)
     "add": (0x10, ("A", "A", "A")),
     "sub": (0x11, ("A", "A", "A")),
     "mul": (0x12, ("A", "A", "A")),
@@ -83,11 +102,15 @@ OPCODES: dict[str, tuple[int, tuple[str, ...]]] = {
     "call": (0x21, ("A", "A*")),
     "ret": (0x22, ("A",)),
     "retval": (0x23, ("A",)),
+    "callkw": (0x26, ("A", "A*", "S*")),  # M16 (1.1)
     "callmethod": (0x24, ("A", "S", "A*", "S?")),
     "defmethod": (0x25, ("A", "S", "S?", "S", "B")),
+    "callmethodkw": (0x27, ("A", "S", "A*", "S*", "S?")),  # M16 (1.1)
     "detach": (0x28, ("A", "A*", "A")),
     "detachmethod": (0x29, ("A", "S", "A*", "S?", "A")),
     "await": (0x2A, ("A", "A")),
+    "detachkw": (0x2B, ("A", "A*", "S*", "A")),  # M16 (1.1)
+    "detachmethodkw": (0x2C, ("A", "S", "A*", "S*", "S?", "A")),  # M16 (1.1)
     "struct": (0x30, ("T", "A*", "A")),
     "enum": (0x31, ("T", "N", "A*", "A")),
     "getfield": (0x32, ("A", "S", "A")),
@@ -105,4 +128,15 @@ OPCODES: dict[str, tuple[int, tuple[str, ...]]] = {
 
 OPCODES_BY_CODE: dict[int, tuple[str, tuple[str, ...]]] = {
     code: (name, kinds) for name, (code, kinds) in OPCODES.items()
+}
+
+# M16: which minor version introduced each opcode -- mirrors
+# NATIVE_SINCE_MINOR above; a 1.0 file using one of these is rejected at
+# load (docs/MAHC_FORMAT.md #4.6). Absent = present since 1.0.
+OPCODE_SINCE_MINOR: dict[str, int] = {
+    "jmpset": 1,
+    "callkw": 1,
+    "callmethodkw": 1,
+    "detachkw": 1,
+    "detachmethodkw": 1,
 }

@@ -20,13 +20,17 @@ from .format import (
     MAGIC,
     MAJOR,
     MINOR,
+    NATIVE_SINCE_MINOR,
+    OPCODE_SINCE_MINOR,
     OPCODES_BY_CODE,
     REQUIRED_SECTIONS,
+    REQUIRED_SECTIONS_V1,
     SEC_CODE,
     SEC_CONSTANTS,
     SEC_DEBUG,
     SEC_FUNCTIONS,
     SEC_NATIVES,
+    SEC_PARAMS,
     SEC_STRINGS,
     SEC_TYPES,
     TAG_DEC,
@@ -81,12 +85,22 @@ def _check_consumed(reader: _Reader, section_name: str) -> None:
         raise MahcFormatError(f"{section_name} section payload not fully consumed (trailing garbage)")
 
 
-def _read_sections(r: _Reader) -> tuple[dict, bytes | None]:
+def _read_sections(r: _Reader, minor: int) -> tuple[dict, bytes | None]:
     """Consume every `(id, length, payload)` section to EOF, enforcing
     docs/MAHC_FORMAT.md #3's ordering rules, and return `(required_payloads,
     debug_payload_or_None)`. Unknown OPTIONAL sections (0x81-0xFF) are
     consumed (so their bytes don't corrupt the next section) and otherwise
-    ignored."""
+    ignored.
+
+    M16: which sections are required depends on `minor` -- a minor >= 1
+    file must also contain PARAMS (0x07), right after CODE; a minor 0 file
+    must NOT contain it at all (docs/MAHC_FORMAT.md #4.5a/#7) -- both
+    directions fall out of picking the right `required` tuple up front: a
+    0x07 section in a minor-0 file is simply not the next expected required
+    section and not itself a known required id, so it's rejected by the
+    existing "unknown required section" branch below with no special-casing
+    needed."""
+    required = REQUIRED_SECTIONS_V1 if minor >= 1 else REQUIRED_SECTIONS
     payloads: dict[int, bytes] = {}
     debug_payload: bytes | None = None
     expect_idx = 0
@@ -94,10 +108,10 @@ def _read_sections(r: _Reader) -> tuple[dict, bytes | None]:
         sec_id = r.u8()
         length = r.varuint()
         payload = r.bytes(length)
-        if expect_idx < len(REQUIRED_SECTIONS):
-            expected = REQUIRED_SECTIONS[expect_idx]
+        if expect_idx < len(required):
+            expected = required[expect_idx]
             if sec_id != expected:
-                if sec_id in REQUIRED_SECTIONS:
+                if sec_id in required:
                     raise MahcFormatError(
                         f"required sections out of order or duplicated: expected section "
                         f"0x{expected:02x}, got 0x{sec_id:02x}"
@@ -110,6 +124,8 @@ def _read_sections(r: _Reader) -> tuple[dict, bytes | None]:
             payloads[sec_id] = payload
             expect_idx += 1
         else:
+            if sec_id in required:
+                raise MahcFormatError(f"duplicate required section 0x{sec_id:02x}")
             if sec_id < 0x80:
                 raise MahcFormatError(f"unknown required section 0x{sec_id:02x}")
             if sec_id == SEC_DEBUG:
@@ -117,8 +133,8 @@ def _read_sections(r: _Reader) -> tuple[dict, bytes | None]:
                     raise MahcFormatError("duplicate DEBUG section")
                 debug_payload = payload
             # else: an unknown optional section -- already consumed, skip it.
-    if expect_idx < len(REQUIRED_SECTIONS):
-        raise MahcFormatError(f"missing required section 0x{REQUIRED_SECTIONS[expect_idx]:02x}")
+    if expect_idx < len(required):
+        raise MahcFormatError(f"missing required section 0x{required[expect_idx]:02x}")
     return payloads, debug_payload
 
 
@@ -231,6 +247,33 @@ def _parse_functions(payload: bytes, nstrings: int) -> list:
     return functions
 
 
+def _parse_params(payload: bytes, functions: list, nstrings: int) -> list:
+    """M16 (1.1): PARAMS section, docs/MAHC_FORMAT.md #4.5a -- one entry per
+    function, in FUNCTIONS order, each `nparams` required to equal that
+    function's own `param_count`. Returns a new `functions` list with
+    `.params` filled in (FunctionDecl is otherwise unchanged)."""
+    pr = _Reader(payload)
+    out = []
+    for fn in functions:
+        nparams = pr.varuint()
+        if nparams != fn.param_count:
+            raise MahcFormatError(
+                f"PARAMS: function declares {fn.param_count} parameter(s) but PARAMS lists {nparams}"
+            )
+        params = []
+        for _ in range(nparams):
+            name = pr.varuint()
+            if name >= nstrings:
+                raise MahcFormatError(f"PARAMS: name string index {name} out of range")
+            flags = pr.u8()
+            if flags & ~1:
+                raise MahcFormatError(f"PARAMS: invalid flags byte {flags} (only bit 0 is defined)")
+            params.append((name, bool(flags & 1)))
+        out.append(FunctionDecl(fn.entry, fn.slot_count, fn.param_count, fn.name, params=params))
+    _check_consumed(pr, "PARAMS")
+    return out
+
+
 def _type_variants(t_index: int, ctx: dict):
     """The `[(variant_name_idx_or_str, fields), ...]` list for type index
     `t_index` -- built-in (0/1) or user (>=2, `ctx["types"]`). Returns
@@ -279,6 +322,17 @@ def _decode_operand(pr: _Reader, kind: str, ctx: dict):
         if idx >= ctx["nstrings"]:
             raise MahcFormatError(f"string index {idx} out of range")
         return idx
+    if kind == "S*":
+        # M16 (1.1): a plain string-index list (keyword-argument names) --
+        # always present, no "S?"-style absence marker per entry.
+        n = pr.varuint()
+        out = []
+        for _ in range(n):
+            s = pr.varuint()
+            if s >= ctx["nstrings"]:
+                raise MahcFormatError(f"string index {s} out of range")
+            out.append(s)
+        return tuple(out)
     if kind == "L":
         return pr.varuint()  # validated once the full instruction count is known
     if kind == "F":
@@ -307,6 +361,7 @@ def _decode_operand(pr: _Reader, kind: str, ctx: dict):
 
 
 def _parse_code(payload: bytes, ctx: dict) -> list:
+    minor = ctx["minor"]
     pr = _Reader(payload)
     count = pr.varuint()
     instrs = []
@@ -316,6 +371,12 @@ def _parse_code(payload: bytes, ctx: dict) -> list:
         if found is None:
             raise MahcFormatError(f"unknown opcode 0x{opcode:02x} at instruction {i}")
         name, kinds = found
+        since = OPCODE_SINCE_MINOR.get(name)
+        if since is not None and minor < since:
+            raise MahcFormatError(
+                f"opcode '{name}' at instruction {i} requires minor version >= {since}, "
+                f"but this file's minor version is {minor}"
+            )
         args = tuple(_decode_operand(pr, kind, ctx) for kind in kinds)
         instrs.append(Instr(name, args))
     _check_consumed(pr, "CODE")
@@ -331,6 +392,18 @@ def _parse_code(payload: bytes, ctx: dict) -> list:
             _cond, target = instr.args
             if target >= ncode:
                 raise MahcFormatError(f"jump target {target} out of range at instruction {i}")
+        elif op == "jmpset":
+            # M16: `param` is an ordinary `A` operand (already range-checked
+            # by `_decode_operand`) -- only `L` needs a jump-target check,
+            # same as `jmpf`. (docs/MAHC_FORMAT.md's own note: validating
+            # that `param`'s depth is 0 and its slot belongs to the
+            # enclosing function isn't done here -- the decoder has no way
+            # to know which function an instruction belongs to.)
+            _param, target = instr.args
+            if target >= ncode:
+                raise MahcFormatError(f"jump target {target} out of range at instruction {i}")
+        elif op in ("callkw", "callmethodkw", "detachkw", "detachmethodkw"):
+            _validate_kwnames(op, instr.args, ctx, i)
         elif op == "struct":
             t, values, _dest = instr.args
             fields = _type_fields(t, ctx)
@@ -372,7 +445,41 @@ def _parse_code(payload: bytes, ctx: dict) -> list:
                 raise MahcFormatError(
                     f"'native' at instruction {i}: {len(args)} arg(s) given, native declares arity {native.arity}"
                 )
+            native_name = ctx["strings"][native.name]
+            since = NATIVE_SINCE_MINOR.get(native_name)
+            if since is not None and minor < since:
+                raise MahcFormatError(
+                    f"native '{native_name}' at instruction {i} requires minor version >= {since}, "
+                    f"but this file's minor version is {minor}"
+                )
     return instrs
+
+
+def _validate_kwnames(op: str, args: tuple, ctx: dict, i: int) -> None:
+    """M16: shared by every `*kw` opcode -- docs/MAHC_FORMAT.md #4.6's rule
+    that `kwnames` names the LAST `len(kwnames)` entries of `args` (so it
+    can never exceed `len(args)`), and that the names are distinct."""
+    if op == "callkw":
+        _callee, arg_addrs, kw_names = args
+    elif op == "callmethodkw":
+        _recv, _name, arg_addrs, kw_names, _trait = args
+    elif op == "detachkw":
+        _callee, arg_addrs, kw_names, _dest = args
+    else:  # detachmethodkw
+        _recv, _name, arg_addrs, kw_names, _trait, _dest = args
+    if len(kw_names) > len(arg_addrs):
+        raise MahcFormatError(
+            f"'{op}' at instruction {i}: {len(kw_names)} keyword name(s) but only {len(arg_addrs)} arg(s)"
+        )
+    seen: set = set()
+    strings = ctx["strings"]
+    for idx in kw_names:
+        text = strings[idx]
+        if text in seen:
+            raise MahcFormatError(
+                f"'{op}' at instruction {i}: keyword argument name '{text}' given more than once"
+            )
+        seen.add(text)
 
 
 def _parse_debug(payload: bytes, nstrings: int) -> DebugInfo:
@@ -413,22 +520,28 @@ def decode(data: bytes) -> Program:
     if minor > MINOR:
         raise MahcFormatError(f"unsupported minor version {minor} (this VM supports up to minor version {MINOR})")
 
-    payloads, debug_payload = _read_sections(r)
+    payloads, debug_payload = _read_sections(r, minor)
 
     strings = _parse_strings(payloads[SEC_STRINGS])
     constants = _parse_constants(payloads[SEC_CONSTANTS], len(strings))
     types = _parse_types(payloads[SEC_TYPES], len(strings))
     natives = _parse_natives(payloads[SEC_NATIVES], len(strings))
     functions = _parse_functions(payloads[SEC_FUNCTIONS], len(strings))
+    if minor >= 1:
+        # M16: PARAMS is required from minor 1 -- `_read_sections` already
+        # guarantees `payloads[SEC_PARAMS]` exists whenever we get here.
+        functions = _parse_params(payloads[SEC_PARAMS], functions, len(strings))
 
     ctx = {
         "nstrings": len(strings),
+        "strings": strings,
         "nconsts": len(constants),
         "ntypes": len(types),
         "types": types,
         "nfunctions": len(functions),
         "nnatives": len(natives),
         "natives": natives,
+        "minor": minor,
     }
     code = _parse_code(payloads[SEC_CODE], ctx)
 

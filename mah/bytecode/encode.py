@@ -15,6 +15,7 @@ from .format import (
     SEC_DEBUG,
     SEC_FUNCTIONS,
     SEC_NATIVES,
+    SEC_PARAMS,
     SEC_STRINGS,
     SEC_TYPES,
     TAG_DEC,
@@ -54,6 +55,13 @@ def _encode_operand(kind: str, value) -> bytes:
         out = bytearray(write_varuint(len(value)))
         for item in value:
             out += _encode_operand("A", item)
+        return bytes(out)
+    if kind == "S*":
+        # M16 (1.1): a plain string-index list (not "S?" per entry) --
+        # keyword-argument names are always present, never absent.
+        out = bytearray(write_varuint(len(value)))
+        for item in value:
+            out += write_varuint(item)
         return bytes(out)
     if kind in ("K", "S", "L", "F", "T", "N", "X"):
         return write_varuint(value)
@@ -140,6 +148,17 @@ def encode(program: Program) -> bytes:
     for instr in program.code:
         payload += _encode_instr(instr)
     out += _section(SEC_CODE, bytes(payload))
+
+    # PARAMS (0x07, required from minor 1 -- docs/MAHC_FORMAT.md #4.5a)
+    if program.minor >= 1:
+        payload = bytearray()
+        for fn in program.functions:
+            params = fn.params if fn.params is not None else []
+            payload += write_varuint(len(params))
+            for name_idx, has_default in params:
+                payload += _str_index(name_idx)
+                payload += _u8(1 if has_default else 0)
+        out += _section(SEC_PARAMS, bytes(payload))
 
     # DEBUG (optional; only present for a debug-target build)
     if program.debug is not None:

@@ -453,6 +453,15 @@ class Resolver:
         depth = self.frame_stack[-1].depth - frame_level.depth
         return (depth, slot)
 
+    def _resolve_kwargs(self, kwargs: list) -> None:
+        """M16: resolve every keyword argument's VALUE expression (the
+        `name` itself isn't a variable reference -- it's only resolved
+        dynamically, at runtime, against the callee's own parameter names,
+        since the callee isn't statically known at a call site in
+        general)."""
+        for _name, value, _name_position in kwargs:
+            self.resolve_expr(value)
+
     @staticmethod
     def _check_no_duplicate_field(label: str, fields: list, position: int) -> None:
         """Shared by StructLit and EnumLit validation: raise if `fields`
@@ -752,6 +761,12 @@ class Resolver:
         elif isinstance(stmt, PrintStmt):
             for arg in stmt.args:
                 self.resolve_expr(arg)
+            # M16: `sep`/`end` keyword-only options -- expressions, resolved
+            # after the positional args like any trailing keyword argument.
+            if stmt.sep is not None:
+                self.resolve_expr(stmt.sep)
+            if stmt.end is not None:
+                self.resolve_expr(stmt.end)
         elif isinstance(stmt, IfStmt):
             self.resolve_expr(stmt.cond)
             self.resolve_block(stmt.then)
@@ -900,6 +915,13 @@ class Resolver:
         new_frame = FrameLevel(depth=self.frame_stack[-1].depth + 1, parent=self.frame_stack[-1])
         self.frame_stack.append(new_frame)
         self._push()
+        # M16: once a parameter has a default, every later one must too
+        # (tracked as we go, left to right) -- a default's own expression is
+        # resolved BEFORE that parameter is declared (so it can see earlier
+        # parameters and any outer name, but never itself or a later
+        # parameter -- resolving in declaration order, one at a time, gives
+        # this for free with no separate "declared-so-far" set).
+        seen_default = False
         for index, param_name in enumerate(fn.params):
             param_position = (
                 fn.param_positions[index] if index < len(fn.param_positions) else fn.position
@@ -919,6 +941,17 @@ class Resolver:
                     f"'self' is only allowed as the first parameter of a trait/impl "
                     f"method at position {param_position}"
                 )
+            default_expr = fn.defaults[index] if index < len(fn.defaults) else None
+            if param_name == "self" and default_expr is not None:
+                raise Exception(f"'self' can't have a default value at position {param_position}")
+            if default_expr is None and seen_default:
+                raise Exception(
+                    f"Parameter '{param_name}' needs a default value because an earlier "
+                    f"parameter has one at position {param_position}"
+                )
+            if default_expr is not None:
+                seen_default = True
+                self.resolve_expr(default_expr)
             slot = new_frame.alloc()
             self._declare(param_name, slot, param_position, kind="param")
             fn.param_slots.append(slot)
@@ -962,6 +995,20 @@ class Resolver:
                         f"'self' is only allowed as the first parameter of a trait/impl "
                         f"method at position {method.position}"
                     )
+            if method.fn is None:
+                # M16: a required (bodyless) trait method has nowhere to
+                # evaluate a default at -- only an impl's own body can.
+                for index, default_expr in enumerate(method.defaults):
+                    if default_expr is not None:
+                        param_pos = (
+                            method.param_positions[index]
+                            if index < len(method.param_positions)
+                            else method.position
+                        )
+                        raise Exception(
+                            f"Trait method '{method.name}' is required, so it can't declare "
+                            f"default values; put them on the impl at position {param_pos}"
+                        )
             if method.fn is not None:
                 method.slot = self.global_frame.alloc()
 
@@ -1193,6 +1240,7 @@ class Resolver:
                 self.type_position_index[expr.obj.position] = ("trait", name)
             for arg in expr.args:
                 self.resolve_expr(arg)
+            self._resolve_kwargs(expr.kwargs)
             # M13: LSP call-site recording -- Trait.m(recv, ...).
             self.method_call_index[expr.position] = {
                 "name": expr.method,
@@ -1238,6 +1286,7 @@ class Resolver:
                     self.type_position_index[expr.obj.position] = ("enum", name)
             for arg in expr.args:
                 self.resolve_expr(arg)
+            self._resolve_kwargs(expr.kwargs)
             # M13: LSP call-site recording -- Type.m(...) (static or native).
             self.method_call_index[expr.position] = {
                 "name": expr.method,
@@ -1273,6 +1322,7 @@ class Resolver:
             self.resolve_expr(expr.callee)
             for arg in expr.args:
                 self.resolve_expr(arg)
+            self._resolve_kwargs(expr.kwargs)
             return
         if isinstance(expr, (SinExpr, CosExpr)):
             self.resolve_expr(expr.arg)
@@ -1412,6 +1462,7 @@ class Resolver:
                     else:
                         for arg in expr.args:
                             self.resolve_expr(arg)
+                        self._resolve_kwargs(expr.kwargs)
                         self._record_dynamic_method_call(expr)
                         return
                 self._resolve_path_call(expr)
@@ -1419,6 +1470,7 @@ class Resolver:
             self.resolve_expr(expr.obj)
             for arg in expr.args:
                 self.resolve_expr(arg)
+            self._resolve_kwargs(expr.kwargs)
             self._record_dynamic_method_call(expr)
             return
         if isinstance(expr, IfStmt):

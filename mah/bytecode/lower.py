@@ -63,7 +63,7 @@ class _Lowerer:
         self.struct_index: dict[str, int] = {}
         self.enum_index: dict[str, int] = {}
 
-        self.functions: list[FunctionDecl] = [FunctionDecl(0, buf.global_slot_count, 0, None)]
+        self.functions: list[FunctionDecl] = [FunctionDecl(0, buf.global_slot_count, 0, None, params=[])]
         self._closure_function_index: dict[int, int] = {}
 
         self.code: list[Instr] = []
@@ -149,14 +149,22 @@ class _Lowerer:
 
     # -- FUNCTIONS / CODE ------------------------------------------------
 
-    def _function_index_for(self, code_addr: int, slot_count: int, param_count: int, name) -> int:
+    def _function_index_for(
+        self, code_addr: int, slot_count: int, param_count: int, name, param_names, has_defaults
+    ) -> int:
         idx = self._closure_function_index.get(code_addr)
         if idx is not None:
             return idx
         demangled = demangle_message(name) if name else None
         name_idx = self.intern_str(demangled) if demangled else None
+        # M16: PARAMS section data for this function -- (name string index,
+        # has_default) per parameter, in order.
+        params = [
+            (self.intern_str(pname), bool(has_default))
+            for pname, has_default in zip(param_names, has_defaults)
+        ]
         idx = len(self.functions)
-        self.functions.append(FunctionDecl(code_addr, slot_count, param_count, name_idx))
+        self.functions.append(FunctionDecl(code_addr, slot_count, param_count, name_idx, params=params))
         self._closure_function_index[code_addr] = idx
         return idx
 
@@ -187,14 +195,21 @@ class _Lowerer:
             return Instr("jmp", (a3,))
         if op == "jmpf":
             return Instr("jmpf", (a1, a3))
+        if op == "jmpset":
+            # M16: codegen repurposes `jmpset`'s IR shape like `jmpf`'s --
+            # arg1 the param slot address, dest the jump target.
+            return Instr("jmpset", (a1, a3))
         if op == "neg":
             return Instr("neg", (a1, a3))
         if op == "closure":
-            slot_count, param_count, name = a2
-            fn_idx = self._function_index_for(a1, slot_count, param_count, name)
+            slot_count, param_count, name, param_names, has_defaults = a2
+            fn_idx = self._function_index_for(a1, slot_count, param_count, name, param_names, has_defaults)
             return Instr("closure", (fn_idx, a3))
         if op == "call":
             return Instr("call", (a1, a2))
+        if op == "callkw":
+            arg_addrs, kw_names = a2
+            return Instr("callkw", (a1, arg_addrs, tuple(self.intern_str(n) for n in kw_names)))
         if op == "ret":
             return Instr("ret", (a1,))
         if op == "retval":
@@ -204,6 +219,18 @@ class _Lowerer:
             return Instr(
                 "callmethod",
                 (a1, self.intern_str(name), args, self.intern_str(trait) if trait is not None else None),
+            )
+        if op == "callmethodkw":
+            name, args, kw_names, trait, _pos = a2
+            return Instr(
+                "callmethodkw",
+                (
+                    a1,
+                    self.intern_str(name),
+                    args,
+                    tuple(self.intern_str(n) for n in kw_names),
+                    self.intern_str(trait) if trait is not None else None,
+                ),
             )
         if op == "defmethod":
             type_name, trait, name, is_method = a2
@@ -219,11 +246,27 @@ class _Lowerer:
             )
         if op == "detach":
             return Instr("detach", (a1, a2, a3))
+        if op == "detachkw":
+            arg_addrs, kw_names = a2
+            return Instr("detachkw", (a1, arg_addrs, tuple(self.intern_str(n) for n in kw_names), a3))
         if op == "detachmethod":
             name, args, trait, _pos = a2
             return Instr(
                 "detachmethod",
                 (a1, self.intern_str(name), args, self.intern_str(trait) if trait is not None else None, a3),
+            )
+        if op == "detachmethodkw":
+            name, args, kw_names, trait, _pos = a2
+            return Instr(
+                "detachmethodkw",
+                (
+                    a1,
+                    self.intern_str(name),
+                    args,
+                    tuple(self.intern_str(n) for n in kw_names),
+                    self.intern_str(trait) if trait is not None else None,
+                    a3,
+                ),
             )
         if op == "await":
             return Instr("await", (a1, a3))
@@ -270,6 +313,12 @@ class _Lowerer:
             return Instr("deferscopepop", ())
         if op == "print":
             return Instr("native", (self.intern_native("io.print"), (a1,), None))
+        if op == "write":
+            # M16 (1.1): `print`'s own codegen now emits a `write` IR op per
+            # piece (each arg's to_string, then sep, ..., then end) instead
+            # of the old one-arg-per-line `print` IR op -- see codegen.py's
+            # module docstring/`_gen_print`.
+            return Instr("native", (self.intern_native("io.write"), (a1,), None))
         if op == "input":
             return Instr("native", (self.intern_native("io.input"), (), a3))
         if op == "sin":

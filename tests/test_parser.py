@@ -396,5 +396,46 @@ class DetachOperandParsingTests(unittest.TestCase):
         self.assertIsInstance(expr.call, MethodCall)
 
 
+class KwargsParsingTests(unittest.TestCase):
+    """M16: default parameter values / keyword-argument calls -- AST shape
+    only (see tests/test_kwargs.py for end-to-end behavioral coverage)."""
+
+    def test_fn_param_defaults(self):
+        (stmt,) = parse("fn f(a, b = 2) { a }")
+        self.assertIsInstance(stmt, LetStmt)
+        fn = stmt.value
+        self.assertIsInstance(fn, FnExpr)
+        self.assertEqual(fn.params, ["a", "b"])
+        self.assertIsNone(fn.defaults[0])
+        self.assertIsInstance(fn.defaults[1], NumberLit)
+        self.assertEqual(fn.defaults[1].value, 2)
+
+    def test_call_kwargs(self):
+        (stmt,) = parse("f(1, x: 2)")
+        expr = stmt.value
+        self.assertIsInstance(expr, Call)
+        self.assertEqual(len(expr.args), 1)
+        self.assertEqual(expr.kwargs[0][0], "x")
+
+    def test_method_call_kwargs(self):
+        (stmt,) = parse("p.m(y: 1)")
+        expr = stmt.value
+        self.assertIsInstance(expr, MethodCall)
+        self.assertEqual(expr.kwargs[0][0], "y")
+
+    def test_struct_literal_argument_is_still_positional(self):
+        expr = parse_expr("f(Point { x: 1 })")
+        self.assertIsInstance(expr, Call)
+        self.assertEqual(len(expr.args), 1)
+        self.assertEqual(expr.kwargs, [])
+
+    def test_print_sep_and_end(self):
+        (stmt,) = parse('print(1, 2, sep: "-", end: "")')
+        self.assertIsInstance(stmt, PrintStmt)
+        self.assertEqual(len(stmt.args), 2)
+        self.assertIsNotNone(stmt.sep)
+        self.assertIsNotNone(stmt.end)
+
+
 if __name__ == "__main__":
     unittest.main()

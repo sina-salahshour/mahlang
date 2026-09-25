@@ -75,6 +75,98 @@ _BINOP_SYMBOLS = {
 }
 
 
+class _Absent:
+    """M16: the sentinel a defaulted-but-unbound parameter slot holds until
+    the callee's own `jmpset`-guarded default-computation code runs (see
+    docs/MAHC_FORMAT.md #6.1) -- never a real Mah value, never observed by
+    anything outside `_bind_params`/`jmpset` as long as an encoder emits
+    correct `jmpset` guards (the VM's own responsibility ends at providing
+    the mechanism)."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "<absent>"
+
+
+ABSENT = _Absent()
+
+
+def _bind_params(param_count: int, params, values: list, kwargs: list, label: str) -> list:
+    """docs/MAHC_FORMAT.md #6.1's argument-binding algorithm, exactly --
+    shared by every call-shaped opcode (`call`, `callkw`, `callmethod(kw)`,
+    `detach(kw)`, `detachmethod(kw)`, and `invoke_sync`). `params` is
+    `None` (a 1.0 file: every parameter unnamed and required) or a list of
+    `(name, has_default)` parallel to param slots `0..param_count-1`.
+    `values` are the positional arguments, in order; `kwargs` is
+    `list[(name, value)]`, already evaluated, in call-site order. Returns a
+    list of length `param_count` (each slot's bound value, or `ABSENT` for
+    a still-unbound defaulted parameter) or raises `MahRuntimeError` with
+    the exact wording that section specifies. `label` is the fully
+    formatted subject of every message (`"'f'"`, `"function"`, or
+    `"method 'm'"`) -- callers decide that, since it depends on context
+    (plain call vs. method call) this function has no way to know."""
+    m = len(values)
+    n = param_count
+    has_any_default = params is not None and any(has_default for _name, has_default in params)
+    if not kwargs and not has_any_default:
+        # Old (pre-M16) wording, unconditionally, for the common case with
+        # no keyword arguments and no defaulted parameters -- existing
+        # tests assert this exact string.
+        if m != n:
+            raise MahRuntimeError(f"Argument Count is invalid. {label} accepts {n} arguments but {m} was given")
+        return list(values)
+    if m > n:
+        raise MahRuntimeError(f"{label} takes at most {n} positional arguments but {m} were given")
+    bound: list = list(values) + [ABSENT] * (n - m)
+    bound_flags = [True] * m + [False] * (n - m)
+    name_to_index = {pname: i for i, (pname, _has_default) in enumerate(params)} if params else {}
+    for k, w in kwargs:
+        idx = name_to_index.get(k)
+        if idx is None:
+            raise MahRuntimeError(f"{label} got an unexpected keyword argument '{k}'")
+        if bound_flags[idx]:
+            raise MahRuntimeError(f"{label} got multiple values for argument '{k}'")
+        bound[idx] = w
+        bound_flags[idx] = True
+    for i in range(n):
+        if bound_flags[i]:
+            continue
+        has_default = params[i][1] if params else False
+        if not has_default:
+            pname = params[i][0] if params else f"#{i}"
+            raise MahRuntimeError(f"{label} is missing required argument '{pname}'")
+    return bound
+
+
+def _bind_method_call(recv, fn, include_self: bool, name: str, values: list, kwargs: list) -> list:
+    """M16: `_bind_params` wrapper for `callmethod(kw)`/`detachmethod(kw)`
+    (and the field-closure fallback) -- docs/MAHC_FORMAT.md #6.1's "for
+    method calls the counts exclude the receiver and the label is
+    `method 'f'`". `recv` is prepended back onto the bound list afterward
+    (it's always positionally bound, slot 0, never named in `kwargs`,
+    never defaulted) so the caller gets a plain `param_count`-long list
+    exactly like a non-method call's, ready for `enter_closure`/
+    `spawn_detached`."""
+    label = f"method '{name}'" if include_self else f"'{name}'"
+    if isinstance(fn, Closure):
+        if include_self:
+            rest_params = fn.params[1:] if fn.params is not None else None
+            bound_rest = _bind_params(fn.param_count - 1, rest_params, values, kwargs, label)
+            return [recv] + bound_rest
+        return _bind_params(fn.param_count, fn.params, values, kwargs, label)
+    # A native target -- always a system-trait method (`is_method` true),
+    # so `include_self` is always true here; never accepts keyword
+    # arguments (there are no declared parameter names to bind them to).
+    if kwargs:
+        raise MahRuntimeError(f"{label} got an unexpected keyword argument '{kwargs[0][0]}'")
+    if values:
+        raise MahRuntimeError(
+            f"Argument Count is invalid. {label} accepts 0 arguments but {len(values)} was given"
+        )
+    return [recv]
+
+
 # ---------------------------------------------------------------------------
 # Linking: Program -> a flat list of directly-executable instruction tuples
 # ---------------------------------------------------------------------------
@@ -91,6 +183,10 @@ class FunctionInfo(NamedTuple):
     slot_count: int
     param_count: int
     name: str | None
+    # M16: parallel to param slots 0..param_count-1 -- [(name, has_default),
+    # ...], or `None` for a 1.0 file (unnamed, all-required parameters) --
+    # see docs/MAHC_FORMAT.md #4.5a.
+    params: list | None
 
 
 class DebugIndex(NamedTuple):
@@ -167,6 +263,8 @@ def _link_instr(instr, strings: list, constants: list, types: list, natives: lis
         return ("jmp", a[0])
     if op == "jmpf":
         return ("jmpf", a[0], a[1])
+    if op == "jmpset":
+        return ("jmpset", a[0], a[1])
     if op in ("add", "sub", "mul", "div", "idiv", "mod", "pow", "eq", "neq", "lt", "gt", "and", "or"):
         return (op, a[0], a[1], a[2])
     if op == "neg":
@@ -175,6 +273,9 @@ def _link_instr(instr, strings: list, constants: list, types: list, natives: lis
         return ("closure", functions[a[0]], a[1])
     if op == "call":
         return ("call", a[0], a[1])
+    if op == "callkw":
+        callee, arg_addrs, kwnames = a
+        return ("callkw", callee, arg_addrs, tuple(strings[i] for i in kwnames))
     if op == "ret":
         return ("ret", a[0])
     if op == "retval":
@@ -182,6 +283,16 @@ def _link_instr(instr, strings: list, constants: list, types: list, natives: lis
     if op == "callmethod":
         recv, name_idx, args, trait_idx = a
         return ("callmethod", recv, strings[name_idx], args, strings[trait_idx] if trait_idx is not None else None)
+    if op == "callmethodkw":
+        recv, name_idx, args, kwnames, trait_idx = a
+        return (
+            "callmethodkw",
+            recv,
+            strings[name_idx],
+            args,
+            tuple(strings[i] for i in kwnames),
+            strings[trait_idx] if trait_idx is not None else None,
+        )
     if op == "defmethod":
         closure_addr, type_idx, trait_idx, name_idx, is_method = a
         return (
@@ -194,6 +305,9 @@ def _link_instr(instr, strings: list, constants: list, types: list, natives: lis
         )
     if op == "detach":
         return ("detach", a[0], a[1], a[2])
+    if op == "detachkw":
+        callee, arg_addrs, kwnames, dest = a
+        return ("detachkw", callee, arg_addrs, tuple(strings[i] for i in kwnames), dest)
     if op == "detachmethod":
         recv, name_idx, args, trait_idx, dest = a
         return (
@@ -201,6 +315,17 @@ def _link_instr(instr, strings: list, constants: list, types: list, natives: lis
             recv,
             strings[name_idx],
             args,
+            strings[trait_idx] if trait_idx is not None else None,
+            dest,
+        )
+    if op == "detachmethodkw":
+        recv, name_idx, args, kwnames, trait_idx, dest = a
+        return (
+            "detachmethodkw",
+            recv,
+            strings[name_idx],
+            args,
+            tuple(strings[i] for i in kwnames),
             strings[trait_idx] if trait_idx is not None else None,
             dest,
         )
@@ -256,7 +381,15 @@ def _link(program: Program) -> LinkedProgram:
     types = _build_types(program.types, strings)
     natives = _validate_natives(program.natives, strings)
     functions = [
-        FunctionInfo(fn.entry, fn.slot_count, fn.param_count, strings[fn.name] if fn.name is not None else None)
+        FunctionInfo(
+            fn.entry,
+            fn.slot_count,
+            fn.param_count,
+            strings[fn.name] if fn.name is not None else None,
+            [(strings[name_idx], has_default) for name_idx, has_default in fn.params]
+            if fn.params is not None
+            else None,
+        )
         for fn in program.functions
     ]
     code = [_link_instr(instr, strings, constants, types, natives, functions) for instr in program.code]
@@ -455,24 +588,6 @@ def _execute(linked: LinkedProgram) -> None:
             )
         return fn, True
 
-    def method_call_args(recv, fn, include_self: bool, name: str, arg_addrs, frame: Frame):
-        args = ([recv] if include_self else []) + [_read(frame, a) for a in arg_addrs]
-        if isinstance(fn, Closure) and len(args) != fn.param_count:
-            if include_self:
-                raise MahRuntimeError(
-                    f"Argument Count is invalid. method '{name}' accepts {fn.param_count - 1} "
-                    f"arguments but {len(args) - 1} was given"
-                )
-            raise MahRuntimeError(
-                f"Argument Count is invalid. '{name}' accepts {fn.param_count} arguments but "
-                f"{len(args)} was given"
-            )
-        if not isinstance(fn, Closure) and len(args) != 1:
-            raise MahRuntimeError(
-                f"Argument Count is invalid. method '{name}' accepts 0 arguments but {len(args) - 1} was given"
-            )
-        return args
-
     def spawn_detached(closure: Closure, arg_values: list):
         new_frame = Frame(slots=[NONE_VALUE] * closure.slot_count, static_parent=closure.defining_frame)
         for i, v in enumerate(arg_values):
@@ -483,14 +598,10 @@ def _execute(linked: LinkedProgram) -> None:
         return promise
 
     def invoke_sync(closure: Closure, arg_values: list, label: str):
-        if len(arg_values) != closure.param_count:
-            call_label = f"'{closure.name}'" if closure.name else "function"
-            raise MahRuntimeError(
-                f"Argument Count is invalid. {call_label} accepts {closure.param_count} arguments "
-                f"but {len(arg_values)} was given"
-            )
+        call_label = f"'{closure.name}'" if closure.name else "function"
+        bound = _bind_params(closure.param_count, closure.params, arg_values, [], call_label)
         frame = Frame(slots=[NONE_VALUE] * closure.slot_count, static_parent=closure.defining_frame)
-        for i, v in enumerate(arg_values):
+        for i, v in enumerate(bound):
             frame.slots[i] = v
         sub_task = Task(pc=closure.code_address, current_frame=frame)
         status, value = step_task(sub_task)
@@ -646,20 +757,36 @@ def _execute(linked: LinkedProgram) -> None:
                 _write(
                     frame,
                     dest,
-                    Closure(function_info.entry, frame, function_info.slot_count, function_info.param_count, function_info.name),
+                    Closure(
+                        function_info.entry,
+                        frame,
+                        function_info.slot_count,
+                        function_info.param_count,
+                        function_info.name,
+                        function_info.params,
+                    ),
                 )
             case ("call", callee_addr, arg_addrs):
                 closure = _read(frame, callee_addr)
                 if not isinstance(closure, Closure):
                     raise MahRuntimeError(f"Tried to call a non-function value ({type_name_of(closure)})")
-                if len(arg_addrs) != closure.param_count:
-                    label = f"'{closure.name}'" if closure.name else "function"
-                    raise MahRuntimeError(
-                        f"Argument Count is invalid. {label} accepts {closure.param_count} arguments "
-                        f"but {len(arg_addrs)} was given"
-                    )
-                arg_values = [_read(frame, a) for a in arg_addrs]
-                enter_closure(task, closure, arg_values)
+                label = f"'{closure.name}'" if closure.name else "function"
+                values = [_read(frame, a) for a in arg_addrs]
+                bound = _bind_params(closure.param_count, closure.params, values, [], label)
+                enter_closure(task, closure, bound)
+            case ("callkw", callee_addr, arg_addrs, kwnames):
+                closure = _read(frame, callee_addr)
+                if not isinstance(closure, Closure):
+                    raise MahRuntimeError(f"Tried to call a non-function value ({type_name_of(closure)})")
+                label = f"'{closure.name}'" if closure.name else "function"
+                npos = len(arg_addrs) - len(kwnames)
+                values = [_read(frame, a) for a in arg_addrs[:npos]]
+                kwargs = [(kwnames[j], _read(frame, arg_addrs[npos + j])) for j in range(len(kwnames))]
+                bound = _bind_params(closure.param_count, closure.params, values, kwargs, label)
+                enter_closure(task, closure, bound)
+            case ("jmpset", param_addr, target):
+                if _read(frame, param_addr) is not ABSENT:
+                    task.pc = target
             case ("ret", value_addr):
                 return_register = _read(frame, value_addr)
                 if not task.return_stack:
@@ -671,14 +798,20 @@ def _execute(linked: LinkedProgram) -> None:
                 closure = _read(frame, callee_addr)
                 if not isinstance(closure, Closure):
                     raise MahRuntimeError(f"Tried to detach a non-function value ({type_name_of(closure)})")
-                if len(arg_addrs) != closure.param_count:
-                    label = f"'{closure.name}'" if closure.name else "function"
-                    raise MahRuntimeError(
-                        f"Argument Count is invalid. {label} accepts {closure.param_count} arguments "
-                        f"but {len(arg_addrs)} was given"
-                    )
-                arg_values = [_read(frame, a) for a in arg_addrs]
-                _write(frame, dest, spawn_detached(closure, arg_values))
+                label = f"'{closure.name}'" if closure.name else "function"
+                values = [_read(frame, a) for a in arg_addrs]
+                bound = _bind_params(closure.param_count, closure.params, values, [], label)
+                _write(frame, dest, spawn_detached(closure, bound))
+            case ("detachkw", callee_addr, arg_addrs, kwnames, dest):
+                closure = _read(frame, callee_addr)
+                if not isinstance(closure, Closure):
+                    raise MahRuntimeError(f"Tried to detach a non-function value ({type_name_of(closure)})")
+                label = f"'{closure.name}'" if closure.name else "function"
+                npos = len(arg_addrs) - len(kwnames)
+                values = [_read(frame, a) for a in arg_addrs[:npos]]
+                kwargs = [(kwnames[j], _read(frame, arg_addrs[npos + j])) for j in range(len(kwnames))]
+                bound = _bind_params(closure.param_count, closure.params, values, kwargs, label)
+                _write(frame, dest, spawn_detached(closure, bound))
             case ("await", promise_addr, dest):
                 value = _read(frame, promise_addr)
                 if not isinstance(value, PromiseInstance):
@@ -751,20 +884,46 @@ def _execute(linked: LinkedProgram) -> None:
             case ("callmethod", recv_addr, name, arg_addrs, trait):
                 recv = _read(frame, recv_addr)
                 fn, include_self = find_method(recv, name, trait)
-                args = method_call_args(recv, fn, include_self, name, arg_addrs, frame)
+                values = [_read(frame, a) for a in arg_addrs]
+                bound = _bind_method_call(recv, fn, include_self, name, values, [])
                 if isinstance(fn, Closure):
-                    enter_closure(task, fn, args)
+                    enter_closure(task, fn, bound)
                 else:
-                    return_register = fn(*args)
+                    return_register = fn(*bound)
+            case ("callmethodkw", recv_addr, name, arg_addrs, kwnames, trait):
+                recv = _read(frame, recv_addr)
+                fn, include_self = find_method(recv, name, trait)
+                npos = len(arg_addrs) - len(kwnames)
+                values = [_read(frame, a) for a in arg_addrs[:npos]]
+                kwargs = [(kwnames[j], _read(frame, arg_addrs[npos + j])) for j in range(len(kwnames))]
+                bound = _bind_method_call(recv, fn, include_self, name, values, kwargs)
+                if isinstance(fn, Closure):
+                    enter_closure(task, fn, bound)
+                else:
+                    return_register = fn(*bound)
             case ("detachmethod", recv_addr, name, arg_addrs, trait, dest):
                 recv = _read(frame, recv_addr)
                 fn, include_self = find_method(recv, name, trait)
-                args = method_call_args(recv, fn, include_self, name, arg_addrs, frame)
+                values = [_read(frame, a) for a in arg_addrs]
+                bound = _bind_method_call(recv, fn, include_self, name, values, [])
                 if isinstance(fn, Closure):
-                    promise = spawn_detached(fn, args)
+                    promise = spawn_detached(fn, bound)
                 else:
                     promise = PromiseInstance()
-                    promise.resolve(fn(*args))
+                    promise.resolve(fn(*bound))
+                _write(frame, dest, promise)
+            case ("detachmethodkw", recv_addr, name, arg_addrs, kwnames, trait, dest):
+                recv = _read(frame, recv_addr)
+                fn, include_self = find_method(recv, name, trait)
+                npos = len(arg_addrs) - len(kwnames)
+                values = [_read(frame, a) for a in arg_addrs[:npos]]
+                kwargs = [(kwnames[j], _read(frame, arg_addrs[npos + j])) for j in range(len(kwnames))]
+                bound = _bind_method_call(recv, fn, include_self, name, values, kwargs)
+                if isinstance(fn, Closure):
+                    promise = spawn_detached(fn, bound)
+                else:
+                    promise = PromiseInstance()
+                    promise.resolve(fn(*bound))
                 _write(frame, dest, promise)
             case ("native", impl, arg_addrs, dest):
                 args = [_read(frame, a) for a in arg_addrs]

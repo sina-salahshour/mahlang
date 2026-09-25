@@ -146,6 +146,11 @@ class Call:
     callee: object  # an expression, in practice always an Ident
     args: list
     position: int
+    # M16: keyword arguments (`name: expr`), in source order, after every
+    # positional arg -- list[tuple[str, object, int]] (name, value_expr,
+    # the NAME token's own position, for error messages/LSP). Empty for an
+    # ordinary all-positional call.
+    kwargs: list = field(default_factory=list, repr=False)
 
 
 @dataclass
@@ -337,6 +342,10 @@ class ExprStmt:
 class PrintStmt:
     args: list
     position: int
+    # M16: keyword-only options -- expressions, or `None` when not written
+    # (codegen substitutes the default: `" "` for sep, `"\n"` for end).
+    sep: Optional[object] = field(default=None, repr=False)
+    end: Optional[object] = field(default=None, repr=False)
 
 
 @dataclass
@@ -412,6 +421,11 @@ class FnExpr:
     # set by Resolver: the resolve.FrameLevel for this function's body --
     # codegen.py continues allocating temp slots from this same object.
     frame_level: object = field(default=None, repr=False)
+    # M16: parallel to `params` -- each entry is the default-value
+    # expression for that parameter, or `None` if it has none. Set by the
+    # parser (`_parse_param_list`); once a parameter has a default, every
+    # later one must too (resolve.py enforces this).
+    defaults: list = field(default_factory=list, repr=False)
 
 
 @dataclass
@@ -446,6 +460,10 @@ class MethodDecl:
     # set by Resolver: hidden global-frame slot holding this fn's Closure
     # (only when `fn` is not None)
     slot: Optional[int] = field(default=None, repr=False)
+    # M16: parallel to `params`, set by the parser -- see `FnExpr.defaults`.
+    # Recorded even for a bodyless (required) trait method (`fn is None`) so
+    # the resolver can reject a default there with a clean message.
+    defaults: list = field(default_factory=list, repr=False)
 
     @property
     def is_method(self) -> bool:
@@ -488,6 +506,8 @@ class MethodCall:
     method: str
     args: list
     position: int  # the method-name token's position
+    # M16: keyword arguments -- see `Call.kwargs`'s docstring.
+    kwargs: list = field(default_factory=list, repr=False)
     # set by Resolver (at most one of these two is set):
     # static_address: `Type.fn(args)` resolved at compile time to the hidden
     #   global slot of that impl fn -> compiled as an ordinary `call`.

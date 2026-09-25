@@ -127,6 +127,20 @@
 (struct_pattern name: (identifier) @property)
 (enum_pattern name: (identifier) @property)
 
+; Keyword arguments at call sites: `name: value` (`area(w: 2, h: 5)`,
+; `r.scaled(k: 3, add: 1)`, `print("a", sep: ", ")`,
+; `detach slow(ms: 1, v: 7)`). Named like a parameter, not a property --
+; it's naming a callee's formal parameter from the caller's side, the
+; mirror image of `param`'s own `name` field below.
+(keyword_argument name: (identifier) @variable.parameter)
+
+; Declared parameter names (`fn area(w, h = 1, scale = 1) { ... }`) -- every
+; `param`, whether or not it carries a default value, so a defaulted
+; parameter's name highlights identically to an ordinary one (the `default`
+; field, when present, is an ordinary `$.expr` and highlights generically
+; through the rules already above/below, same as any other expression).
+(param name: (identifier) @variable.parameter)
+
 ; Function names -- declarations and call sites.
 (fn_stmt name: (identifier) @function)
 (fn_expr name: (identifier) @function)

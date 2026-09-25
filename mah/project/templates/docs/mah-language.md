@@ -72,7 +72,7 @@ one level, and `%` shares a level with `+`/`-`.
 
 | call | meaning |
 |---|---|
-| `print(a, b, ...)` | prints each argument **on its own line** |
+| `print(a, b, ..., sep: " ", end: "\n")` | prints the arguments separated by `sep` (default: a space), then `end` (default: a newline). `print()` prints just a newline |
 | `input()` | reads an integer from stdin (skips non-digits until one) |
 | `sin(x)`, `cos(x)` | radians |
 | `sleep_async(ms)` | pauses (see Async) |
@@ -119,7 +119,35 @@ c()
 print(c())                          # 2
 ```
 
-- Recursion works. The number of arguments must match exactly.
+- Recursion works.
+
+### Default values and keyword arguments
+
+```mah
+fn area(w, h = 1, scale = 1) { w * h * scale }
+print(area(2))                  # 2
+print(area(2, 3))               # 6
+print(area(2, scale: 3))        # 6    keyword argument: `name: value`
+print(area(h: 5, w: 2))         # 10   any parameter can be passed by keyword
+
+fn greet(name, greeting = "Hello, " + name) { greeting }   # defaults can use earlier parameters
+print(greet("mah"))             # Hello, mah
+
+print("a", "b", sep: ", ", end: "!\n")   # a, b!
+print("no newline", end: "")
+```
+
+- Parameters with defaults must come after the ones without.
+- A default is evaluated **on every call** that doesn't pass that argument,
+  so `fn f(b = B { n: 0 })` gets a fresh struct each time.
+- At a call site, positional arguments come first, then `name: value`
+  pairs. Passing an unknown keyword, the same parameter twice, too many
+  arguments, or leaving out a parameter without a default is a runtime
+  error.
+- Works the same for methods (`r.scaled(k: 3)`, `Rect.new(w: 2)`) and
+  detached calls (`detach fetch(url: u)`). `self` can't have a default, and
+  a trait's required (bodyless) methods can't declare defaults (put them on
+  the impl).
 - A top-level `fn` can only call functions **declared above it** (except
   inside `impl` blocks, see Traits).
 
@@ -286,5 +314,6 @@ before anything runs.
 - String methods (`len`, `split`, `replace`, ...), string indexing.
 - `<=`, `>=`, `!`, `&&`, `||`, `+=`, `++`, ternary `?:`.
 - Type annotations, generics, classes/inheritance, exceptions/`try`.
+- Variadic parameters (`*args`, `**kwargs`); only `print` takes any number of arguments.
 - File, network, or OS access (planned as future built-ins).
 - `null`/`nil`/`undefined`: use `none`.

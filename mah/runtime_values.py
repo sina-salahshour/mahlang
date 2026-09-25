@@ -43,14 +43,20 @@ class Frame:
 
 
 class Closure:
-    __slots__ = ("code_address", "defining_frame", "slot_count", "param_count", "name")
+    __slots__ = ("code_address", "defining_frame", "slot_count", "param_count", "name", "params")
 
-    def __init__(self, code_address, defining_frame, slot_count, param_count, name=None):
+    def __init__(self, code_address, defining_frame, slot_count, param_count, name=None, params=None):
         self.code_address = code_address
         self.defining_frame = defining_frame
         self.slot_count = slot_count
         self.param_count = param_count
         self.name = name
+        # M16: parallel to param slots 0..param_count-1 -- list[tuple[str,
+        # bool]] (parameter name, has_default), or `None` for a function
+        # from a 1.0 file (no PARAMS section: every parameter unnamed and
+        # required) -- see docs/MAHC_FORMAT.md #4.5a/#6.1 and
+        # code_interpreter.py's `_bind_params`.
+        self.params = params
 
 
 class StructInstance:

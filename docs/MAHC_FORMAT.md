@@ -1,4 +1,4 @@
-# The `.mahc` bytecode format (version 1.0)
+# The `.mahc` bytecode format (version 1.1)
 
 `mah build prog.mh` compiles a program (its entry file plus everything it
 imports) into a single `.mahc` file; `mah runc prog.mahc` runs one. This
@@ -43,7 +43,7 @@ recommended.
 ```
 magic      bytes(4)  = 0x4D 0x41 0x48 0x43   ("MAHC")
 major      u16       = 1
-minor      u16       = 0
+minor      u16       = 1          (0 for a 1.0 file; see §7)
 sections   (id u8, length varuint, payload bytes(length))*   until end of file
 ```
 
@@ -51,10 +51,12 @@ sections   (id u8, length varuint, payload bytes(length))*   until end of file
   implements, and **should** reject one whose `minor` is greater than the
   one it implements (it may use opcodes/natives the VM doesn't know). An
   encoder writes the lowest minor version whose features it uses.
-- **Required sections**, ids `0x01`–`0x06`, each present exactly once and
-  in increasing id order: STRINGS, CONSTANTS, TYPES, NATIVES, FUNCTIONS,
-  CODE.
-- Ids `0x07`–`0x7F` are reserved for future *required* sections: a VM
+- **Required sections**, each present exactly once and in increasing id
+  order: STRINGS (`0x01`), CONSTANTS (`0x02`), TYPES (`0x03`), NATIVES
+  (`0x04`), FUNCTIONS (`0x05`), CODE (`0x06`), and — in files with minor ≥ 1
+  only — PARAMS (`0x07`). A 1.0 file **must not** contain PARAMS; a 1.1 file
+  **must**.
+- Ids `0x08`–`0x7F` are reserved for future *required* sections: a VM
   **must** reject a file containing one it doesn't know.
 - Ids `0x80`–`0xFF` are *optional* sections, allowed after CODE in any
   order: a VM **must** skip ones it doesn't know (using `length`). `0x80` is
@@ -131,6 +133,7 @@ Version 1.0 defines:
 | name | arity | behavior |
 |---|---|---|
 | `io.print` | 1 | writes `to_string(v)` (§6.6) followed by `\n` to standard output; returns `none` |
+| `io.write` | 1 | *(1.1)* writes `to_string(v)` (§6.6) to standard output with **no** newline; returns `none` |
 | `io.input` | 0 | reads characters from standard input: skips characters until the first ASCII digit, then consumes digits up to and including the first non-digit (or end of input); returns that Number. End of input before any digit is a runtime error. |
 | `math.sin` | 1 | sine of a Number (radians); the result is computed in IEEE-754 double precision and converted to Number via its shortest round-trip decimal text |
 | `math.cos` | 1 | cosine, same rules |
@@ -155,6 +158,18 @@ program**: entry `0`, `param_count` `0`, and its `slot_count` is the size of
 the global frame. `name` is used only to print function values and in error
 messages.
 
+### 4.5a PARAMS (`0x07`, required from 1.1)
+```
+for each function, in FUNCTIONS order:
+  nparams varuint                  (must equal that function's param_count)
+  nparams × (name str, flags u8)   flags bit 0 = the parameter has a default;
+                                   all other bits must be 0
+```
+Parameter names are needed to bind keyword arguments, and default flags to
+know which parameters may be left unbound (§6.1). Function 0 has 0
+parameters. In a 1.0 file (no PARAMS), parameters are unnamed and have no
+defaults.
+
 ### 4.6 CODE (`0x06`)
 ```
 count varuint
@@ -169,6 +184,7 @@ these indices. Operand kinds:
 | `A` | `depth varuint, slot varuint` | a frame slot: start at the current frame, follow `static_parent` `depth` times, take slot `slot` |
 | `A?` | `varuint d`; if `d > 0`, then `slot varuint` (depth = `d-1`) | optional address |
 | `A*` | `count varuint, count × A` | address list |
+| `S*` | `count varuint, count × str` | *(1.1)* string list (keyword-argument names) |
 | `K` | `varuint` | constant index |
 | `S` / `S?` | `str` / `str?` | string index |
 | `L` | `varuint` | instruction index (jump target) |
@@ -187,6 +203,7 @@ Opcodes (semantics in §6):
 | `0x02` | `loadk` | const `K`, dest `A` |
 | `0x03` | `jmp` | target `L` |
 | `0x04` | `jmpf` | cond `A`, target `L` |
+| `0x05` | `jmpset` *(1.1)* | param `A`, target `L` |
 | `0x10` | `add` | a `A`, b `A`, dest `A` |
 | `0x11` | `sub` | a, b, dest |
 | `0x12` | `mul` | a, b, dest |
@@ -207,9 +224,13 @@ Opcodes (semantics in §6):
 | `0x23` | `retval` | dest `A` |
 | `0x24` | `callmethod` | recv `A`, name `S`, args `A*`, trait `S?` |
 | `0x25` | `defmethod` | closure `A`, type_name `S`, trait `S?`, name `S`, is_method `B` |
+| `0x26` | `callkw` *(1.1)* | callee `A`, args `A*`, kwnames `S*` |
+| `0x27` | `callmethodkw` *(1.1)* | recv `A`, name `S`, args `A*`, kwnames `S*`, trait `S?` |
 | `0x28` | `detach` | callee `A`, args `A*`, dest `A` |
 | `0x29` | `detachmethod` | recv `A`, name `S`, args `A*`, trait `S?`, dest `A` |
 | `0x2A` | `await` | promise `A`, dest `A` |
+| `0x2B` | `detachkw` *(1.1)* | callee `A`, args `A*`, kwnames `S*`, dest `A` |
+| `0x2C` | `detachmethodkw` *(1.1)* | recv `A`, name `S`, args `A*`, kwnames `S*`, trait `S?`, dest `A` |
 | `0x30` | `struct` | type `T`, values `A*` (declaration order), dest `A` |
 | `0x31` | `enum` | type `T`, variant `N`, values `A*` (declaration order), dest `A` |
 | `0x32` | `getfield` | obj `A`, field `S`, dest `A` |
@@ -224,7 +245,12 @@ Opcodes (semantics in §6):
 | `0x44` | `deferscopepop` | — |
 | `0x50` | `native` | fn `X`, args `A*`, dest `A?` |
 
-All other opcode values are reserved. `native`'s `args` count **must**
+All other opcode values are reserved. Opcodes, operand kinds, and natives
+marked *(1.1)* **must not** appear in a file whose minor version is 0.
+
+In the `*kw` opcodes, `kwnames` names the **last** `len(kwnames)` entries
+of `args`, in order; the entries before them are positional. `len(kwnames)
+≤ len(args)`, and the names are distinct (validated at load). `native`'s `args` count **must**
 equal the native's declared arity (validated at load). `struct`/`enum`'s
 `values` count **must** equal the type's/variant's field count.
 
@@ -274,17 +300,43 @@ the empty String are falsy; every other value is truthy.
   parent) and task 0 at pc `0`. Each step fetches the instruction at `pc`,
   increments `pc`, then executes.
 - `closure fn dest`: `dest ← Function(fn, current frame)`.
-- `call callee args`: `callee` must hold a Function whose `param_count`
-  equals the number of args (else runtime error). Create a frame of the
-  function's `slot_count` with `static_parent` = the closure's defining
-  frame, copy the argument values into slots `0..n-1`, push
-  `(pc, current frame)`, make the new frame current, and jump to the
+- `call callee args` / `callkw callee args kwnames`: `callee` must hold a
+  Function (else runtime error). Create a frame of the function's
+  `slot_count` with `static_parent` = the closure's defining frame,
+  **bind the arguments** into its parameter slots `0..param_count-1` (below),
+  push `(pc, current frame)`, make the new frame current, and jump to the
   function's `entry`.
+- **Argument binding.** Given the function's parameters `p0..p(n-1)` (names
+  and default flags from PARAMS), the positional values `v0..v(m-1)` and the
+  keyword pairs `(k, w)`:
+  1. `m > n` → runtime error (too many positional arguments).
+  2. Slot `i ← v_i` for every `i < m`.
+  3. For each keyword pair in order: find the parameter named `k`; none →
+     runtime error (unexpected keyword argument); already bound (by position
+     or an earlier keyword) → runtime error (multiple values); otherwise bind
+     it to `w`.
+  4. Every parameter still unbound: if it has a default, its slot holds the
+     **absent** marker; otherwise → runtime error (missing required
+     argument).
+  Encoders emit, at the start of the function body, one `jmpset` per
+  defaulted parameter that skips that parameter's default computation when
+  the parameter was bound, so the absent marker is never observed by
+  anything else. A default is therefore evaluated at call time, inside the
+  callee's frame, in parameter order. Reference error messages: with no
+  keyword arguments involved and no defaulted parameters,
+  `Argument Count is invalid. 'f' accepts N arguments but M was given`
+  (`function` for an anonymous one); otherwise `'f' takes at most N
+  positional arguments but M were given`, `'f' got an unexpected keyword
+  argument 'k'`, `'f' got multiple values for argument 'k'`, and
+  `'f' is missing required argument 'p'`. For method calls the counts
+  exclude the receiver and the label is `method 'f'`.
+- `jmpset param L`: jump to `L` if `param` (always a slot of the current
+  frame) holds a bound value, i.e. anything but the absent marker.
 - `ret value`: return register ← value. If the task's return stack is empty,
   the task finishes with that value; otherwise pop `(pc, frame)` and
   continue there.
 - `retval dest`: `dest ← return register`. Encoders emit it immediately
-  after every `call`/`callmethod`.
+  after every `call`/`callkw`/`callmethod`/`callmethodkw`.
 - `halt`: the task finishes with `none` (ends the main program's top-level
   code).
 
@@ -329,16 +381,19 @@ Single-threaded cooperative scheduling:
   continuations. Resolving an already-settled promise does nothing;
   resolving a pending one sets it to `Settled { value }` and then runs its
   waiting continuations **synchronously, in registration order**.
-- `detach callee args dest`: arity-check like `call`; create a new pending
-  Promise `p` and a new task whose frame is set up like `call` (empty
+- `detach callee args dest` / `detachkw callee args kwnames dest`: bind
+  arguments like `call`/`callkw` (errors happen here, in the calling task);
+  create a new pending Promise `p` and a new task whose frame is set up
+  like `call` (empty
   return stack), with `p` as the promise it resolves when finished. **Run
   the new task immediately**, until it finishes (then resolve `p` with its
   result) or suspends. Then `dest ← p` and the calling task continues.
-- `detachmethod recv name args trait dest`: method lookup exactly like
-  `callmethod` (§6.7), then like `detach` with the resolved function and the
-  argument list including `recv` when it's a method call. If the target is
-  a native method, call it and `dest ←` a Promise already settled with its
-  result.
+- `detachmethod recv name args trait dest` / `detachmethodkw ...`: method
+  lookup exactly like `callmethod` (§6.7), then like `detach`/`detachkw`
+  with the resolved function and the argument list including `recv` when
+  it's a method call. If the target is a native method, call it and `dest ←`
+  a Promise already settled with its result (keyword arguments to a native
+  method → runtime error, unexpected keyword argument).
 - `await p dest`: `p` must be a Promise (else runtime error). If settled,
   `dest ← value`. Otherwise the current task **suspends**: register a
   continuation on `p` that writes the value to `dest` and resumes the task
@@ -397,7 +452,9 @@ name. A target is (function value or native, `is_method`).
 - `defmethod c type trait name is_method`: set the inherent target
   (`trait` absent) or that trait's target to (`c`, `is_method`). Encoders
   emit all `defmethod`s before any user code runs.
-- `callmethod recv name args trait` — lookup, with `T` = type name of `recv`:
+- `callmethod recv name args trait` (and `callmethodkw recv name args
+  kwnames trait`, identical except that the arguments carry keywords) —
+  lookup, with `T` = type name of `recv`:
   1. `trait` present: the target for that trait, or a runtime error
      "'T' does not implement trait ...".
   2. otherwise the inherent target if any; else the single trait target if
@@ -405,12 +462,15 @@ name. A target is (function value or native, `is_method`).
      (ambiguous).
   3. if (no target, or the target isn't a method) and `trait` is absent and
      `recv` is a struct/enum instance with a field `name`: the field's value
-     must be a Function; call it with exactly `args` (no receiver).
+     must be a Function; call it with exactly `args` (no receiver),
+     binding them like `callkw`.
   4. no target → runtime error "'T' has no method 'name'"; target isn't a
      method → runtime error (static function called as a method).
-  5. otherwise call the target with `recv` followed by `args`. A function
-     target is invoked like `call` (arity counts `recv`); a native target
-     sets the return register directly. Either way, `retval` follows.
+  5. otherwise call the target with `recv` as the first positional argument,
+     followed by `args`. A function target is invoked like `call`/`callkw`
+     (binding counts `recv`); a native target sets the return register
+     directly (keyword arguments → runtime error). Either way, `retval`
+     follows.
 
 ### 6.8 Runtime errors
 Version 1.0 has no error values and no way to catch an error: a runtime
@@ -432,6 +492,11 @@ change for that.
   sections, new built-in types at the next free type indices. A 1.x VM runs any 1.y file with y ≤ x.
 - **Major version**: anything that changes the meaning or encoding of
   existing items.
+- **1.1** (current) added parameter names and defaults (the PARAMS
+  section), keyword-argument calls (`callkw`, `callmethodkw`, `detachkw`,
+  `detachmethodkw`, operand kind `S*`), `jmpset`, and the `io.write`
+  native. A 1.1 VM still runs 1.0 files: without PARAMS, every parameter is
+  unnamed and required, which is exactly 1.0's arity rule.
 - Planned growth, for orientation: arrays (a new value type, an opcode to
   build one, `Iterable`/`Iterator` native trait impls — see
   `docs/TRAITS.md`), string utilities, filesystem, networking, and process
