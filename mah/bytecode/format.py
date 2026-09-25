@@ -1,18 +1,25 @@
-"""Format constants for `.mahc` version 1.1 -- the single source of truth
+"""Format constants for `.mahc` version 1.2 -- the single source of truth
 mirroring docs/MAHC_FORMAT.md. Every other module in this package (and the
 VM, `mah/code_interpreter.py`) imports its constants from here rather than
 hard-coding a section id/opcode/tag number a second time.
 
-M16 bumps MINOR to 1: default parameter values + keyword-argument calls
+M16 bumped MINOR to 1: default parameter values + keyword-argument calls
 (the PARAMS section, `jmpset`, the `*kw` opcodes, operand kind `S*`) and
 the `io.write` native -- see docs/MAHC_FORMAT.md #4.5a/#4.6/#7.
+
+M17 bumps MINOR to 2: `matchrange` (range patterns), the `le`/`ge`/`not`
+operators, and the native inherent methods `String.len`/`String.char_at`/
+`Function.arity` (§6.7) -- see docs/MAHC_FORMAT.md #4.6/#6.3/#6.7/#7.
+Ranges, iterators, and their adapters aren't VM features at all: they're
+ordinary Mah code (the compiler's prelude, `mah/std/prelude.mh`) compiled
+like any user program.
 """
 
 from __future__ import annotations
 
 MAGIC = b"MAHC"
 MAJOR = 1
-MINOR = 1
+MINOR = 2
 
 # -- section ids (docs/MAHC_FORMAT.md #3) -----------------------------------
 SEC_STRINGS = 0x01
@@ -98,6 +105,9 @@ OPCODES: dict[str, tuple[int, tuple[str, ...]]] = {
     "and": (0x1B, ("A", "A", "A")),
     "or": (0x1C, ("A", "A", "A")),
     "neg": (0x1D, ("A", "A")),
+    "le": (0x1E, ("A", "A", "A")),  # M17 (1.2)
+    "ge": (0x1F, ("A", "A", "A")),  # M17 (1.2)
+    "not": (0x0F, ("A", "A")),  # M17 (1.2)
     "closure": (0x20, ("F", "A")),
     "call": (0x21, ("A", "A*")),
     "ret": (0x22, ("A",)),
@@ -118,6 +128,7 @@ OPCODES: dict[str, tuple[int, tuple[str, ...]]] = {
     "matchstruct": (0x34, ("A", "T", "A")),
     "matchenum": (0x35, ("A", "T", "N", "A")),
     "matchfail": (0x36, ()),
+    "matchrange": (0x37, ("A", "A?", "A?", "B", "A")),  # M17 (1.2)
     "deferpush": (0x40, ()),
     "deferadd": (0x41, ("A",)),
     "deferpeek": (0x42, ("A",)),
@@ -139,4 +150,8 @@ OPCODE_SINCE_MINOR: dict[str, int] = {
     "callmethodkw": 1,
     "detachkw": 1,
     "detachmethodkw": 1,
+    "le": 2,
+    "ge": 2,
+    "not": 2,
+    "matchrange": 2,
 }

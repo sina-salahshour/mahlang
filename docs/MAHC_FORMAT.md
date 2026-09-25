@@ -1,4 +1,4 @@
-# The `.mahc` bytecode format (version 1.1)
+# The `.mahc` bytecode format (version 1.2)
 
 `mah build prog.mh` compiles a program (its entry file plus everything it
 imports) into a single `.mahc` file; `mah runc prog.mahc` runs one. This
@@ -43,7 +43,7 @@ recommended.
 ```
 magic      bytes(4)  = 0x4D 0x41 0x48 0x43   ("MAHC")
 major      u16       = 1
-minor      u16       = 1          (0 for a 1.0 file; see §7)
+minor      u16       = 2          (0 or 1 for older files; see §7)
 sections   (id u8, length varuint, payload bytes(length))*   until end of file
 ```
 
@@ -54,8 +54,8 @@ sections   (id u8, length varuint, payload bytes(length))*   until end of file
 - **Required sections**, each present exactly once and in increasing id
   order: STRINGS (`0x01`), CONSTANTS (`0x02`), TYPES (`0x03`), NATIVES
   (`0x04`), FUNCTIONS (`0x05`), CODE (`0x06`), and — in files with minor ≥ 1
-  only — PARAMS (`0x07`). A 1.0 file **must not** contain PARAMS; a 1.1 file
-  **must**.
+  only — PARAMS (`0x07`). A 1.0 file **must not** contain PARAMS; a 1.1 or
+  later file **must**.
 - Ids `0x08`–`0x7F` are reserved for future *required* sections: a VM
   **must** reject a file containing one it doesn't know.
 - Ids `0x80`–`0xFF` are *optional* sections, allowed after CODE in any
@@ -218,6 +218,9 @@ Opcodes (semantics in §6):
 | `0x1B` | `and` | a, b, dest |
 | `0x1C` | `or` | a, b, dest |
 | `0x1D` | `neg` | a `A`, dest `A` |
+| `0x1E` | `le` *(1.2)* | a, b, dest |
+| `0x1F` | `ge` *(1.2)* | a, b, dest |
+| `0x0F` | `not` *(1.2)* | a `A`, dest `A` |
 | `0x20` | `closure` | fn `F`, dest `A` |
 | `0x21` | `call` | callee `A`, args `A*` |
 | `0x22` | `ret` | value `A` |
@@ -238,6 +241,7 @@ Opcodes (semantics in §6):
 | `0x34` | `matchstruct` | value `A`, type `T`, dest `A` |
 | `0x35` | `matchenum` | value `A`, type `T`, variant `N`, dest `A` |
 | `0x36` | `matchfail` | — |
+| `0x37` | `matchrange` *(1.2)* | value `A`, lo `A?`, hi `A?`, inclusive `B`, dest `A` |
 | `0x40` | `deferpush` | — |
 | `0x41` | `deferadd` | closure `A` |
 | `0x42` | `deferpeek` | dest `A` |
@@ -246,7 +250,8 @@ Opcodes (semantics in §6):
 | `0x50` | `native` | fn `X`, args `A*`, dest `A?` |
 
 All other opcode values are reserved. Opcodes, operand kinds, and natives
-marked *(1.1)* **must not** appear in a file whose minor version is 0.
+marked *(1.1)* **must not** appear in a file whose minor version is 0, and
+those marked *(1.2)* not in one whose minor version is below 2.
 
 In the `*kw` opcodes, `kwnames` names the **last** `len(kwnames)` entries
 of `args`, in order; the entries before them are positional. `len(kwnames)
@@ -358,8 +363,10 @@ the empty String are falsy; every other value is truthy.
   value, `none` equals only `none`; every other value (structs, enums
   including `some(..)`, functions, promises) is equal only to itself
   (identity). Values of different types are never equal. Result: Bool.
-- `lt`/`gt`: two Numbers, or two Strings (by Unicode code point
-  sequence); anything else is a runtime error. Result: Bool.
+- `lt`/`gt`, and *(1.2)* `le`/`ge` (≤ / ≥): two Numbers, or two Strings
+  (by Unicode code point sequence); anything else is a runtime error.
+  Result: Bool.
+- `not a dest` *(1.2)*: `dest ←` the Bool `!truthy(a)`.
 - `and`/`or`: both operands are already evaluated (no short-circuit);
   result is the Bool of `truthy(a) && truthy(b)` / `truthy(a) || truthy(b)`.
 
@@ -373,6 +380,12 @@ the empty String are falsy; every other value is truthy.
 - `matchstruct v T dest`: `dest ← (v is an instance of struct T)`.
   `matchenum v T k dest`: `dest ← (v is an instance of enum T, variant k)`.
 - `matchfail`: runtime error "No pattern in 'match' matched the value".
+- `matchrange v lo hi inclusive dest` *(1.2)*: `dest ←` a Bool, true iff
+  `v` and every present bound are all Numbers or all Strings, and (`lo`
+  absent or `lo ≤ v`) and (`hi` absent, or `v < hi`, or `v ≤ hi` when
+  `inclusive` is 1). It never raises: a value of another type simply
+  doesn't match. At least one of `lo`/`hi` is present (validated at load).
+  Strings compare as `lt` does.
 
 ### 6.4 Tasks, promises, and the scheduler
 Single-threaded cooperative scheduling:
@@ -449,6 +462,16 @@ name. A target is (function value or native, `is_method`).
 - Initially: for every built-in type name (`Number`, `String`, `Bool`,
   `Function`, `Option`, `Promise`), a native target for trait `Printable`,
   method `to_string`, `is_method` true, computing §6.6 step 2.
+- Also initially *(1.2)*, native **inherent** methods (all `is_method`
+  true; arguments after the receiver are positional, keyword arguments are
+  a runtime error):
+  | type | method | behavior |
+  |---|---|---|
+  | `String` | `len()` | the number of Unicode code points, as a Number |
+  | `String` | `char_at(i)` | the code point at index `i` (an integer Number, `0 ≤ i < len`) as a one-character String; anything else is a runtime error |
+  | `Function` | `arity()` | the function's `param_count` (including defaulted parameters) |
+  Wrong argument counts give the usual `Argument Count is invalid.
+  method 'NAME' accepts N arguments but M was given`.
 - `defmethod c type trait name is_method`: set the inherent target
   (`trait` absent) or that trait's target to (`c`, `is_method`). Encoders
   emit all `defmethod`s before any user code runs.
@@ -492,11 +515,19 @@ change for that.
   sections, new built-in types at the next free type indices. A 1.x VM runs any 1.y file with y ≤ x.
 - **Major version**: anything that changes the meaning or encoding of
   existing items.
-- **1.1** (current) added parameter names and defaults (the PARAMS
+- **1.1** added parameter names and defaults (the PARAMS
   section), keyword-argument calls (`callkw`, `callmethodkw`, `detachkw`,
   `detachmethodkw`, operand kind `S*`), `jmpset`, and the `io.write`
   native. A 1.1 VM still runs 1.0 files: without PARAMS, every parameter is
   unnamed and required, which is exactly 1.0's arity rule.
+- **1.2** added `matchrange` (range patterns), the `le`/`ge`/`not`
+  operators, and the native inherent
+  methods `String.len`, `String.char_at`, and `Function.arity` (§6.7).
+  Iterators, ranges, and their adapters (`map`, `filter`, `skip`, `take`,
+  `reduce`) aren't VM features at all: they're ordinary Mah code (the
+  compiler's *prelude*, `mah/std/prelude.mh`) compiled into the file like
+  the user's own code, as ordinary TYPES entries, functions, and
+  `defmethod`s. A VM needs nothing beyond the list above to run them.
 - Planned growth, for orientation: arrays (a new value type, an opcode to
   build one, `Iterable`/`Iterator` native trait impls — see
   `docs/TRAITS.md`), string utilities, filesystem, networking, and process

@@ -460,7 +460,7 @@ def get_diagnostics(text: str, path: Optional[str] = None) -> list[dict]:
     # non-forgiving resolve behavior of reporting exactly one error.
     if not parser.errors:
         try:
-            Resolver().resolve_program(program)
+            Resolver(prelude_start=pp.prelude_start).resolve_program(program)
         except SystemExit:
             raise
         except BaseException as error:  # noqa: BLE001 - report the one resolve error
@@ -1147,20 +1147,31 @@ def get_completions(
     # already have -- see `_resolve_for_navigation`'s docstring).
     result = _resolve_for_navigation(text, path)
     if result is not None:
-        _pp, resolver, _tokens = result
+        pp_nav, resolver, _tokens = result
         seen_decls = set()
         for symbol in resolver.position_index.values():
             if symbol.decl_position in seen_decls:
                 continue
             seen_decls.add(symbol.decl_position)
+            # M17: never suggest a prelude-internal name (its own method
+            # params like `f`/`n`/`self`, or any other prelude-declared
+            # variable/function binding) -- the prelude is implementation
+            # detail, not part of the user's own program.
+            if pp_nav.prelude_start is not None and symbol.decl_position >= pp_nav.prelude_start:
+                continue
             items.append(_resolver_symbol_completion_item(symbol))
         for struct_name in resolver.struct_decls:
+            if struct_name.startswith("__"):
+                # M17: prelude-internal helper types (`__Iter`, `__NoInitial`).
+                continue
             items.append({"label": struct_name, "kind": COMPLETION_STRUCT, "detail": "struct"})
         for enum_name in resolver.enum_decls:
             if enum_name in ("Option", "Promise"):
                 # Built-ins: Option is reached via `some`/`none` keywords,
                 # Promise via `detach`/`sleep_async` -- not something users
                 # normally type the bare type name of.
+                continue
+            if enum_name.startswith("__"):
                 continue
             items.append({"label": enum_name, "kind": COMPLETION_ENUM, "detail": "enum"})
 
@@ -1373,7 +1384,7 @@ def _resolve_for_navigation(text: str, path: Optional[str]):
     lexer = Lexer(combined)
     parser = Parser(lexer)
     program = parser.parse_program()
-    resolver = Resolver()
+    resolver = Resolver(prelude_start=pp.prelude_start)
     try:
         resolver.resolve_program(program)
     except Exception:  # noqa: BLE001 - any resolve failure means "no symbol table"
@@ -2005,7 +2016,7 @@ def _rename_variable_cross_file(found, new_name: str, entry_text: str) -> Option
         fprogram = fparser.parse_program()
         if fparser.errors:
             return None
-        fresolver = Resolver()
+        fresolver = Resolver(prelude_start=fpp.prelude_start)
         try:
             fresolver.resolve_program(fprogram)
         except Exception:

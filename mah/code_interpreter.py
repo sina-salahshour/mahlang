@@ -72,6 +72,7 @@ from .runtime_values import (
 _BINOP_SYMBOLS = {
     "add": "+", "sub": "-", "mul": "*", "div": "/",
     "idiv": "//", "mod": "%", "pow": "**", "lt": "<", "gt": ">",
+    "le": "<=", "ge": ">=",  # M17 (1.2)
 }
 
 
@@ -90,6 +91,22 @@ class _Absent:
 
 
 ABSENT = _Absent()
+
+
+class NativeMethod(NamedTuple):
+    """M17: a native (VM-builtin) method-table target that isn't
+    `Printable.to_string` -- i.e. one that may take arguments after the
+    receiver (docs/MAHC_FORMAT.md #6.7: `String.char_at(i)`). `arity` is
+    the argument count EXCLUDING the receiver (0 for `to_string`/`len`/
+    `arity`, 1 for `char_at`); `impl` is a plain Python callable taking the
+    receiver followed by that many positional values. Wrapping every
+    native target this way (even the old arity-0 ones) keeps
+    `_bind_method_call`'s native branch uniform instead of hardcoding
+    \"natives always take zero extra arguments\", which stopped being true
+    the moment `char_at` was added."""
+
+    arity: int
+    impl: object
 
 
 def _bind_params(param_count: int, params, values: list, kwargs: list, label: str) -> list:
@@ -155,16 +172,31 @@ def _bind_method_call(recv, fn, include_self: bool, name: str, values: list, kwa
             bound_rest = _bind_params(fn.param_count - 1, rest_params, values, kwargs, label)
             return [recv] + bound_rest
         return _bind_params(fn.param_count, fn.params, values, kwargs, label)
-    # A native target -- always a system-trait method (`is_method` true),
-    # so `include_self` is always true here; never accepts keyword
-    # arguments (there are no declared parameter names to bind them to).
+    # A native target -- always a system-trait/inherent method (`is_method`
+    # true), so `include_self` is always true here; never accepts keyword
+    # arguments (there are no declared parameter names to bind them to --
+    # docs/MAHC_FORMAT.md #6.7). M17: a native's arity (excluding the
+    # receiver) may be nonzero (`String.char_at`'s `i`), so this validates
+    # against `fn.arity` instead of hardcoding 0.
     if kwargs:
         raise MahRuntimeError(f"{label} got an unexpected keyword argument '{kwargs[0][0]}'")
-    if values:
+    arity = fn.arity if isinstance(fn, NativeMethod) else 0
+    if len(values) != arity:
         raise MahRuntimeError(
-            f"Argument Count is invalid. {label} accepts 0 arguments but {len(values)} was given"
+            f"Argument Count is invalid. {label} accepts {arity} arguments but {len(values)} was given"
         )
-    return [recv]
+    return [recv] + list(values)
+
+
+def _call_native(fn, bound: list):
+    """Invoke a native method-table target (`fn`, from `find_method`, once
+    `isinstance(fn, Closure)` has already been ruled out) -- `fn` is a
+    `NativeMethod(arity, impl)` (M17+) or, for exactly the pre-M17
+    `Printable.to_string` shape kept for backward source-compatibility
+    with any other module still constructing a target tuple by hand, a
+    plain callable taking only the receiver."""
+    impl = fn.impl if isinstance(fn, NativeMethod) else fn
+    return impl(*bound)
 
 
 # ---------------------------------------------------------------------------
@@ -265,10 +297,12 @@ def _link_instr(instr, strings: list, constants: list, types: list, natives: lis
         return ("jmpf", a[0], a[1])
     if op == "jmpset":
         return ("jmpset", a[0], a[1])
-    if op in ("add", "sub", "mul", "div", "idiv", "mod", "pow", "eq", "neq", "lt", "gt", "and", "or"):
+    if op in ("add", "sub", "mul", "div", "idiv", "mod", "pow", "eq", "neq", "lt", "gt", "le", "ge", "and", "or"):
         return (op, a[0], a[1], a[2])
     if op == "neg":
         return ("neg", a[0], a[1])
+    if op == "not":
+        return ("not", a[0], a[1])
     if op == "closure":
         return ("closure", functions[a[0]], a[1])
     if op == "call":
@@ -349,6 +383,9 @@ def _link_instr(instr, strings: list, constants: list, types: list, natives: lis
     if op == "matchenum":
         value, t_idx, variant_idx, dest = a
         return ("matchenum", value, types[t_idx], variant_idx, dest)
+    if op == "matchrange":
+        value, lo, hi, inclusive, dest = a
+        return ("matchrange", value, lo, hi, inclusive, dest)
     if op == "matchfail":
         return ("matchfail",)
     if op == "deferpush":
@@ -438,10 +475,49 @@ def _values_equal(a: Any, b: Any) -> bool:
     return a is b
 
 
+def _matchrange(val: Any, lo: Any, hi: Any, inclusive: bool) -> bool:
+    """docs/MAHC_FORMAT.md #6.3: `matchrange` -- true iff `val` and every
+    PRESENT bound (`lo`/`hi` is the Python `None` "absent" marker set by
+    `_decode_operand`'s `A?` kind, never a real Mah value -- a genuine Mah
+    `none` is `runtime_values.NONE_VALUE`, a distinct object) are all
+    Numbers or all Strings, and `lo` absent or `lo <= val`, and `hi`
+    absent, or `val < hi`, or `val <= hi` when `inclusive`. Never raises: a
+    value of another type (or a type mismatch against a bound) simply
+    doesn't match."""
+    if _is_number(val):
+        kind_ok = _is_number
+    elif isinstance(val, str):
+        kind_ok = lambda v: isinstance(v, str)  # noqa: E731
+    else:
+        return False
+    if lo is not None and not kind_ok(lo):
+        return False
+    if hi is not None and not kind_ok(hi):
+        return False
+    if lo is not None and not (lo <= val):
+        return False
+    if hi is not None:
+        if inclusive:
+            return val <= hi
+        return val < hi
+    return True
+
+
 def _format_number(v: Decimal) -> str:
     if v == v.to_integral_value():
         return str(int(v))
     return format(v.normalize(), "f")
+
+
+def _string_char_at(s: str, i: Any) -> str:
+    """M17: `String.char_at(i)` -- docs/MAHC_FORMAT.md #6.7. Unicode code
+    points, one per index (Python `str` indexing already is code-point
+    based) -- `0 <= i < len(s)`, `i` an integer Number."""
+    if not _is_number(i):
+        raise MahRuntimeError(f"char_at index must be a Number, got {type_name_of(i)}")
+    if i != i.to_integral_value() or i < 0 or i >= len(s):
+        raise MahRuntimeError(f"char_at index {_format_number(i)} is out of range for a String of length {len(s)}")
+    return s[int(i)]
 
 
 def _format_value(val: Any, recurse) -> str:
@@ -541,7 +617,21 @@ def _execute(linked: LinkedProgram) -> None:
     for builtin_type in BUILTIN_TYPE_NAMES:
         method_table.setdefault((builtin_type, "to_string"), {"inherent": None, "traits": {}})["traits"][
             "Printable"
-        ] = (lambda v: to_str(v), True)
+        ] = (NativeMethod(0, lambda v: to_str(v)), True)
+    # M17: native INHERENT methods (docs/MAHC_FORMAT.md #6.7) -- unlike
+    # to_string above, these have no trait behind them at all.
+    method_table.setdefault(("String", "len"), {"inherent": None, "traits": {}})["inherent"] = (
+        NativeMethod(0, lambda s: Decimal(len(s))),
+        True,
+    )
+    method_table.setdefault(("String", "char_at"), {"inherent": None, "traits": {}})["inherent"] = (
+        NativeMethod(1, lambda s, i: _string_char_at(s, i)),
+        True,
+    )
+    method_table.setdefault(("Function", "arity"), {"inherent": None, "traits": {}})["inherent"] = (
+        NativeMethod(0, lambda fn: Decimal(fn.param_count)),
+        True,
+    )
 
     ctx = NativeContext(to_string=lambda v: to_str(v), schedule_timer=lambda secs, p: schedule_timer(secs, p))
 
@@ -677,10 +767,14 @@ def _execute(linked: LinkedProgram) -> None:
         raise AssertionError(op)
 
     def _compare(op: str, a, b):
-        if _is_number(a) and _is_number(b):
-            return a < b if op == "lt" else a > b
-        if isinstance(a, str) and isinstance(b, str):
-            return a < b if op == "lt" else a > b
+        if (_is_number(a) and _is_number(b)) or (isinstance(a, str) and isinstance(b, str)):
+            if op == "lt":
+                return a < b
+            if op == "gt":
+                return a > b
+            if op == "le":
+                return a <= b
+            return a >= b  # "ge"
         raise MahRuntimeError(f"Cannot compare {type_name_of(a)} and {type_name_of(b)} with '{_BINOP_SYMBOLS[op]}'")
 
     def step_task(task: Task):
@@ -742,7 +836,7 @@ def _execute(linked: LinkedProgram) -> None:
                 _write(frame, dest, _values_equal(_read(frame, a_addr), _read(frame, b_addr)))
             case ("neq", a_addr, b_addr, dest):
                 _write(frame, dest, not _values_equal(_read(frame, a_addr), _read(frame, b_addr)))
-            case ("lt" | "gt" as op, a_addr, b_addr, dest):
+            case ("lt" | "gt" | "le" | "ge" as op, a_addr, b_addr, dest):
                 _write(frame, dest, _compare(op, _read(frame, a_addr), _read(frame, b_addr)))
             case ("and", a_addr, b_addr, dest):
                 _write(frame, dest, bool(truthy(_read(frame, a_addr)) and truthy(_read(frame, b_addr))))
@@ -753,6 +847,8 @@ def _execute(linked: LinkedProgram) -> None:
                 if not _is_number(v):
                     raise MahRuntimeError(f"Cannot negate {type_name_of(v)}")
                 _write(frame, dest, -v)
+            case ("not", a_addr, dest):
+                _write(frame, dest, bool(not truthy(_read(frame, a_addr))))
             case ("closure", function_info, dest):
                 _write(
                     frame,
@@ -862,6 +958,11 @@ def _execute(linked: LinkedProgram) -> None:
                     frame, dest,
                     isinstance(val, EnumInstance) and val.type_name == type_info.name and val.variant == variant_name,
                 )
+            case ("matchrange", value_addr, lo_addr, hi_addr, inclusive, dest):
+                val = _read(frame, value_addr)
+                lo = _read(frame, lo_addr) if lo_addr is not None else None
+                hi = _read(frame, hi_addr) if hi_addr is not None else None
+                _write(frame, dest, _matchrange(val, lo, hi, inclusive))
             case ("matchfail",):
                 raise MahRuntimeError("No pattern in 'match' matched the value")
             case ("deferpush",):
@@ -889,7 +990,7 @@ def _execute(linked: LinkedProgram) -> None:
                 if isinstance(fn, Closure):
                     enter_closure(task, fn, bound)
                 else:
-                    return_register = fn(*bound)
+                    return_register = _call_native(fn, bound)
             case ("callmethodkw", recv_addr, name, arg_addrs, kwnames, trait):
                 recv = _read(frame, recv_addr)
                 fn, include_self = find_method(recv, name, trait)
@@ -900,7 +1001,7 @@ def _execute(linked: LinkedProgram) -> None:
                 if isinstance(fn, Closure):
                     enter_closure(task, fn, bound)
                 else:
-                    return_register = fn(*bound)
+                    return_register = _call_native(fn, bound)
             case ("detachmethod", recv_addr, name, arg_addrs, trait, dest):
                 recv = _read(frame, recv_addr)
                 fn, include_self = find_method(recv, name, trait)
@@ -910,7 +1011,7 @@ def _execute(linked: LinkedProgram) -> None:
                     promise = spawn_detached(fn, bound)
                 else:
                     promise = PromiseInstance()
-                    promise.resolve(fn(*bound))
+                    promise.resolve(_call_native(fn, bound))
                 _write(frame, dest, promise)
             case ("detachmethodkw", recv_addr, name, arg_addrs, kwnames, trait, dest):
                 recv = _read(frame, recv_addr)
@@ -923,7 +1024,7 @@ def _execute(linked: LinkedProgram) -> None:
                     promise = spawn_detached(fn, bound)
                 else:
                     promise = PromiseInstance()
-                    promise.resolve(fn(*bound))
+                    promise.resolve(_call_native(fn, bound))
                 _write(frame, dest, promise)
             case ("native", impl, arg_addrs, dest):
                 args = [_read(frame, a) for a in arg_addrs]

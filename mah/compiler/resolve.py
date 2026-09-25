@@ -201,6 +201,7 @@ from .ast_nodes import (
     MethodCall,
     NumberLit,
     PrintStmt,
+    RangePat,
     ReturnStmt,
     SinExpr,
     SleepAsyncExpr,
@@ -251,7 +252,21 @@ class Symbol:
 
 
 class Resolver:
-    def __init__(self):
+    def __init__(self, prelude_start: int | None = None):
+        # M17: the combined-text offset where the prelude begins (see
+        # preprocessor.py's `Preprocessed.prelude_start`), or `None` if it
+        # wasn't included. A declaration whose own position is `>=
+        # prelude_start` is "system" code -- its traits count as built-in
+        # traits (`self.system_traits`) and its struct/enum types as
+        # built-in types (`_is_user_type` false for them), and its `impl`s
+        # skip the orphan rule / inherent-on-built-in check entirely (see
+        # `_is_system_decl`, `_register_trait`, `_register_inherent_impl`,
+        # `_register_trait_impl`).
+        self.prelude_start = prelude_start
+        # M17: struct/enum type names declared at or after `prelude_start`
+        # -- checked by `_is_user_type` before falling back to the ordinary
+        # struct_decls/enum_decls membership test.
+        self._system_types: set = set()
         self.global_frame = FrameLevel(depth=0, parent=None)
         self.frame_stack: list[FrameLevel] = [self.global_frame]
         self.scopes: list[dict] = [{}]
@@ -379,6 +394,39 @@ class Resolver:
             }
             for builtin_type in BUILTIN_TYPE_NAMES
         }
+        # M17: native INHERENT methods -- docs/MAHC_FORMAT.md #6.7's
+        # `String.len`/`String.char_at`/`Function.arity`. Seeded here (not
+        # via SYSTEM_TRAITS/BUILTIN_TYPE_NAMES like the block above) since
+        # these are inherent, not trait-provided -- so `String.len(s)`
+        # static-path calls, hover, and completion (M13) know about them
+        # the same way a real inherent `impl` method would be known.
+        self.impls["String"]["inherent"]["len"] = {
+            "slot": None,
+            "is_method": True,
+            "params": 1,
+            "native": True,
+            "decl_position": None,
+            "param_names": ["self"],
+            "return_hint": "Number",
+        }
+        self.impls["String"]["inherent"]["char_at"] = {
+            "slot": None,
+            "is_method": True,
+            "params": 2,
+            "native": True,
+            "decl_position": None,
+            "param_names": ["self", "i"],
+            "return_hint": "String",
+        }
+        self.impls["Function"]["inherent"]["arity"] = {
+            "slot": None,
+            "is_method": True,
+            "params": 1,
+            "native": True,
+            "decl_position": None,
+            "param_names": ["self"],
+            "return_hint": "Number",
+        }
         self.trait_decl_positions: dict = {}  # trait name -> name-token position (user traits only)
         # M12: current impl target while resolving that impl's own method
         # bodies (None everywhere else, including while resolving a
@@ -502,8 +550,44 @@ class Resolver:
     def _is_user_type(self, name: str) -> bool:
         """A user-declared struct, or a user-declared enum (built-in enums
         -- Option/Promise -- live in `enum_decls` too, but are NOT user
-        types for `impl`'s purposes -- see this module's docstring)."""
+        types for `impl`'s purposes -- see this module's docstring). M17:
+        a struct/enum declared BY THE PRELUDE (`_system_types`) is likewise
+        not a user type -- users can't `impl Range { }` or `impl Iterable
+        for Range` (both system), but `impl MyTrait for Range` is fine
+        (ordinary orphan rule: MyTrait is user-defined)."""
+        if name in self._system_types:
+            return False
         return name in self.struct_decls or (name in self.enum_decls and name not in BUILTIN_TYPE_NAMES)
+
+    def _check_prelude_name_clash(self, name: str, position: int) -> None:
+        """M17: a user type/trait whose name is also declared by the prelude
+        (`Range`, `Iterable`, an adapter like `Taken`, ...). Whichever of the
+        two declarations is seen second, report it at the USER's declaration,
+        saying the name is reserved -- rather than the generic "already
+        declared" error, which would point into the prelude when the user's
+        declaration happens to be registered first. Declarations on the same
+        side (user/user, prelude/prelude) fall through to the normal
+        duplicate errors."""
+        existing = self.struct_decl_positions.get(name)
+        if existing is None:
+            existing = self.enum_decl_positions.get(name)
+        if existing is None:
+            existing = self.trait_decl_positions.get(name)
+        if existing is None:
+            return
+        this_is_system = self._is_system_decl(position)
+        if this_is_system == self._is_system_decl(existing):
+            return
+        user_position = existing if this_is_system else position
+        raise Exception(
+            f"'{name}' is a built-in name (declared by the prelude for ranges and "
+            f"iterators) and can't be used for your own type or trait at position {user_position}"
+        )
+
+    def _is_system_decl(self, position: int) -> bool:
+        """M17: whether `position` (a declaration's own source position)
+        falls inside the prelude -- see `self.prelude_start`'s docstring."""
+        return self.prelude_start is not None and position >= self.prelude_start
 
     def _is_type_name(self, name: str) -> bool:
         return name in self.struct_decls or name in self.enum_decls or name in BUILTIN_TYPE_NAMES
@@ -812,6 +896,7 @@ class Resolver:
                         f"at position {stmt.position}"
                     )
                 seen.add(name)
+            self._check_prelude_name_clash(stmt.name, stmt.position)
             if stmt.name in self.struct_decls:
                 raise Exception(
                     f"Struct '{stmt.name}' is already declared at position {stmt.position}"
@@ -828,6 +913,8 @@ class Resolver:
                     f"'{stmt.name}' is already declared as a trait at position {stmt.position}"
                 )
             self.struct_decls[stmt.name] = stmt.fields
+            if self._is_system_decl(stmt.position):
+                self._system_types.add(stmt.name)
             # LSP: register the declaration site in type_position_index --
             # see that dict's docstring above.
             name_pos = stmt.name_position if stmt.name_position is not None else stmt.position
@@ -855,6 +942,7 @@ class Resolver:
                             f"'{field_name}' more than once at position {stmt.position}"
                         )
                     seen_fields.add(field_name)
+            self._check_prelude_name_clash(stmt.name, stmt.position)
             if stmt.name in self.enum_decls:
                 raise Exception(
                     f"Enum '{stmt.name}' is already declared at position {stmt.position}"
@@ -872,6 +960,8 @@ class Resolver:
             self.enum_decls[stmt.name] = {
                 variant_name: variant_fields for variant_name, variant_fields in stmt.variants
             }
+            if self._is_system_decl(stmt.position):
+                self._system_types.add(stmt.name)
             # LSP: register the enum's and each variant's declaration site
             # in type_position_index -- see that dict's docstring above.
             name_pos = stmt.name_position if stmt.name_position is not None else stmt.position
@@ -973,6 +1063,7 @@ class Resolver:
             raise Exception(
                 f"'{name}' is a built-in type name and cannot be redeclared at position {trait.position}"
             )
+        self._check_prelude_name_clash(name, trait.position)
         if name in self.trait_decls:
             raise Exception(f"Trait '{name}' is already declared at position {trait.position}")
         if name in self.struct_decls or name in self.enum_decls:
@@ -1024,6 +1115,14 @@ class Resolver:
             }
             for method in trait.methods
         }
+        # M17: a trait declared BY THE PRELUDE is a system trait, exactly
+        # like `Printable` (which the runtime declares directly, via
+        # SYSTEM_TRAITS) -- so `impl Iterable for MyType` is subject to the
+        # same orphan rule as any other system trait, and the prelude's own
+        # `impl Iterable for Range`/`impl Iterable for String` bypass it
+        # (see `_register_trait_impl`'s `_is_system_decl` check).
+        if self._is_system_decl(trait.position):
+            self.system_traits.add(name)
         # LSP.
         pos = trait.name_position if trait.name_position is not None else trait.position
         self.trait_decl_positions[name] = pos
@@ -1084,7 +1183,10 @@ class Resolver:
 
     def _register_inherent_impl(self, impl: ImplDecl, entry: dict) -> None:
         type_name = impl.type_name
-        if not self._is_user_type(type_name):
+        # M17: an inherent impl written BY THE PRELUDE (`impl __Iter { }`)
+        # skips this check entirely -- it may target a prelude-declared
+        # (system) type freely.
+        if not self._is_user_type(type_name) and not self._is_system_decl(impl.position):
             raise Exception(
                 f"Cannot define inherent methods on built-in type '{type_name}'; declare a "
                 f"trait and 'impl YourTrait for {type_name}' instead at position {impl.position}"
@@ -1123,8 +1225,15 @@ class Resolver:
         if trait_name not in self.trait_decls:
             raise NameError(f"Undefined trait '{trait_name}' at position {pos}")
         # Orphan rule: at least one of trait/type must be user-defined.
-        # Checked BEFORE the duplicate-impl check below.
-        if trait_name in self.system_traits and not self._is_user_type(type_name):
+        # Checked BEFORE the duplicate-impl check below. M17: an impl
+        # written BY THE PRELUDE (`impl Iterable for Range`, `impl
+        # Iterable for String`) skips this entirely -- both a system trait
+        # and a system type are fine there.
+        if (
+            trait_name in self.system_traits
+            and not self._is_user_type(type_name)
+            and not self._is_system_decl(pos)
+        ):
             raise Exception(
                 f"Cannot implement built-in trait '{trait_name}' for built-in type "
                 f"'{type_name}' at position {pos}"
@@ -1251,7 +1360,8 @@ class Resolver:
         if self._is_type_name(name):
             impl_entry = self.impls.get(name, {"inherent": {}, "traits": {}})
             inherent = impl_entry["inherent"].get(expr.method)
-            if inherent is not None:
+            is_inherent = inherent is not None
+            if is_inherent:
                 fninfo = inherent
                 trait_hit = None
             else:
@@ -1272,7 +1382,17 @@ class Resolver:
                         f"'{name}.{expr.method}(...)' needs the receiver as its first argument "
                         f"at position {expr.position}"
                     )
-                expr.trait_name = trait_hit
+                if is_inherent:
+                    # M17: a native INHERENT method (e.g. `String.len(s)`,
+                    # `Function.arity(f)`) -- there's no trait to name, so
+                    # `trait_name` can't represent this (it must stay
+                    # `None`, its "ordinary dynamic call on obj" meaning
+                    # everywhere else). `native_inherent` tells codegen to
+                    # emit a plain dynamic `callmethod` on `args[0]`
+                    # instead, trait `None`.
+                    expr.native_inherent = True
+                else:
+                    expr.trait_name = trait_hit
             else:
                 expr.static_address = (self.frame_stack[-1].depth, fninfo["slot"])
             # M13: purely advisory return-type guess -- see `_type_hint`'s
@@ -1496,10 +1616,39 @@ class Resolver:
     # expressions -- NumberLit/StringLit/BoolLit are the one overlap,
     # reused as-is for literal patterns (equality, no name to resolve).
 
+    @staticmethod
+    def _range_bound_type_name(node) -> str | None:
+        """M17: the type name a range-pattern bound's literal counts as --
+        `None` is impossible in practice (the parser only ever builds a
+        `NumberLit`/`StringLit` here), kept only for completeness/safety."""
+        if isinstance(node, NumberLit):
+            return "Number"
+        if isinstance(node, StringLit):
+            return "String"
+        return None
+
     def resolve_pattern(self, pattern) -> None:
         if isinstance(pattern, WildcardPat):
             return
         if isinstance(pattern, (NumberLit, StringLit, BoolLit)):
+            return
+        if isinstance(pattern, RangePat):
+            # M17: nothing to declare (no binding); validate both bounds,
+            # when both are present, are the same kind of literal -- a
+            # Number-vs-String mix can never match anything sensibly (see
+            # docs/MAHC_FORMAT.md #6.3's `matchrange`: a value only matches
+            # when it and every present bound are all Numbers or all
+            # Strings). An empty numeric range (`lo > hi`) is deliberately
+            # NOT rejected here -- it simply never matches, at runtime,
+            # like any other unsatisfiable pattern.
+            if pattern.lo is not None and pattern.hi is not None:
+                lo_type = self._range_bound_type_name(pattern.lo)
+                hi_type = self._range_bound_type_name(pattern.hi)
+                if lo_type != hi_type:
+                    raise Exception(
+                        f"Range pattern bounds must be both Numbers or both Strings "
+                        f"at position {pattern.position}"
+                    )
             return
         if isinstance(pattern, BindPat):
             slot = self.frame_stack[-1].alloc()

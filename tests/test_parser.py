@@ -32,7 +32,9 @@ from mah.compiler.ast_nodes import (
     MethodCall,
     NumberLit,
     PrintStmt,
+    RangePat,
     StructDecl,
+    StructLit,
     StructPat,
     TraitDecl,
     Unary,
@@ -435,6 +437,88 @@ class KwargsParsingTests(unittest.TestCase):
         self.assertEqual(len(stmt.args), 2)
         self.assertIsNotNone(stmt.sep)
         self.assertIsNotNone(stmt.end)
+
+
+class M17RangeParsingTests(unittest.TestCase):
+    """M17: range expressions/patterns and the `le`/`ge`/`!` operators --
+    AST shape only (see tests/test_iterators.py and tests/test_operators.py
+    for end-to-end behavioral coverage)."""
+
+    def test_range_desugars_to_range_struct_lit(self):
+        expr = parse_expr("1..5")
+        self.assertIsInstance(expr, StructLit)
+        self.assertEqual(expr.type_name, "Range")
+        names = [name for name, _value in expr.fields]
+        self.assertEqual(names, ["start", "end", "inclusive"])
+        inclusive = dict(expr.fields)["inclusive"]
+        self.assertIsInstance(inclusive, BoolLit)
+        self.assertFalse(inclusive.value)
+
+    def test_prefix_range_desugars_to_to_range(self):
+        expr = parse_expr("..=3")
+        self.assertIsInstance(expr, StructLit)
+        self.assertEqual(expr.type_name, "ToRange")
+        inclusive = dict(expr.fields)["inclusive"]
+        self.assertTrue(inclusive.value)
+
+    def test_suffix_only_range_desugars_to_from_range(self):
+        (stmt,) = parse("print(1..)")
+        (expr,) = stmt.args
+        self.assertIsInstance(expr, StructLit)
+        self.assertEqual(expr.type_name, "FromRange")
+        self.assertEqual([name for name, _v in expr.fields], ["start"])
+
+    def test_if_condition_ending_in_suffix_range_leaves_the_body_alone(self):
+        (wrapper,) = parse("if x == 1.. { }")
+        stmt = wrapper.value
+        self.assertIsInstance(stmt, IfStmt)
+        self.assertIsInstance(stmt.cond, StructLit)
+        self.assertEqual(stmt.cond.type_name, "FromRange")
+        start = dict(stmt.cond.fields)["start"]
+        self.assertIsInstance(start, Binary)
+        self.assertEqual(start.op, "eq")
+        self.assertEqual(stmt.then.stmts, [])
+        self.assertIsNone(stmt.then.tail)
+
+    def test_negative_bound_range_pattern(self):
+        (wrapper,) = parse('match 1 { -3..=3 => { 1 } }')
+        stmt = wrapper.value
+        self.assertIsInstance(stmt, MatchStmt)
+        pattern = stmt.arms[0].pattern
+        self.assertIsInstance(pattern, RangePat)
+        self.assertTrue(pattern.inclusive)
+        self.assertIsInstance(pattern.lo, NumberLit)
+        self.assertEqual(pattern.lo.value, -3)
+        self.assertIsInstance(pattern.hi, NumberLit)
+        self.assertEqual(pattern.hi.value, 3)
+
+
+class M17OperatorParsingTests(unittest.TestCase):
+    """M17 part B: `<=`/`>=`/`!` -- see tests/test_operators.py for
+    end-to-end behavioral coverage."""
+
+    def test_le_binary_op(self):
+        expr = parse_expr("a <= b")
+        self.assertIsInstance(expr, Binary)
+        self.assertEqual(expr.op, "le")
+
+    def test_ge_binary_op(self):
+        expr = parse_expr("a >= b")
+        self.assertIsInstance(expr, Binary)
+        self.assertEqual(expr.op, "ge")
+
+    def test_bang_binds_tighter_than_eq(self):
+        expr = parse_expr("!a == b")
+        self.assertIsInstance(expr, Binary)
+        self.assertEqual(expr.op, "eq")
+        self.assertIsInstance(expr.lhs, Unary)
+        self.assertEqual(expr.lhs.op, "!")
+
+    def test_bang_binds_looser_than_postfix_method_call(self):
+        expr = parse_expr("!x.y()")
+        self.assertIsInstance(expr, Unary)
+        self.assertEqual(expr.op, "!")
+        self.assertIsInstance(expr.operand, MethodCall)
 
 
 if __name__ == "__main__":

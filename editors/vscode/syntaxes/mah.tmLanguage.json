@@ -236,8 +236,9 @@
     "operators": {
       "patterns": [
         {
+          "comment": "Longer alternatives are listed before their prefixes so oniguruma's first-match-wins alternation picks the longer token: `..=` before `..` (also before plain `.`, which falls through to `#punctuation` when neither range alternative matches -- e.g. field access `a.b`, since a lone `.` isn't followed by a second `.`), `!=` before the bare `!` folded into the trailing character class.",
           "name": "keyword.operator.mah",
-          "match": "(\\*\\*|//|==|!=|=>|<=|>=|[+\\-*/%<>=&|])"
+          "match": "(\\*\\*|//|==|!=|=>|<=|>=|\\.\\.=|\\.\\.|[+\\-*/%<>=&|!])"
         }
       ]
     },

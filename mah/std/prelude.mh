@@ -1,0 +1,276 @@
+# The Mah prelude: iterators and ranges.
+#
+# The preprocessor appends this file to a program whenever the program uses
+# anything it declares (see mah/preprocessor.py). Everything here is
+# "system" code: its traits count as built-in traits and its types as
+# built-in types for the orphan rule, and its impls may target built-in
+# types like String.
+#
+# Only struct/enum/trait/impl items are allowed here. They're hoisted, so
+# sitting after the user's code doesn't matter. A top-level `fn` or `let`
+# would only run after the user's program had finished, so helpers are
+# static functions on `__Iter` instead.
+
+# -- the protocol -------------------------------------------------------
+
+# A cursor over a sequence: `next` returns `some(item)`, or `none` once the
+# sequence is exhausted.
+trait Iterator {
+    fn next(self)
+}
+
+# Something that can be iterated, any number of times: `iter` returns a
+# fresh Iterator. Every Iterable gets the adapters below. They're lazy:
+# `map`/`filter`/`skip`/`take` only describe a new Iterable, and nothing
+# runs until something pulls items (`reduce`, or a future `for` loop).
+trait Iterable {
+    fn iter(self)
+
+    # f(value) or f(value, index)
+    fn map(self, f) { Mapped { source: self, f: f } }
+
+    # keeps the items where f(value) or f(value, index) is truthy
+    fn filter(self, f) { Filtered { source: self, f: f } }
+
+    fn skip(self, n) { Skipped { source: self, n: n } }
+
+    fn take(self, n) { Taken { source: self, n: n } }
+
+    # Like JavaScript's: f(acc, value) or f(acc, value, index). Without an
+    # initial value the first item is the starting accumulator (and the
+    # first index passed to f is 1). An empty Iterable with no initial
+    # value gives `none`.
+    fn reduce(self, f, initial = __NoInitial {}) {
+        let it = self.iter()
+        let acc = initial
+        let index = 0
+        let empty = false
+        match initial {
+            __NoInitial {} => {
+                match it.next() {
+                    some(first) => { acc = first; index = 1; }
+                    none => { empty = true; }
+                }
+            }
+            _ => { }
+        }
+        if empty { return none }
+        while true {
+            match it.next() {
+                some(value) => {
+                    acc = __Iter.call_reduce(f, acc, value, index)
+                    index = index + 1
+                }
+                none => { break }
+            }
+        }
+        acc
+    }
+}
+
+# -- helpers ----------------------------------------------------------------
+
+struct __NoInitial { }
+
+struct __Iter { }
+
+impl __Iter {
+    # Callbacks may take the index or not: pass it only if they want it.
+    fn call(f, value, index) {
+        if f.arity() == 1 { f(value) } else { f(value, index) }
+    }
+
+    fn call_reduce(f, acc, value, index) {
+        if f.arity() == 2 { f(acc, value) } else { f(acc, value, index) }
+    }
+
+    # Ranges count up by adding 1, which only makes sense for Numbers
+    # ("a" + 1 is "a1", so a String range would never end). Mah has no way
+    # to raise an error yet, so this calls a method that doesn't exist,
+    # named so that the resulting error explains itself. Replace it with a
+    # real error once Mah has structured errors.
+    fn require_number(v) {
+        if (v + 1) == (v + "1") { v.only_ranges_of_numbers_can_be_iterated() }
+    }
+}
+
+# -- ranges -----------------------------------------------------------------
+#
+# `a..b` is Range { start: a, end: b, inclusive: false }, `a..=b` the same
+# with inclusive: true, `a..` is FromRange { start: a }, and `..b` / `..=b`
+# are ToRange { end: b, inclusive }. Ranges count up by 1 from `start`.
+# ToRange has no start, so it can't be iterated; it's for `match` and
+# (later) slicing.
+
+struct Range { start, end, inclusive }
+struct FromRange { start }
+struct ToRange { end, inclusive }
+
+struct RangeIterator { current, end, inclusive }
+struct FromRangeIterator { current }
+
+impl Iterable for Range {
+    fn iter(self) {
+        __Iter.require_number(self.start)
+        __Iter.require_number(self.end)
+        RangeIterator { current: self.start, end: self.end, inclusive: self.inclusive }
+    }
+}
+
+impl Iterator for RangeIterator {
+    fn next(self) {
+        # M17 part B: `<=`/`>=` exist now -- simplify the inclusive check
+        # (was `(self.current < self.end) | (self.current == self.end)`).
+        let more = if self.inclusive {
+            self.current <= self.end
+        } else {
+            self.current < self.end
+        }
+        if more {
+            let value = self.current
+            self.current = self.current + 1
+            some(value)
+        } else {
+            none
+        }
+    }
+}
+
+impl Iterable for FromRange {
+    fn iter(self) {
+        __Iter.require_number(self.start)
+        FromRangeIterator { current: self.start }
+    }
+}
+
+impl Iterator for FromRangeIterator {
+    fn next(self) {
+        let value = self.current
+        self.current = self.current + 1
+        some(value)
+    }
+}
+
+impl Printable for Range {
+    fn to_string(self) {
+        if self.inclusive { "" + self.start + "..=" + self.end } else { "" + self.start + ".." + self.end }
+    }
+}
+
+impl Printable for FromRange {
+    fn to_string(self) { "" + self.start + ".." }
+}
+
+impl Printable for ToRange {
+    fn to_string(self) {
+        if self.inclusive { "..=" + self.end } else { ".." + self.end }
+    }
+}
+
+# -- strings ----------------------------------------------------------------
+
+# A String iterates over its characters (Unicode code points), each as a
+# one-character String.
+struct StringIterator { text, index }
+
+impl Iterable for String {
+    fn iter(self) { StringIterator { text: self, index: 0 } }
+}
+
+impl Iterator for StringIterator {
+    fn next(self) {
+        if self.index < self.text.len() {
+            let c = self.text.char_at(self.index)
+            self.index = self.index + 1
+            some(c)
+        } else {
+            none
+        }
+    }
+}
+
+# -- adapters ---------------------------------------------------------------
+#
+# Each adapter is an Iterable (so adapters chain) whose `iter` builds a fresh
+# Iterator over a fresh iterator of its source: iterating twice starts over.
+
+struct Mapped { source, f }
+struct MappedIterator { it, f, index }
+
+impl Iterable for Mapped {
+    fn iter(self) { MappedIterator { it: self.source.iter(), f: self.f, index: 0 } }
+}
+
+impl Iterator for MappedIterator {
+    fn next(self) {
+        match self.it.next() {
+            some(value) => {
+                let result = __Iter.call(self.f, value, self.index)
+                self.index = self.index + 1
+                some(result)
+            }
+            none => { none }
+        }
+    }
+}
+
+struct Filtered { source, f }
+struct FilteredIterator { it, f, index }
+
+impl Iterable for Filtered {
+    fn iter(self) { FilteredIterator { it: self.source.iter(), f: self.f, index: 0 } }
+}
+
+impl Iterator for FilteredIterator {
+    fn next(self) {
+        while true {
+            match self.it.next() {
+                some(value) => {
+                    let keep = __Iter.call(self.f, value, self.index)
+                    self.index = self.index + 1
+                    if keep { return some(value) }
+                }
+                none => { return none }
+            }
+        }
+        none
+    }
+}
+
+struct Skipped { source, n }
+struct SkippedIterator { it, remaining }
+
+impl Iterable for Skipped {
+    fn iter(self) { SkippedIterator { it: self.source.iter(), remaining: self.n } }
+}
+
+impl Iterator for SkippedIterator {
+    fn next(self) {
+        while self.remaining > 0 {
+            self.remaining = self.remaining - 1
+            match self.it.next() {
+                some(_) => { }
+                none => { return none }
+            }
+        }
+        self.it.next()
+    }
+}
+
+struct Taken { source, n }
+struct TakenIterator { it, remaining }
+
+impl Iterable for Taken {
+    fn iter(self) { TakenIterator { it: self.source.iter(), remaining: self.n } }
+}
+
+impl Iterator for TakenIterator {
+    fn next(self) {
+        if self.remaining > 0 {
+            self.remaining = self.remaining - 1
+            self.it.next()
+        } else {
+            none
+        }
+    }
+}

@@ -611,5 +611,39 @@ class ServerCapabilitiesTests(unittest.TestCase):
         self.assertIn("completionProvider", source)
 
 
+class M17PreludeLspTests(unittest.TestCase):
+    """M17: the prelude (ranges/iterators) is inlined like an imported
+    module -- completion must hide its internals, and hover/go-to-
+    definition into it must work like into any other imported file."""
+
+    def test_completion_after_a_range_value_excludes_prelude_internals(self):
+        src = "let x = 1..5\nx."
+        line, col = _find(src, "x.")
+        completions = analysis.get_completions(src, line=line, character=col + 2, path=None)
+        labels = {item["label"] for item in completions}
+        # Prelude adapter/param names never leak into member completion...
+        self.assertNotIn("source", labels)
+        self.assertNotIn("remaining", labels)
+        # ...and Range's own real members (fields + Iterable's adapters) do
+        # show up.
+        self.assertIn("start", labels)
+        self.assertIn("map", labels)
+
+    def test_general_completion_excludes_prelude_helper_types_but_keeps_range(self):
+        src = "let x = 1..5\n"
+        completions = analysis.get_completions(src, line=1, character=0, path=None)
+        labels = {item["label"] for item in completions}
+        self.assertNotIn("__Iter", labels)
+        self.assertNotIn("__NoInitial", labels)
+        self.assertIn("Range", labels)
+
+    def test_go_to_definition_on_range_lands_in_the_prelude(self):
+        src = "let r = Range { start: 1, end: 2, inclusive: false }\n"
+        line, col = _find(src, "Range")
+        location = analysis.get_definition(src, line=line, character=col + 1, path=None)
+        self.assertIsNotNone(location)
+        self.assertTrue(location["path"].endswith("prelude.mh"))
+
+
 if __name__ == "__main__":
     unittest.main()

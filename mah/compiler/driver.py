@@ -40,9 +40,17 @@ def _format_parser_errors(pp, errors: list) -> str:
     lines = []
     for message, position in errors:
         message = demangle_message(message)
-        label = _location_label(pp, pp.entry_path, position)
+        # Map the position the message itself cites, which isn't always the
+        # token the parser recorded (e.g. a range error cites its `..`
+        # operator, a duplicate-keyword error the keyword's name); fall back
+        # to the recorded position.
+        cited = re.search(r"at position '?(\d+)'?", message)
+        label = _location_label(pp, pp.entry_path, int(cited.group(1)) if cited else position)
         if label:
-            message = re.sub(rf"at position '?{position}'?", f"at position {label}", message, count=1)
+            if cited:
+                message = message[: cited.start()] + f"at position {label}" + message[cited.end():]
+            else:
+                message = f"{message} at position {label}"
         lines.append(message)
     return "\n".join(lines)
 
@@ -65,7 +73,7 @@ def compile_to_program(*, path: str | None = None, text: str | None = None, targ
     if parser.errors:
         raise SyntaxError(_format_parser_errors(pp, parser.errors))
 
-    resolver = Resolver()
+    resolver = Resolver(prelude_start=pp.prelude_start)
     resolver.resolve_program(program)
 
     codegen = Codegen(resolver.global_frame)

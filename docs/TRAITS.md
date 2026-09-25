@@ -104,9 +104,18 @@ the already-re-entrant `step_task` and returns its value. A callee that
 tries to suspend (awaits a pending Promise) is a runtime error there, since
 the opcode that asked for the value can't be suspended half-way.
 
-### Planned: `Iterable` / `Iterator` and `for` (not implemented)
+### `Iterable` / `Iterator` (M17) and `for` (planned)
 
-The shape this is designed to take, so nothing above has to change:
+Landed in M17, except the `for` loop. Unlike `Printable`, these traits
+aren't native: they're declared in Mah itself, in the compiler's
+**prelude** (`mah/std/prelude.mh`), together with ranges (`Range`,
+`FromRange`, `ToRange`), String iteration, and the lazy adapters every
+Iterable gets (`map`, `filter`, `skip`, `take`, `reduce`). The prelude is
+appended to a program only when it names something the prelude declares
+(or uses `..`), and its declarations count as system code for the orphan
+rule. VMs need nothing special to run it (see `docs/MAHC_FORMAT.md` §7).
+The design below is what shipped, and the `for` loop still plans to
+desugar this way:
 
 ```mah
 trait Iterator { fn next(self) }        # some(item) / none when exhausted
@@ -135,9 +144,14 @@ dispatch mechanism:
   calls like `print`'s.
 - `break`/`continue` inside `body` reuse the `while` loop's existing
   machinery (and M9's defer unwinding).
-- Built-in iterables (arrays, once they exist, a `range(a, b)`, maybe
-  String) would get native `Iterable`/`Iterator` impls, added to
-  `SYSTEM_TRAITS` + `NATIVE_TRAIT_METHODS` the same way `Printable` is.
+- Built-in iterables are prelude impls, not native ones: ranges and
+  String already are (String iteration uses the native `len`/`char_at`
+  methods), and arrays would be too once they exist.
+- Performance note: iterating is ordinary interpreted Mah code, roughly
+  5–6× slower than an equivalent `while` loop today (20,000 items through
+  `reduce`: ~0.65s versus ~0.1s, excluding startup). If that matters, a
+  VM-side fast path for `RangeIterator.next` is the obvious first
+  optimization.
 - `for` is already a reserved keyword (it's also used in `impl Tr for T`).
 
 Other system traits likely to follow the same pattern: `Eq` (for `==` on

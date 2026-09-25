@@ -1,0 +1,36 @@
+# A tour of ranges, range patterns, and the Iterable/Iterator prelude --
+# see the M17 milestone in docs/V2_DESIGN.md and mah/std/prelude.mh.
+
+# Ranges are values: `a..b` (exclusive), `a..=b` (inclusive), `a..`
+# (counts up forever), `..b`/`..=b` (no start, for `match` only).
+let r = 2..5
+print(r)
+print(2..=5)
+print(10..)
+print(..3)
+
+# Range patterns in `match` -- bounds are literals only.
+fn describe(x) {
+    match x {
+        0..10 => { "single digit" }
+        10..100 => { "double digit" }
+        100.. => { "big" }
+    }
+}
+print(describe(4))
+print(describe(42))
+print(describe(1000))
+
+# The adapters (`map`/`filter`/`skip`/`take`) are lazy -- nothing runs
+# until `reduce` (or manual `.iter()`/`.next()`) actually pulls values.
+let total = (1..)
+    .map(fn(x) { x * x })
+    .filter(fn(v, i) { i % 2 == 0 })
+    .take(3)
+    .reduce(fn(a, b) { a + b })
+print(total)
+
+# A String iterates over its characters (one-character Strings, by
+# Unicode code point).
+print("hello".map(fn(c) { c + c }).reduce(fn(a, b) { a + b }, ""))
+print("banana".filter(fn(c) { c == "a" }).reduce(fn(n, c) { n + 1 }, 0))

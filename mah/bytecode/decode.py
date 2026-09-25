@@ -438,6 +438,10 @@ def _parse_code(payload: bytes, ctx: dict) -> list:
                 raise MahcFormatError(
                     f"'matchenum' at instruction {i}: variant index {variant} out of range for type {t}"
                 )
+        elif op == "matchrange":
+            _value, lo, hi, _incl, _dest = instr.args
+            if lo is None and hi is None:
+                raise MahcFormatError(f"'matchrange' at instruction {i}: at least one of lo/hi must be present")
         elif op == "native":
             fn, args, _dest = instr.args
             native = ctx["natives"][fn]

@@ -21,6 +21,10 @@ class TokenType(Enum):
     ASSIGN = "="
     DOT = "."
     COLON = ":"
+    # M17: `..`/`..=` -- range expressions/patterns. Checked before the
+    # single `.` (and `..=` before `..`) in `get_next_token`.
+    DOTDOT = ".."
+    DOTDOT_EQ = "..="
     # operators
     ADD = "+"
     SUB = "-"
@@ -34,6 +38,9 @@ class TokenType(Enum):
     FAT_ARROW = "=>"
     LT = "<"
     GT = ">"
+    LE = "<="
+    GE = ">="
+    BANG = "!"
     AND = "&"
     OR = "|"
     # keywords
@@ -120,6 +127,7 @@ _SINGLE_CHAR = {
     "=": TokenType.ASSIGN,
     "<": TokenType.LT,
     ">": TokenType.GT,
+    "!": TokenType.BANG,
     "&": TokenType.AND,
     "|": TokenType.OR,
 }
@@ -130,6 +138,8 @@ _TWO_CHAR = {
     "==": TokenType.EQ,
     "!=": TokenType.NEQ,
     "=>": TokenType.FAT_ARROW,
+    "<=": TokenType.LE,
+    ">=": TokenType.GE,
 }
 
 
@@ -214,7 +224,19 @@ class Lexer:
             literal = text[start:end]
             return Token(KEYWORDS.get(literal, TokenType.ID), literal, start)
 
+        # M17: `..=` (three chars) before `..` (two) before a plain `.`
+        # (one) -- the number rule above already stops before either (a
+        # digit run never continues into a second `.`), so `1..5` still
+        # lexes as NUMBER `1`, DOTDOT, NUMBER `5`.
+        three = text[start : start + 3]
+        if three == "..=":
+            self.position += 3
+            return Token(TokenType.DOTDOT_EQ, three, start)
+
         two = text[start : start + 2]
+        if two == "..":
+            self.position += 2
+            return Token(TokenType.DOTDOT, two, start)
         if two in _TWO_CHAR:
             self.position += 2
             return Token(_TWO_CHAR[two], two, start)

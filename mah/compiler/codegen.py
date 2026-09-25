@@ -218,6 +218,7 @@ from .ast_nodes import (
     MethodCall,
     NumberLit,
     PrintStmt,
+    RangePat,
     ReturnStmt,
     SinExpr,
     SleepAsyncExpr,
@@ -583,6 +584,18 @@ class Codegen:
             placeholder = self.buf.emit((None, None, None, None))
             failure_jumps.append((cond, placeholder))
             return
+        if isinstance(pattern, RangePat):
+            # M17: `matchrange` -- see docs/MAHC_FORMAT.md #4.6/#6.3. Each
+            # present bound is loaded into a temp first (like the literal-
+            # pattern case above); an absent bound stays `None`, encoded as
+            # operand kind `A?`'s "absent" marker.
+            lo_addr = self.gen_expr(pattern.lo) if pattern.lo is not None else None
+            hi_addr = self.gen_expr(pattern.hi) if pattern.hi is not None else None
+            cond = self._temp()
+            self.buf.emit(("matchrange", value_addr, (lo_addr, hi_addr, pattern.inclusive), cond))
+            placeholder = self.buf.emit((None, None, None, None))
+            failure_jumps.append((cond, placeholder))
+            return
         if isinstance(pattern, (StructPat, EnumPat)):
             cond = self._temp()
             if isinstance(pattern, StructPat):
@@ -674,7 +687,8 @@ class Codegen:
         if isinstance(expr, Unary):
             src = self.gen_expr(expr.operand)
             tmp = self._temp()
-            self.buf.emit(("neg", src, None, tmp))
+            op = "neg" if expr.op == "-" else "not"
+            self.buf.emit((op, src, None, tmp))
             return tmp
         if isinstance(expr, Binary):
             left = self.gen_expr(expr.lhs)
@@ -935,6 +949,24 @@ class Codegen:
                 )
             self.buf.emit(("retval", None, None, dest))
             return dest
+        if expr.native_inherent:
+            # M17: `Type.method(args)` resolved to a native INHERENT method
+            # (e.g. `String.len(s)`) -- there's no trait to dispatch
+            # through, so this is a plain dynamic `callmethod` on
+            # `args[0]`, trait `None` (see `ast_nodes.py`'s
+            # `MethodCall.native_inherent` docstring).
+            recv = self.gen_expr(expr.args[0])
+            rest = tuple(self.gen_expr(a) for a in expr.args[1:])
+            dest = self._temp()
+            if not expr.kwargs:
+                self.buf.emit(("callmethod", recv, (expr.method, rest, None, expr.position), None))
+            else:
+                kw_names, kw_addrs = self._gen_kwargs(expr.kwargs)
+                self.buf.emit(
+                    ("callmethodkw", recv, (expr.method, rest + kw_addrs, kw_names, None, expr.position), None)
+                )
+            self.buf.emit(("retval", None, None, dest))
+            return dest
         # Ordinary dynamic method call: `expr.obj.method(args)`, dispatch on
         # the runtime type of `expr.obj`'s value.
         recv = self.gen_expr(expr.obj)
@@ -985,6 +1017,21 @@ class Codegen:
                         (call.method, rest + kw_addrs, kw_names, call.trait_name, call.position),
                         dest,
                     )
+                )
+            return dest
+        if call.native_inherent:
+            # M17: `detach Type.method(args)` where the target is a native
+            # inherent method -- mirrors the `_gen_method_call` branch
+            # above, but `detach`/`detachkw` (no following `retval`).
+            recv = self.gen_expr(call.args[0])
+            rest = tuple(self.gen_expr(a) for a in call.args[1:])
+            dest = self._temp()
+            if not call.kwargs:
+                self.buf.emit(("detachmethod", recv, (call.method, rest, None, call.position), dest))
+            else:
+                kw_names, kw_addrs = self._gen_kwargs(call.kwargs)
+                self.buf.emit(
+                    ("detachmethodkw", recv, (call.method, rest + kw_addrs, kw_names, None, call.position), dest)
                 )
             return dest
         # Ordinary dynamic method call: `detach obj.method(args)`.

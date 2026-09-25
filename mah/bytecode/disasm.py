@@ -93,9 +93,9 @@ def _instr_line(r: _Renderer, i: int, instr) -> str:
         rendered = f"cond={_addr(a[0])} target={a[1]}"
     elif op == "jmpset":
         rendered = f"param={_addr(a[0])} target={a[1]}"
-    elif op in ("add", "sub", "mul", "div", "idiv", "mod", "pow", "eq", "neq", "lt", "gt", "and", "or"):
+    elif op in ("add", "sub", "mul", "div", "idiv", "mod", "pow", "eq", "neq", "lt", "gt", "le", "ge", "and", "or"):
         rendered = f"a={_addr(a[0])} b={_addr(a[1])} dest={_addr(a[2])}"
-    elif op == "neg":
+    elif op in ("neg", "not"):
         rendered = f"a={_addr(a[0])} dest={_addr(a[1])}"
     elif op == "closure":
         rendered = f"fn={r.func(a[0])} dest={_addr(a[1])}"
@@ -146,6 +146,8 @@ def _instr_line(r: _Renderer, i: int, instr) -> str:
         rendered = f"value={_addr(a[0])} type={r.type_name(a[1])} dest={_addr(a[2])}"
     elif op == "matchenum":
         rendered = f"value={_addr(a[0])} type={r.type_name(a[1])} variant={r.variant_name(a[1], a[2])} dest={_addr(a[3])}"
+    elif op == "matchrange":
+        rendered = f"value={_addr(a[0])} lo={_addr(a[1])} hi={_addr(a[2])} inclusive={a[3]} dest={_addr(a[4])}"
     elif op == "deferadd":
         rendered = f"closure={_addr(a[0])}"
     elif op in ("deferpeek", "deferpop"):

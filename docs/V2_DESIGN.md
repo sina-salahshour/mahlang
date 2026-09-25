@@ -2502,6 +2502,71 @@ node that resolved to it. Then:
     duplicate (0x07) cases. The template language reference was updated
     and its examples checked against real output. 486 tests green.
 
+18. **M17 — Ranges, range patterns, iterators, `!`/`<=`/`>=`. ✅ Landed.**
+
+    - **Ranges**: `a..b`, `a..=b`, `a..`, `..b`, `..=b`, the loosest-binding
+      expression form, desugared at parse time into the prelude structs
+      `Range { start, end, inclusive }`, `FromRange { start }`, and
+      `ToRange { end, inclusive }` (which print as written). A range's end
+      must be on the operator's own line, because Mah has no significant
+      newlines: `let f = 1..` followed by `foo(f)` would otherwise silently
+      parse as `1..foo(f)`. The range-end check is a positive list of
+      expression-starting tokens.
+    - **Range patterns** (`1..10 =>`, `..=5 =>`, `15.. =>`, `"a"..="z" =>`,
+      negative literals, nested like `some(1..5)`) compile to one new
+      `matchrange` opcode that never raises. A value of another type just
+      doesn't match.
+    - **Iterators** live in `mah/std/prelude.mh`, written in Mah by me:
+      `Iterator`/`Iterable` with lazy, restartable `map`/`filter`/`skip`/
+      `take` and a JS-style `reduce` (`none` on an empty Iterable with no
+      initial value). Callbacks get the index only if their `arity()` asks
+      for it. String iteration and the adapter types are here too. The
+      preprocessor appends the prelude only when the program names something
+      it declares or uses `..`, a sound over-approximation, so `print("hi")`
+      stays 74 bytes. Prelude declarations are system code for the orphan
+      rule (so `impl Iterable for String` is allowed there and nowhere else).
+    - **Operators** `<=`, `>=` (comparison level) and prefix `!` (the unary
+      level).
+    - **Bytecode 1.2**: `matchrange`, `le`/`ge`/`not`, and the native
+      inherent methods `String.len`, `String.char_at`, and `Function.arity`,
+      the only VM-level additions. Everything else is ordinary compiled Mah.
+
+    Found and fixed during verification (beyond the coder's own work, which
+    also fixed a real bug where raw non-ASCII text in string literals was
+    mangled): that fix made `\u00e9`/`\xe9` escapes crash the compiler with
+    an internal `UnicodeDecodeError`. They're now decoded one escape at a
+    time, with a test. An open range at the end of a line swallowed the
+    next line (the newline rule above), caught by running the template
+    doc's own examples. Some newer syntax errors (ranges, the M16
+    duplicate-keyword error, `detach`) printed raw `position 'N'` instead of
+    `#L:C`, because the formatter only mapped the position the parser
+    recorded. It now maps whatever position the message cites, and the
+    CLI's duplicate copy of that formatter delegates to the driver's. Also
+    confirmed that a `git stash` the coder ran mid-task (while the grammar
+    agent and my own doc edits were live) left nothing lost.
+    Every example in the template language reference was run and checked
+    against its commented output. 564 tests green.
+
+    Post-M17 correctness review (requested by the user), checking the
+    task against the original request rather than the test list, found
+    two more bugs, both fixed with tests:
+    - **Iterating a String range** (`("a".."c")`) counted `a, a1, a11, …`
+      forever, since the prelude adds 1 and `"a" + 1` is `"a1"`. `Range`/
+      `FromRange` iteration now requires Number bounds. Mah can't raise a
+      custom error yet, so the prelude calls a deliberately missing method
+      whose name is the message (`only_ranges_of_numbers_can_be_iterated`):
+      a documented stopgap until structured errors exist. String ranges
+      still work in `match`.
+    - **User types named like prelude types**: a program declaring its own
+      `struct Taken` (or `Range`, `Iterable`, ...) that never iterates
+      failed to compile, because the name itself triggered the prelude,
+      which then clashed with the error pointing into the prelude. The
+      trigger check is now program-wide and ignores names the program
+      declares itself; when a real clash remains (the program also
+      iterates), the error names the user's declaration and says it's a
+      built-in name. One M17 test asserting that any `struct Range` is
+      rejected was updated for this intended change. 568 tests green.
+
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
 it** (`make test` must stay green) — see `docs/TESTING.md` for where
@@ -2513,7 +2578,7 @@ M1 was built and documented that way.
 
 ## Status
 
-M0 through M16 are all landed (see their entries above for what changed and
+M0 through M17 are all landed (see their entries above for what changed and
 each milestone's deliberate deviations/simplifications). `docs/NEXT_PHASES.md`
 captures what's deliberately deferred still (match guards, arrays/lists,
 generics, the type system -- and, as of M11, sound field-*access*
@@ -2554,6 +2619,8 @@ method-name hover/go-to-definition/completion in the LSP; M14 made the
 compiler's output a portable, versioned binary format (`.mahc`, see
 `docs/MAHC_FORMAT.md`) that the VM runs exclusively; M15 added projects
 (`mah init`, `mah-project.toml`, project-aware `run`/`build`); M16 added
-default parameter values and keyword arguments (bytecode 1.1). All
-planned milestones (M0–M16) are now complete; see `docs/NEXT_PHASES.md`
+default parameter values and keyword arguments (bytecode 1.1); M17 added
+ranges, range patterns, iterators (the Mah-source prelude), and
+`!`/`<=`/`>=` (bytecode 1.2). All
+planned milestones (M0–M17) are now complete; see `docs/NEXT_PHASES.md`
 for what's next.

@@ -12,6 +12,7 @@ from ..bytecode.lower import line_col
 from ..code_interpreter import run_bytes
 from ..runtime_values import MahRuntimeError
 from ..compiler.codegen import Codegen, CodeBuffer
+from ..compiler.driver import _format_parser_errors as _driver_format_parser_errors
 from ..compiler.driver import compile_to_bytes
 from ..compiler.lexer import Lexer
 from ..compiler.parser import Parser
@@ -56,7 +57,7 @@ def generate_code(input_str: str, pp) -> CodeBuffer:
         # exception handling `main()`'s outer `except` block already does.
         raise SyntaxError(_format_parser_errors(pp, parser.errors))
 
-    resolver = Resolver()
+    resolver = Resolver(prelude_start=pp.prelude_start)
     resolver.resolve_program(program)
 
     codegen = Codegen(resolver.global_frame)
@@ -76,22 +77,10 @@ def find_error_line(input_str: str, pos: int):
 
 def _format_parser_errors(pp, errors: list) -> str:
     """M6: render every collected `parser.errors` entry as one combined
-    message, each with its raw combined-text position already resolved to
-    a real `#line:col`/`file#line:col` label -- so the result, once handed
-    to `main()`'s outer `except` as a single `SyntaxError`, has no more
-    bare `at position <digits>` patterns left for that handler's own
-    position-substitution regex to find (it just passes the message
-    through unchanged, exactly as it already does for a plain single-error
-    message with no position at all)."""
-    lines = []
-    for message, position in errors:
-        message = demangle_message(message)
-        label = _location_label(pp, pp.entry_path, position)
-        if label:
-            message = re.sub(rf"at position '?{position}'?", f"at position {label}", message, count=1)
-        lines.append(message)
-    return "\n".join(lines)
-
+    message with each position resolved to a `#line:col`/`file#line:col`
+    label. Delegates to the compile driver's implementation so `run`,
+    `build`, and `generate_code` can never format these differently."""
+    return _driver_format_parser_errors(pp, errors)
 
 def _location_label(pp, entry_path: str, combined_offset: int) -> str:
     """Render a ``#line:row`` (entry file) or ``file#line:row`` location."""

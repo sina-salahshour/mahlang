@@ -18,7 +18,7 @@ from __future__ import annotations
 import os
 from decimal import Decimal
 
-from ..preprocessor import BUFFER_PATH, demangle_message
+from ..preprocessor import BUFFER_PATH, PRELUDE_PATH, demangle_message
 from ..runtime_values import NONE_VALUE
 from .format import MINOR, NATIVE_ARITIES, TAG_DEC, TAG_FALSE, TAG_INT, TAG_NONE, TAG_STR, TAG_TRUE
 from .program import Const, DebugInfo, FunctionDecl, Instr, NativeRef, Program, TypeDecl
@@ -29,6 +29,7 @@ from .program import Const, DebugInfo, FunctionDecl, Instr, NativeRef, Program, 
 _BINOP_NAMES = {
     "+": "add", "-": "sub", "*": "mul", "/": "div", "//": "idiv", "%": "mod", "**": "pow",
     "eq": "eq", "neq": "neq", "lt": "lt", "gt": "gt", "and": "and", "or": "or",
+    "le": "le", "ge": "ge",  # M17 (1.2)
 }
 
 
@@ -201,6 +202,8 @@ class _Lowerer:
             return Instr("jmpset", (a1, a3))
         if op == "neg":
             return Instr("neg", (a1, a3))
+        if op == "not":
+            return Instr("not", (a1, a3))
         if op == "closure":
             slot_count, param_count, name, param_names, has_defaults = a2
             fn_idx = self._function_index_for(a1, slot_count, param_count, name, param_names, has_defaults)
@@ -301,6 +304,9 @@ class _Lowerer:
             return Instr("matchenum", (a1, t, n, a3))
         if op == "matchfail":
             return Instr("matchfail", ())
+        if op == "matchrange":
+            lo, hi, inclusive = a2
+            return Instr("matchrange", (a1, lo, hi, bool(inclusive), a3))
         if op == "deferpush":
             return Instr("deferpush", ())
         if op == "deferadd":
@@ -335,7 +341,14 @@ class _Lowerer:
         idx = self._file_index.get(path)
         if idx is not None:
             return idx
-        if path == self.pp.entry_path:
+        if path == PRELUDE_PATH:
+            # M17: the prelude's DEBUG file name is the fixed sentinel
+            # `"<prelude>"`, never its real on-disk path -- a runtime error
+            # raised inside prelude code is then located at
+            # `<prelude>#L:C` (docs/MAHC_FORMAT.md #6.8), independent of
+            # where this Mah installation happens to keep prelude.mh.
+            name = "<prelude>"
+        elif path == self.pp.entry_path:
             name = "<buffer>" if path == BUFFER_PATH else os.path.basename(path)
         else:
             base_dir = os.path.dirname(self.pp.entry_path) if self.pp.entry_path != BUFFER_PATH else os.getcwd()

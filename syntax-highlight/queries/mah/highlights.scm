@@ -60,12 +60,17 @@
 "**" @operator
 "==" @operator
 "!=" @operator
+"!" @operator
 "=>" @operator
 "<" @operator
 ">" @operator
+"<=" @operator
+">=" @operator
 "&" @operator
 "|" @operator
 "=" @operator
+".." @operator
+"..=" @operator
 
 ; Punctuation
 ;

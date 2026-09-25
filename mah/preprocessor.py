@@ -61,6 +61,13 @@ from typing import Optional
 BUFFER_PATH = "<buffer>"
 DEFAULT_EXT = ".mh"
 
+# M17: the Mah-source prelude (ranges/iterators, see mah/std/prelude.mh's
+# own docstring) -- an absolute path computed from `__file__` (not
+# relative to the current working directory), so it resolves correctly
+# once installed too (`make install-mah` copies the `mah/` package
+# wholesale, prelude.mh included, keeping this same relative layout).
+PRELUDE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "std", "prelude.mh")
+
 # Prefix used when mangling a module's top-level names.
 _MODULE_PREFIX = "__mah_m"
 # Sentinel prefix for references to non-exported members (forces an error).
@@ -124,6 +131,61 @@ def scan(source: str) -> list:
             continue
         tokens.append(Tok(kind, match.group(), match.start()))
     return tokens
+
+
+def _compute_prelude_triggers() -> frozenset:
+    """M17: every `id` token immediately after a `struct`/`enum`/`trait`/
+    `fn` `id` token in the prelude's own source -- i.e. every type/trait/
+    method name it declares (`Iterator`, `Iterable`, `map`, `filter`,
+    `skip`, `take`, `reduce`, `iter`, `next`, `Range`, `FromRange`,
+    `ToRange`, ...). Computed once, at import time, by scanning the
+    prelude with this module's own tolerant `scan()` (never the real
+    compiler lexer -- this module stays dependency-free from `compiler`)."""
+    with open(PRELUDE_PATH, encoding="utf-8") as handle:
+        source = handle.read()
+    tokens = scan(source)
+    triggers: set = set()
+    for i in range(len(tokens) - 1):
+        tok, nxt = tokens[i], tokens[i + 1]
+        if tok.kind == "id" and tok.value in ("struct", "enum", "trait", "fn") and nxt.kind == "id":
+            triggers.add(nxt.value)
+    return frozenset(triggers)
+
+
+PRELUDE_TRIGGERS: frozenset = _compute_prelude_triggers()
+
+
+def _uses_prelude(token_lists: list) -> bool:
+    """M17: whether the program -- `token_lists` holds one already-scanned
+    token list per file (entry + every import) -- looks like it might use
+    anything the prelude declares. A sound OVER-approximation (a false
+    positive just includes the prelude unnecessarily; there are no false
+    negatives, since every real use of prelude functionality has to name
+    it): two adjacent `.` characters (`..`/`..=`, which this tolerant
+    scanner -- unlike the real lexer -- sees as two separate `dot` tokens,
+    maybe followed by a `=` `punct`), or an `id` token spelling one of
+    `PRELUDE_TRIGGERS` -- except names the program declares itself (the
+    `id` right after `struct`/`enum`/`trait`, in any of its files). A
+    program with its own `struct Taken` that never iterates must compile
+    without the prelude, whose own `Taken` would otherwise clash with it;
+    if the program also iterates, the clash is reported as a clear
+    "built-in name" error by the resolver. A lone `.` is never a trigger."""
+    declared = set()
+    for tokens in token_lists:
+        for i in range(1, len(tokens)):
+            prev, tok = tokens[i - 1], tokens[i]
+            if tok.kind == "id" and prev.kind == "id" and prev.value in ("struct", "enum", "trait"):
+                declared.add(tok.value)
+    triggers = PRELUDE_TRIGGERS - declared
+    for tokens in token_lists:
+        for tok in tokens:
+            if tok.kind == "id" and tok.value in triggers:
+                return True
+        for i in range(len(tokens) - 1):
+            a, b = tokens[i], tokens[i + 1]
+            if a.kind == "dot" and b.kind == "dot" and b.start == a.end:
+                return True
+    return False
 
 
 def _decode_path(literal: str) -> str:
@@ -195,6 +257,12 @@ class Preprocessed:
     errors: list                # (message, entry_offset, length)
     exports: dict               # path -> set of exported names
     module_index: dict          # path -> int
+    # M17: the combined-text offset where the prelude begins, or `None` if
+    # it wasn't included (see `_uses_prelude`/`preprocess`'s tail). Always
+    # appended after every real segment (entry file + every import), so
+    # entry-file offsets are unchanged for programs that don't trigger it
+    # -- the LSP relies on that.
+    prelude_start: Optional[int] = None
 
     # -- source map -------------------------------------------------------
     def map_to_source(self, offset: int):
@@ -329,6 +397,10 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
     included: set[str] = {entry_path}
     combined: list[str] = []
     state = {"len": 0}
+    # M17: every processed file's token list, so the prelude decision (see
+    # `_uses_prelude`) can look at the whole program at once -- a type the
+    # entry declares may only be *used* in an import, or vice versa.
+    program_tokens: list = []
 
     def emit(piece: str, fpath: str, src_offset: int, src_length: int, root) -> None:
         if not piece:
@@ -368,6 +440,7 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
     def process(fpath: str, source: str, root, is_entry: bool) -> None:
         tokens = scan(source)
         count = len(tokens)
+        program_tokens.append(tokens)
 
         info = analyze_module(tokens)
         exports[fpath] = info.exported
@@ -573,6 +646,19 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
 
     process(entry_path, text, root=None, is_entry=True)
 
+    # M17: the prelude is inlined LAST, after everything else -- as a
+    # module with its own index, exactly the way an ordinary import is
+    # processed (mangling rules etc; it declares no top-level `fn`/`let`,
+    # so nothing actually gets mangled) -- iff the entry file or any import
+    # looked like it might use anything the prelude declares. Appended
+    # (not prepended) so entry-file offsets are unchanged for a program
+    # that doesn't trigger it, which the LSP relies on.
+    prelude_start = None
+    if _uses_prelude(program_tokens):
+        emit("\n", entry_path, len(text), 0, None)
+        prelude_start = state["len"]
+        inline_module(PRELUDE_PATH, None)
+
     return Preprocessed(
         text="".join(combined),
         segments=segments,
@@ -583,6 +669,7 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
         errors=errors,
         exports=exports,
         module_index=module_index,
+        prelude_start=prelude_start,
     )
 
 

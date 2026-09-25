@@ -523,6 +523,17 @@ class MethodCall:
     # further hover/completion type-hint propagation. Never used for
     # codegen/dispatch.
     return_hint: Optional[str] = field(default=None, repr=False)
+    # M17: set by Resolver -- True when this is a static path call
+    # (`Type.method(...)`) whose target is a native INHERENT method (no
+    # trait involved at all, e.g. `String.len(s)`, `Function.arity(f)`).
+    # There's no trait name to carry this through `trait_name` (that field
+    # means "dispatch on args[0], restricted to this trait" and can't
+    # represent "no trait" without colliding with the unset/ordinary-call
+    # meaning of `None`) -- codegen instead emits a plain dynamic
+    # `callmethod`/`callmethodkw` on `args[0]` with the remaining args and
+    # `trait=None`, exactly mirroring the interpreter's own
+    # inherent-before-trait dispatch order.
+    native_inherent: bool = field(default=False, repr=False)
 
 
 # -- M4: patterns / match ------------------------------------------------
@@ -585,6 +596,20 @@ class EnumPat:
     # M11: same `None`-for-shorthand rule as `StructPat.field_name_positions`
     # above -- see that field's comment for the full reasoning.
     field_name_positions: list = field(default_factory=list, repr=False)
+
+
+@dataclass
+class RangePat:
+    """M17: a range pattern (`1..10`, `10..=15`, `..1`, `15..`) -- `lo`/`hi`
+    are literal-pattern nodes (`NumberLit`/`StringLit`), or `None` when that
+    bound is absent (a one-sided range). Bounds are literals only (no
+    identifiers/expressions) -- see the parser's `_parse_pattern`. Compiles
+    to the `matchrange` opcode (docs/MAHC_FORMAT.md #4.6/#6.3)."""
+
+    lo: Optional[object]
+    hi: Optional[object]
+    inclusive: bool
+    position: int
 
 
 @dataclass

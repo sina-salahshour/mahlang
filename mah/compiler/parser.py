@@ -11,6 +11,8 @@ and `%` with `+`/`-`; M0 preserves v1's behavior, quirks included.
 
 from __future__ import annotations
 
+import codecs
+import re
 from decimal import Decimal
 
 from .ast_nodes import (
@@ -43,6 +45,7 @@ from .ast_nodes import (
     MethodDecl,
     NumberLit,
     PrintStmt,
+    RangePat,
     ReturnStmt,
     SinExpr,
     SleepAsyncExpr,
@@ -57,11 +60,55 @@ from .ast_nodes import (
 )
 from .lexer import Lexer, Token, TokenType
 
+# A backslash escape: \uXXXX, \UXXXXXXXX, \xXX, a 1-3 digit octal escape,
+# or a backslash followed by any single ASCII character. A backslash before
+# a non-ASCII character is left as written (like any unknown escape).
+_ESCAPE_RE = re.compile(r"\\(?:u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|x[0-9a-fA-F]{2}|[0-7]{1,3}|[\x00-\x7f])")
+
+
+def decode_string_literal(raw: str) -> str:
+    r"""Process the backslash escapes in a string literal's source text
+    (quotes already stripped), with Python's `unicode_escape` meanings
+    (`\n`, `\t`, `\"`, `\\`, `\u00e9`, `\x41`, ...), while leaving every
+    other character exactly as written. M17 fix: the old
+    `bytes(raw, "utf-8").decode("unicode_escape")` decoded the whole
+    literal's UTF-8 bytes as Latin-1, which split a raw non-ASCII character
+    like `é` into two wrong characters (`"héllo".len()` was 6). Decoding
+    only the escape sequences, one at a time, keeps raw text intact and
+    `\u`/`\x` escapes working."""
+    return _ESCAPE_RE.sub(lambda m: codecs.decode(m.group(0), "unicode_escape"), raw)
+
+
 _COMPARE_OPS = {
     TokenType.EQ: "eq",
     TokenType.NEQ: "neq",
     TokenType.LT: "lt",
     TokenType.GT: "gt",
+    TokenType.LE: "le",
+    TokenType.GE: "ge",
+}
+# M17: tokens that can begin an expression (everything `_parse_unary`/
+# `_parse_primary` accepts, minus `{`, which `_can_start_range_end`
+# special-cases) -- the only tokens that can be a range's end value.
+_RANGE_END_STARTERS = {
+    TokenType.NUMBER,
+    TokenType.STRING,
+    TokenType.ID,
+    TokenType.PAREN_OPEN,
+    TokenType.SUB,
+    TokenType.BANG,
+    TokenType.TRUE,
+    TokenType.FALSE,
+    TokenType.NONE,
+    TokenType.SOME,
+    TokenType.IF,
+    TokenType.MATCH,
+    TokenType.FN,
+    TokenType.SIN,
+    TokenType.COS,
+    TokenType.INPUT,
+    TokenType.DETACH,
+    TokenType.SLEEP_ASYNC,
 }
 _ADDITIVE_OPS = {
     TokenType.ADD: "+",
@@ -583,15 +630,36 @@ class Parser:
                 type_name="Option", variant="some", fields=[("value", inner)], position=tok.position
             )
 
+        # M17: a pattern starting with `..`/`..=` -- a one-sided range with
+        # no lower bound (`..1`, `..=10`). A required literal bound follows
+        # (`SyntaxError` if missing/not a literal).
+        if tok.type in (TokenType.DOTDOT, TokenType.DOTDOT_EQ):
+            self.advance()
+            hi = self._parse_range_pattern_bound_required(tok)
+            return RangePat(lo=None, hi=hi, inclusive=tok.type is TokenType.DOTDOT_EQ, position=tok.position)
+
+        # M17: `-N` -- a negated number literal, usable as a plain literal
+        # pattern and as a range bound below. `-` followed by anything else
+        # is the ordinary syntax-error path (falls through to the final
+        # raise, `self.current` still sitting on the `-` token since
+        # nothing was consumed).
+        if tok.type is TokenType.SUB and self.lexer.peek_token().type is TokenType.NUMBER:
+            self.advance()
+            num_tok = self.advance()
+            lit = NumberLit(value=-Decimal(num_tok.literal), position=tok.position)
+            return self._maybe_range_pattern(lit)
+
         if tok.type is TokenType.NUMBER:
             self.advance()
-            return NumberLit(value=Decimal(tok.literal), position=tok.position)
+            lit = NumberLit(value=Decimal(tok.literal), position=tok.position)
+            return self._maybe_range_pattern(lit)
 
         if tok.type is TokenType.STRING:
             self.advance()
             raw = tok.literal[1:-1]
-            value = bytes(raw, "utf-8").decode("unicode_escape")
-            return StringLit(value=value, position=tok.position)
+            value = decode_string_literal(raw)
+            lit = StringLit(value=value, position=tok.position)
+            return self._maybe_range_pattern(lit)
 
         if tok.type is TokenType.TRUE:
             self.advance()
@@ -627,6 +695,54 @@ class Parser:
             return BindPat(name=tok.literal, position=tok.position)
 
         raise SyntaxError(f"Invalid syntax '{tok}' at position '{tok.position}'")
+
+    # -- M17: range patterns -------------------------------------------
+
+    def _pattern_bound_starts(self) -> bool:
+        """Whether the current token can start a range-pattern bound --
+        a NUMBER, a negative NUMBER (`SUB` then `NUMBER`), or a STRING.
+        Bounds are literals only (no identifiers/expressions)."""
+        if self.current.type in (TokenType.NUMBER, TokenType.STRING):
+            return True
+        return self.current.type is TokenType.SUB and self.lexer.peek_token().type is TokenType.NUMBER
+
+    def _parse_pattern_bound(self):
+        """Consume one range-pattern bound -- only called once
+        `_pattern_bound_starts()` has confirmed there is one."""
+        if self.current.type is TokenType.SUB:
+            self.advance()
+            num_tok = self.expect(TokenType.NUMBER)
+            return NumberLit(value=-Decimal(num_tok.literal), position=num_tok.position)
+        if self.current.type is TokenType.NUMBER:
+            num_tok = self.advance()
+            return NumberLit(value=Decimal(num_tok.literal), position=num_tok.position)
+        str_tok = self.expect(TokenType.STRING)
+        raw = str_tok.literal[1:-1]
+        value = decode_string_literal(raw)
+        return StringLit(value=value, position=str_tok.position)
+
+    def _parse_range_pattern_bound_required(self, op_tok: Token):
+        """The bound following a PREFIX `..`/`..=` (`..1`, `..=10`) --
+        always required (a one-sided range needs its one bound)."""
+        if not self._pattern_bound_starts():
+            if op_tok.type is TokenType.DOTDOT_EQ:
+                raise SyntaxError(f"'..=' needs an end value at position '{op_tok.position}'")
+            raise SyntaxError(f"a range pattern starting with '..' needs an end value at position '{op_tok.position}'")
+        return self._parse_pattern_bound()
+
+    def _maybe_range_pattern(self, lit):
+        """After parsing a literal pattern (`lit`), check for a following
+        `..`/`..=` turning it into a `RangePat`'s lower bound -- `1..10`,
+        `1..`, `1..=10`. Otherwise `lit` is an ordinary literal pattern."""
+        if self.current.type not in (TokenType.DOTDOT, TokenType.DOTDOT_EQ):
+            return lit
+        op_tok = self.advance()
+        if self._pattern_bound_starts():
+            hi = self._parse_pattern_bound()
+            return RangePat(lo=lit, hi=hi, inclusive=op_tok.type is TokenType.DOTDOT_EQ, position=lit.position)
+        if op_tok.type is TokenType.DOTDOT_EQ:
+            raise SyntaxError(f"'..=' needs an end value at position '{op_tok.position}'")
+        return RangePat(lo=lit, hi=None, inclusive=False, position=lit.position)
 
     def _parse_struct_pat(self, name_tok: Token) -> StructPat:
         self.expect(TokenType.BRACE_OPEN)
@@ -884,7 +1000,83 @@ class Parser:
     # -- expressions (precedence chain, lowest to highest binding) --------
 
     def parse_expr(self):
-        return self._parse_or_and()
+        return self._parse_range()
+
+    def _can_start_range_end(self, op_tok: Token) -> bool:
+        """M17: whether the current token is the end value of the range whose
+        `..`/`..=` operator is `op_tok` (for a suffix range, this is what
+        tells `1..5` from an open-ended `1..`). It is only when both:
+
+        - the token can begin an expression (`_RANGE_END_STARTERS`; `{` only
+          while a bare struct literal is allowed here, since in an
+          `if`/`while`/`match` head it opens the body), and
+        - it starts on the **same line** as the operator. Mah has no
+          significant newlines, so without this rule `let f = 1..` followed
+          by `foo(f)` on the next line would silently parse as
+          `1..foo(f)`, and one followed by `let ...` would be a syntax
+          error."""
+        tok = self.current
+        if tok.type is TokenType.BRACE_OPEN:
+            if not self._struct_literal_allowed:
+                return False
+        elif tok.type not in _RANGE_END_STARTERS:
+            return False
+        between = self.lexer.input_str[op_tok.position + len(op_tok.literal) : tok.position]
+        return "\n" not in between
+
+    def _parse_range(self):
+        """M17: ranges (`a..b`, `a..=b`, `a..`, `..b`, `..=b`) are the
+        LOWEST-precedence expression form -- desugared here, at parse time,
+        into `StructLit` nodes naming the prelude's `Range`/`FromRange`/
+        `ToRange` types (no new expression AST node). Both the range's
+        `start` and `end` parse at `_parse_or_and`'s level (the old top of
+        the precedence chain), so `1..n + 1` is `1..(n + 1)` and
+        `1..10.map(f)` is `1..(10.map(f))` (postfix/method calls bind
+        tighter than `..`) -- see docs/MAHC_FORMAT.md-adjacent
+        docs/mah-language.md for the worked examples."""
+        if self.current.type in (TokenType.DOTDOT, TokenType.DOTDOT_EQ):
+            op_tok = self.advance()
+            if not self._can_start_range_end(op_tok):
+                raise SyntaxError(
+                    f"a range starting with '..' needs an end value at position '{op_tok.position}'"
+                )
+            end = self._parse_or_and()
+            return StructLit(
+                type_name="ToRange",
+                fields=[
+                    ("end", end),
+                    ("inclusive", BoolLit(value=op_tok.type is TokenType.DOTDOT_EQ, position=op_tok.position)),
+                ],
+                position=op_tok.position,
+                field_name_positions=[],
+            )
+        left = self._parse_or_and()
+        if self.current.type in (TokenType.DOTDOT, TokenType.DOTDOT_EQ):
+            op_tok = self.advance()
+            if not self._can_start_range_end(op_tok):
+                if op_tok.type is TokenType.DOTDOT_EQ:
+                    raise SyntaxError(f"'..=' needs an end value at position '{op_tok.position}'")
+                return StructLit(
+                    type_name="FromRange",
+                    fields=[("start", left)],
+                    position=op_tok.position,
+                    field_name_positions=[],
+                )
+            end = self._parse_or_and()
+            node = StructLit(
+                type_name="Range",
+                fields=[
+                    ("start", left),
+                    ("end", end),
+                    ("inclusive", BoolLit(value=op_tok.type is TokenType.DOTDOT_EQ, position=op_tok.position)),
+                ],
+                position=op_tok.position,
+                field_name_positions=[],
+            )
+            if self.current.type in (TokenType.DOTDOT, TokenType.DOTDOT_EQ):
+                raise SyntaxError(f"ranges can't be chained at position '{self.current.position}'")
+            return node
+        return left
 
     def _parse_or_and(self):
         left = self._parse_compare()
@@ -924,6 +1116,17 @@ class Parser:
             op_tok = self.advance()
             operand = self._parse_unary()
             return Unary(op="-", operand=operand, position=op_tok.position)
+        # M17: `!` at the same precedence level as unary `-` -- `!!x`,
+        # `-!x`, `!-x` all parse (each branch recurses back into
+        # `_parse_unary`, so either prefix can stack with the other or
+        # itself). Postfix (`.`/call) binds tighter: `!x.y()` is
+        # `!(x.y())`, since `_parse_pow`/`_parse_primary` (further down the
+        # chain) already consume the whole postfix chain before a `!`
+        # wrapping it ever gets a chance to.
+        if self.current.type is TokenType.BANG:
+            op_tok = self.advance()
+            operand = self._parse_unary()
+            return Unary(op="!", operand=operand, position=op_tok.position)
         return self._parse_pow()
 
     def _parse_pow(self):
@@ -1025,7 +1228,7 @@ class Parser:
         if tok.type is TokenType.STRING:
             self.advance()
             raw = tok.literal[1:-1]
-            value = bytes(raw, "utf-8").decode("unicode_escape")
+            value = decode_string_literal(raw)
             return self._parse_postfix_from(StringLit(value=value, position=tok.position))
 
         if tok.type is TokenType.TRUE:

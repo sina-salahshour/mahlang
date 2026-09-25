@@ -61,6 +61,22 @@ class ExampleTests(unittest.TestCase):
         out = run_file(example_path("binary_to_decimal.mh"), stdin="1101")
         self.assertEqual(out.strip(), "13")
 
+    def test_iterators(self):
+        out = run_file(example_path("iterators.mh"))
+        self.assertEqual(
+            out,
+            "2..5\n"
+            "2..=5\n"
+            "10..\n"
+            "..3\n"
+            "single digit\n"
+            "double digit\n"
+            "big\n"
+            "35\n"
+            "hheelllloo\n"
+            "3\n",
+        )
+
     def test_traits(self):
         out = run_file(example_path("traits.mh"))
         self.assertEqual(

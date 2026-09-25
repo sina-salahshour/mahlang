@@ -87,10 +87,11 @@ class RoundTripTests(unittest.TestCase):
         for name in _EXAMPLE_FILES:
             with self.subTest(example=name):
                 data = compile_bytes(path=example_path(name))
-                # M16: the reference encoder now writes minor version 1
-                # (default parameter values + keyword-argument calls +
-                # `io.write`) -- see docs/MAHC_FORMAT.md #7.
-                self.assertEqual(data[:8], b"MAHC\x01\x00\x01\x00")
+                # M17: the reference encoder now writes minor version 2
+                # (`matchrange`, the `le`/`ge`/`not` operators, and the
+                # native inherent methods `String.len`/`String.char_at`/
+                # `Function.arity`) -- see docs/MAHC_FORMAT.md #7.
+                self.assertEqual(data[:8], b"MAHC\x01\x00\x02\x00")
 
     def test_decoded_bytes_run_the_same_as_the_source(self):
         for name, stdin in (("traits.mh", ""), ("enums.mh", "")):
@@ -139,10 +140,10 @@ class LoaderValidationTests(unittest.TestCase):
         self.assertIn("major", str(cm.exception))
 
     def test_unsupported_minor_version(self):
-        # M16: this VM now implements minor version 1, so the smallest
-        # genuinely unsupported minor version is 2.
+        # M17: this VM now implements minor version 2, so the smallest
+        # genuinely unsupported minor version is 3.
         data = bytearray(compile_bytes(text="print(1)"))
-        data[6] = 2
+        data[6] = 3
         with self.assertRaises(MahcFormatError) as cm:
             decode(bytes(data))
         self.assertIn("minor", str(cm.exception))
@@ -503,7 +504,11 @@ class ParamsAndKwargsBytecodeTests(unittest.TestCase):
 
     def test_header_is_minor_1_and_params_section_has_names_and_defaults(self):
         data = compile_bytes(text="fn f(a, b = 1) { a }")
-        self.assertEqual(data[:8], b"MAHC\x01\x00\x01\x00")
+        # M17: the reference encoder always writes the CURRENT minor
+        # version (now 2), regardless of which features a given program
+        # actually uses -- this test's own name predates that bump but
+        # still exercises exactly what it says (PARAMS names/defaults).
+        self.assertEqual(data[:8], b"MAHC\x01\x00\x02\x00")
         program = decode(data)
         fn = next(
             f for f in program.functions if f.name is not None and program.strings[f.name] == "f"

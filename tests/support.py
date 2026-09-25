@@ -54,7 +54,7 @@ def compile_source(*, path: str | None = None, text: str | None = None):
     parser = Parser(lexer)
     program = parser.parse_program()
 
-    resolver = Resolver()
+    resolver = Resolver(prelude_start=pp.prelude_start)
     resolver.resolve_program(program)
 
     codegen = Codegen(resolver.global_frame)

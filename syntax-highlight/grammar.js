@@ -18,13 +18,22 @@
 // `-` (`-p.x` is `-(p.x)`, `p.x ** 2` is `(p.x) ** 2`).
 const PREC = {
   ASSIGN: 0,
-  OR_AND: 1,
-  COMPARE: 2,
-  ADDITIVE: 3,
-  MULTIPLICATIVE: 4,
-  UNARY: 5,
-  POW: 6,
-  POSTFIX: 7,
+  // Range expressions (`5..10`, `5..=10`, `1..`, `..10`) bind the loosest
+  // of any binary-shaped operator -- looser even than `&`/`|` (previously
+  // the loosest). Not the same slot as ASSIGN: assignment is a completely
+  // separate production (`place "=" expr`, restricted to an
+  // identifier/field_access target) that never shares a parse state with
+  // the range/binary operator chain, so the two don't need to be
+  // distinguished from each other numerically, only RANGE needs to sit
+  // below OR_AND.
+  RANGE: 1,
+  OR_AND: 2,
+  COMPARE: 3,
+  ADDITIVE: 4,
+  MULTIPLICATIVE: 5,
+  UNARY: 6,
+  POW: 7,
+  POSTFIX: 8,
 };
 
 module.exports = grammar({
@@ -69,6 +78,31 @@ module.exports = grammar({
     // no `{` turns up after the second identifier. Declaring it lets GLR
     // keep the `field_access` branch alive as a fallback.
     [$.expr, $.enum_literal],
+    // `range_expr`'s "both bounds" (`5..10`) and "open end" (`5..`)
+    // alternatives share the prefix `$.expr ".."` -- right after `5..`, a
+    // following `10` is ambiguous between "this is the range's right
+    // bound" (extend "both bounds") and "the range already ended at
+    // `5..`; `10` starts an unrelated new top-level statement"
+    // (`source_file` is `repeat($._stmt)`, and a bare number is a valid
+    // `expr_stmt` on its own). At equal precedence this resolves
+    // deterministically but WRONG (confirmed with
+    // `tree-sitter parse --debug=normal` on a minimal reproducer: `5..10`
+    // parsed as two separate statements, `5..` then a stray `10`) --
+    // same-precedence shift/reduce ties resolve the way left-associativity
+    // wants them resolved for a genuinely repeated operator, which doesn't
+    // fit here (there's no operator to the right of `10`, just the choice
+    // of whether to consume it at all). Declaring the conflict forces GLR
+    // to fork both readings; `range_expr`'s `prec.dynamic(1, ...)` on the
+    // "both bounds" alternative (see its comment below) then picks that
+    // reading whenever both forks produce a complete, error-free parse --
+    // which also leaves the *other* ambiguity (an open-ended range's
+    // missing right bound swallowing a following `{ ... }` that's really
+    // an enclosing `if`/`while`/`match`'s block, e.g.
+    // `if x == 1.. { print(1) }`) to resolve itself correctly: that block
+    // is only ever reachable as a `range_expr` bound in the fork where
+    // doing so leaves the enclosing `if`/`while` with no `then`/`body`
+    // block of its own, so GLR discards that fork as unparseable.
+    [$.range_expr],
   ],
 
   rules: {
@@ -301,7 +335,9 @@ module.exports = grammar({
 
     _pattern: ($) =>
       choice(
+        $.range_pattern,
         $.number,
+        $.negative_number,
         $.string,
         $.true,
         $.false,
@@ -312,6 +348,39 @@ module.exports = grammar({
         $.enum_pattern,
         $.identifier,
       ),
+
+    // A negative number literal pattern (`-5 => { ... }`, and as a range
+    // bound: `-10..-5`). Patterns are their own grammar, entirely separate
+    // from `$.expr` (see the module comment above `_pattern`), so this
+    // can't reuse `unary_expr` -- it's a small dedicated rule instead,
+    // exactly like `wildcard_pattern`/`none_pattern` below.
+    negative_number: ($) => seq("-", $.number),
+
+    // Range pattern (match-arm only, a different grammar from `range_expr`
+    // above): `1..10`, `10..=15` (both bounds), `..1`/`..=1` (open start),
+    // `15..` (open end). Bounds are number or string literals only (never
+    // a general pattern/expression), and a number bound may be negative
+    // (`-10..-5`) -- see `_range_pattern_bound`. Listed first in
+    // `_pattern`'s choice above (rather than after, the way `range_expr`
+    // is appended after `binary_expr` in `expr`'s list) purely so a bound
+    // followed by `..`/`..=` doesn't need a tie-break against the bare
+    // `$.number`/`$.negative_number`/`$.string` alternatives: ordinary LR
+    // lookahead already resolves "bound then `..`" vs "bound alone" (shift
+    // vs reduce) without needing a declared conflict, unlike `range_expr`
+    // in the sibling expression grammar (whose ambiguity is with `$.block`,
+    // not with another alternative of the same rule).
+    range_pattern: ($) =>
+      choice(
+        seq(
+          $._range_pattern_bound,
+          choice("..", "..="),
+          $._range_pattern_bound,
+        ),
+        seq($._range_pattern_bound, choice("..", "..=")),
+        seq(choice("..", "..="), $._range_pattern_bound),
+      ),
+
+    _range_pattern_bound: ($) => choice($.number, $.negative_number, $.string),
 
     wildcard_pattern: ($) => "_",
 
@@ -350,6 +419,7 @@ module.exports = grammar({
         $.match_expr,
         $.fn_expr,
         $.block,
+        $.range_expr,
         $.binary_expr,
         $.unary_expr,
         $.field_access,
@@ -394,14 +464,17 @@ module.exports = grammar({
 
     paren_expr: ($) => seq("(", $.expr, ")"),
 
-    unary_expr: ($) => prec(PREC.UNARY, seq("-", $.expr)),
+    // Prefix `!` (logical not) sits at the same precedence level as unary
+    // `-`, exactly per this milestone's spec (`!!x`, `!a == b` parses as
+    // `(!a) == b` since COMPARE is looser than UNARY, `if !(x < 3) { }`).
+    unary_expr: ($) => prec(PREC.UNARY, seq(choice("-", "!"), $.expr)),
 
     binary_expr: ($) =>
       choice(
         prec.left(PREC.OR_AND, seq($.expr, choice("&", "|"), $.expr)),
         prec.left(
           PREC.COMPARE,
-          seq($.expr, choice("==", "!=", "<", ">"), $.expr),
+          seq($.expr, choice("==", "!=", "<", ">", "<=", ">="), $.expr),
         ),
         prec.left(PREC.ADDITIVE, seq($.expr, choice("+", "-", "%"), $.expr)),
         prec.left(
@@ -409,6 +482,37 @@ module.exports = grammar({
           seq($.expr, choice("*", "/", "//"), $.expr),
         ),
         prec.right(PREC.POW, seq($.expr, "**", $.expr)),
+      ),
+
+    // Range expressions: `5..10` / `5..=10` (both bounds), `1..` (open
+    // end), `..10` / `..=10` (open start). The loosest-binding operator in
+    // the language (see PREC.RANGE) -- `1..n + 1` is `1..(n + 1)` since
+    // `+` (ADDITIVE) reduces the right bound before `..` ever applies.
+    //
+    // The "both bounds" alternative is deliberately NOT wrapped in
+    // `prec.left`/associativity -- it's left as a plain `prec()` (non-
+    // associative) so that its shift/reduce tie against "open end" (they
+    // share the prefix `$.expr ".."`) is a genuine, undecided conflict
+    // rather than one tree-sitter would otherwise resolve statically and
+    // silently (see the `[$.range_expr]` conflict declared above for why
+    // that matters and what was actually observed when this was first
+    // tried with `prec.left` at equal precedence). `prec.dynamic(1, ...)`
+    // then breaks the tie in GLR's favor once both forks a genuine
+    // conflict produces are complete, well-formed parses -- e.g. for
+    // `5..10`, preferring the "both bounds" reading over "`5..`, then a
+    // separate `10` statement". It has no effect on forks where only ONE
+    // side is well-formed (e.g. `if x == 1.. { print(1) }`, where
+    // extending into the block leaves the enclosing `if` without a `then`
+    // block, so that fork simply fails to parse and dynamic precedence
+    // never enters into it).
+    range_expr: ($) =>
+      choice(
+        prec.dynamic(
+          1,
+          prec(PREC.RANGE, seq($.expr, choice("..", "..="), $.expr)),
+        ),
+        prec(PREC.RANGE, seq($.expr, choice("..", "..="))),
+        prec.left(PREC.RANGE, seq(choice("..", "..="), $.expr)),
       ),
 
     field_access: ($) =>
