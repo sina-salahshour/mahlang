@@ -2,8 +2,8 @@
 
 Status: **landed as M12, extended in M13** (see `docs/V2_DESIGN.md`'s M12/M13 entries for what
 changed where). This file is the design reference: the language rules, how
-dispatch works at runtime, and how future system traits (`Iterable` for a
-`for` loop, and friends) plug into the same machinery.
+dispatch works at runtime, and how system traits (`Printable`, and
+`Iterable`/`Iterator` behind the `for` loop) plug into the same machinery.
 
 ## The language
 
@@ -104,9 +104,9 @@ the already-re-entrant `step_task` and returns its value. A callee that
 tries to suspend (awaits a pending Promise) is a runtime error there, since
 the opcode that asked for the value can't be suspended half-way.
 
-### `Iterable` / `Iterator` (M17) and `for` (planned)
+### `Iterable` / `Iterator` (M17) and `for` (M18)
 
-Landed in M17, except the `for` loop. Unlike `Printable`, these traits
+Landed in M17; the `for` loop landed in M18. Unlike `Printable`, these traits
 aren't native: they're declared in Mah itself, in the compiler's
 **prelude** (`mah/std/prelude.mh`), together with ranges (`Range`,
 `FromRange`, `ToRange`), String iteration, and the lazy adapters every
@@ -114,36 +114,49 @@ Iterable gets (`map`, `filter`, `skip`, `take`, `reduce`). The prelude is
 appended to a program only when it names something the prelude declares
 (or uses `..`), and its declarations count as system code for the orphan
 rule. VMs need nothing special to run it (see `docs/MAHC_FORMAT.md` §7).
-The design below is what shipped, and the `for` loop still plans to
-desugar this way:
+The protocol:
 
 ```mah
 trait Iterator { fn next(self) }        # some(item) / none when exhausted
 trait Iterable { fn iter(self) }        # returns an Iterator
 
-for x in expr { body }
+for let x, let i in expr { body }       # `, let i` (0-based index) is optional
 ```
 
-`for` desugars at parse or codegen time into the existing pieces — no new
-dispatch mechanism:
+`for` has its own AST node (`ForStmt`), and codegen compiles it straight to
+the existing pieces, with no new opcode and no new dispatch mechanism:
 
 ```mah
-{
-    let __it = Iterable.iter(expr)      # (or expr itself, if it's already an Iterator)
-    while true {
-        match Iterator.next(__it) {
-            some(x) => { body }
-            none => { break }
-        }
+# what codegen emits, written as Mah
+result = none
+let it = Iterable.iter(expr)            # evaluated once
+let counter = 0
+while true {                            # `continue` jumps here
+    match Iterator.next(it) {
+        some(x) => { let i = counter; counter = counter + 1; body }
+        _ => { break }                  # anything but some(_) ends the loop
     }
 }
 ```
 
-- Both calls are ordinary `callmethod`s in the compiled code, so they can
-  suspend like any other call — `invoke_sync` is only for runtime-internal
+- Both calls are trait-restricted `callmethod`s (`trait="Iterable"`/
+  `"Iterator"`), so `for let v in 5` fails with "'Number' does not
+  implement trait 'Iterable'", and an `iter` that returns a non-Iterator
+  fails the same way on `next`. Like any `callmethod`, they can suspend,
+  so a `for` body may `await`. `invoke_sync` is only for runtime-internal
   calls like `print`'s.
+- An Iterator isn't itself Iterable (the prelude's iterators don't
+  implement `Iterable`), so `for` takes the Iterable, never `x.iter()`.
+- `next` returning anything other than `some(_)` ends the loop quietly,
+  the same as `none`. That's deliberately lenient: making it an error would
+  need a new opcode (or a runtime error hook) for a bug that only a
+  hand-written Iterator can have.
 - `break`/`continue` inside `body` reuse the `while` loop's existing
-  machinery (and M9's defer unwinding).
+  machinery (and M9's defer unwinding). Loops are expressions (M18): the
+  value of a `while`/`for` is the value of the `break` that ended it, or
+  `none`.
+- `for let` in the source triggers the prelude (`preprocessor._uses_prelude`),
+  since String/range iteration lives there. `impl T for X` never does.
 - Built-in iterables are prelude impls, not native ones: ranges and
   String already are (String iteration uses the native `len`/`char_at`
   methods), and arrays would be too once they exist.
@@ -152,7 +165,7 @@ dispatch mechanism:
   `reduce`: ~0.65s versus ~0.1s, excluding startup). If that matters, a
   VM-side fast path for `RangeIterator.next` is the obvious first
   optimization.
-- `for` is already a reserved keyword (it's also used in `impl Tr for T`).
+- `for` is shared with `impl Tr for T`; `in` became a reserved keyword in M18.
 
 Other system traits likely to follow the same pattern: `Eq` (for `==` on
 structs), `Ord` (`<`/`>`), `Awaitable`.

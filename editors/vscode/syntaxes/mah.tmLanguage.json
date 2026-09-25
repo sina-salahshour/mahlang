@@ -71,7 +71,7 @@
       "patterns": [
         {
           "name": "keyword.control.mah",
-          "match": "\\b(if|elif|else|while|break|continue|return|match|defer|detach)\\b"
+          "match": "\\b(if|elif|else|while|for|in|break|continue|return|match|defer|detach)\\b"
         }
       ]
     },

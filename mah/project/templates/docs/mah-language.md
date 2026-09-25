@@ -94,15 +94,30 @@ while i < 3 {
     if i == 2 { continue }
     print(i)
 }
+
+for let v in 1..4 { print(v) }              # 1 2 3 (one per line)
+for let c, let idx in "ab" { print(idx, c) } # 0 a, then 1 b
+
+let x = while true { break 10 }             # loops are expressions: 10
+let big = for let n in 1.. { if n * n > 50 { break n } }   # 8
+let none_found = for let n in 1..3 { if n > 5 { break n } }  # none
 ```
 
-- `if`/`elif`/`else` and `match` are **expressions**: `let s = if ok { "y" }
-  else { "n" }`. An `if` with no `else` whose condition is false yields `none`.
-- `while cond { }` is the only loop. `break`/`continue` apply to the
-  innermost `while`. **There is no `for` loop.**
+- `if`/`elif`/`else`, `match`, `while`, and `for` are all **expressions**:
+  `let s = if ok { "y" } else { "n" }`. An `if` with no `else` whose
+  condition is false yields `none`.
+- `for let value in iterable { }` loops over any Iterable (ranges, Strings,
+  `map`/`filter`/... results, your own types -- see "Ranges and
+  iterators"). `for let value, let index in ... { }` also binds the
+  0-based index. Both need `let`; `for x in ...` is a syntax error. The
+  bindings only exist inside the loop body.
+- `break`/`continue` apply to the innermost `while`/`for`. `break value`
+  ends the loop and makes `value` the loop's value; a loop that ends any
+  other way (condition false, iterable exhausted, bare `break`) has the
+  value `none`. The value must start on the same line as `break`.
 - Conditions need no parentheses. A struct literal can't appear bare in an
-  `if`/`while`/`match` head; wrap it in parentheses:
-  `if (Point { x: 1, y: 2 }.x > 0) { }`.
+  `if`/`while`/`match` head or after `for ... in`; wrap it in parentheses:
+  `if (Point { x: 1, y: 2 }.x > 0) { }`, `for let v in (Countdown { from: 3 }) { }`.
 
 ## Functions and closures
 
@@ -276,8 +291,13 @@ let it = (1..3).iter()          # or pull items by hand
 print(it.next(), it.next(), it.next())                         # some(1) some(2) none
 ```
 
-- There's no `for` loop yet: consume iterables with `reduce`, or with
-  `while` and `next()`.
+- Loop over any Iterable with `for` (see "Control flow"):
+
+```mah
+for let n, let i in (1..=2).map(fn(x) { x * 10 }) {
+    print(i, n)                 # 0 10, then 1 20
+}
+```
 
 ## Traits and methods
 
@@ -394,7 +414,9 @@ before anything runs.
 
 ## Not available (don't use these)
 
-- Arrays/lists/maps, indexing (`a[0]`), `for` loops, `collect`/`for_each`/`count`.
+- Arrays/lists/maps, indexing (`a[0]`), `collect`/`for_each`/`count`.
+- `for x in ...` without `let`, C-style `for (i = 0; ...)`, destructuring in
+  `for` bindings, labeled `break`/`continue`.
 - String methods other than `len`/`char_at` (no `split`, `replace`, ...), string indexing.
 - `&&`, `||`, `+=`, `++`, ternary `?:`.
 - Type annotations, generics, classes/inheritance, exceptions/`try`.

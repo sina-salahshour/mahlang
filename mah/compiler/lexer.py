@@ -70,6 +70,7 @@ class TokenType(Enum):
     TRAIT = "trait"
     IMPL = "impl"
     FOR = "for"
+    IN = "in"
     # literals / identifiers
     STRING = "STRING"
     NUMBER = "NUMBER"
@@ -108,6 +109,7 @@ KEYWORDS = {
     "trait": TokenType.TRAIT,
     "impl": TokenType.IMPL,
     "for": TokenType.FOR,
+    "in": TokenType.IN,
 }
 
 _SINGLE_CHAR = {

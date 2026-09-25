@@ -359,14 +359,40 @@ class IfStmt:
 
 @dataclass
 class WhileStmt:
+    """Usable as a statement or an expression: the loop's value is the value
+    of the `break` that ended it, or `none` when the condition turned false
+    (or on a value-less `break`)."""
+
     cond: object
     body: Block
     position: int
 
 
 @dataclass
+class ForStmt:
+    """`for let value[, let index] in iterable { body }` -- like `WhileStmt`,
+    usable as an expression whose value is the ending `break`'s value (or
+    `none`). Iterates via the prelude's `Iterable.iter`/`Iterator.next`
+    (see docs/TRAITS.md); `index` counts from 0."""
+
+    value_name: str
+    index_name: Optional[str]
+    iterable: object
+    body: Block
+    position: int  # the `for` keyword
+    value_position: int = field(default=0, repr=False)
+    index_position: Optional[int] = field(default=None, repr=False)
+    # set by Resolver: slots (in the enclosing frame level) of the two
+    # bindings; `index_address` stays None when there's no index binding.
+    value_address: Optional[int] = field(default=None, repr=False)
+    index_address: Optional[int] = field(default=None, repr=False)
+
+
+@dataclass
 class BreakStmt:
     position: int
+    # `break expr` -- the enclosing loop's value; None for a bare `break`.
+    value: Optional[object] = None
 
 
 @dataclass

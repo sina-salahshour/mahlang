@@ -164,7 +164,7 @@ def _uses_prelude(token_lists: list) -> bool:
     it): two adjacent `.` characters (`..`/`..=`, which this tolerant
     scanner -- unlike the real lexer -- sees as two separate `dot` tokens,
     maybe followed by a `=` `punct`), or an `id` token spelling one of
-    `PRELUDE_TRIGGERS` -- except names the program declares itself (the
+    `PRELUDE_TRIGGERS`, or `for let` (a `for` loop) -- except names the program declares itself (the
     `id` right after `struct`/`enum`/`trait`, in any of its files). A
     program with its own `struct Taken` that never iterates must compile
     without the prelude, whose own `Taken` would otherwise clash with it;
@@ -184,6 +184,10 @@ def _uses_prelude(token_lists: list) -> bool:
         for i in range(len(tokens) - 1):
             a, b = tokens[i], tokens[i + 1]
             if a.kind == "dot" and b.kind == "dot" and b.start == a.end:
+                return True
+            # a `for` loop (`for let x in ...`) iterates via the prelude's
+            # Iterable/Iterator; `impl Tr for T` is never followed by `let`.
+            if a.kind == "id" and a.value == "for" and b.kind == "id" and b.value == "let":
                 return True
     return False
 

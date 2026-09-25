@@ -1,0 +1,56 @@
+# `for` loops, `break` with a value, and loops as expressions.
+
+# `for let value in iterable` -- anything Iterable: ranges, Strings, the
+# map/filter/skip/take adapters, or your own `impl Iterable for T`.
+for let n in 1..4 {
+    print(n)
+}
+
+# An optional second binding is the 0-based index.
+for let c, let i in "mah" {
+    print(i, c)
+}
+
+# `continue` skips to the next item, `break` stops the loop.
+for let n in (1..).filter(fn(n) { n % 3 == 0 }) {
+    if n == 6 { continue }
+    if n > 12 { break }
+    print("multiple of three:", n)
+}
+
+# Loops are expressions: their value is whatever `break` carried out of
+# them, or `none` if they ended any other way.
+let x = while true { break 10 }
+print(x)
+
+let first_square_over_50 = for let n in 1.. {
+    if n * n > 50 { break n }
+}
+print(first_square_over_50)
+
+let missing = for let c in "abc" { if c == "z" { break c } }
+print(missing)
+
+# Your own types: implement Iterable (returning an Iterator).
+struct Countdown { from }
+struct CountdownIter { n }
+
+impl Iterable for Countdown {
+    fn iter(self) { CountdownIter { n: self.from } }
+}
+
+impl Iterator for CountdownIter {
+    fn next(self) {
+        if self.n > 0 {
+            self.n = self.n - 1
+            some(self.n + 1)
+        } else {
+            none
+        }
+    }
+}
+
+for let n in (Countdown { from: 3 }) {
+    print(n, "...")
+}
+print("liftoff")

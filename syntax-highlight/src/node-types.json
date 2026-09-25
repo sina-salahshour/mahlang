@@ -103,9 +103,20 @@
         {
           "type": "trait_decl",
           "named": true
-        },
+        }
+      ]
+    }
+  },
+  {
+    "type": "break_stmt",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": false,
+      "types": [
         {
-          "type": "while_stmt",
+          "type": "expr",
           "named": true
         }
       ]
@@ -218,10 +229,6 @@
         },
         {
           "type": "trait_decl",
-          "named": true
-        },
-        {
-          "type": "while_stmt",
           "named": true
         }
       ]
@@ -549,6 +556,10 @@
           "named": true
         },
         {
+          "type": "for_expr",
+          "named": true
+        },
+        {
           "type": "identifier",
           "named": true
         },
@@ -606,6 +617,10 @@
         },
         {
           "type": "unary_expr",
+          "named": true
+        },
+        {
+          "type": "while_expr",
           "named": true
         }
       ]
@@ -722,6 +737,52 @@
           "named": true
         }
       ]
+    }
+  },
+  {
+    "type": "for_expr",
+    "named": true,
+    "fields": {
+      "body": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "block",
+            "named": true
+          }
+        ]
+      },
+      "index": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "iterable": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "expr",
+            "named": true
+          }
+        ]
+      },
+      "value": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
     }
   },
   {
@@ -1317,10 +1378,6 @@
         {
           "type": "trait_decl",
           "named": true
-        },
-        {
-          "type": "while_stmt",
-          "named": true
         }
       ]
     }
@@ -1545,7 +1602,7 @@
     }
   },
   {
-    "type": "while_stmt",
+    "type": "while_expr",
     "named": true,
     "fields": {
       "body": {
@@ -1667,8 +1724,8 @@
     "named": false
   },
   {
-    "type": "break_stmt",
-    "named": true
+    "type": "break",
+    "named": false
   },
   {
     "type": "comment",
@@ -1737,6 +1794,10 @@
   },
   {
     "type": "import",
+    "named": false
+  },
+  {
+    "type": "in",
     "named": false
   },
   {

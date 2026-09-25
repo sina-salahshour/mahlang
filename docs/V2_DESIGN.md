@@ -2567,6 +2567,43 @@ node that resolved to it. Then:
       built-in name. One M17 test asserting that any `struct Range` is
       rejected was updated for this intended change. 568 tests green.
 
+19. **M18 — `for` loops, `break value`, loops as expressions. ✅ Landed.**
+
+    - **`for let value[, let index] in iterable { body }`** (`ForStmt`).
+      `let` is required on both bindings (a targeted syntax error says so
+      for `for x in`), the index counts from 0, and both bindings live in a
+      scope layer around the body, like a match arm's pattern bindings.
+      The iterable is a condition-style expression (a bare struct literal
+      needs parentheses). `in` is a new reserved keyword.
+    - **No new opcodes and no AST desugaring**: codegen compiles `ForStmt`
+      directly into trait-restricted `callmethod`s (`Iterable.iter` once,
+      then `Iterator.next` per item), a `matchenum` on `Option.some`, and a
+      `getfield` into the value slot. See `docs/TRAITS.md` for the exact
+      shape and why anything other than `some(_)` ends the loop quietly.
+      Bytecode stays 1.2.
+    - **Loops are expressions**: `while`/`for` moved from
+      `_STATEMENT_LEADING` into `_parse_primary`, next to `if`/`match`,
+      and need no `;` as statements. A loop's value is its ending `break`'s
+      value, or `none` (condition false, iterable exhausted, bare `break`).
+      Codegen gives each loop a `dest` (in the loop context, shared by
+      `_gen_break`), loaded with `none` on entry. `break value` evaluates
+      the value, then runs the pending defers, then jumps, like `return`.
+      The value has to start on the `break`'s own line (the M17 range-end
+      rule, reused via `_can_start_range_end`), so `break` followed by more
+      code on the next line stays a bare `break`.
+    - **Prelude trigger**: `for let` in the token stream pulls in the
+      prelude (String and range iteration live there); `impl T for X`
+      doesn't.
+    - **Editors**: tree-sitter `while_stmt` became `while_expr` (in `expr`)
+      next to a new `for_expr`; `break_stmt` takes an optional value, so
+      `break` is now highlighted as a `"break"` token. The TextMate grammar
+      and the LSP keyword tables (hover/completion) cover `for`/`in`.
+    - Tests: `tests/test_loops.py` (parsing, iteration over ranges/Strings/
+      adapters/user types, `continue`/`break`/`return`/`defer`/async in
+      the body, loop values, error cases, prelude triggering), LSP hover/
+      go-to-definition on loop bindings, and `examples/loops.mh`. 617
+      tests green.
+
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
 it** (`make test` must stay green) — see `docs/TESTING.md` for where
@@ -2578,7 +2615,7 @@ M1 was built and documented that way.
 
 ## Status
 
-M0 through M17 are all landed (see their entries above for what changed and
+M0 through M18 are all landed (see their entries above for what changed and
 each milestone's deliberate deviations/simplifications). `docs/NEXT_PHASES.md`
 captures what's deliberately deferred still (match guards, arrays/lists,
 generics, the type system -- and, as of M11, sound field-*access*
@@ -2621,6 +2658,7 @@ compiler's output a portable, versioned binary format (`.mahc`, see
 (`mah init`, `mah-project.toml`, project-aware `run`/`build`); M16 added
 default parameter values and keyword arguments (bytecode 1.1); M17 added
 ranges, range patterns, iterators (the Mah-source prelude), and
-`!`/`<=`/`>=` (bytecode 1.2). All
-planned milestones (M0–M17) are now complete; see `docs/NEXT_PHASES.md`
+`!`/`<=`/`>=` (bytecode 1.2); M18 added `for` loops, `break value`, and
+loops as expressions (no bytecode change). All
+planned milestones (M0–M18) are now complete; see `docs/NEXT_PHASES.md`
 for what's next.

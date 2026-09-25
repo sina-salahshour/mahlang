@@ -190,6 +190,8 @@ statement list, so a top-level `defer` runs at program end.
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 from .ast_nodes import (
     AssignStmt,
     Binary,
@@ -207,6 +209,7 @@ from .ast_nodes import (
     EnumPat,
     ErrorNode,
     ExprStmt,
+    ForStmt,
     FieldAccess,
     FnExpr,
     Ident,
@@ -367,7 +370,9 @@ class Codegen:
         elif isinstance(stmt, IfStmt):
             self._gen_if_into(stmt, self._temp())
         elif isinstance(stmt, WhileStmt):
-            self._gen_while(stmt)
+            self._gen_while_into(stmt, self._temp())
+        elif isinstance(stmt, ForStmt):
+            self._gen_for_into(stmt, self._temp())
         elif isinstance(stmt, MatchStmt):
             self._gen_match_into(stmt, self._temp())
         elif isinstance(stmt, BreakStmt):
@@ -510,25 +515,81 @@ class Codegen:
         for addr in end_jumps:
             self.buf.emit(("jmp", None, None, end_target), address=addr)
 
-    def _gen_while(self, stmt: WhileStmt) -> None:
+    def _gen_while_into(self, stmt: WhileStmt, dest) -> None:
+        """A loop's value is the value of the `break` that ended it, or
+        `none` -- `dest` starts as `none` and only a `break value` (see
+        `_gen_break`) overwrites it on its way out."""
+        self.buf.emit(("ld", NONE_VALUE, None, dest))
         cond_check_addr = self.buf.code_pointer
-        # M9: snapshot the defer depth as of loop entry (before the body's
-        # own possible push) so break/continue know exactly how many
-        # scopes opened *inside* this loop iteration need draining --
-        # never more than that, and never scopes belonging to an
-        # enclosing block/function.
-        loop_ctx = {
-            "continue_target": cond_check_addr,
-            "break_placeholders": [],
-            "defer_depth_at_entry": self._defer_depth,
-        }
-        self._while_stack.append(loop_ctx)
+        loop_ctx = self._push_loop(cond_check_addr, dest)
         cond_addr = self.gen_expr(stmt.cond)
         jmpf_placeholder = self.buf.emit((None, None, None, None))
         self.gen_block(stmt.body)
         self.buf.emit(("jmp", None, None, cond_check_addr))
         end_target = self.buf.code_pointer
         self.buf.emit(("jmpf", cond_addr, None, end_target), address=jmpf_placeholder)
+        self._pop_loop(loop_ctx, end_target)
+
+    def _gen_for_into(self, stmt: ForStmt, dest) -> None:
+        """`for let v, let i in xs { body }` -- no desugaring into other AST
+        nodes, just the planned protocol calls (docs/TRAITS.md):
+
+            dest = none; it = Iterable.iter(xs); counter = 0
+          top:
+            item = Iterator.next(it)
+            if item isn't `some(_)`: goto end
+            v = item.value; i = counter; counter = counter + 1
+            body; goto top
+          end:
+
+        Both calls are trait-restricted `callmethod`s, so a non-Iterable
+        gets "'X' does not implement trait 'Iterable'". `continue` jumps to
+        `top`; `break` to `end`."""
+        self.buf.emit(("ld", NONE_VALUE, None, dest))
+        source = self.gen_expr(stmt.iterable)
+        it = self._temp()
+        self.buf.emit(("callmethod", source, ("iter", (), "Iterable", stmt.position), None))
+        self.buf.emit(("retval", None, None, it))
+        counter = one = None
+        if stmt.index_address is not None:
+            counter = self._temp()
+            self.buf.emit(("ld", Decimal(0), None, counter))
+            one = self._temp()
+            self.buf.emit(("ld", Decimal(1), None, one))
+        top = self.buf.code_pointer
+        loop_ctx = self._push_loop(top, dest)
+        item = self._temp()
+        self.buf.emit(("callmethod", it, ("next", (), "Iterator", stmt.position), None))
+        self.buf.emit(("retval", None, None, item))
+        is_some = self._temp()
+        self.buf.emit(("matchtag", item, ("enum", "Option", "some"), is_some))
+        jmpf_placeholder = self.buf.emit((None, None, None, None))
+        self.buf.emit(("getfield", item, "value", (0, stmt.value_address)))
+        if counter is not None:
+            self.buf.emit(("=", counter, None, (0, stmt.index_address)))
+            self.buf.emit(("+", counter, one, counter))
+        self.gen_block(stmt.body)
+        self.buf.emit(("jmp", None, None, top))
+        end_target = self.buf.code_pointer
+        self.buf.emit(("jmpf", is_some, None, end_target), address=jmpf_placeholder)
+        self._pop_loop(loop_ctx, end_target)
+
+    def _push_loop(self, continue_target: int, dest) -> dict:
+        # M9: snapshot the defer depth as of loop entry (before the body's
+        # own possible push) so break/continue know exactly how many
+        # scopes opened *inside* this loop iteration need draining --
+        # never more than that, and never scopes belonging to an
+        # enclosing block/function.
+        loop_ctx = {
+            "continue_target": continue_target,
+            "break_placeholders": [],
+            "defer_depth_at_entry": self._defer_depth,
+            "dest": dest,
+        }
+        self._while_stack.append(loop_ctx)
+        return loop_ctx
+
+    def _pop_loop(self, loop_ctx: dict, end_target: int) -> None:
         for addr in loop_ctx["break_placeholders"]:
             self.buf.emit(("jmp", None, None, end_target), address=addr)
         self._while_stack.pop()
@@ -616,7 +677,12 @@ class Codegen:
     def _gen_break(self, stmt: BreakStmt) -> None:
         if not self._while_stack:
             raise Exception(f"'break' used outside a loop at position {stmt.position}")
-        self._emit_defer_unwind(self._defer_depth - self._while_stack[-1]["defer_depth_at_entry"])
+        loop_ctx = self._while_stack[-1]
+        if stmt.value is not None:
+            # Evaluated before any defers run, like `return`'s value.
+            src = self.gen_expr(stmt.value)
+            self.buf.emit(("=", src, None, loop_ctx["dest"]))
+        self._emit_defer_unwind(self._defer_depth - loop_ctx["defer_depth_at_entry"])
         placeholder = self.buf.emit((None, None, None, None))
         self._while_stack[-1]["break_placeholders"].append(placeholder)
 
@@ -800,6 +866,14 @@ class Codegen:
         if isinstance(expr, MatchStmt):
             dest = self._temp()
             self._gen_match_into(expr, dest)
+            return dest
+        if isinstance(expr, WhileStmt):
+            dest = self._temp()
+            self._gen_while_into(expr, dest)
+            return dest
+        if isinstance(expr, ForStmt):
+            dest = self._temp()
+            self._gen_for_into(expr, dest)
             return dest
         if isinstance(expr, Block):
             dest = self._temp()

@@ -4,7 +4,7 @@ A project written in **Mah**, a small dynamically typed language (`.mh`
 files). Mah isn't a mainstream language, so don't guess its syntax from
 Python, JavaScript, or Rust: **read `docs/mah-language.md` before writing or
 changing any Mah code.** It's short and lists exactly what exists, plus what
-doesn't (no arrays, no `for` loop, no `<=`/`>=`, no string methods, ...).
+doesn't (no arrays, no exceptions, almost no string methods, ...).
 
 ## Layout
 

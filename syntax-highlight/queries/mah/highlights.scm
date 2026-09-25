@@ -2,7 +2,7 @@
 ;
 ; Most keywords are anonymous tokens embedded in a multi-element rule
 ; (e.g. `while_stmt: seq("while", ...)`) and are queried as string
-; literals below. A few (`break`, `continue`, `none`, `_`, `true`,
+; literals below. A few (`continue`, `none`, `_`, `true`,
 ; `false`) are each a rule whose ENTIRE body is a single bare string --
 ; tree-sitter doesn't expose a separate anonymous token for those (the
 ; named node itself IS the leaf), so they must be queried by node type
@@ -15,6 +15,8 @@
 "for" @keyword
 "return" @keyword
 "while" @keyword
+"in" @keyword
+"break" @keyword
 "fn" @keyword
 "if" @keyword
 "elif" @keyword
@@ -26,7 +28,6 @@
 "from" @keyword
 "defer" @keyword
 "detach" @keyword
-(break_stmt) @keyword
 (continue_stmt) @keyword
 (none_expr) @keyword
 (none_pattern) @keyword

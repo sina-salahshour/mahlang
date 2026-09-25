@@ -54,10 +54,9 @@ model:
   and as an assignment target — a new `Index` AST node alongside
   `FieldAccess`), and almost certainly a `for` loop (`for x in arr { ... }`)
   since iterating v1's `while` + manual index is painful for real list use.
-  As of M12 the `for` loop's direction is set: it goes through the
-  `Iterable`/`Iterator` system traits and desugars into a `while` + `match`
-  over `Iterator.next` (see `docs/TRAITS.md`), with arrays getting native
-  impls of those traits.
+  The `for` loop landed in M18 (`for let x in arr { ... }`), going through
+  the `Iterable`/`Iterator` system traits (see `docs/TRAITS.md`), so
+  arrays only need impls of those traits.
 - Pattern matching over arrays (fixed-length `[a, b]`, or a slice-style
   `[head, ...rest]`) is a natural extension of M4's pattern compiler but is
   explicitly not committed to yet — flagging it so M4's `Pattern` AST base

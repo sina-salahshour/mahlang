@@ -32,6 +32,7 @@ from .ast_nodes import (
     EnumPat,
     ErrorNode,
     ExprStmt,
+    ForStmt,
     FieldAccess,
     FnExpr,
     Ident,
@@ -103,6 +104,8 @@ _RANGE_END_STARTERS = {
     TokenType.SOME,
     TokenType.IF,
     TokenType.MATCH,
+    TokenType.WHILE,
+    TokenType.FOR,
     TokenType.FN,
     TokenType.SIN,
     TokenType.COS,
@@ -131,9 +134,9 @@ _EXPR_STOPPERS = {TokenType.SEMICOLON, TokenType.BRACE_CLOSE, TokenType.EOF}
 # must flow through the general expression path (parse_expr ->
 # _parse_primary) so they can be used as expressions/tails, with
 # _parse_block_items below handling the "semicolon required unless
-# block-shaped or last in the block" disambiguation. WHILE stays here: it's
-# never expression-capable (no meaningful "value" for a loop), so it's
-# parsed exactly as before, always appended directly to `stmts`.
+# block-shaped or last in the block" disambiguation. WHILE/FOR aren't here
+# either: loops are expressions too (their value is the `break` value that
+# ended them, `let x = while true { break 10 }`).
 _STATEMENT_LEADING = {
     TokenType.LET,
     TokenType.STRUCT,
@@ -141,7 +144,6 @@ _STATEMENT_LEADING = {
     TokenType.RETURN,
     TokenType.BREAK,
     TokenType.CONTINUE,
-    TokenType.WHILE,
     TokenType.PRINT,
     TokenType.DEFER,
     # M12: `trait`/`impl` decls -- always statement-leading, dispatched by
@@ -157,7 +159,13 @@ _STATEMENT_LEADING = {
 # constructs but are handled through the expression path, not
 # `_STATEMENT_LEADING`, since M5). See `_synchronize`'s docstring for the
 # termination argument.
-_SYNC_TOKENS = _STATEMENT_LEADING | {TokenType.FN, TokenType.IF, TokenType.MATCH}
+_SYNC_TOKENS = _STATEMENT_LEADING | {
+    TokenType.FN,
+    TokenType.IF,
+    TokenType.MATCH,
+    TokenType.WHILE,
+    TokenType.FOR,
+}
 
 
 class Parser:
@@ -286,6 +294,8 @@ class Parser:
                     (
                         IfStmt,
                         MatchStmt,
+                        WhileStmt,
+                        ForStmt,
                         Block,
                         Call,
                         FnExpr,
@@ -484,15 +494,16 @@ class Parser:
         if tok.type is TokenType.ENUM:
             return self._parse_enum_decl()
 
-        if tok.type is TokenType.WHILE:
-            self.advance()
-            cond = self._parse_condition_expr()
-            body = self.parse_block()
-            return WhileStmt(cond=cond, body=body, position=tok.position)
-
         if tok.type is TokenType.BREAK:
             self.advance()
-            return BreakStmt(position=tok.position)
+            # `break value`: the value must start on the `break`'s own line
+            # (the same rule as a range's end, see `_can_start_range_end`),
+            # so a bare `break` followed by more code on the next line
+            # stays a bare `break`.
+            value = None
+            if self._can_start_range_end(tok):
+                value = self.parse_expr()
+            return BreakStmt(position=tok.position, value=value)
 
         if tok.type is TokenType.CONTINUE:
             self.advance()
@@ -572,6 +583,45 @@ class Parser:
             self.advance()
             else_ = self.parse_block()
         return IfStmt(cond=cond, then=then, elifs=elifs, else_=else_, position=if_tok.position)
+
+    def _parse_while(self) -> WhileStmt:
+        while_tok = self.advance()  # WHILE
+        cond = self._parse_condition_expr()
+        body = self.parse_block()
+        return WhileStmt(cond=cond, body=body, position=while_tok.position)
+
+    def _parse_for(self) -> ForStmt:
+        """`for let value[, let index] in iterable { body }`. The iterable is
+        a condition-style expression (no bare struct literal, since `{`
+        opens the body)."""
+        for_tok = self.advance()  # FOR
+        self._expect_for_let()
+        value_tok = self.expect(TokenType.ID)
+        index_tok = None
+        if self.current.type is TokenType.COMMA:
+            self.advance()
+            self._expect_for_let()
+            index_tok = self.expect(TokenType.ID)
+        self.expect(TokenType.IN)
+        iterable = self._parse_condition_expr()
+        body = self.parse_block()
+        return ForStmt(
+            value_name=value_tok.literal,
+            index_name=index_tok.literal if index_tok is not None else None,
+            iterable=iterable,
+            body=body,
+            position=for_tok.position,
+            value_position=value_tok.position,
+            index_position=index_tok.position if index_tok is not None else None,
+        )
+
+    def _expect_for_let(self) -> None:
+        if self.current.type is not TokenType.LET:
+            raise SyntaxError(
+                f"Expected 'let' before a 'for' loop variable (write 'for let x in ...' "
+                f"or 'for let x, let i in ...') at position '{self.current.position}'"
+            )
+        self.advance()
 
     def _parse_condition_expr(self):
         """Parse an `if`/`while`/`elif` condition with bare struct-literal
@@ -1159,6 +1209,12 @@ class Parser:
 
         if tok.type is TokenType.MATCH:
             return self._parse_postfix_from(self._parse_match())
+
+        if tok.type is TokenType.WHILE:
+            return self._parse_postfix_from(self._parse_while())
+
+        if tok.type is TokenType.FOR:
+            return self._parse_postfix_from(self._parse_for())
 
         if tok.type is TokenType.BRACE_OPEN:
             return self._parse_postfix_from(self.parse_block())

@@ -77,6 +77,17 @@ class ExampleTests(unittest.TestCase):
             "3\n",
         )
 
+    def test_loops(self):
+        out = run_file(example_path("loops.mh"))
+        self.assertEqual(
+            out,
+            "1\n2\n3\n"
+            "0 m\n1 a\n2 h\n"
+            "multiple of three: 3\nmultiple of three: 9\nmultiple of three: 12\n"
+            "10\n8\nnone\n"
+            "3 ...\n2 ...\n1 ...\nliftoff\n",
+        )
+
     def test_traits(self):
         out = run_file(example_path("traits.mh"))
         self.assertEqual(

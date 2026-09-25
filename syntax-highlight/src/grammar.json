@@ -59,10 +59,6 @@
         },
         {
           "type": "SYMBOL",
-          "name": "while_stmt"
-        },
-        {
-          "type": "SYMBOL",
           "name": "print_stmt"
         },
         {
@@ -555,14 +551,35 @@
       }
     },
     "break_stmt": {
-      "type": "STRING",
-      "value": "break"
+      "type": "PREC_RIGHT",
+      "value": 0,
+      "content": {
+        "type": "SEQ",
+        "members": [
+          {
+            "type": "STRING",
+            "value": "break"
+          },
+          {
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "SYMBOL",
+                "name": "expr"
+              },
+              {
+                "type": "BLANK"
+              }
+            ]
+          }
+        ]
+      }
     },
     "continue_stmt": {
       "type": "STRING",
       "value": "continue"
     },
-    "while_stmt": {
+    "while_expr": {
       "type": "SEQ",
       "members": [
         {
@@ -572,6 +589,76 @@
         {
           "type": "FIELD",
           "name": "condition",
+          "content": {
+            "type": "SYMBOL",
+            "name": "expr"
+          }
+        },
+        {
+          "type": "FIELD",
+          "name": "body",
+          "content": {
+            "type": "SYMBOL",
+            "name": "block"
+          }
+        }
+      ]
+    },
+    "for_expr": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "for"
+        },
+        {
+          "type": "STRING",
+          "value": "let"
+        },
+        {
+          "type": "FIELD",
+          "name": "value",
+          "content": {
+            "type": "SYMBOL",
+            "name": "identifier"
+          }
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SEQ",
+              "members": [
+                {
+                  "type": "STRING",
+                  "value": ","
+                },
+                {
+                  "type": "STRING",
+                  "value": "let"
+                },
+                {
+                  "type": "FIELD",
+                  "name": "index",
+                  "content": {
+                    "type": "SYMBOL",
+                    "name": "identifier"
+                  }
+                }
+              ]
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "STRING",
+          "value": "in"
+        },
+        {
+          "type": "FIELD",
+          "name": "iterable",
           "content": {
             "type": "SYMBOL",
             "name": "expr"
@@ -1308,6 +1395,14 @@
         {
           "type": "SYMBOL",
           "name": "match_expr"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "while_expr"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "for_expr"
         },
         {
           "type": "SYMBOL",

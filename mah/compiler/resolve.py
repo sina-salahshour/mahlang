@@ -190,6 +190,7 @@ from .ast_nodes import (
     EnumPat,
     ErrorNode,
     ExprStmt,
+    ForStmt,
     FieldAccess,
     FnExpr,
     Ident,
@@ -862,6 +863,22 @@ class Resolver:
         elif isinstance(stmt, WhileStmt):
             self.resolve_expr(stmt.cond)
             self.resolve_block(stmt.body)
+        elif isinstance(stmt, ForStmt):
+            # The iterable is resolved outside the loop's bindings; the
+            # bindings get their own scope layer directly enclosing the
+            # body's block scope (like a match arm's pattern bindings).
+            self.resolve_expr(stmt.iterable)
+            self._push()
+            slot = self.frame_stack[-1].alloc()
+            self._declare(stmt.value_name, slot, stmt.value_position, kind="let")
+            stmt.value_address = slot
+            if stmt.index_name is not None:
+                slot = self.frame_stack[-1].alloc()
+                symbol = self._declare(stmt.index_name, slot, stmt.index_position, kind="let")
+                symbol.type_hint = "Number"
+                stmt.index_address = slot
+            self.resolve_block(stmt.body)
+            self._pop()
         elif isinstance(stmt, MatchStmt):
             self.resolve_expr(stmt.scrutinee)
             for arm in stmt.arms:
@@ -875,7 +892,10 @@ class Resolver:
                 self.resolve_pattern(arm.pattern)
                 self.resolve_block(arm.body)
                 self._pop()
-        elif isinstance(stmt, (BreakStmt, ContinueStmt)):
+        elif isinstance(stmt, BreakStmt):
+            if stmt.value is not None:
+                self.resolve_expr(stmt.value)
+        elif isinstance(stmt, ContinueStmt):
             pass
         elif isinstance(stmt, ReturnStmt):
             if stmt.value is not None:
@@ -1601,7 +1621,7 @@ class Resolver:
             # logic already used when they appear as statements.
             self.resolve_stmt(expr)
             return
-        if isinstance(expr, MatchStmt):
+        if isinstance(expr, (MatchStmt, WhileStmt, ForStmt)):
             self.resolve_stmt(expr)
             return
         if isinstance(expr, Block):

@@ -53,6 +53,7 @@ KEYWORD_TOKENS = {
     TokenType.TRAIT,
     TokenType.IMPL,
     TokenType.FOR,
+    TokenType.IN,
 }
 
 BUILTIN_TOKENS = {
@@ -70,9 +71,13 @@ KEYWORD_DOCS = {
     "elif": "Additional conditional branch, checked when previous `if`/`elif` "
     "conditions were false.",
     "else": "Fallback branch, runs when every preceding condition was false.",
-    "while": "Loop while the condition is truthy.\n\n```mah\nwhile cond {\n\t# ...\n}\n```",
-    "break": "Exit the innermost enclosing `while` loop.",
-    "continue": "Skip to the next iteration of the innermost `while` loop.",
+    "while": "Loop while the condition is truthy. A loop is an expression: its value "
+    "is the value of the `break` that ended it, or `none`.\n\n"
+    "```mah\nwhile cond {\n\t# ...\n}\nlet x = while true { break 10 }\n```",
+    "break": "Exit the innermost enclosing `while`/`for` loop. `break value` also makes "
+    "`value` the loop's value (the value must start on the same line as `break`).\n\n"
+    "```mah\nlet first = for let n in 1.. { if n * n > 50 { break n } }\n```",
+    "continue": "Skip to the next iteration of the innermost `while`/`for` loop.",
     "return": "Return from a function, optionally with a value.\n\n"
     "```mah\nreturn expr\n```",
     "fn": "Define a function. With a name, it's sugar for binding a closure "
@@ -131,7 +136,13 @@ KEYWORD_DOCS = {
     "`impl` block. Call a method as `value.method()`, a static function "
     "as `Type.function(...)`.\n\n"
     "```mah\nstruct Point { x, y }\nimpl Point {\n\tfn new(x, y) { Self { x: x, y: y } }\n}\n```",
-    "for": "Used in `impl Trait for Type`. (Reserved for the future `for` loop.)",
+    "for": "Loop over any `Iterable` (ranges, Strings, `map`/`filter`/... adapters, "
+    "your own `impl Iterable for T`). The optional second binding is the 0-based "
+    "index. Like `while`, it's an expression whose value is the `break` value, or "
+    "`none`. Also used in `impl Trait for Type`.\n\n"
+    "```mah\nfor let v, let i in 10..13 {\n\tprint(i, v)\n}\n```",
+    "in": "Separates a `for` loop's bindings from what it iterates.\n\n"
+    "```mah\nfor let c in \"abc\" { print(c) }\n```",
 }
 
 BUILTIN_DOCS = {

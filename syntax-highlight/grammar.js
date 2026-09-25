@@ -124,7 +124,6 @@ module.exports = grammar({
         $.return_stmt,
         $.break_stmt,
         $.continue_stmt,
-        $.while_stmt,
         $.print_stmt,
         $.defer_stmt,
         $.expr_stmt,
@@ -234,14 +233,31 @@ module.exports = grammar({
 
     return_stmt: ($) => prec.right(seq("return", optional($.expr))),
 
-    break_stmt: ($) => "break",
+    // `break value` -- the enclosing loop's value. The real parser only
+    // takes a value that starts on the `break`'s own line; a highlighter
+    // doesn't need that distinction.
+    break_stmt: ($) => prec.right(seq("break", optional($.expr))),
 
     continue_stmt: ($) => "continue",
 
-    while_stmt: ($) =>
+    // Loops are expressions (`let x = while true { break 10 }`), like
+    // `if`/`match`.
+    while_expr: ($) =>
       seq(
         "while",
         field("condition", $.expr),
+        field("body", $.block),
+      ),
+
+    // `for let value[, let index] in iterable { ... }`
+    for_expr: ($) =>
+      seq(
+        "for",
+        "let",
+        field("value", $.identifier),
+        optional(seq(",", "let", field("index", $.identifier))),
+        "in",
+        field("iterable", $.expr),
         field("body", $.block),
       ),
 
@@ -417,6 +433,8 @@ module.exports = grammar({
         $.assignment_expr,
         $.if_expr,
         $.match_expr,
+        $.while_expr,
+        $.for_expr,
         $.fn_expr,
         $.block,
         $.range_expr,

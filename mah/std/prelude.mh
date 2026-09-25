@@ -22,7 +22,7 @@ trait Iterator {
 # Something that can be iterated, any number of times: `iter` returns a
 # fresh Iterator. Every Iterable gets the adapters below. They're lazy:
 # `map`/`filter`/`skip`/`take` only describe a new Iterable, and nothing
-# runs until something pulls items (`reduce`, or a future `for` loop).
+# runs until something pulls items (`reduce`, or a `for` loop).
 trait Iterable {
     fn iter(self)
 

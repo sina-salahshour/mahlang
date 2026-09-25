@@ -73,6 +73,27 @@ class HoverTests(unittest.TestCase):
             self.assertIsNotNone(hover, f"hover on {kw!r} returned None")
             self.assertIn(kw, hover["contents"]["value"])
 
+    def test_hover_on_loop_keywords(self):
+        src = "let x = for let v, let i in 1..3 { if v > 1 { break v } continue }\nwhile false { }\n"
+        for kw in ("for", "in", "break", "continue", "while"):
+            line, col = _find(src, kw)
+            hover = analysis.get_hover(src, line, col)
+            self.assertIsNotNone(hover, f"hover on {kw!r} returned None")
+            self.assertIn(f"**keyword** `{kw}`", hover["contents"]["value"])
+        line, col = _find(src, "for")
+        self.assertIn("Iterable", analysis.get_hover(src, line, col)["contents"]["value"])
+
+    def test_for_loop_bindings_hover_and_definition(self):
+        src = "for let item, let idx in 1..3 {\n    print(item, idx)\n}\n"
+        for name in ("item", "idx"):
+            decl_line, decl_col = _find(src, name)
+            use_line, use_col = _find(src, name, occurrence=1)
+            hover = analysis.get_hover(src, use_line, use_col)
+            self.assertIsNotNone(hover)
+            self.assertIn(f"`{name}`", hover["contents"]["value"])
+            definition = analysis.get_definition(src, use_line, use_col)
+            self.assertEqual(definition["range"]["start"], {"line": decl_line, "character": decl_col})
+
     def test_hover_on_undefined_identifier_returns_none(self):
         # No symbol table entry (undefined reference) -- must degrade to
         # None, not crash.
