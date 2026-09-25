@@ -4,9 +4,10 @@
 
 Mah is a small programming language built entirely from scratch: a
 hand-written lexer, recursive-descent parser, resolver, bytecode compiler,
-and a tree-walking VM, plus a real LSP server and editor integrations for
-Neovim and VS Code — **every one of them pure Python**, standard library
-only, with zero third-party runtime dependencies anywhere in the toolchain.
+and a VM for its portable bytecode format, plus a formatter, a real LSP
+server, and editor integrations for Neovim and VS Code — **every one of
+them pure Python**, standard library only, with zero third-party runtime
+dependencies anywhere in the toolchain.
 
 ## Why it's built this way
 
@@ -17,8 +18,8 @@ purpose:
 - **Pure Python, standard library only.** The lexer, parser, resolver,
   codegen, VM, and the LSP server import nothing beyond `python3`'s own
   stdlib — no parser-generator library, no LSP framework, no third-party
-  CLI library (the `mah` command's `run`/`build`/`lsp` subcommands are
-  plain `argparse`). Clone the repo, and everything runs with nothing to
+  CLI library (the `mah` command's `run`/`build`/`format`/`lsp`
+  subcommands are plain `argparse`). Clone the repo, and everything runs with nothing to
   `pip install`. The only place this project reaches for `npm`/Node is the
   optional VS Code extension client, since that's simply what a VS Code
   extension is — the language server it talks to is still pure Python.
@@ -120,10 +121,61 @@ process("alpha")   # opening alpha / using alpha / closing alpha
 process("bad")     # opening bad / closing bad -- close() still ran
 ```
 
+And the newer parts of the language:
+
+```mah
+# traits and methods
+struct Rect { w, h }
+trait Shape {
+    fn area(self)
+    fn describe(self) { "a shape with area " + self.area() }
+}
+impl Shape for Rect {
+    fn area(self) { self.w * self.h }
+}
+print(Rect { w: 2, h: 3 }.describe())   # a shape with area 6
+
+# Vectors, Maps, lazy iterators, for loops
+let odd_squares = (1..=5).map(fn(n) { n * n }).filter(fn(n) { n % 2 == 1 }).reduce()
+print(odd_squares)                      # [1, 9, 25]
+let ages = ["ada": 36, "alan": 41]
+for let name, let i in ages {
+    print(i, name, ages[name])          # 0 ada 36, then 1 alan 41
+}
+
+# default values, keyword arguments, match guards
+fn greet(name, greeting = "Hello") { greeting + ", " + name + "!" }
+print(greet("Mah", greeting: "Salam"))  # Salam, Mah!
+fn sign(n) {
+    match n {
+        0 => { "zero" }
+        x if x < 0 => { "negative" }
+        _ => { "positive" }
+    }
+}
+print(sign(-4))                         # negative
+
+# async: detach any call or expression, then .await its Promise
+fn slow(n) { sleep_async(10); n * 2 }
+let a = detach slow(21)
+let b = detach { sleep_async(5); "from a block" }
+print(a.await, b.await)                 # 42 from a block
+
+# optional type annotations and generics
+fn first<T>(v: Vector<T>) -> T { v[0] }
+let pick: fn(Vector<Number>) -> Number = first
+print(pick([7, 8]))                     # 7
+```
+
+Type annotations are optional and are checked for valid type names today.
+The static type checker that will use them (with inference, so most code
+needs no annotations) is the next milestone; see "Where this is going".
+
 See `examples/*.mh` for many more (structs, enums, pattern matching,
-expression blocks, `defer`, closures/recursion, imports, string handling,
-number-base conversions) and `docs/V2_DESIGN.md` for the full language
-design writeup, milestone by milestone.
+traits, iterators, Vectors and Maps, `for` loops, keyword arguments,
+async, `defer`, closures/recursion, imports, strings, number-base
+conversions) and `docs/V2_DESIGN.md` for the full language design writeup,
+milestone by milestone.
 
 ### Modules
 
@@ -251,19 +303,22 @@ currently provides:
 
 - live diagnostics as you type, including syntax and resolve errors inside
   imported files
-- hover, with docs for keywords, builtins, and the declaration a variable/
-  function/parameter resolved to
+- hover, with docs for keywords and builtins, the declaration a variable/
+  function/parameter resolved to (with its doc comment), struct/enum
+  shapes, and trait and method signatures
+- completion: keywords, builtins, names in scope, imported and namespaced
+  names, and methods/fields after a `.` based on the receiver's type
 - go to definition — scope-aware (locals, then globals), and it follows
   imports: jumping from a namespaced call, the namespace name itself, or
   an `import` path string, into the file it points at
-- rename (single-file only for now — see `docs/NEXT_PHASES.md` for what
-  cross-file rename and struct/enum/field rename would take)
+- rename: variables and functions across every file that imports them,
+  and struct/enum/variant/field names (including their uses in type
+  annotations)
 - document formatting, the same as `mah format`
 
-(Completion, document symbols, and code actions existed in an earlier
-version of the server and are currently disabled pending a rewrite onto
-the same resolver-backed foundation as the features above — not yet
-reintroduced.)
+(Document symbols and code actions existed in an earlier version of the
+server and are still disabled, pending a rewrite onto the same
+resolver-backed foundation as the features above.)
 
 ## Testing
 
@@ -278,9 +333,9 @@ just an example file; see `docs/TESTING.md`.
 ## How it's built
 
 ```
-source --> preprocessor --> lexer --> parser --> resolver --> codegen --> VM
-           (imports)                  (AST)      (scopes,      (flat IR)  (tree-walking
-                                                   addresses)              interpreter)
+source --> preprocessor --> lexer --> parser --> resolver --> codegen --> lower --> VM
+           (imports)                  (AST)      (scopes,      (flat IR)   (.mahc     (runs .mahc
+                                                   addresses)               bytecode)  only)
 ```
 
 - `mah/preprocessor.py` inlines `import`/`export` directives into one
@@ -293,41 +348,69 @@ source --> preprocessor --> lexer --> parser --> resolver --> codegen --> VM
   `(depth, slot)` address relative to its enclosing function's frame, and
   building the symbol table the LSP's hover/definition/rename read
   directly.
-- `mah/compiler/codegen.py` lowers the AST into a flat, 3-address bytecode
-  array.
-- `mah/code_interpreter.py` runs that bytecode: heap `Frame`s linked by a
-  static chain pointer for lexical scoping and closures (see "Heap-
-  allocated closures" above), an explicit return-address stack for calls,
-  and tagged heap values for structs/enums.
+- `mah/compiler/codegen.py` lowers the AST into a flat, 3-address IR, and
+  `mah/bytecode/lower.py` turns that into the portable `.mahc` format
+  (specified in `docs/MAHC_FORMAT.md`).
+- `mah/code_interpreter.py` is the VM, and it runs only `.mahc`: heap
+  `Frame`s linked by a static chain pointer for lexical scoping and
+  closures (see "Heap-allocated closures" above), an explicit
+  return-address stack for calls, tagged heap values for structs/enums,
+  and a single-threaded task scheduler for `detach`/`.await`.
+- `mah/std/prelude.mh` is the part of the standard library written in Mah
+  itself (ranges, iterators and their adapters), included automatically
+  when a program uses it.
+- `mah/format/` is `mah format`: it uses the lexer and parser to lay code
+  out, and verifies that only whitespace changed before writing.
 
 `docs/V2_DESIGN.md` is the full design document — every language feature
-above landed as its own milestone (M0 through M9) with the reasoning,
-deviations, and test coverage for each written up in place.
+above landed as its own milestone (M0 through M21 so far) with the
+reasoning, deviations, and test coverage for each written up in place.
 
 ## Where this is going
 
-Not yet built, but designed for and tracked in `docs/NEXT_PHASES.md`:
+Next up, designed in `docs/TYPES.md`:
 
-- **Match guards** (`pattern if condition => { ... }`)
-- **Arrays / lists**
-- **Generics**
-- **Traits / interfaces**
-- **A runtime type system** — types as ordinary values you can pass
-  around, narrow with the language's own `if`/`match`, and inspect at
-  runtime, rather than a separate static type-checker bolted on top
-- **Async** (`detach` / `.await`) — a JS-style event loop where only real
-  I/O ever triggers scheduling, not `detach` itself (there's a validated
-  prototype for this model already, see `docs/prototypes/async_model.py`)
-- **Cross-file rename** and **struct/enum/field rename** in the LSP
-- A garbage collector, once the above settle enough that the heap object
-  model they need is stable
+- **A static type checker** (M22–M24). Types are inferred wherever
+  possible: locals, return types, closure parameters from where the
+  closure is passed (`"abc".map(fn(c) { ... })` knows `c` is a `String`),
+  and even a parameter's type from how the body uses it. Annotations stay
+  optional, with an explicit `Unknown` as an escape hatch. Generic
+  functions, structs, enums and traits, and a fully typed prelude. Three
+  strictness levels in `mah-project.toml`: `loose` (the default: editor
+  warnings only), `strict` (type errors fail the build and show in the
+  editor), and `explicit` (also requires an annotation wherever a type
+  can't be inferred). A `mah check` command, and hover/completion driven
+  by the inferred types. Types have no runtime cost: the bytecode doesn't
+  change.
+
+Further out, tracked in `docs/NEXT_PHASES.md` and `docs/TYPES.md`:
+
+- **Formatter settings** in a `[format]` section of `mah-project.toml`
+  (line width, indentation); the options already exist internally
+- **Pattern matching on Vectors** (`[a, b]`, `[head, ...rest]`) and
+  **exhaustiveness checking** for `match`
+- **Nullable types** (`T?`), so the checker can catch "this might be
+  `none`" bugs
+- **Types as runtime values**, for narrowing with `if`/`match` on a type
+- **Renaming a field everywhere it's accessed** (`p.x`), which needs the
+  type checker to know what `p` is
+- **Errors you can handle** (today a runtime error always ends the
+  program), and built-ins for files, the network and the OS
+- **Third-party packages** (`[dependencies]` in the manifest is already
+  reserved for them)
+- **Document symbols and code actions** in the language server
+- A garbage collector, once the heap object model settles
 
 ## Docs
 
 - `docs/V2_DESIGN.md` — the language design doc and milestone-by-milestone
   build log
-- `docs/NEXT_PHASES.md` — detailed design notes for everything in
-  "Where this is going" above
+- `docs/TYPES.md` — the static type system: syntax, inference,
+  strictness levels, generics, and the milestone plan
+- `docs/FORMAT.md` — `mah format`: its layout rules and the
+  whitespace-only guarantee
+- `docs/NEXT_PHASES.md` — design notes for the rest of "Where this is
+  going" above
 - `docs/TRAITS.md` — traits, `impl`, method dispatch, and system traits
 - `docs/MAHC_FORMAT.md` — the portable `.mahc` bytecode format (normative)
 - `docs/TESTING.md` — the testing policy referenced above
