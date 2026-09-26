@@ -213,7 +213,9 @@ python -m mah format ./examples                      # rewrite .mh files in the 
 (`--check` lists files that would change instead; see `docs/FORMAT.md`).
 
 `mah <file>` (no subcommand) is shorthand for `mah run <file>` (or `mah
-runc` for a `.mahc` file). The `.mahc` format is specified in
+runc` for a `.mahc` file). `mah build` output starts with a
+`#!/usr/bin/env -S mah runc` line and is marked executable, so with `mah` on
+your `PATH` you can run it directly: `./structs.mahc`. The `.mahc` format is specified in
 `docs/MAHC_FORMAT.md`, in enough detail to write a VM for it in any
 language.
 

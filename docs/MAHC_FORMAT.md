@@ -47,6 +47,11 @@ minor      u16       = 2          (0 or 1 for older files; see §7)
 sections   (id u8, length varuint, payload bytes(length))*   until end of file
 ```
 
+- A file **may** start with a shebang line: bytes `#!` up to and
+  including the first `\n`, placed before `magic`. It isn't part of the
+  format; a VM **must** skip it. The reference `mah build` writes
+  `#!/usr/bin/env -S mah runc\n` and marks the file executable, so a built
+  program runs as `./prog.mahc`.
 - A VM **must** reject a file whose `major` differs from the one it
   implements, and **should** reject one whose `minor` is greater than the
   one it implements (it may use opcodes/natives the VM doesn't know). An

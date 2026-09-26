@@ -25,7 +25,7 @@ mah run                     # compile and run the entry point
 mah run other.mh            # run a specific file instead
 mah build                   # write every [[target]] from mah-project.toml
 mah build --target release  # write one target
-mah runc build/{{name}}.mahc   # run a compiled file
+mah runc build/{{name}}.mahc   # run a compiled file (or just ./build/{{name}}.mahc)
 mah dis build/{{name}}.mahc    # show the compiled bytecode
 mah format                  # lay out every .mh file in the standard style
 mah format --check          # list files that aren't formatted (exit 1 if any)

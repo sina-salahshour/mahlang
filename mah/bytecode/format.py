@@ -22,6 +22,12 @@ built-in types `Vector`/`Map`, their native inherent methods, and the
 from __future__ import annotations
 
 MAGIC = b"MAHC"
+# `mah build` writes this line before MAGIC (and marks the file executable)
+# so `./prog.mahc` runs it; decode() skips any leading `#!...\n` line --
+# docs/MAHC_FORMAT.md #3. `env -S` splits "mah runc" into two arguments, so
+# it works whatever the file is named (the `mah FILE` shorthand keys off a
+# `.mahc` extension).
+SHEBANG = b"#!/usr/bin/env -S mah runc\n"
 MAJOR = 1
 MINOR = 3
 

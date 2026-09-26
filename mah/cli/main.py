@@ -7,7 +7,7 @@ import sys
 
 from ..bytecode.decode import decode
 from ..bytecode.disasm import disassemble
-from ..bytecode.format import MahcFormatError
+from ..bytecode.format import SHEBANG, MahcFormatError
 from ..bytecode.lower import line_col
 from ..code_interpreter import run_bytes
 from ..runtime_values import MahRuntimeError
@@ -376,16 +376,14 @@ def main(argv: list[str] | None = None) -> int:
                     )
             for t in targets:
                 os.makedirs(os.path.dirname(t.out), exist_ok=True)
-                with open(t.out, "wb") as f:
-                    f.write(compiled_by_profile[t.profile])
+                _write_mahc(t.out, compiled_by_profile[t.profile])
                 rel_out = os.path.relpath(t.out, os.getcwd())
                 print(f"built {t.name} ({t.profile}) -> {rel_out}")
         elif args.command == "build":
             build_target = args.target if args.target is not None else "debug"
             data = compile_to_bytes(path=args.file, text=entry_str, target=build_target)
             out_path = args.out if args.out is not None else _default_mahc_path(args.file)
-            with open(out_path, "wb") as f:
-                f.write(data)
+            _write_mahc(out_path, data)
         elif args.command == "run":
             data = compile_to_bytes(path=args.file, text=entry_str, target="debug")
             run_bytes(data)
@@ -409,6 +407,17 @@ def main(argv: list[str] | None = None) -> int:
         raise e
 
     return 0
+
+
+def _write_mahc(path: str, data: bytes) -> None:
+    """Write a built program as a directly executable file: SHEBANG
+    first (so `./prog.mahc` runs it via `mah runc`), then the bytecode,
+    with the execute bits added wherever the read bits are set."""
+    with open(path, "wb") as f:
+        f.write(SHEBANG)
+        f.write(data)
+    mode = os.stat(path).st_mode
+    os.chmod(path, mode | ((mode & 0o444) >> 2))
 
 
 def _report_runtime_error(e: MahRuntimeError) -> None:

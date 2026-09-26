@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from mah.bytecode.decode import decode
 from mah.bytecode.disasm import disassemble
 from mah.bytecode.encode import encode
-from mah.bytecode.format import SEC_PARAMS, MahcFormatError
+from mah.bytecode.format import SEC_PARAMS, SHEBANG, MahcFormatError
 from mah.bytecode.leb128 import read_varint, read_varuint, write_varint, write_varuint
 from mah.bytecode.program import Const, FunctionDecl, Instr, NativeRef, Program
 from mah.cli.main import main as cli_main
@@ -146,6 +146,16 @@ class LoaderValidationTests(unittest.TestCase):
         with self.assertRaises(MahcFormatError) as cm:
             decode(bytes(data))
         self.assertIn("minor", str(cm.exception))
+
+    def test_leading_shebang_line_is_skipped(self):
+        data = compile_bytes(text="print(1)")
+        self.assertEqual(decode(SHEBANG + data), decode(data))
+        self.assertEqual(decode(b"#!/some/other mah\n" + data), decode(data))
+
+    def test_shebang_without_newline(self):
+        with self.assertRaises(MahcFormatError) as cm:
+            decode(b"#!/usr/bin/env mah")
+        self.assertIn("shebang", str(cm.exception))
 
     def test_truncated_file(self):
         data = compile_bytes(text="print(1)")
@@ -394,6 +404,41 @@ class CliTests(unittest.TestCase):
             with open(out_path, "rb") as f:
                 data = f.read()
             self.assertIsNone(decode(data).debug)
+
+    def test_build_output_is_an_executable_script(self):
+        with tempfile.TemporaryDirectory() as td:
+            src = os.path.join(td, "prog.mh")
+            with open(src, "w") as f:
+                f.write('print("hi")')
+            self._run_main(["build", src])
+            mahc = os.path.join(td, "prog.mahc")
+            with open(mahc, "rb") as f:
+                data = f.read()
+            self.assertTrue(data.startswith(SHEBANG))
+            self.assertEqual(data[len(SHEBANG):], compile_bytes(path=src))
+            if os.name == "posix":
+                self.assertTrue(os.access(mahc, os.X_OK))
+
+    @unittest.skipUnless(os.name == "posix", "shebang execution is POSIX-only")
+    def test_built_file_runs_directly(self):
+        with tempfile.TemporaryDirectory() as td:
+            # a stand-in `mah` on PATH, so this doesn't depend on an install
+            bin_dir = os.path.join(td, "bin")
+            os.makedirs(bin_dir)
+            launcher = os.path.join(bin_dir, "mah")
+            with open(launcher, "w") as f:
+                f.write(f'#!/bin/sh\nPYTHONPATH="{_REPO_ROOT}" exec "{sys.executable}" -m mah "$@"\n')
+            os.chmod(launcher, 0o755)
+            src = os.path.join(td, "prog.mh")
+            with open(src, "w") as f:
+                f.write('print("hi")')
+            # no `.mahc` extension: the shebang names `runc` explicitly
+            out_path = os.path.join(td, "prog")
+            self._run_main(["build", src, "-o", out_path])
+            env = dict(os.environ, PATH=bin_dir + os.pathsep + os.environ.get("PATH", ""))
+            result = subprocess.run([out_path], env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            self.assertEqual(result.stdout, "hi\n")
 
 
 # ---------------------------------------------------------------------------

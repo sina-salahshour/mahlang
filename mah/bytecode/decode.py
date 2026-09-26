@@ -517,6 +517,13 @@ def _parse_debug(payload: bytes, nstrings: int) -> DebugInfo:
 
 
 def decode(data: bytes) -> Program:
+    if data.startswith(b"#!"):
+        # an optional shebang line (see format.SHEBANG) -- not part of the
+        # format proper, so skip it before looking for MAGIC
+        newline = data.find(b"\n")
+        if newline < 0:
+            raise MahcFormatError("truncated file: shebang line without a newline")
+        data = data[newline + 1 :]
     r = _Reader(data)
     magic = r.bytes(4)
     if magic != MAGIC:
