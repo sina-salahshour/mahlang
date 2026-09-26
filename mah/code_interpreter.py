@@ -526,7 +526,10 @@ def _matchrange(val: Any, lo: Any, hi: Any, inclusive: bool) -> bool:
 
 def _format_number(v: Decimal) -> str:
     if v == v.to_integral_value():
-        return str(int(v))
+        # every digit, without going through `int` (whose str() refuses
+        # past 4300 digits and is slow long before that); "5.00" -> "5"
+        text = format(v, "f").partition(".")[0]
+        return "0" if text == "-0" else text
     return format(v.normalize(), "f")
 
 
@@ -1008,6 +1011,10 @@ def _execute(linked: LinkedProgram) -> None:
                 raise MahRuntimeError("Division by zero")
             return a % b
         if op == "pow":
+            if a == 0 and b < 0:
+                # `decimal` would return Infinity here (untrapped), which
+                # Mah has no representation for
+                raise MahRuntimeError("Division by zero")
             return a**b
         raise AssertionError(op)
 

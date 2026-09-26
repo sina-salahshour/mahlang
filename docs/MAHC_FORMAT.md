@@ -51,7 +51,9 @@ sections   (id u8, length varuint, payload bytes(length))*   until end of file
   including the first `\n`, placed before `magic`. It isn't part of the
   format; a VM **must** skip it. The reference `mah build` writes
   `#!/usr/bin/env -S mah runc\n` and marks the file executable, so a built
-  program runs as `./prog.mahc`.
+  program runs as `./prog.mahc`. A self-contained executable
+  (`mah build --self-contained`) wraps a `.mahc` file together with a
+  runtime; that container is described in docs/RUST_VM.md.
 - A VM **must** reject a file whose `major` differs from the one it
   implements, and **should** reject one whose `minor` is greater than the
   one it implements (it may use opcodes/natives the VM doesn't know). An

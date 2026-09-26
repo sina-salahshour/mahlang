@@ -101,6 +101,8 @@ def run_file(path: str, stdin: str = "") -> str:
 
 
 def _run(data: bytes, stdin: str) -> str:
+    if os.environ.get("MAH_TEST_VM") == "rust":
+        return _run_rust(data, stdin)
     # contextlib has no redirect_stdin (only stdout/stderr) -- swap
     # sys.stdin manually, since the `io.input` native reads from it
     # directly via sys.stdin.read(1).
@@ -113,6 +115,35 @@ def _run(data: bytes, stdin: str) -> str:
     finally:
         sys.stdin = old_stdin
     return out.getvalue()
+
+
+def _run_rust(data: bytes, stdin: str) -> str:
+    """`_run` on the native Rust VM (`MAH_TEST_VM=rust`, `make test-rust`):
+    runs the program through `mah-vm` and turns its exit status back into
+    the exceptions the Python VM raises, so every test that goes through
+    `run_source`/`run_file` checks the Rust VM's behavior too."""
+    import subprocess
+    import tempfile
+
+    from mah.bytecode.format import MahcFormatError
+    from mah.runtime_values import MahRuntimeError
+    from mah.rust_vm import find_vm
+
+    fd, path = tempfile.mkstemp(suffix=".mahc")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        result = subprocess.run([find_vm(), "run", path], input=stdin.encode(), capture_output=True)
+    finally:
+        os.unlink(path)
+    stderr = result.stderr.decode()
+    if result.returncode == 1 and stderr.startswith("RuntimeError: "):
+        raise MahRuntimeError(stderr[len("RuntimeError: "):].rstrip("\n"))
+    if result.returncode == 2 and stderr.startswith("error: invalid .mahc file: "):
+        raise MahcFormatError(stderr[len("error: invalid .mahc file: "):].rstrip("\n"))
+    if result.returncode != 0:
+        raise AssertionError(f"mah-vm exited {result.returncode}: {stderr}")
+    return result.stdout.decode()
 
 
 def example_path(name: str) -> str:

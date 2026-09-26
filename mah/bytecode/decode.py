@@ -42,6 +42,7 @@ from .format import (
     BUILTIN_TYPES,
     MahcFormatError,
 )
+from . import bundle
 from .leb128 import read_varint, read_varuint
 from .program import Const, DebugInfo, FunctionDecl, Instr, NativeRef, Program, TypeDecl
 
@@ -517,6 +518,9 @@ def _parse_debug(payload: bytes, nstrings: int) -> DebugInfo:
 
 
 def decode(data: bytes) -> Program:
+    # a self-contained executable (mah/bytecode/bundle.py) carries the
+    # program's bytes after its stub and runtime
+    _info, data = bundle.split(data)
     if data.startswith(b"#!"):
         # an optional shebang line (see format.SHEBANG) -- not part of the
         # format proper, so skip it before looking for MAGIC

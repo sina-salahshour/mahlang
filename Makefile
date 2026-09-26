@@ -2,6 +2,7 @@ CC ?= cc
 CFLAGS ?= -O3 -shared -fPIC -I ./syntax-highlight/src
 NVIM_DIR ?= $(if $(XDG_CONFIG_HOME),$(XDG_CONFIG_HOME)/nvim,$(HOME)/.config/nvim)
 PYTHON ?= python3
+CARGO ?= cargo
 
 # Installed locations inside the Neovim config directory.
 FTDETECT := $(NVIM_DIR)/ftdetect/mah.vim
@@ -27,6 +28,18 @@ lang:
 test:
 	$(PYTHON) -m unittest discover -s tests -t . -v
 
+# The same suite with every program run on the Rust VM instead (see
+# tests/support.py's `_run_rust`), plus the Rust crate's own tests.
+test-rust: vm
+	cd runtime && $(CARGO) test --release
+	MAH_TEST_VM=rust $(PYTHON) -m unittest discover -s tests -t .
+
+# ---------------------------------------------------------------------------
+# mah-vm -- the native Rust runtime (runtime/, std-only; see docs/RUST_VM.md)
+# ---------------------------------------------------------------------------
+vm:
+	cd runtime && $(CARGO) build --release
+
 # ---------------------------------------------------------------------------
 # mah -- the CLI (which also ships the language server as `mah lsp`)
 # ---------------------------------------------------------------------------
@@ -35,11 +48,14 @@ test:
 # bin/mah resolves its own real path explicitly and does
 # `from mah.cli.main import main`, so this works from any invoking directory
 # regardless of how sys.path[0] gets set for a script run through a symlink.
+# The Rust runtime is copied too if it's been built (`make vm`): `--vm rust`
+# and `build --self-contained` look for it next to the package.
 install-mah:
 	mkdir -p $(LIB_DIR) $(BIN_DIR)
-	rm -rf $(LIB_DIR)/mah
+	rm -rf $(LIB_DIR)/mah $(LIB_DIR)/mah-vm
 	cp -r mah $(LIB_DIR)/mah
 	cp bin/mah $(LIB_DIR)/mah-launcher
+	if [ -x runtime/target/release/mah-vm ]; then cp runtime/target/release/mah-vm $(LIB_DIR)/mah-vm; fi
 	chmod +x $(LIB_DIR)/mah-launcher
 	ln -sf $(LIB_DIR)/mah-launcher $(BIN_LINK)
 
@@ -122,7 +138,7 @@ uninstall-lsp-nvim: uninstall-nvim
 lsp-uninstall: uninstall-nvim
 lsp-remove: uninstall-nvim
 
-.PHONY: lang test install install-all uninstall uninstall-all \
+.PHONY: lang test test-rust vm install install-all uninstall uninstall-all \
 	install-mah uninstall-mah install-nvim uninstall-nvim build-vscode \
 	install-cli install-cli-mah cli-install uninstall-cli cli-uninstall remove-cli \
 	install-syntax nvim-install install-lsp install-lsp-nvim lsp-install nvim-lsp \

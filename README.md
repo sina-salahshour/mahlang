@@ -212,6 +212,20 @@ python -m mah format ./examples                      # rewrite .mh files in the 
 `mah format` only ever changes whitespace, and checks that before writing
 (`--check` lists files that would change instead; see `docs/FORMAT.md`).
 
+There's also a native runtime written in Rust (standard library only), with
+the same behavior as the Python VM:
+
+```sh
+make vm                                              # build it (needs cargo)
+python -m mah run --vm rust ./examples/structs.mh    # run on it (also: runc --vm rust)
+python -m mah build --self-contained ./examples/structs.mh -o structs
+./structs                                            # one file, runs without mah installed
+```
+
+A self-contained build is a small shell script with the runtime and the
+bytecode appended; it runs on machines with the same OS and CPU. See
+`docs/RUST_VM.md`.
+
 `mah <file>` (no subcommand) is shorthand for `mah run <file>` (or `mah
 runc` for a `.mahc` file). `mah build` output starts with a
 `#!/usr/bin/env -S mah runc` line and is marked executable, so with `mah` on
@@ -230,7 +244,9 @@ mah build --target release
 ```
 
 `mah init` creates `mah-project.toml` (package name, version, entry point,
-and build targets, each with a `debug` or `release` profile), `src/main.mh`,
+and build targets, each with a `debug` or `release` profile and optionally
+`self-contained = true` for a standalone executable; `[run] vm = "rust"`
+makes `mah run` use the Rust runtime), `src/main.mh`,
 a `.gitignore`, and docs for coding agents: `AGENTS.md` (plus a `CLAUDE.md`
 that imports it) and `docs/mah-language.md`, a complete language reference
 written so an LLM can write correct Mah without guessing. `mah run` and
@@ -243,6 +259,7 @@ reserved for third-party packages, which aren't supported yet.
 
 ```sh
 make install-mah      # installs into ~/.local/lib/mah, links ~/.local/bin/mah
+                      # (run `make vm` first to install the Rust runtime too)
 make uninstall-mah
 ```
 
@@ -415,6 +432,7 @@ Further out, tracked in `docs/NEXT_PHASES.md` and `docs/TYPES.md`:
   going" above
 - `docs/TRAITS.md` — traits, `impl`, method dispatch, and system traits
 - `docs/MAHC_FORMAT.md` — the portable `.mahc` bytecode format (normative)
+- `docs/RUST_VM.md` — the Rust runtime (`mah-vm`), `--vm rust`, self-contained executables
 - `docs/TESTING.md` — the testing policy referenced above
 - `docs/DEVELOPMENT_WORKFLOW.md` — how this project's own development is
   split across planning, implementation, and verification

@@ -5,6 +5,8 @@ import re
 import shlex
 import sys
 
+from .. import rust_vm
+from ..bytecode import bundle
 from ..bytecode.decode import decode
 from ..bytecode.disasm import disassemble
 from ..bytecode.format import SHEBANG, MahcFormatError
@@ -152,6 +154,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="path to the .mh file to run, or a project directory (defaults to the "
              "current project, found by searching upward from the current directory)",
     )
+    _add_vm_argument(run_parser)
 
     build_parser = subparsers.add_parser(
         "build", help="compile a .mh file, or the current project's targets, to .mahc bytecode"
@@ -176,6 +179,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
              "error messages, 'release' omits them; project mode: the name of one "
              "[[target]] entry to build (default: build all of them)",
     )
+    build_parser.add_argument(
+        "--self-contained", action="store_true",
+        help="bundle the Rust runtime (mah-vm) into the output, making one executable "
+             "file that runs without mah installed (same OS and CPU only)",
+    )
 
     init_parser = subparsers.add_parser(
         "init", help="create a new Mah project (in DIR, or the current directory)"
@@ -184,6 +192,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
     runc_parser = subparsers.add_parser("runc", help="run a compiled .mahc bytecode file")
     runc_parser.add_argument("file", help="path to the .mahc file to run")
+    _add_vm_argument(runc_parser)
 
     dis_parser = subparsers.add_parser("dis", help="disassemble a .mahc bytecode file")
     dis_parser.add_argument("file", help="path to the .mahc file to disassemble")
@@ -212,6 +221,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
 
     return parser
+
+
+def _add_vm_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--vm", choices=("python", "rust"), default=None,
+        help="which runtime executes the program: the reference Python VM (the default, "
+             "unless a project's [run] vm says otherwise) or the native Rust one, mah-vm "
+             "(build it with 'make vm')",
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -258,6 +276,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Next: {cd_prefix}mah run")
         return 0
 
+    if args.command == "runc" and args.vm == "rust":
+        try:
+            return rust_vm.run_file(args.file)
+        except rust_vm.RustVmNotFound as e:
+            print(e, file=sys.stderr)
+            return 2
+
     if args.command == "runc":
         data = read_file_bytes(args.file)
         try:
@@ -277,11 +302,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "dis":
         data = read_file_bytes(args.file)
         try:
+            info, _mahc = bundle.split(data)
             program = decode(data)
         except MahcFormatError as e:
             print(f"error: invalid .mahc file: {e}", file=sys.stderr)
             return 2
-        text = disassemble(program)
+        header, _nl, rest = disassemble(program).partition("\n")
+        text = f"{header}\n{_runtime_line(info)}\n{rest}"
         if args.out is None:
             print(text, end="")
         else:
@@ -297,6 +324,9 @@ def main(argv: list[str] | None = None) -> int:
     # entries to actually write, already resolved from `--target`).
     project = None
     targets = None
+    # `build --self-contained`: (vm bytes, version, target), looked up
+    # before compiling anything so a missing mah-vm fails fast.
+    runtime = None
 
     if args.command == "run":
         if args.file is None or os.path.isdir(args.file):
@@ -304,6 +334,8 @@ def main(argv: list[str] | None = None) -> int:
             if err is not None:
                 return err
             args.file = project.entry
+        if args.vm is None:
+            args.vm = project.run_vm if project is not None else "python"
 
     elif args.command == "build":
         if args.file is None or os.path.isdir(args.file):
@@ -339,6 +371,17 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
+
+    # a project target can ask for a bundle itself (`self-contained = true`)
+    if args.command == "build" and (args.self_contained or any(t.self_contained for t in targets or ())):
+        try:
+            vm_path = rust_vm.find_vm()
+            vm_ver, vm_target = rust_vm.vm_version(vm_path)
+        except rust_vm.RustVmNotFound as e:
+            print(e, file=sys.stderr)
+            return 2
+        with open(vm_path, "rb") as f:
+            runtime = (f.read(), vm_ver, vm_target)
 
     entry_str = read_file(args.file)
     pp = preprocess(args.file, entry_str)
@@ -376,16 +419,24 @@ def main(argv: list[str] | None = None) -> int:
                     )
             for t in targets:
                 os.makedirs(os.path.dirname(t.out), exist_ok=True)
-                _write_mahc(t.out, compiled_by_profile[t.profile])
+                bundled = args.self_contained or t.self_contained
+                _write_mahc(t.out, compiled_by_profile[t.profile], runtime if bundled else None)
                 rel_out = os.path.relpath(t.out, os.getcwd())
-                print(f"built {t.name} ({t.profile}) -> {rel_out}")
+                kind = f"{t.profile}, self-contained" if bundled else t.profile
+                print(f"built {t.name} ({kind}) -> {rel_out}")
         elif args.command == "build":
             build_target = args.target if args.target is not None else "debug"
             data = compile_to_bytes(path=args.file, text=entry_str, target=build_target)
             out_path = args.out if args.out is not None else _default_mahc_path(args.file)
-            _write_mahc(out_path, data)
+            _write_mahc(out_path, data, runtime)
         elif args.command == "run":
             data = compile_to_bytes(path=args.file, text=entry_str, target="debug")
+            if args.vm == "rust":
+                try:
+                    return rust_vm.run_bytes(data)
+                except rust_vm.RustVmNotFound as e:
+                    print(e, file=sys.stderr)
+                    return 2
             run_bytes(data)
     except MahRuntimeError as e:
         _report_runtime_error(e)
@@ -409,15 +460,30 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _write_mahc(path: str, data: bytes) -> None:
-    """Write a built program as a directly executable file: SHEBANG
-    first (so `./prog.mahc` runs it via `mah runc`), then the bytecode,
-    with the execute bits added wherever the read bits are set."""
+def _write_mahc(path: str, data: bytes, runtime: tuple | None = None) -> None:
+    """Write a built program as a directly executable file, with the
+    execute bits added wherever the read bits are set: SHEBANG then the
+    bytecode (so `./prog.mahc` runs it via `mah runc`), or -- with
+    `runtime` = (mah-vm bytes, version, target) -- a self-contained bundle
+    (mah/bytecode/bundle.py) that needs no mah install at all."""
     with open(path, "wb") as f:
-        f.write(SHEBANG)
-        f.write(data)
+        if runtime is None:
+            f.write(SHEBANG)
+            f.write(data)
+        else:
+            f.write(bundle.build(runtime[0], runtime[1], runtime[2], data))
     mode = os.stat(path).st_mode
     os.chmod(path, mode | ((mode & 0o444) >> 2))
+
+
+def _runtime_line(info) -> str:
+    """`mah dis`'s second line: which runtime, if any, the file carries."""
+    if info is None:
+        return "runtime: none (plain bytecode, runs on an installed mah)"
+    return (
+        f"runtime: rust mah-vm {info.vm_version} ({info.vm_target}), self-contained, "
+        f"{info.vm_size} bytes"
+    )
 
 
 def _report_runtime_error(e: MahRuntimeError) -> None:

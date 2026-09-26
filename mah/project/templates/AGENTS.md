@@ -27,6 +27,8 @@ mah build                   # write every [[target]] from mah-project.toml
 mah build --target release  # write one target
 mah runc build/{{name}}.mahc   # run a compiled file (or just ./build/{{name}}.mahc)
 mah dis build/{{name}}.mahc    # show the compiled bytecode
+mah run --vm rust           # run on the native Rust runtime (if it's installed)
+mah build --self-contained  # make every target standalone (runs without mah, same OS/CPU)
 mah format                  # lay out every .mh file in the standard style
 mah format --check          # list files that aren't formatted (exit 1 if any)
 ```
@@ -45,7 +47,11 @@ program and reading its output.
 - `[package]`: `name`, `version` (yours to manage), `entry` (defaults to
   `src/main.mh`).
 - `[[target]]`: one per build output, each with a unique `name`, a
-  `profile` (`"debug"` or `"release"`), and an `out` path.
+  `profile` (`"debug"` or `"release"`), and an `out` path. Optional
+  `self-contained = true` bundles the Rust runtime into the output, making a
+  standalone executable (it needs `mah-vm` installed to build).
+- `[run]`: `vm = "python"` (default) or `"rust"` picks the runtime `mah run`
+  uses for the project; `mah run --vm ...` overrides it.
 - `[dependencies]`: reserved for third-party packages, which aren't supported
   yet. Keep it empty.
 

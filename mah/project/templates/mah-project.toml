@@ -9,6 +9,8 @@ entry = "src/main.mh"    # the file `mah run` executes (relative to this file)
 # writes just one.
 #   profile = "debug"    keeps source locations, so runtime errors say where
 #   profile = "release"  strips them: a smaller file, errors give no location
+#   self-contained = true  (optional) bundles the Rust runtime into the output,
+#                          so it runs without mah installed (same OS and CPU)
 [[target]]
 name = "debug"
 profile = "debug"
@@ -18,6 +20,18 @@ out = "build/{{name}}-debug.mahc"
 name = "release"
 profile = "release"
 out = "build/{{name}}.mahc"
+
+# A standalone executable of the release build (needs the Rust runtime, mah-vm):
+# [[target]]
+# name = "dist"
+# profile = "release"
+# out = "build/{{name}}"
+# self-contained = true
+
+# How `mah run` runs the project: vm = "python" (the reference VM) or
+# vm = "rust" (the faster native runtime, mah-vm). `mah run --vm ...` overrides it.
+[run]
+vm = "python"
 
 # Third-party packages will be declared here. Not supported yet, so keep it empty.
 [dependencies]

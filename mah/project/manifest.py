@@ -14,9 +14,11 @@ from dataclasses import dataclass, field
 MANIFEST_NAME = "mah-project.toml"
 
 _PACKAGE_KEYS = {"name", "version", "entry"}
-_TARGET_KEYS = {"name", "profile", "out"}
-_TOP_LEVEL_KEYS = {"package", "target", "dependencies"}
+_TARGET_KEYS = {"name", "profile", "out", "self-contained"}
+_RUN_KEYS = {"vm"}
+_TOP_LEVEL_KEYS = {"package", "target", "run", "dependencies"}
 _PROFILES = {"debug", "release"}
+VMS = ("python", "rust")
 
 
 class MahProjectError(Exception):
@@ -30,6 +32,8 @@ class Target:
     name: str
     profile: str  # "debug" | "release"
     out: str  # absolute path
+    # bundle the Rust runtime into the output (`mah build --self-contained`)
+    self_contained: bool = False
 
 
 @dataclass
@@ -40,6 +44,8 @@ class Project:
     version: str
     entry: str  # absolute path
     targets: list[Target] = field(default_factory=list)
+    # which VM `mah run` uses unless `--vm` says otherwise ([run] vm)
+    run_vm: str = "python"
     dependencies: dict = field(default_factory=dict)
 
 
@@ -129,9 +135,23 @@ def load_project(manifest_path: str) -> Project:
                 other = seen_outs[resolved_out]
                 fail(f"targets '{other}' and '{t_name}' write the same file {out_path}")
 
+            self_contained = raw_target.get("self-contained", False)
+            if not isinstance(self_contained, bool):
+                fail(f"target '{t_name}': self-contained must be true or false")
+
             seen_names[t_name] = out_path
             seen_outs[resolved_out] = t_name
-            targets.append(Target(name=t_name, profile=profile, out=out_path))
+            targets.append(Target(name=t_name, profile=profile, out=out_path, self_contained=self_contained))
+
+    run = data.get("run", {})
+    if not isinstance(run, dict):
+        fail("run must be a table, written [run]")
+    for key in run:
+        if key not in _RUN_KEYS:
+            fail(f"unknown key 'run.{key}'")
+    run_vm = run.get("vm", "python")
+    if run_vm not in VMS:
+        fail('run.vm must be "python" or "rust"')
 
     dependencies = data.get("dependencies", {})
     if not isinstance(dependencies, dict):
@@ -146,5 +166,6 @@ def load_project(manifest_path: str) -> Project:
         version=version,
         entry=entry_path,
         targets=targets,
+        run_vm=run_vm,
         dependencies=dependencies,
     )

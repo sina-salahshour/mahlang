@@ -103,6 +103,10 @@ VMs from it, so a feature isn't done until that document describes it.
   `at position ...` in a VM message.
 - The VM must never import `mah.compiler`/`mah.preprocessor`/`mah.lsp`
   (a test enforces this).
+- **Port it to the Rust VM too** (`runtime/`, see `docs/RUST_VM.md`): a
+  new opcode goes in `runtime/src/decode.rs` and `vm.rs`, a native in
+  `vm.rs`, with the same error messages as the Python VM. `make test-rust`
+  runs the whole suite on the Rust VM and must stay green as well.
 
 ## 7. Test it — do this before calling the feature done, not after
 
@@ -111,6 +115,7 @@ file.** Concretely:
 
 ```sh
 make test                                       # must stay green
+make test-rust                                  # same suite on the Rust VM
 python -m mah build examples/your_test.mh       # writes examples/your_test.mahc
 python -m mah dis examples/your_test.mahc       # eyeball the bytecode
 python -m mah run examples/your_test.mh         # run it

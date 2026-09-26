@@ -85,6 +85,8 @@ class InitTests(unittest.TestCase):
                 ],
             )
             self.assertEqual(project.dependencies, {})
+            self.assertEqual([t.self_contained for t in project.targets], [False, False])
+            self.assertEqual(project.run_vm, "python")
 
             for dirpath, _dirs, files in os.walk(root):
                 for name in files:
@@ -292,6 +294,95 @@ class BuildProjectTests(unittest.TestCase):
 # manifest validation
 # ---------------------------------------------------------------------------
 
+# A stand-in `mah-vm` (MAH_VM points to it): enough for the CLI to take
+# its version and to show that it was the one asked to run the program.
+_FAKE_VM = """#!/bin/sh
+if [ "$1" = --version ]; then echo "mah-vm 9.9.9 (fake-target)"; exit 0; fi
+echo "fake vm ran $1"
+"""
+
+
+@unittest.skipUnless(os.name == "posix", "the stand-in mah-vm is a shell script")
+class RustRuntimeSettingsTests(unittest.TestCase):
+    """`[run] vm` and `self-contained = true` (the real runtime is covered
+    by tests/test_rust_vm.py)."""
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        vm = os.path.join(self.td.name, "fake-mah-vm")
+        with open(vm, "w") as f:
+            f.write(_FAKE_VM)
+        os.chmod(vm, 0o755)
+        self.old_vm = os.environ.get("MAH_VM")
+        os.environ["MAH_VM"] = vm
+        self.root = os.path.join(self.td.name, "proj")
+        with _chdir(self.td.name):
+            _run_main(["init", "proj"])
+        self.manifest = os.path.join(self.root, "mah-project.toml")
+
+    def tearDown(self):
+        if self.old_vm is None:
+            os.environ.pop("MAH_VM", None)
+        else:
+            os.environ["MAH_VM"] = self.old_vm
+        self.td.cleanup()
+
+    def _edit_manifest(self, old, new):
+        with open(self.manifest) as f:
+            text = f.read()
+        self.assertIn(old, text)
+        with open(self.manifest, "w") as f:
+            f.write(text.replace(old, new))
+
+    def _run_captured(self, argv):
+        # the rust path runs a subprocess, which writes to the real fd 1
+        with tempfile.TemporaryFile("w+") as out:
+            old = os.dup(1)
+            os.dup2(out.fileno(), 1)
+            try:
+                rc = cli_main(argv)
+                sys.stdout.flush()
+            finally:
+                os.dup2(old, 1)
+                os.close(old)
+            out.seek(0)
+            return rc, out.read()
+
+    def test_run_uses_the_manifest_vm(self):
+        self._edit_manifest('vm = "python"', 'vm = "rust"')
+        with _chdir(self.root):
+            rc, out = self._run_captured(["run"])
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.startswith("fake vm ran "), out)
+
+    def test_vm_flag_overrides_the_manifest(self):
+        self._edit_manifest('vm = "python"', 'vm = "rust"')
+        with _chdir(self.root):
+            rc, out = self._run_captured(["run", "--vm", "python"])
+        self.assertEqual((rc, out), (0, "Hello, proj!\n"))
+
+    def test_default_manifest_runs_on_python(self):
+        with _chdir(self.root):
+            rc, out = self._run_captured(["run"])
+        self.assertEqual((rc, out), (0, "Hello, proj!\n"))
+
+    def test_self_contained_target(self):
+        self._edit_manifest(
+            "# [[target]]\n# name = \"dist\"\n# profile = \"release\"\n# out = \"build/{name}\"\n"
+            "# self-contained = true".replace("{name}", "proj"),
+            '[[target]]\nname = "dist"\nprofile = "release"\nout = "build/proj"\nself-contained = true',
+        )
+        with _chdir(self.root):
+            rc, out, err = _run_main(["build"])
+        self.assertEqual(rc, 0, msg=err)
+        self.assertIn("built dist (release, self-contained) -> build/proj", out)
+        self.assertIn("built release (release) -> build/proj.mahc", out)
+        with open(os.path.join(self.root, "build", "proj"), "rb") as f:
+            self.assertTrue(f.read().startswith(b"#!/bin/sh\n# mah-bundle v1\n# vm-version: 9.9.9\n"))
+        with open(os.path.join(self.root, "build", "proj.mahc"), "rb") as f:
+            self.assertTrue(f.read().startswith(b"#!/usr/bin/env -S mah runc\n"))
+
+
 class ManifestValidationTests(unittest.TestCase):
     def _write(self, td, text):
         path = os.path.join(td, "mah-project.toml")
@@ -338,6 +429,36 @@ class ManifestValidationTests(unittest.TestCase):
                 td, '[package]\nname = "x"\nversion = "1"\nauthor = "me"\n'
             )
             self._assert_error(path, "unknown key 'package.author'")
+
+    def test_self_contained_must_be_a_bool(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = self._write(
+                td,
+                '[package]\nname = "x"\nversion = "1"\n\n'
+                '[[target]]\nname = "a"\nprofile = "release"\nout = "a"\nself-contained = "yes"\n',
+            )
+            self._assert_error(path, "target 'a': self-contained must be true or false")
+
+    def test_run_vm_must_be_python_or_rust(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = self._write(td, '[package]\nname = "x"\nversion = "1"\n\n[run]\nvm = "jvm"\n')
+            self._assert_error(path, 'run.vm must be "python" or "rust"')
+
+    def test_unknown_run_key(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = self._write(td, '[package]\nname = "x"\nversion = "1"\n\n[run]\nfast = true\n')
+            self._assert_error(path, "unknown key 'run.fast'")
+
+    def test_run_and_self_contained_settings_load(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = self._write(
+                td,
+                '[package]\nname = "x"\nversion = "1"\n\n[run]\nvm = "rust"\n\n'
+                '[[target]]\nname = "a"\nprofile = "release"\nout = "a"\nself-contained = true\n',
+            )
+            project = load_project(path)
+            self.assertEqual(project.run_vm, "rust")
+            self.assertTrue(project.targets[0].self_contained)
 
     def test_invalid_profile(self):
         with tempfile.TemporaryDirectory() as td:
