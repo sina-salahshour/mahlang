@@ -2839,8 +2839,12 @@ node that resolved to it. Then:
       and rolls back completely on failure, so a mismatch never leaves a
       half-unified structure and the if/match join can try a branch.
     - **Deviations from the design, all deliberate**: method calls and
-      static path calls give an unchecked `Unknown`, and their arguments
-      are still checked (M23). Built-in indexing (`Vector`/`String`/`Map`, including
+      static path calls were an unchecked `Unknown` at first; the M23a
+      follow-up (`docs/TYPES.md`'s plan) types them through a method
+      registry (`Checker._register_methods`/`_method_scheme`), with native
+      method signatures hard-coded in `_native_method` until
+      `builtins.d.mh`, and records field-access and method-call types
+      (`field_types`/`method_types`) for LSP hover. Built-in indexing (`Vector`/`String`/`Map`, including
       range slices) and `for` over built-in iterables are typed directly now,
       ahead of M23's trait-based rules. `Unknown` has a third kind,
       "unchecked" (what M22 doesn't type yet, and the recovery value after a

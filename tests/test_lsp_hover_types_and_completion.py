@@ -61,6 +61,86 @@ class HoverDocCommentTests(unittest.TestCase):
         self.assertNotIn("__mah_m", value)
 
 
+class HoverInferredTypeTests(unittest.TestCase):
+    SRC = (
+        "let x = 5\n"
+        "let v = [1, 2]\n"
+        "fn add(a, b) {\n"
+        "\treturn a + b * 2\n"
+        "}\n"
+        "fn id(a) {\n"
+        "\treturn a\n"
+        "}\n"
+        "print(add(x, 1))\n"
+    )
+
+    def _value(self, needle, occurrence=0):
+        line, col = _find(self.SRC, needle, occurrence)
+        hover = analysis.get_hover(self.SRC, line, col)
+        self.assertIsNotNone(hover)
+        return hover["contents"]["value"]
+
+    def test_hover_on_variable_declaration_shows_inferred_type(self):
+        self.assertIn("x: Number", self._value("x"))
+        self.assertIn("v: Vector<Number>", self._value("v ="))
+
+    def test_hover_on_variable_use_shows_inferred_type(self):
+        self.assertIn("x: Number", self._value("x, 1"))
+
+    def test_hover_on_function_and_parameter_shows_signature(self):
+        self.assertIn("fn add(a: Number, b: Number) -> Number", self._value("add", occurrence=1))
+        self.assertIn("a: Number", self._value("a, b"))
+        self.assertIn("fn id(a: T) -> T", self._value("id"))
+
+
+class HoverMethodAndFieldTypeTests(unittest.TestCase):
+    SRC = (
+        "struct Board { c1 }\n"
+        "struct Line { a, b }\n"
+        "impl Board {\n"
+        "    fn new() { Self { c1: \"\" } }\n"
+        "    # the cell's mark\n"
+        "    fn get(self, i) { match i { 1 => { self.c1 } _ => { \"\" } } }\n"
+        "}\n"
+        "let board = Board.new()\n"
+        "let l = Line { a: 1, b: 2 }\n"
+        "print(board.get(l.a))\n"
+    )
+
+    def _value(self, needle, occurrence=0, delta=0):
+        line, col = _find(self.SRC, needle, occurrence)
+        hover = analysis.get_hover(self.SRC, line, col + delta)
+        self.assertIsNotNone(hover, needle)
+        return hover["contents"]["value"]
+
+    def test_static_call_shows_signature(self):
+        self.assertIn("fn new() -> Board", self._value("Board.new", delta=len("Board.")))
+
+    def test_variable_from_static_call_has_its_type(self):
+        self.assertIn("board: Board", self._value("board ="))
+
+    def test_self_has_the_impl_type(self):
+        self.assertIn("self: Board", self._value("self.c1"))
+
+    def test_field_access_shows_field_type(self):
+        value = self._value("self.c1", delta=len("self."))
+        self.assertIn("c1: String", value)
+        self.assertIn("`Board`", value)
+        self.assertIn("a: Number", self._value("l.a", delta=2))
+
+    def test_field_declaration_shows_field_type(self):
+        self.assertIn("c1: String", self._value("c1"))
+
+    def test_method_call_shows_signature_and_doc(self):
+        value = self._value("board.get", delta=len("board."))
+        self.assertIn("fn get(self, i: Number) -> String", value)
+        self.assertIn("on `Board`", value)
+        self.assertIn("the cell's mark", value)
+
+    def test_method_declaration_shows_signature(self):
+        self.assertIn("fn get(self, i: Number) -> String", self._value("fn get", delta=3))
+
+
 class HoverStructEnumTests(unittest.TestCase):
     STRUCT_SRC = (
         "struct Point { x, y }\n"
@@ -168,16 +248,15 @@ class HoverFieldTests(unittest.TestCase):
         self.assertIn("field", value)
         self.assertIn("Shape.Circle", value)
 
-    def test_hover_on_plain_field_access_is_not_a_field_hover(self):
+    def test_hover_on_plain_field_access_uses_the_checkers_type(self):
         src = self.STRUCT_SRC + "print(p.x)\n"
         line, col = _find(src, "p.x")
         col += 2  # land on the `x` after `p.`
         hover = analysis.get_hover(src, line, col)
-        # `p.x` is plain field access -- deliberately not covered (unsound
-        # without a real type system) -- so this must not claim to be a
-        # "field" hover at all (it may return None, or find nothing useful).
-        if hover is not None:
-            self.assertNotIn("**field**", hover["contents"]["value"])
+        # The type checker knows `p: Point`, so this is Point's field.
+        self.assertIsNotNone(hover)
+        value = hover["contents"]["value"]
+        self.assertIn("**field** `x` of `Point`", value)
 
 
 class GotoDefinitionFieldTests(unittest.TestCase):
@@ -442,7 +521,7 @@ class MethodNavigationTests(unittest.TestCase):
         hover = analysis.get_hover(self.SRC, line, col)
         self.assertIsNotNone(hover)
         value = hover["contents"]["value"]
-        self.assertIn("impl Rect: fn new(w, h)", value)
+        self.assertIn("fn new(w: Number, h: Number) -> Rect", value)
         self.assertIn("makes a rect", value)
 
     def test_hover_on_area_with_known_receiver_type(self):
@@ -452,7 +531,8 @@ class MethodNavigationTests(unittest.TestCase):
         self.assertIsNotNone(hover)
         value = hover["contents"]["value"]
         self.assertIn("on `Rect`", value)
-        self.assertIn("impl Shape for Rect: fn area(self)", value)
+        self.assertIn("fn area(self) -> Number", value)
+        self.assertIn("implements `Shape.area`", value)
         self.assertNotIn("Sq", value)
 
     def test_hover_on_area_with_unknown_receiver_type(self):
@@ -668,8 +748,8 @@ class CollectionMethodTests(unittest.TestCase):
         src = "let v = [1]\nv.push(2)\n"
         line, col = _find(src, "push")
         hover = analysis.get_hover(src, line, col)
-        self.assertIn("`push` on `Vector`", hover["contents"]["value"])
-        self.assertIn("fn push(self, value)", hover["contents"]["value"])
+        self.assertIn("`push` on `Vector<Number>`", hover["contents"]["value"])
+        self.assertIn("fn push(self, value: Number)", hover["contents"]["value"])
 
 
 if __name__ == "__main__":

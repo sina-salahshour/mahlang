@@ -27,6 +27,7 @@ from ..compiler.lexer import KEYWORDS, Lexer, Token, TokenType  # noqa: E402
 from ..compiler.parser import Parser  # noqa: E402
 from ..compiler.resolve import Resolver  # noqa: E402
 from ..compiler import typecheck  # noqa: E402
+from ..compiler.types import TCon, TFn, prune as prune_type, show as show_type  # noqa: E402
 from ..preprocessor import BUFFER_PATH, demangle_message, preprocess  # noqa: E402
 from ..project.manifest import check_level_for  # noqa: E402
 from ..runtime_values import BUILTIN_TYPE_NAMES  # noqa: E402
@@ -1326,7 +1327,7 @@ def get_hover(text: str, line: int, character: int, path: Optional[str] = None) 
     elif token.type is TokenType.ID:
         found = _symbol_at_position(text, line, character, path)
         if found is not None:
-            pp, _resolver, symbol = found
+            pp, resolver, symbol = found
             kind_label = {
                 "let": "variable",
                 "fn": "function",
@@ -1335,6 +1336,13 @@ def get_hover(text: str, line: int, character: int, path: Optional[str] = None) 
             }.get(symbol.kind, symbol.kind)
             display_name = demangle_message(symbol.name)
             value = f"**{kind_label}** `{display_name}`"
+            t = _checker_decl_type(resolver, symbol.decl_position)
+            if t is not None:
+                if symbol.kind == "fn" and isinstance(prune_type(t), TFn):
+                    signature = _fn_signature_text(display_name, t)
+                else:
+                    signature = f"{display_name}: {_type_text(t)}"
+                value += f"\n\n```mah\n{signature}\n```"
             decl_path, decl_offset = pp.map_to_source(symbol.decl_position)
             doc_source = text if decl_path == pp.entry_path else pp.files.get(decl_path, "")
             doc = _leading_doc_comment(doc_source, decl_offset) if doc_source else ""
@@ -1346,7 +1354,9 @@ def get_hover(text: str, line: int, character: int, path: Optional[str] = None) 
             method_found = _method_at_position(text, line, character, path)
             if method_found is not None:
                 mpp, mresolver, mkind, mpayload = method_found
-                value = _method_hover_value(mpp, mresolver, mkind, mpayload, text)
+                value = _typed_method_hover_value(mpp, mresolver, mkind, mpayload, token, text)
+                if value is None:
+                    value = _method_hover_value(mpp, mresolver, mkind, mpayload, text)
             else:
                 type_found = _type_symbol_at_position(text, line, character, path)
                 if type_found is not None:
@@ -1354,14 +1364,27 @@ def get_hover(text: str, line: int, character: int, path: Optional[str] = None) 
                 else:
                     field_found = _field_symbol_at_position(text, line, character, path)
                     if field_found is None:
-                        return None
-                    _resolver, kind, payload = field_found
-                    if kind == "struct_field":
-                        struct_name, field_name = payload
-                        value = f"**field** `{field_name}` of struct `{struct_name}`"
+                        value = _field_access_hover_value(text, path, token)
+                        if value is None:
+                            return None
                     else:
-                        enum_name, variant_name, field_name = payload
-                        value = f"**field** `{field_name}` of `{enum_name}.{variant_name}`"
+                        fresolver, kind, payload = field_found
+                        checker = _checker_for(fresolver)
+                        field_type = None
+                        if kind == "struct_field":
+                            struct_name, field_name = payload
+                            value = f"**field** `{field_name}` of struct `{struct_name}`"
+                            info = checker.structs.get(struct_name) if checker is not None else None
+                            if info is not None:
+                                field_type = info.fields.get(field_name)
+                        else:
+                            enum_name, variant_name, field_name = payload
+                            value = f"**field** `{field_name}` of `{enum_name}.{variant_name}`"
+                            info = checker.enums.get(enum_name) if checker is not None else None
+                            if info is not None:
+                                field_type = info.variants.get(variant_name, {}).get(field_name)
+                        if field_type is not None:
+                            value += f"\n\n```mah\n{field_name}: {_type_text(field_type)}\n```"
     else:
         return None
 
@@ -1369,6 +1392,126 @@ def get_hover(text: str, line: int, character: int, path: Optional[str] = None) 
         "contents": {"kind": "markdown", "value": value},
         "range": token_range,
     }
+
+
+def _checker_for(resolver):
+    """The type checker (docs/TYPES.md) run over the program
+    `_resolve_for_navigation` resolved, cached on the resolver; `None` when
+    it crashed (hover then just leaves types out)."""
+    program = getattr(resolver, "lsp_program", None)
+    if program is None:
+        return None
+    if not hasattr(resolver, "lsp_checker"):
+        checker = typecheck.Checker(resolver)
+        try:
+            checker.check(program)
+        except Exception:  # noqa: BLE001 - hover must never crash
+            checker = None
+        resolver.lsp_checker = checker
+    return resolver.lsp_checker
+
+
+def _checker_decl_type(resolver, position: int):
+    """The checker's type for the declaration whose name is at `position`
+    (combined text), or `None`."""
+    checker = _checker_for(resolver)
+    if checker is None:
+        return None
+    return checker.decl_types.get(position)
+
+
+def _type_text(t) -> str:
+    return demangle_message(show_type(t))
+
+
+def _fn_signature_text(name: str, t, skip_receiver: bool = False) -> str:
+    """`fn name(a: A, b: B) -> R` for a function type (`fn name: T` for
+    anything else)."""
+    t = prune_type(t)
+    if not isinstance(t, TFn):
+        return f"{name}: {_type_text(t)}"
+    names = t.names or [f"_{i}" for i in range(len(t.params))]
+    params = [f"{n}: {_type_text(p)}" if n != "self" else "self" for n, p in zip(names, t.params)]
+    for index in range(t.required, len(params)):
+        params[index] += " = ..."
+    ret = prune_type(t.ret)
+    arrow = "" if isinstance(ret, TCon) and ret.name == "None" else f" -> {_type_text(ret)}"
+    return f"fn {name}({', '.join(params)}){arrow}"
+
+
+def _combined_token_position(pp, token: Token) -> Optional[int]:
+    return pp.entry_to_combined(token.position)
+
+
+def _typed_method_hover_value(pp, resolver, kind: str, payload, token: Token, text: str) -> Optional[str]:
+    """Hover for a method call/declaration from the type checker's
+    signature, or `None` when the checker has none there (falls back to
+    `_method_hover_value`'s resolver-based listing)."""
+    checker = _checker_for(resolver)
+    position = _combined_token_position(pp, token)
+    if checker is None or position is None:
+        return None
+    if kind == "call":
+        sig = checker.method_types.get(position)
+        if sig is None:
+            return None
+        sig = prune_type(sig)
+        name = payload["name"]
+        receiver = None
+        if isinstance(sig, TFn) and sig.names and sig.names[0] == "self":
+            receiver = _type_text(sig.params[0])
+            header = f"**method** `{name}` on `{receiver}`"
+        else:
+            owner = payload.get("receiver_type")
+            header = f"**function** `{name}`" + (f" of `{owner}`" if owner else "")
+        value = f"{header}\n\n```mah\n{_fn_signature_text(name, sig)}\n```"
+        candidates = payload.get("candidates") or []
+        if candidates:
+            wanted = receiver.split("<")[0] if receiver else payload.get("receiver_type")
+            chosen = next((c for c in candidates if c[0] == "impl" and c[1] == wanted), None)
+            if chosen is None and len(candidates) == 1:
+                chosen = candidates[0]
+            if chosen is not None and chosen[0] == "impl" and chosen[2] is not None:
+                value = value.replace(header, f"{header} -- implements `{chosen[2]}.{name}`", 1)
+            decl_pos = _method_decl_position(resolver, chosen, name) if chosen is not None else None
+            if decl_pos is not None:
+                decl_path, decl_offset = pp.map_to_source(decl_pos)
+                doc_source = text if decl_path == pp.entry_path else pp.files.get(decl_path, "")
+                doc = _leading_doc_comment(doc_source, decl_offset) if doc_source else ""
+                if doc:
+                    value += f"\n\n{doc}"
+        return value
+    sig = checker.decl_types.get(position)
+    if sig is None:
+        return None
+    if payload[0] == "impl":
+        _kind, type_name, trait_name, method_name = payload
+        header = f"**method** `{method_name}` of `{type_name}`"
+        if trait_name is not None:
+            header += f" -- implements `{trait_name}.{method_name}`"
+    else:
+        _kind, trait_name, method_name = payload
+        header = f"**trait method** `{trait_name}.{method_name}`"
+    return f"{header}\n\n```mah\n{_fn_signature_text(method_name, sig)}\n```"
+
+
+def _field_access_hover_value(text: str, path: Optional[str], token: Token) -> Optional[str]:
+    """Hover for the field in a plain field access (`p.x`), from the type
+    checker's type for that access, or `None`."""
+    result = _resolve_for_navigation(text, path)
+    if result is None:
+        return None
+    pp, resolver, _tokens = result
+    checker = _checker_for(resolver)
+    position = _combined_token_position(pp, token)
+    if checker is None or position is None or position not in checker.field_types:
+        return None
+    owner, field_type = checker.field_types[position]
+    owner = prune_type(owner)
+    value = f"**field** `{token.literal}`"
+    if isinstance(owner, TCon):
+        value += f" of `{_type_text(owner)}`"
+    return value + f"\n\n```mah\n{token.literal}: {_type_text(field_type)}\n```"
 
 
 def _member_owner(text: str, token: Token) -> Optional[str]:
@@ -1452,6 +1595,8 @@ def _resolve_for_navigation(text: str, path: Optional[str]):
         resolver.resolve_program(program)
     except Exception:  # noqa: BLE001 - any resolve failure means "no symbol table"
         return None
+    # Kept for hover, which type-checks the same AST (`_symbol_type_text`).
+    resolver.lsp_program = program
     tokens, _lex_error = tokenize(combined)
     return pp, resolver, tokens
 

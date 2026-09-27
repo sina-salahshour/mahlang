@@ -1,6 +1,6 @@
 # Mah static types
 
-Status: **M21 (syntax) and M22 (the core checker) landed; M23 (traits and the standard library) and M24 (LSP hover/completion) are next.** See `docs/V2_DESIGN.md`'s M22 entry for where the implementation deviates from this design. This replaces `docs/NEXT_PHASES.md`'s
+Status: **M21 (syntax) and M22 (the core checker) landed, plus a first slice of M23 (method calls) and M24 (hover types); the rest of M23 (trait types, bounds, the standard library) and M24 (completion from checker types) are next.** See `docs/V2_DESIGN.md`'s M22 entry for where the implementation deviates from this design. This replaces `docs/NEXT_PHASES.md`'s
 "The type system" sketch for now. That sketch treated types as runtime
 values. This design is purely static, so nothing about it runs. Types can
 still become runtime values later (for `match`-on-type narrowing), and
@@ -482,6 +482,18 @@ milestones, continuing after M20.
   expected-type propagation. No traits yet: method calls give `Unknown`.
   The `[types] check` manifest key, `mah check`, compile-time errors in
   `strict`/`explicit`, LSP diagnostics.
+- **M23a, method calls. ✅ Landed** (first slice of M23, see
+  `docs/V2_DESIGN.md`'s M22 entry). Every user impl/trait method is
+  checked on demand and generalized like a top-level function, `self` is
+  the impl's target type, `obj.m(...)` / `Type.f(...)` / `Trait.m(x, ...)`
+  are typed through the method's signature (inherent first, then trait
+  impls and their defaults), the native methods of `String`/`Vector`/`Map`
+  and `to_string` have hard-coded signatures (until `builtins.d.mh`), and
+  an unbound receiver is inferred from a unique method name. Field-closure
+  calls (`p.f()`) are typed through the field. The prelude's methods stay
+  unchecked. LSP hover shows these types (M24's hover part): variables,
+  parameters (including `self`), function/method signatures, field
+  declarations, and field access.
 - **M23, traits and the standard library.** Trait/impl typing, method
   lookup, trait types, bounds, generic defaults, `for` loops, indexing,
   `builtins.d.mh`, the annotated prelude. This is where `"abc".map(fn(c)

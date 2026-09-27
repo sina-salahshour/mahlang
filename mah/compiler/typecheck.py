@@ -22,10 +22,15 @@ Order (docs/TYPES.md's "Items and order"):
    (ML-style levels, see types.TVar).
 3. The main program: the remaining top-level statements, in order.
 
-What this first version (M22) doesn't type yet, per the milestone plan:
-method calls and static path calls (their result is an unchecked
-`Unknown`; their arguments are still checked), trait types and bounds,
-generic defaults, and user `Index`/`Iterable` impls. Built-in indexing and
+Method calls (M23, first slice): every impl/trait method is registered up
+front (`_register_methods`) and its body checked on demand like a
+top-level function, with `self` typed as the impl's target. `obj.m(...)`
+looks `m` up on the receiver's type (inherent impl first, then trait
+impls and their defaults, then the native methods of the built-in types);
+`Type.f(...)`/`Trait.m(recv, ...)` use the named type's/trait's. An
+unbound receiver whose method name exactly one type provides becomes that
+type. Not typed yet: the prelude's methods (unchecked), trait types and
+bounds, generic defaults, and user `Index`/`Iterable` impls. Built-in indexing and
 `for` over built-in types are typed directly. The prelude's bodies aren't
 checked at all, and no diagnostic is ever reported inside the prelude.
 """
@@ -96,6 +101,7 @@ from .types import (
     TUnknown,
     TVar,
     Unifier,
+    free_params,
     free_vars,
     instantiate,
     is_con,
@@ -194,6 +200,20 @@ class _Item:
         self.scheme = None
 
 
+class _Method:
+    """One impl or trait method, checked on demand like `_Item`."""
+
+    def __init__(self, decl, target, scope: dict, params: list, system: bool):
+        self.decl = decl  # MethodDecl
+        self.target = target  # `self`'s type (unchecked Unknown in a trait)
+        self.scope = scope  # the impl's/trait's own type parameters
+        self.params = params  # TParams to quantify besides the method's own
+        self.system = system  # declared in the prelude: not checked
+        self.state = "todo"  # "todo" | "busy" | "done"
+        self.mono = None
+        self.scheme = None
+
+
 class _Loop:
     def __init__(self, var: TVar):
         self.var = var
@@ -236,8 +256,16 @@ class Checker:
         # Declarations whose final type is checked for implicit Unknowns at
         # the end: (position, description, type).
         self.decls: list = []
-        # Declaration name position -> its type (for tests, later hover).
+        # Declaration name position -> its type (for tests and LSP hover).
         self.decl_types: dict = {}
+        # For LSP hover: field-access position -> (the object's type, the
+        # field's type), and method-call position -> the called method's
+        # instantiated signature (receiver included).
+        self.field_types: dict = {}
+        self.method_types: dict = {}
+        # type name -> {"inherent": {name: _Method}, "traits": {trait: {name: _Method}}}
+        self.impl_methods: dict = {}
+        self.trait_methods: dict = {}  # trait name -> {name: _Method}
         self.fn_stack: list = []
         self.tparams: list = []  # stack of {name: TParam}
         self.self_type = None
@@ -250,13 +278,13 @@ class Checker:
     def check(self, program: list) -> list[TypeDiagnostic]:
         self._register_types(program)
         self._register_globals(program)
+        self._register_methods(program)
         for stmt in program:
             if isinstance(stmt, LetStmt) and self._sym(self._name_pos(stmt)) in self.items:
                 self._check_item(self.items[self._sym(self._name_pos(stmt))])
-            elif isinstance(stmt, ImplDecl) and not self._in_prelude(stmt.position):
-                self._check_impl(stmt)
-            elif isinstance(stmt, TraitDecl) and not self._in_prelude(stmt.position):
-                self._check_trait(stmt)
+            elif isinstance(stmt, (ImplDecl, TraitDecl)) and not self._in_prelude(stmt.position):
+                for method in self._methods_of(stmt):
+                    self._method_scheme(method)
         for stmt in program:
             if isinstance(stmt, (StructDecl, EnumDecl, TraitDecl, ImplDecl)):
                 continue
@@ -689,54 +717,269 @@ class Checker:
         self.env[symbol] = scheme
         self._record_fn(stmt, sig)
 
-    def _check_impl(self, impl: ImplDecl) -> None:
-        scope = {tp.name: TParam(tp.name) for tp in impl.type_params}
-        self.tparams = [scope]
-        try:
-            info = self.structs.get(impl.type_name) or self.enums.get(impl.type_name)
-            if impl.type_args:
-                target = TCon(impl.type_name, [self._convert(a) for a in impl.type_args])
-            elif info is not None:
-                target = TCon(impl.type_name, [TParam(p.name) for p in info.params])
-            elif impl.type_name == "Vector":
-                target = TCon("Vector", [TParam("T")])
-            elif impl.type_name == "Map":
-                target = TCon("Map", [TParam("K"), TParam("V")])
-            elif impl.type_name in PRIMITIVES:
-                target = PRIMITIVES[impl.type_name]
-            else:
-                target = _unchecked()
-            self.self_type = target
-            for method in impl.methods:
-                if method.fn is not None:
-                    self._check_method(method.fn, target)
-        finally:
-            self.tparams, self.self_type = [], None
+    # -- methods -------------------------------------------------------------
 
-    def _check_trait(self, trait: TraitDecl) -> None:
-        # Trait types come in M23: inside a default body, `self` (and
-        # `Self`) are unchecked.
-        self.tparams = [{tp.name: TParam(tp.name) for tp in trait.type_params}]
-        self.self_type = _unchecked()
-        try:
-            for method in trait.methods:
-                if method.fn is not None:
-                    self._check_method(method.fn, self.self_type)
-        finally:
-            self.tparams, self.self_type = [], None
+    def _impl_target(self, impl: ImplDecl):
+        info = self.structs.get(impl.type_name) or self.enums.get(impl.type_name)
+        if impl.type_args:
+            return TCon(impl.type_name, [self._convert(a) for a in impl.type_args])
+        if info is not None:
+            return TCon(impl.type_name, [TParam(p.name) for p in info.params])
+        if impl.type_name == "Vector":
+            return TCon("Vector", [TParam("T")])
+        if impl.type_name == "Map":
+            return TCon("Map", [TParam("K"), TParam("V")])
+        if impl.type_name in PRIMITIVES:
+            return PRIMITIVES[impl.type_name]
+        return _unchecked()
 
-    def _check_method(self, fn: FnExpr, self_type) -> None:
-        saved_fns = self.fn_stack
-        self.fn_stack = []
+    def _register_methods(self, program: list) -> None:
+        for decl in _walk(program):
+            if isinstance(decl, TraitDecl):
+                scope = {tp.name: TParam(tp.name) for tp in decl.type_params}
+                system = self._in_prelude(decl.position)
+                table = self.trait_methods.setdefault(decl.name, {})
+                for method in decl.methods:
+                    table[method.name] = _Method(method, _unchecked(), scope, list(scope.values()), system)
+            elif isinstance(decl, ImplDecl):
+                scope = {tp.name: TParam(tp.name) for tp in decl.type_params}
+                self.tparams = [scope]
+                try:
+                    target = self._impl_target(decl)
+                finally:
+                    self.tparams = []
+                params = list(scope.values())
+                for p in free_params(target):
+                    if p not in params:
+                        params.append(p)
+                system = self._in_prelude(decl.position)
+                entry = self.impl_methods.setdefault(decl.type_name, {"inherent": {}, "traits": {}})
+                table = entry["inherent"] if decl.trait_name is None else entry["traits"].setdefault(decl.trait_name, {})
+                for method in decl.methods:
+                    table[method.name] = _Method(method, target, scope, params, system)
+
+    def _methods_of(self, decl) -> list:
+        if isinstance(decl, TraitDecl):
+            table = self.trait_methods.get(decl.name, {})
+        else:
+            entry = self.impl_methods.get(decl.type_name, {"inherent": {}, "traits": {}})
+            table = entry["inherent"] if decl.trait_name is None else entry["traits"].get(decl.trait_name, {})
+        return [table[m.name] for m in decl.methods if table.get(m.name) is not None and table[m.name].decl is m]
+
+    def _method_scheme(self, m: _Method):
+        """The method's generalized signature (receiver included), checking
+        its body first if it hasn't been; None when it isn't typed (a
+        prelude method)."""
+        if m.state == "done":
+            return m.scheme
+        if m.state == "busy":
+            return Scheme((), m.mono)
+        if m.system:
+            m.state = "done"
+            return None
+        m.state = "busy"
+        saved = (self.fn_stack, self.tparams, self.self_type)
+        self.fn_stack, self.tparams, self.self_type = [], [m.scope], m.target
         try:
+            decl = m.decl
+            if decl.fn is None:
+                # A required trait method: its written signature only.
+                own = {tp.name: TParam(tp.name) for tp in decl.type_params}
+                self.tparams.append(own)
+                params = []
+                for index, name in enumerate(decl.params):
+                    annotation = decl.param_types[index] if index < len(decl.param_types) else None
+                    if index == 0 and name == "self":
+                        params.append(m.target)
+                    else:
+                        params.append(self._convert(annotation) if annotation is not None else _unchecked())
+                ret = self._convert(decl.return_type) if decl.return_type is not None else _unchecked()
+                required = next((i for i, d in enumerate(decl.defaults) if d is not None), len(decl.params))
+                m.scheme = Scheme(list(own.values()) + m.params, TFn(params, ret, required, decl.params))
+                return m.scheme
             self._enter_level()
-            sig, declared = self._check_fn(fn, None, self_type=self_type)
+
+            def on_sig(sig):
+                m.mono = sig
+
+            sig, declared = self._check_fn(decl.fn, None, on_sig=on_sig, self_type=m.target)
             self._exit_level()
-            self._generalize(sig, declared)
-            if fn.name_position is not None:
-                self.decl_types[fn.name_position] = sig
+            m.scheme = self._generalize(sig, declared + m.params)
+            if decl.fn.name_position is not None:
+                self.decl_types[decl.fn.name_position] = sig
+            return m.scheme
         finally:
-            self.fn_stack = saved_fns
+            self.fn_stack, self.tparams, self.self_type = saved
+            m.state = "done"
+
+    def _find_method(self, type_name: str, name: str):
+        """The `_Method` `Type.name` dispatches to: the inherent impl first,
+        then the one trait impl (or its trait's default) providing it."""
+        entry = self.impl_methods.get(type_name)
+        if entry is None:
+            return None
+        if name in entry["inherent"]:
+            return entry["inherent"][name]
+        hits = []
+        for trait, fns in entry["traits"].items():
+            if name in fns:
+                hits.append(fns[name])
+            elif name in self.trait_methods.get(trait, {}):
+                hits.append(self.trait_methods[trait][name])
+        return hits[0] if len(hits) == 1 else None
+
+    def _native_method(self, receiver, name: str):
+        """The signature (receiver included) of a built-in type's native
+        method, or None."""
+        if not isinstance(receiver, TCon):
+            return None
+        if name == "to_string":
+            return TFn([receiver], STRING, 1, ["self"])
+        if receiver.name == "String":
+            if name == "len":
+                return TFn([STRING], NUMBER, 1, ["self"])
+            if name == "char_at":
+                return TFn([STRING, NUMBER], STRING, 2, ["self", "i"])
+        elif receiver.name == "Vector" and len(receiver.args) == 1:
+            (t,) = receiver.args
+            table = {
+                "len": ([], NUMBER),
+                "push": ([("value", t)], NONE),
+                "pop": ([], t),
+                "push_start": ([("value", t)], NONE),
+                "pop_start": ([], t),
+                "copy": ([("deep", BOOL)], receiver),
+            }
+        elif receiver.name == "Map" and len(receiver.args) == 2:
+            k, v = receiver.args
+            table = {
+                "len": ([], NUMBER),
+                "keys": ([], TCon("Vector", [k])),
+                "values": ([], TCon("Vector", [v])),
+                "has": ([("key", k)], BOOL),
+                "remove": ([("key", k)], v),
+                "copy": ([("deep", BOOL)], receiver),
+            }
+        else:
+            return None
+        if receiver.name == "String" or name not in table:
+            return None
+        extra, ret = table[name]
+        required = 1 if name == "copy" else 1 + len(extra)
+        return TFn([receiver] + [t for _n, t in extra], ret, required, ["self"] + [n for n, _t in extra])
+
+    def _instance(self, type_name: str):
+        """A fresh instance of a named type (for binding an unknown
+        receiver), or None."""
+        info = self.structs.get(type_name) or self.enums.get(type_name)
+        if info is not None:
+            return TCon(type_name, info.fresh_args(self.level))
+        if type_name in ("String", "Number", "Bool"):
+            return PRIMITIVES[type_name]
+        if type_name == "Vector":
+            return TCon("Vector", [self._fresh()])
+        if type_name == "Map":
+            return TCon("Map", [self._fresh(), self._fresh()])
+        return None
+
+    def _method_sig(self, receiver, name: str):
+        """The instantiated signature (receiver included) of `receiver.name`,
+        or None."""
+        receiver = prune(receiver)
+        if isinstance(receiver, TCon):
+            m = self._find_method(receiver.name, name)
+            if m is not None:
+                scheme = self._method_scheme(m)
+                return instantiate(scheme, self.level) if scheme is not None else _unchecked()
+            return self._native_method(receiver, name)
+        return None
+
+    def _infer_receiver(self, var, name: str) -> None:
+        """An unbound receiver becomes the one type that has a method
+        `name` (docs/TYPES.md's "Inferring a parameter from its uses")."""
+        found = set()
+        for type_name, entry in self.impl_methods.items():
+            if self._find_method(type_name, name) is not None:
+                found.add(type_name)
+        for type_name, sample in (("String", STRING), ("Vector", TCon("Vector", [NONE])), ("Map", TCon("Map", [NONE, NONE]))):
+            if name != "to_string" and self._native_method(sample, name) is not None:
+                found.add(type_name)
+        if len(found) != 1:
+            return
+        instance = self._instance(found.pop())
+        if instance is not None:
+            self._try_unify(var, instance)
+
+    def _check_args_only(self, args, kwargs) -> None:
+        for arg in args:
+            self._check_expr(arg)
+        for _name, value, _position in kwargs:
+            self._check_expr(value)
+
+    def _call_bound(self, sig, receiver, receiver_position, args, kwargs, position):
+        """Call a method signature whose receiver was already checked."""
+        sig = prune(sig)
+        if not isinstance(sig, TFn) or not sig.params:
+            self._check_args_only(args, kwargs)
+            return sig if isinstance(sig, TUnknown) else _unchecked()
+        self._expect(receiver, sig.params[0], receiver_position, "in the receiver")
+        names = sig.names[1:] if sig.names is not None else None
+        bound = TFn(sig.params[1:], sig.ret, max(sig.required - 1, 0), names)
+        return self._apply(bound, args, kwargs, position)
+
+    def _check_method_call(self, expr: MethodCall):
+        obj = expr.obj
+        if isinstance(obj, Ident) and self._sym(obj.position) is None:
+            return self._check_path_call(expr)
+        receiver = prune(self._check_expr(obj))
+        if isinstance(receiver, TVar):
+            self._infer_receiver(receiver, expr.method)
+            receiver = prune(receiver)
+        sig = self._method_sig(receiver, expr.method)
+        if sig is None and isinstance(receiver, TCon) and receiver.name in self.structs:
+            if expr.method in self.structs[receiver.name].fields:
+                # A closure stored in a field: `p.f()`.
+                field = self._field_type(receiver, expr.method, expr.position)[0]
+                self.field_types[expr.position] = (receiver, field)
+                return self._apply_callee(prune(field), expr.args, expr.kwargs, expr.position)
+        if sig is None:
+            self._check_args_only(expr.args, expr.kwargs)
+            return _unchecked()
+        self.method_types[expr.position] = sig
+        return self._call_bound(sig, receiver, obj.position, expr.args, expr.kwargs, expr.position)
+
+    def _check_path_call(self, expr: MethodCall):
+        """`Type.f(args)` / `Trait.m(recv, args)`."""
+        name = expr.obj.name
+        if name == "Self" and isinstance(prune(self.self_type), TCon):
+            name = prune(self.self_type).name
+        if name in self.trait_methods and name not in self.impl_methods and expr.args:
+            receiver = prune(self._check_expr(expr.args[0]))
+            sig = None
+            if isinstance(receiver, TCon):
+                sig = self._method_sig(receiver, expr.method)
+            if sig is None and expr.method in self.trait_methods[name]:
+                scheme = self._method_scheme(self.trait_methods[name][expr.method])
+                sig = instantiate(scheme, self.level) if scheme is not None else None
+            if sig is None:
+                self._check_args_only(expr.args[1:], expr.kwargs)
+                return _unchecked()
+            self.method_types[expr.position] = sig
+            return self._call_bound(sig, receiver, expr.args[0].position, expr.args[1:], expr.kwargs, expr.position)
+        m = self._find_method(name, expr.method)
+        sig = None
+        if m is not None:
+            scheme = self._method_scheme(m)
+            sig = instantiate(scheme, self.level) if scheme is not None else None
+        else:
+            instance = self._instance(name)
+            if instance is not None:
+                sig = self._native_method(instance, expr.method)
+        if sig is None:
+            self._check_args_only(expr.args, expr.kwargs)
+            return _unchecked()
+        self.method_types[expr.position] = sig
+        return self._apply_callee(prune(sig), expr.args, expr.kwargs, expr.position)
 
     # -- statements ------------------------------------------------------
 
@@ -892,15 +1135,7 @@ class Checker:
         if isinstance(expr, FieldAccess):
             return self._check_field_access(expr)
         if isinstance(expr, MethodCall):
-            # M23: method lookup. The arguments are still checked.
-            obj = expr.obj
-            if not (isinstance(obj, Ident) and self._sym(obj.position) is None):
-                self._check_expr(obj)
-            for arg in expr.args:
-                self._check_expr(arg)
-            for _name, value, _position in expr.kwargs:
-                self._check_expr(value)
-            return _unchecked()
+            return self._check_method_call(expr)
         if isinstance(expr, IfStmt):
             return self._check_if(expr, hint, used)
         if isinstance(expr, MatchStmt):
@@ -958,55 +1193,60 @@ class Checker:
 
     def _check_call(self, expr: Call):
         callee = prune(self._check_expr(expr.callee))
+        return self._apply_callee(callee, expr.args, expr.kwargs, expr.position)
+
+    def _apply_callee(self, callee, args, kwargs, position: int):
+        """Call a value of type `callee` (already pruned)."""
         if isinstance(callee, TVar):
-            fn = TFn([self._fresh() for _ in expr.args], self._fresh())
+            fn = TFn([self._fresh() for _ in args], self._fresh())
             self._try_unify(callee, fn)
             callee = fn
         if isinstance(callee, TUnknown) or not isinstance(callee, TFn):
             if not isinstance(callee, TUnknown):
-                self._error(expr.position, f"{show(callee)} is not a function")
+                self._error(position, f"{show(callee)} is not a function")
                 callee = _unchecked()
-            for arg in expr.args:
-                self._check_expr(arg)
-            for _name, value, _position in expr.kwargs:
-                self._check_expr(value)
+            self._check_args_only(args, kwargs)
             return callee
+        return self._apply(callee, args, kwargs, position)
 
+    def _apply(self, callee: TFn, args, kwargs, position: int):
+        """Match arguments to a function type's parameters by position and
+        keyword, check each, and give the return type."""
         params = callee.params
         pairs = []  # (argument expression, parameter type or None)
         filled = set()
-        for index, arg in enumerate(expr.args):
+        for index, arg in enumerate(args):
             if index < len(params):
                 pairs.append((arg, params[index]))
                 filled.add(index)
             else:
                 pairs.append((arg, None))
-        if len(expr.args) > len(params):
+        if len(args) > len(params):
             self._error(
-                expr.position,
-                f"Too many arguments: expected at most {len(params)}, found {len(expr.args)}",
+                position,
+                f"Too many arguments: expected at most {len(params)}, found {len(args)}",
             )
-        for name, value, position in expr.kwargs:
+        for name, value, kw_position in kwargs:
             if callee.names is None:
                 pairs.append((value, None))
                 continue
             if name not in callee.names:
-                self._error(position, f"No parameter named '{name}'")
+                self._error(kw_position, f"No parameter named '{name}'")
                 pairs.append((value, None))
                 continue
             index = callee.names.index(name)
             if index in filled:
-                self._error(position, f"Argument '{name}' is given twice")
+                self._error(kw_position, f"Argument '{name}' is given twice")
             filled.add(index)
             pairs.append((value, params[index]))
         missing = [i for i in range(callee.required) if i not in filled]
         if missing:
             if callee.names is not None:
                 names = ", ".join(f"'{callee.names[i]}'" for i in missing)
-                self._error(expr.position, f"Missing argument {names}")
+                self._error(position, f"Missing argument {names}")
             else:
                 self._error(
-                    expr.position,
+                    position,
                     f"Too few arguments: expected {callee.required}, found {len(filled)}",
                 )
         # Closures last, so the other arguments bind type variables first.
@@ -1128,7 +1368,9 @@ class Checker:
                 self._error(expr.position, f"'.await' needs a Promise, found {show(obj)}")
                 return _unchecked()
             return result
-        return self._field_type(obj, expr.field, expr.position)[0]
+        field = self._field_type(obj, expr.field, expr.position)[0]
+        self.field_types[expr.position] = (obj, field)
+        return field
 
     # -- indexing ----------------------------------------------------------
 

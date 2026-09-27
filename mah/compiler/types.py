@@ -158,6 +158,24 @@ def free_vars(t: Type, out: list | None = None) -> list:
     return out
 
 
+def free_params(t: Type, out: list | None = None) -> list:
+    """The TParams in `t`, each once, in first-occurrence order."""
+    if out is None:
+        out = []
+    t = prune(t)
+    if isinstance(t, TParam):
+        if t not in out:
+            out.append(t)
+    elif isinstance(t, TCon):
+        for a in t.args:
+            free_params(a, out)
+    elif isinstance(t, TFn):
+        for p in t.params:
+            free_params(p, out)
+        free_params(t.ret, out)
+    return out
+
+
 def unknowns(t: Type, out: list | None = None) -> list:
     """Every TUnknown object inside `t`."""
     if out is None:

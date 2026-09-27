@@ -413,12 +413,102 @@ class StructEnumTests(_Base):
             "Type mismatch in the right operand of '-': expected Number, found String", 3,
         )
 
-    def test_method_calls_are_unchecked_for_now(self):
-        # M23 types method calls; their arguments are still checked.
+    def test_native_method_calls_are_typed(self):
         diagnostics, types = check('let v = [1]\nlet n = v.len()\nv.push(-"a")')
-        self.assertEqual(types["n"], ["Unknown"])
+        self.assertEqual(types["n"], ["Number"])
         self.assertEqual(
             diagnostics, [("mismatch", "Type mismatch in the negated value: expected Number, found String", 3)]
+        )
+
+
+class MethodTests(_Base):
+    def test_inherent_methods_static_calls_and_self(self):
+        self.assertTypes(
+            "struct Board { c1 }\n"
+            "impl Board {\n"
+            '    fn new() { Self { c1: "" } }\n'
+            "    fn get(self, i) { match i { 1 => { self.c1 } _ => { \"\" } } }\n"
+            "}\n"
+            "let board = Board.new()\n"
+            "let cell = board.get(1)",
+            new="fn() -> Board",
+            get="fn(Board, Number) -> String",
+            board="Board",
+            cell="String",
+        )
+
+    def test_generic_impl_instantiates_per_call(self):
+        self.assertTypes(
+            "struct Pair<T> { a: T, b: T }\n"
+            "impl<T> Pair<T> {\n"
+            "    fn first(self) { self.a }\n"
+            "    fn make(x: T) { Pair { a: x, b: x } }\n"
+            "}\n"
+            "let f = Pair { a: 1, b: 2 }.first()\n"
+            'let g = Pair.make("s").first()',
+            first="fn(Pair<T>) -> T",
+            f="Number",
+            g="String",
+        )
+
+    def test_trait_impl_and_trait_path_call(self):
+        self.assertTypes(
+            "trait Shape { fn area(self) -> Number }\n"
+            "struct Sq { s }\n"
+            "impl Shape for Sq { fn area(self) { self.s * self.s } }\n"
+            "let a = Sq { s: 2 }.area()\n"
+            "let t = Shape.area(Sq { s: 3 })",
+            a="Number",
+            t="Number",
+        )
+
+    def test_native_methods(self):
+        self.assertTypes(
+            'let v = [1, 2]\nlet x = v.pop()\nlet m = ["a": 1]\nlet ks = m.keys()\n'
+            'let s = "abc".len()\nlet str = 5.to_string()\nlet c = v.copy()',
+            x="Number",
+            ks="Vector<String>",
+            s="Number",
+            str="String",
+            c="Vector<Number>",
+        )
+
+    def test_field_closure_call(self):
+        self.assertTypes("struct C { f }\nlet c = C { f: fn(x) { x + 1 } }\nlet r = c.f(2)", r="Number")
+
+    def test_mutually_recursive_methods(self):
+        self.assertTypes(
+            "struct A { n }\n"
+            "impl A {\n"
+            "    fn even(self, k) { if k == 0 { true } else { self.odd(k - 1) } }\n"
+            "    fn odd(self, k) { if k == 0 { false } else { self.even(k - 1) } }\n"
+            "}\n"
+            "let e = A { n: 1 }.even(4)",
+            even="fn(A, Number) -> Bool",
+            e="Bool",
+        )
+
+    def test_receiver_inferred_from_unique_method_name(self):
+        self.assertTypes(
+            "struct B { w }\n"
+            'impl B { fn winner(self) { "X" } }\n'
+            "fn check(b) { b.winner() }",
+            check="fn(B) -> String",
+        )
+
+    def test_ambiguous_method_name_leaves_receiver_open(self):
+        self.assertTypes(
+            "struct P { x }\nstruct Q { y }\n"
+            "impl P { fn size(self) { 1 } }\nimpl Q { fn size(self) { 2 } }\n"
+            "fn check(b) { b.size() }",
+            check="fn(T) -> Unknown",
+        )
+
+    def test_method_argument_mismatch(self):
+        self.assertMismatch(
+            'struct A { n }\nimpl A { fn go(self, k: Number) { k } }\nA { n: 1 }.go("x")',
+            "Type mismatch in an argument: expected Number, found String",
+            3,
         )
 
 

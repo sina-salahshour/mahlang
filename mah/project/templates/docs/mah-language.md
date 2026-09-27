@@ -542,9 +542,12 @@ stay unannotated, depends on `[types] check` in `mah-project.toml`:
 `"loose"` (the default) reports mismatches as warnings only, and `mah
 run`/`mah build` don't check at all; `"strict"` makes a mismatch a compile
 error, blocking `run`/`build`; `"explicit"` is like `strict`, and also
-requires an annotation anywhere a type can't be inferred. Method calls,
-trait-typed values, and bounds aren't checked yet (this is the checker's
-first version).
+requires an annotation anywhere a type can't be inferred. Method calls
+(`p.area()`, `Rect.new(1, 2)`, `Shape.area(p)`) are checked against the
+method's signature, and `self` has the impl's type; a parameter whose
+only clue is a method call gets the one type that has that method.
+Trait-typed values, bounds, and the prelude's iterator methods (`map`,
+`filter`, ...) aren't checked yet.
 
 The checker is stricter than the runtime in a few places, so code that
 should pass `strict` follows these rules:
@@ -625,7 +628,7 @@ before anything runs.
   `for` bindings, labeled `break`/`continue`.
 - String methods other than `len`/`char_at` (no `split`, `replace`, ...).
 - `&&`, `||`, `+=`, `++`, ternary `?:`.
-- Type-checking method calls, trait-typed values, and bounds (the checker's first version skips these); classes/inheritance, exceptions/`try`.
+- Type-checking trait-typed values, bounds, and the prelude's iterator methods (the checker skips these for now); classes/inheritance, exceptions/`try`.
 - Variadic parameters (`*args`, `**kwargs`); only `print` takes any number of arguments.
 - File, network, or OS access (planned as future built-ins).
 - `null`/`nil`/`undefined`: use `none`.
