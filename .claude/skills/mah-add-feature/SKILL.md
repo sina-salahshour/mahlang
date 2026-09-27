@@ -186,6 +186,12 @@ correctly**. A language change isn't done until they describe it:
   appears in the reference (`TemplateDriftTests`). A failure there after a
   language change means **update the doc**, not the test.
 
+## 10. Website docs and changelog (`www/`)
+
+Update the website docs and the changelog via the `update-docs` skill —
+it explains which page(s) under `www/src/content/docs/` to touch and how
+to add a changelog entry for this change.
+
 ## Common mistakes
 
 - Forgetting step 9 — new projects then ship docs that teach LLMs the old

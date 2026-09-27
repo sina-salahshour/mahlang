@@ -26,7 +26,9 @@ from ..compiler.codegen import Codegen  # noqa: E402
 from ..compiler.lexer import KEYWORDS, Lexer, Token, TokenType  # noqa: E402
 from ..compiler.parser import Parser  # noqa: E402
 from ..compiler.resolve import Resolver  # noqa: E402
+from ..compiler import typecheck  # noqa: E402
 from ..preprocessor import BUFFER_PATH, demangle_message, preprocess  # noqa: E402
+from ..project.manifest import check_level_for  # noqa: E402
 from ..runtime_values import BUILTIN_TYPE_NAMES  # noqa: E402
 
 # --------------------------------------------------------------------------
@@ -167,6 +169,7 @@ BUILTIN_DOCS = {
 
 # LSP enum values ----------------------------------------------------------
 SEVERITY_ERROR = 1
+SEVERITY_WARNING = 2
 
 # Used by get_definition's import-directive handling: jumping to a whole
 # imported *file* has no specific symbol position to point at, so land at
@@ -488,8 +491,9 @@ def get_diagnostics(text: str, path: Optional[str] = None) -> list[dict]:
     # nothing extra to gain by resolving it anyway, matching today's
     # non-forgiving resolve behavior of reporting exactly one error.
     if not parser.errors:
+        resolver = Resolver(prelude_start=pp.prelude_start)
         try:
-            Resolver(prelude_start=pp.prelude_start).resolve_program(program)
+            resolver.resolve_program(program)
         except SystemExit:
             raise
         except BaseException as error:  # noqa: BLE001 - report the one resolve error
@@ -516,12 +520,42 @@ def get_diagnostics(text: str, path: Optional[str] = None) -> list[dict]:
                     demangle_message(_clean_message(message)),
                 )
             )
+        else:
+            # M22: the static checker -- resolve succeeded, so `resolver`'s
+            # symbol table is complete. A checker crash must never take
+            # diagnostics down with it (the checker is new/still evolving),
+            # so it's isolated behind its own try/except and just logged.
+            level = check_level_for(path)
+            try:
+                type_diagnostics = typecheck.check_program(program, resolver)
+            except Exception as error:  # noqa: BLE001 - never let this kill diagnostics
+                try:
+                    from .server import _log
+                    _log(f"typecheck crashed for {path!r}: {error!r}")
+                except Exception:  # noqa: BLE001 - _log itself, or importing it, failed
+                    pass
+            else:
+                severity = SEVERITY_WARNING if level == "loose" else SEVERITY_ERROR
+                for diag in typecheck.reportable(type_diagnostics, level):
+                    length = _token_length_at(combined, diag.position)
+                    diagnostics.append(
+                        _diagnostic_for_combined_offset(
+                            pp,
+                            text,
+                            combined,
+                            diag.position,
+                            length,
+                            demangle_message(diag.message),
+                            severity=severity,
+                        )
+                    )
 
     return diagnostics
 
 
 def _diagnostic_for_combined_offset(
-    pp, text: str, combined: str, combined_offset: int, length: int, message: str
+    pp, text: str, combined: str, combined_offset: int, length: int, message: str,
+    severity: int = SEVERITY_ERROR,
 ) -> dict:
     """Build a diagnostic in the buffer for an error at a combined-text offset."""
     origin_path, src_offset = pp.map_to_source(combined_offset)
@@ -534,7 +568,7 @@ def _diagnostic_for_combined_offset(
         # Error is in the buffer itself; the entry source equals the buffer.
         return {
             "range": make_range(text, src_offset, src_offset + src_length),
-            "severity": SEVERITY_ERROR,
+            "severity": severity,
             "source": "mah",
             "message": message or "error",
         }
@@ -555,7 +589,7 @@ def _diagnostic_for_combined_offset(
 
     return {
         "range": rng,
-        "severity": SEVERITY_ERROR,
+        "severity": severity,
         "source": "mah",
         "message": f"in imported file {location}: {message or 'error'}",
     }

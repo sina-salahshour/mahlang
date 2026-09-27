@@ -1,6 +1,6 @@
 # Mah static types
 
-Status: **design. M21 (syntax) landed; the checker (M22+) isn't implemented yet.** This replaces `docs/NEXT_PHASES.md`'s
+Status: **M21 (syntax) and M22 (the core checker) landed; M23 (traits and the standard library) and M24 (LSP hover/completion) are next.** See `docs/V2_DESIGN.md`'s M22 entry for where the implementation deviates from this design. This replaces `docs/NEXT_PHASES.md`'s
 "The type system" sketch for now. That sketch treated types as runtime
 values. This design is purely static, so nothing about it runs. Types can
 still become runtime values later (for `match`-on-type narrowing), and
@@ -474,7 +474,7 @@ milestones, continuing after M20.
   the lexer to keep comments as trivia attached to tokens (today they're
   dropped). Its options are one object, so a `[format]` section in
   `mah-project.toml` can set them later. Designed separately.
-- **M22, the core checker.** `mah/compiler/types.py` (type
+- **M22, the core checker. ✅ Landed.** `mah/compiler/types.py` (type
   representation, unification, assignability) and
   `mah/compiler/typecheck.py` (the pass). Primitives, functions,
   closures, structs/enums (with generics), operators, `let`/assignment,

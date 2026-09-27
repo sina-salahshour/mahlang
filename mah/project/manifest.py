@@ -11,12 +11,15 @@ import os
 import tomllib
 from dataclasses import dataclass, field
 
+from ..compiler import typecheck
+
 MANIFEST_NAME = "mah-project.toml"
 
 _PACKAGE_KEYS = {"name", "version", "entry"}
 _TARGET_KEYS = {"name", "profile", "out", "self-contained"}
 _RUN_KEYS = {"vm"}
-_TOP_LEVEL_KEYS = {"package", "target", "run", "dependencies"}
+_TYPES_KEYS = {"check"}
+_TOP_LEVEL_KEYS = {"package", "target", "run", "dependencies", "types"}
 _PROFILES = {"debug", "release"}
 VMS = ("python", "rust")
 
@@ -47,6 +50,8 @@ class Project:
     # which VM `mah run` uses unless `--vm` says otherwise ([run] vm)
     run_vm: str = "python"
     dependencies: dict = field(default_factory=dict)
+    # static type-checking strictness ([types] check) -- see mah/compiler/typecheck.py
+    type_check: str = typecheck.DEFAULT_CHECK_LEVEL
 
 
 def find_manifest(start_dir: str) -> str | None:
@@ -159,6 +164,16 @@ def load_project(manifest_path: str) -> Project:
     if dependencies:
         fail("third-party dependencies aren't supported yet; leave [dependencies] empty")
 
+    types_table = data.get("types", {})
+    if not isinstance(types_table, dict):
+        fail("types must be a table, written [types]")
+    for key in types_table:
+        if key not in _TYPES_KEYS:
+            fail(f"unknown key 'types.{key}'")
+    type_check = types_table.get("check", typecheck.DEFAULT_CHECK_LEVEL)
+    if type_check not in typecheck.CHECK_LEVELS:
+        fail('types.check must be "loose", "strict" or "explicit"')
+
     return Project(
         root=root,
         manifest_path=manifest_path,
@@ -168,4 +183,23 @@ def load_project(manifest_path: str) -> Project:
         targets=targets,
         run_vm=run_vm,
         dependencies=dependencies,
+        type_check=type_check,
     )
+
+
+def check_level_for(path: str | None) -> str:
+    """The `[types] check` level that applies to a source file at `path`:
+    the manifest found by searching upward from `path`'s directory, or
+    `typecheck.DEFAULT_CHECK_LEVEL` ("loose") when `path` is `None`, no
+    manifest is found, or the manifest found is invalid. Files run outside
+    a project are always loose -- see docs/TYPES.md's Strictness section."""
+    if path is None:
+        return typecheck.DEFAULT_CHECK_LEVEL
+    manifest_path = find_manifest(os.path.dirname(os.path.abspath(path)))
+    if manifest_path is None:
+        return typecheck.DEFAULT_CHECK_LEVEL
+    try:
+        project = load_project(manifest_path)
+    except MahProjectError:
+        return typecheck.DEFAULT_CHECK_LEVEL
+    return project.type_check

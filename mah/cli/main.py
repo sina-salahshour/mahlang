@@ -15,17 +15,18 @@ from ..code_interpreter import run_bytes
 from ..runtime_values import MahRuntimeError
 from ..compiler.codegen import Codegen, CodeBuffer
 from ..compiler.driver import _format_parser_errors as _driver_format_parser_errors
-from ..compiler.driver import compile_to_bytes
+from ..compiler.driver import compile_to_bytes, format_diagnostic, type_check as run_type_check
 from ..compiler.lexer import Lexer
 from ..compiler.parser import Parser
 from ..compiler.resolve import Resolver
+from ..compiler import typecheck
 from ..preprocessor import demangle_message, preprocess
 from ..project.init import init_project
-from ..project.manifest import MANIFEST_NAME, MahProjectError, find_manifest, load_project
+from ..project.manifest import MANIFEST_NAME, MahProjectError, check_level_for, find_manifest, load_project
 
 sys.tracebacklimit = 0
 
-_SUBCOMMANDS = {"run", "build", "runc", "dis", "lsp", "init", "format"}
+_SUBCOMMANDS = {"run", "build", "runc", "dis", "lsp", "init", "format", "check"}
 
 
 def read_file(file_name):
@@ -214,6 +215,20 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="change nothing; list the files that would change and exit 1 if any would",
     )
 
+    check_parser = subparsers.add_parser(
+        "check", help="run the static type checker and print its diagnostics"
+    )
+    check_parser.add_argument(
+        "file", nargs="?", default=None,
+        help="path to the .mh file to check, or a project directory (defaults to the "
+             "current project, found by searching upward from the current directory)",
+    )
+    check_parser.add_argument(
+        "--level", choices=typecheck.CHECK_LEVELS, default=None,
+        help="override the type-check level ([types] check in mah-project.toml; "
+             "\"loose\" outside a project)",
+    )
+
     lsp_parser = subparsers.add_parser("lsp", help="start the Mah language server (speaks LSP over stdio)")
     lsp_parser.add_argument(
         "--version", action="store_true",
@@ -327,6 +342,15 @@ def main(argv: list[str] | None = None) -> int:
     # `build --self-contained`: (vm bytes, version, target), looked up
     # before compiling anything so a missing mah-vm fails fast.
     runtime = None
+    # `mah check`'s exit status (0 unless the level isn't "loose" and
+    # something was reported -- see the "check" branch in the try block
+    # below); every other command still exits via its own explicit
+    # `return`, so this default is never seen by them.
+    exit_code = 0
+    # M22: only set for `check` -- the level `--level` overrides, else the
+    # project's `[types] check`, else (single-file mode) whatever
+    # `check_level_for` finds by searching upward from the file itself.
+    check_level = None
 
     if args.command == "run":
         if args.file is None or os.path.isdir(args.file):
@@ -336,6 +360,19 @@ def main(argv: list[str] | None = None) -> int:
             args.file = project.entry
         if args.vm is None:
             args.vm = project.run_vm if project is not None else "python"
+
+    elif args.command == "check":
+        if args.file is None or os.path.isdir(args.file):
+            project, err = _resolve_project(args.file)
+            if err is not None:
+                return err
+            args.file = project.entry
+        if args.level is not None:
+            check_level = args.level
+        elif project is not None:
+            check_level = project.type_check
+        else:
+            check_level = check_level_for(args.file)
 
     elif args.command == "build":
         if args.file is None or os.path.isdir(args.file):
@@ -383,6 +420,14 @@ def main(argv: list[str] | None = None) -> int:
         with open(vm_path, "rb") as f:
             runtime = (f.read(), vm_ver, vm_target)
 
+    # M22: `run`/`build` pass this to `compile_to_bytes` so a strict/
+    # explicit project's type errors become compile errors; single-file
+    # mode still honors a manifest found by searching upward from the file
+    # (`check_level_for`), so a file inside a project directory isn't
+    # accidentally treated as loose.
+    if args.command in ("run", "build"):
+        check_level = project.type_check if project is not None else check_level_for(args.file)
+
     entry_str = read_file(args.file)
     pp = preprocess(args.file, entry_str)
 
@@ -415,7 +460,7 @@ def main(argv: list[str] | None = None) -> int:
             for t in targets:
                 if t.profile not in compiled_by_profile:
                     compiled_by_profile[t.profile] = compile_to_bytes(
-                        path=project.entry, text=entry_str, target=t.profile
+                        path=project.entry, text=entry_str, target=t.profile, check=check_level
                     )
             for t in targets:
                 os.makedirs(os.path.dirname(t.out), exist_ok=True)
@@ -426,11 +471,11 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"built {t.name} ({kind}) -> {rel_out}")
         elif args.command == "build":
             build_target = args.target if args.target is not None else "debug"
-            data = compile_to_bytes(path=args.file, text=entry_str, target=build_target)
+            data = compile_to_bytes(path=args.file, text=entry_str, target=build_target, check=check_level)
             out_path = args.out if args.out is not None else _default_mahc_path(args.file)
             _write_mahc(out_path, data, runtime)
         elif args.command == "run":
-            data = compile_to_bytes(path=args.file, text=entry_str, target="debug")
+            data = compile_to_bytes(path=args.file, text=entry_str, target="debug", check=check_level)
             if args.vm == "rust":
                 try:
                     return rust_vm.run_bytes(data)
@@ -438,6 +483,28 @@ def main(argv: list[str] | None = None) -> int:
                     print(e, file=sys.stderr)
                     return 2
             run_bytes(data)
+        elif args.command == "check":
+            # `entry_str`/`pp` above were already computed for `args.file`
+            # (the resolved entry/target file); `run_type_check` reruns the
+            # front end itself (it's the self-contained function `mah
+            # check` is built on -- see mah/compiler/driver.py) and hands
+            # back its own `pp` for locating each diagnostic. A resolve
+            # error propagates unformatted, exactly like `compile_to_bytes`
+            # above, and is located by the `except Exception` block below
+            # using the outer `pp`, computed from the very same file/text.
+            check_pp, diagnostics = run_type_check(path=args.file, text=entry_str)
+            reportable = typecheck.reportable(diagnostics, check_level)
+            severity = "warning" if check_level == "loose" else "error"
+            for diag in reportable:
+                print(f"{severity}: {format_diagnostic(check_pp, diag)}")
+            count = len(reportable)
+            if count == 0:
+                print("no type errors")
+            else:
+                noun = severity if count == 1 else f"{severity}s"
+                print(f"{count} {noun}")
+            if check_level != "loose" and reportable:
+                exit_code = 1
     except MahRuntimeError as e:
         _report_runtime_error(e)
         return 1
@@ -457,7 +524,7 @@ def main(argv: list[str] | None = None) -> int:
         e.args = (message,)
         raise e
 
-    return 0
+    return exit_code
 
 
 def _write_mahc(path: str, data: bytes, runtime: tuple | None = None) -> None:

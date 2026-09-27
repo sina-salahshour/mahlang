@@ -207,6 +207,7 @@ python -m mah build ./examples/structs.mh --target release -o out.mahc   # no de
 python -m mah runc ./examples/structs.mahc           # run compiled bytecode
 python -m mah dis ./examples/structs.mahc            # show it as readable instructions
 python -m mah format ./examples                      # rewrite .mh files in the standard layout
+python -m mah check ./examples/structs.mh             # run the static type checker
 ```
 
 `mah format` only ever changes whitespace, and checks that before writing
@@ -241,12 +242,16 @@ cd my-app
 mah run                # runs the entry point from mah-project.toml (src/main.mh)
 mah build              # writes every [[target]], e.g. build/my-app.mahc
 mah build --target release
+mah check              # runs the static type checker, at the project's [types] check level
 ```
 
 `mah init` creates `mah-project.toml` (package name, version, entry point,
 and build targets, each with a `debug` or `release` profile and optionally
 `self-contained = true` for a standalone executable; `[run] vm = "rust"`
-makes `mah run` use the Rust runtime), `src/main.mh`,
+makes `mah run` use the Rust runtime; `[types] check` sets the static
+type-checking level -- `"loose"` (default, warnings only), `"strict"`
+(compile errors), or `"explicit"` (`"strict"` plus required annotations
+where types can't be inferred) -- see `mah check` above), `src/main.mh`,
 a `.gitignore`, and docs for coding agents: `AGENTS.md` (plus a `CLAUDE.md`
 that imports it) and `docs/mah-language.md`, a complete language reference
 written so an LLM can write correct Mah without guessing. `mah run` and

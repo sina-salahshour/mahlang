@@ -25,6 +25,7 @@ mah run                     # compile and run the entry point
 mah run other.mh            # run a specific file instead
 mah build                   # write every [[target]] from mah-project.toml
 mah build --target release  # write one target
+mah check                   # run the static type checker and print its diagnostics
 mah runc build/{{name}}.mahc   # run a compiled file (or just ./build/{{name}}.mahc)
 mah dis build/{{name}}.mahc    # show the compiled bytecode
 mah run --vm rust           # run on the native Rust runtime (if it's installed)
@@ -52,6 +53,11 @@ program and reading its output.
   standalone executable (it needs `mah-vm` installed to build).
 - `[run]`: `vm = "python"` (default) or `"rust"` picks the runtime `mah run`
   uses for the project; `mah run --vm ...` overrides it.
+- `[types]`: `check = "loose"` (default) makes type mismatches editor
+  warnings only; `"strict"` makes them compile errors for `mah run`/`mah
+  build` too; `"explicit"` is `"strict"` plus every declaration whose type
+  can't be inferred must be annotated. `mah check` reports at whichever
+  level is set (`--level` overrides it for one run).
 - `[dependencies]`: reserved for third-party packages, which aren't supported
   yet. Keep it empty.
 

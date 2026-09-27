@@ -116,9 +116,9 @@ impl __Iter {
 # ToRange has no start, so it can't be iterated; it's for `match` and
 # (later) slicing.
 
-struct Range { start, end, inclusive }
-struct FromRange { start }
-struct ToRange { end, inclusive }
+struct Range { start: Number, end: Number, inclusive: Bool }
+struct FromRange { start: Number }
+struct ToRange { end: Number, inclusive: Bool }
 
 struct RangeIterator { current, end, inclusive }
 struct FromRangeIterator { current }

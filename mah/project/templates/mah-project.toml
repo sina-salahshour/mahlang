@@ -33,5 +33,13 @@ out = "build/{{name}}.mahc"
 [run]
 vm = "python"
 
+# Static type checking (see `mah check`):
+#   "loose"    types are advisory: editor warnings only; run/build don't check
+#   "strict"   type errors are compile errors (editor, run, build)
+#   "explicit" like strict, and every declaration whose type can't be inferred
+#              must be annotated
+[types]
+check = "loose"
+
 # Third-party packages will be declared here. Not supported yet, so keep it empty.
 [dependencies]

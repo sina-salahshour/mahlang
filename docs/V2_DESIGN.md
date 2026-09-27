@@ -2818,6 +2818,57 @@ node that resolved to it. Then:
     its own statement. Tests: `tests/test_language.py`'s
     `CallAnyExpressionTests`, `tests/test_parser.py`, `tests/test_format.py`.
 
+25. **M22 — the core type checker. ✅ Landed.** Design in `docs/TYPES.md`;
+    code in `mah/compiler/types.py` (types, a trail-based unifier,
+    assignability) and `mah/compiler/typecheck.py` (the pass).
+
+    - **Pass**: runs after `resolve`, over the same AST, looking variables
+      up through the resolver's `position_index` (keyed by `Symbol`), and
+      writes nothing codegen reads (tested: identical bytecode for every
+      example with and without the checker). Order: struct/enum field
+      types (anywhere in the program), top-level `let`s registered up front,
+      then top-level functions and user impl/trait method bodies in source
+      order (on demand, depth-first for forward references), then the main
+      program.
+    - **Inference**: ML-style levels for generalization; first-constraint-
+      wins unification; `none` is a lower bound that doesn't bind; pending
+      `+`/`*`/comparison constraints default to `Number` when their function
+      is generalized. A constraint still waiting on outer variables moves to
+      the outer level, and so does its result (it must not be generalized:
+      found on `examples/traits.mh`). Every `unify`/`assign` runs on a trail
+      and rolls back completely on failure, so a mismatch never leaves a
+      half-unified structure and the if/match join can try a branch.
+    - **Deviations from the design, all deliberate**: method calls and
+      static path calls give an unchecked `Unknown`, and their arguments
+      are still checked (M23). Built-in indexing (`Vector`/`String`/`Map`, including
+      range slices) and `for` over built-in iterables are typed directly now,
+      ahead of M23's trait-based rules. `Unknown` has a third kind,
+      "unchecked" (what M22 doesn't type yet, and the recovery value after a
+      reported error), which the explicit level never reports. An Unknown
+      value flowing *into* a variable binds it (so it isn't later reported
+      as uninferable), but a variable passed where `Unknown` is accepted
+      stays open. A field read on an unknown receiver also considers enum
+      variant fields (a unique enum variant with that field). When two sites
+      disagree on an unannotated field, the explicit level asks for the
+      annotation at the field's declaration. A function whose only returned
+      value is `none` returns `None` rather than generalizing. The prelude's
+      bodies aren't checked yet, and nothing inside it is ever reported. Its
+      unannotated fields are explicit `Unknown`, except `Range`/`FromRange`/
+      `ToRange`, whose fields got `Number`/`Bool` annotations now.
+    - **Wiring**: `[types] check = "loose" | "strict" | "explicit"` in
+      `mah-project.toml` (`mah/project/manifest.py`, `check_level_for`);
+      `compile_to_program(check=...)` raises located `type error: ...`
+      lines in strict/explicit and skips the checker entirely in loose.
+      `mah run`/`mah build` honor the manifest, including for a single file
+      inside a project. There's a new `mah check [FILE|DIR] [--level ...]`
+      command, and the LSP publishes type diagnostics (warnings in loose,
+      errors otherwise).
+    - Tests: `tests/test_typecheck.py` (unifier, inference, generalization,
+      operators, calls/kwargs/arity, closures and expected types,
+      structs/enums, control flow, patterns, the explicit level, examples
+      free of type errors, codegen unchanged) and
+      `tests/test_typecheck_wiring.py` (manifest, driver, CLI, LSP).
+
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
 it** (`make test` must stay green) — see `docs/TESTING.md` for where
@@ -2829,7 +2880,7 @@ M1 was built and documented that way.
 
 ## Status
 
-M0 through M21 (and M21b, `mah format`) are all landed (see their entries above for what changed and
+M0 through M22 (and M21b, `mah format`) are all landed (see their entries above for what changed and
 each milestone's deliberate deviations/simplifications). `docs/NEXT_PHASES.md`
 captures what's deliberately deferred still (arrays/lists pattern matching,
 generics, the type system -- and, as of M11, sound field-*access*

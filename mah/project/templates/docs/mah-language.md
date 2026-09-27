@@ -533,11 +533,33 @@ print(r.await)                  # 5
 
 ## Type annotations
 
-Declarations can carry optional types. **Only the type names are checked
-for now** (an unknown type or a wrong number of `<...>` arguments is a
-compile error). The type checker that will use them is still to come, so
-today annotations document intent and change nothing when the program
-runs.
+Declarations can carry optional types. An unknown type name or a wrong
+number of `<...>` arguments is always a compile error. Annotations never
+change how the program runs -- they're erased before codegen -- but they
+are checked, by `mah check` and by the editor: whether a mismatch is just
+a warning or a compile error, and whether an inferred type is allowed to
+stay unannotated, depends on `[types] check` in `mah-project.toml`:
+`"loose"` (the default) reports mismatches as warnings only, and `mah
+run`/`mah build` don't check at all; `"strict"` makes a mismatch a compile
+error, blocking `run`/`build`; `"explicit"` is like `strict`, and also
+requires an annotation anywhere a type can't be inferred. Method calls,
+trait-typed values, and bounds aren't checked yet (this is the checker's
+first version).
+
+The checker is stricter than the runtime in a few places, so code that
+should pass `strict` follows these rules:
+
+- A variable keeps one type: `let x = 1` then `x = "s"` is a type error
+  (use a new `let x = ...` to shadow it instead).
+- `[...]` and `[k: v]` literals hold one element type (`[1, "a"]` is an
+  error), and range bounds are Numbers.
+- `none` fits any type, and `let x = none` takes its type from the first
+  non-`none` value assigned later.
+- Unannotated parameters are inferred from how they're used. `+`, `*`, and
+  comparisons on values of unknown type default to `Number`: `fn add(a, b)
+  { a + b }` takes Numbers, so annotate `a: String` to concatenate.
+- An `if`/`match` whose branches have different types is fine as a
+  statement, but its value has type `Unknown`.
 
 ```mah
 fn add(a: Number, b: Number = 1) -> Number { a + b }
@@ -603,7 +625,7 @@ before anything runs.
   `for` bindings, labeled `break`/`continue`.
 - String methods other than `len`/`char_at` (no `split`, `replace`, ...).
 - `&&`, `||`, `+=`, `++`, ternary `?:`.
-- Type checking (annotations are accepted but not checked yet), classes/inheritance, exceptions/`try`.
+- Type-checking method calls, trait-typed values, and bounds (the checker's first version skips these); classes/inheritance, exceptions/`try`.
 - Variadic parameters (`*args`, `**kwargs`); only `print` takes any number of arguments.
 - File, network, or OS access (planned as future built-ins).
 - `null`/`nil`/`undefined`: use `none`.
