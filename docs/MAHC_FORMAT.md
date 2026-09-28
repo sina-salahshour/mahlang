@@ -1,4 +1,4 @@
-# The `.mahc` bytecode format (version 1.5)
+# The `.mahc` bytecode format (version 1.6)
 
 `mah build prog.mh` compiles a program (its entry file plus everything it
 imports) into a single `.mahc` file; `mah runc prog.mahc` runs one. This
@@ -43,7 +43,7 @@ recommended.
 ```
 magic      bytes(4)  = 0x4D 0x41 0x48 0x43   ("MAHC")
 major      u16       = 1
-minor      u16       = 5          (0-4 for older files; see §7)
+minor      u16       = 6          (0-5 for older files; see §7)
 sections   (id u8, length varuint, payload bytes(length))*   until end of file
 ```
 
@@ -65,7 +65,12 @@ sections   (id u8, length varuint, payload bytes(length))*   until end of file
   (every file it produces has 1.4's TYPES layout and HANDLERS section),
   or the highest `(1.x)` marker among the natives the file lists (5 for
   the `std:math` natives), so a program that doesn't call newer natives
-  still runs on an older VM.
+  still runs on an older VM. *(1.6)* Native methods (§6.7) are called by
+  name, so it also writes the minor that added any native method whose
+  *name* a `callmethod`/`callmethodkw`/`detachmethod`/`detachmethodkw` in
+  the program's own code (outside the prelude) uses, whatever the
+  receiver turns out to be; the prelude's `to_number`, which relies on 1.6
+  methods, counts as one.
 - **Required sections**, each present exactly once and in increasing id
   order: STRINGS (`0x01`), CONSTANTS (`0x02`), TYPES (`0x03`), NATIVES
   (`0x04`), FUNCTIONS (`0x05`), CODE (`0x06`), — in files with minor ≥ 1 —
@@ -640,6 +645,27 @@ name. A target is (function value or native, `is_method`).
   | `Map` *(1.3)* | `has(k)` | Bool: whether `k` is present (a non-key `k` is a runtime error, §6.9) |
   | `Map` *(1.3)* | `remove(k)` | remove `k`'s entry and return its value, or `none` if absent |
   | `Map` *(1.3)* | `copy(deep = false)` | a new Map with the same entries in the same order; shallow unless `deep` is truthy (§6.9) |
+  | `String` *(1.6)* | `split(sep = none, limit = none)` | a Vector of Strings. With `sep` `none`: the maximal runs of non-whitespace. Otherwise the pieces between non-overlapping occurrences of `sep` (a non-empty String), left to right. With `limit` (a whole Number), at most that many splits: the last piece is then the rest of the String, unchanged (in whitespace mode, starting at its next non-whitespace code point) |
+  | `String` *(1.6)* | `trim()` / `trim_start()` / `trim_end()` | without leading and trailing / leading / trailing whitespace |
+  | `String` *(1.6)* | `pad_start(width, fill = " ")` / `pad_end(...)` | if shorter than `width` code points: `fill` (non-empty) repeated before / after it, the last repetition cut to fit exactly; otherwise unchanged |
+  | `String` *(1.6)* | `replace(from, to)` / `replace_all(from, to)` | the first / every non-overlapping occurrence of `from` replaced by `to`. An empty `from` matches at the start / before every code point and at the end |
+  | `String` *(1.6)* | `starts_with(s)` / `ends_with(s)` / `contains(s)` | Bool |
+  | `String` *(1.6)* | `index_of(s)` | `some(i)`, the code-point position of the first occurrence of `s` (`some(0)` for `""`), or `none` |
+  | `String` *(1.6)* | `repeat(n)` | the String `n` times (`n` a whole Number ≥ 0) |
+  | `String` *(1.6)* | `to_upper()` / `to_lower()` | Unicode full case mapping (`"Straße"` → `"STRASSE"`), final-sigma rule included |
+  | `String` *(1.6)* | `lines()` | a Vector of the lines: split at each `\n`, dropping a `\r` immediately before it (a `\r` not followed by `\n` stays); a final `\n` doesn't start another line; `""` has none |
+  | `String` *(1.6)* | `parse_number()` | the Number the String spells, or `none`: after trimming whitespace it must match `[+-]?(D+(.D*)? \| .D+)([eE][+-]?D{1,5})?` (D an ASCII digit), converted exactly as a CONSTANTS decimal (§4.2) |
+  | `Vector` *(1.6)* | `join(sep = "")` | every item's `to_string` (§6.6), with `sep` between |
+
+  *(1.6)* Positions and lengths count Unicode code points, and
+  "whitespace" is exactly the Unicode White_Space property. An argument
+  that should be a String and isn't is a `RuntimeError.TypeMismatch`
+  (`NAME: WHAT must be a String, got TYPE`); a count that isn't a whole
+  Number ≥ 0 is an `ArgumentError` (`NAME: WHAT must be a whole number of
+  at least 0, got N`, or `must be a Number, got TYPE` for a non-Number);
+  an empty `sep`/`fill` is an `ArgumentError` (`split: sep can't be
+  empty`, `NAME: fill can't be empty`). `mah/string_methods.py` is the
+  reference implementation.
   Wrong argument counts give the usual `Argument Count is invalid.
   method 'NAME' accepts N arguments but M was given`.
 - `defmethod c type trait name is_method`: set the inherent target
@@ -903,6 +929,12 @@ message
   program that doesn't use them is still a 1.4 file.
 - The optional TESTS section (§4.9, for `mah test`) came without a minor
   version: older VMs skip it, and a program with one still runs normally.
+- **1.6** added native methods only: the String methods `split`, `trim`,
+  `trim_start`, `trim_end`, `pad_start`, `pad_end`, `replace`,
+  `replace_all`, `starts_with`, `ends_with`, `contains`, `index_of`,
+  `repeat`, `to_upper`, `to_lower`, `lines`, `parse_number`, and
+  `Vector.join` (§6.7). The encoder writes 1.6 only for a program that
+  calls a method by one of those names (§3).
 - Planned growth, for orientation: error-set checking (the static
   checker's `throws` inference and "unhandled error" diagnostics -- M26),
   string utilities, filesystem, networking, and process natives.

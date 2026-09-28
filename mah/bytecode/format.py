@@ -26,6 +26,9 @@ built-in type `RuntimeError` (index 2; user types now numbered from 3),
 
 M27 bumps MINOR to 5: new natives only (`math.tan`/`asin`/`acos`/`atan`/
 `atan2`/`exp`/`log`/`log10`, behind `std:math`) -- docs/MAHC_FORMAT.md #4.4.
+
+M29 bumps MINOR to 6: new native inherent methods only -- the String
+methods and `Vector.join` (docs/MAHC_FORMAT.md #6.7, NATIVE_METHOD_SINCE_MINOR).
 """
 
 from __future__ import annotations
@@ -38,7 +41,7 @@ MAGIC = b"MAHC"
 # `.mahc` extension).
 SHEBANG = b"#!/usr/bin/env -S mah runc\n"
 MAJOR = 1
-MINOR = 5
+MINOR = 6
 
 # -- section ids (docs/MAHC_FORMAT.md #3) -----------------------------------
 SEC_STRINGS = 0x01
@@ -151,6 +154,24 @@ NATIVE_SINCE_MINOR = {
     "math.log": 5,
     "math.log10": 5,
 }
+
+# M29: native inherent methods added after 1.0, by the minor that added
+# them. Methods are called by name, so the encoder can't know a call's
+# target; a file calling any method of one of these names (on any value) is
+# written with at least that minor -- docs/MAHC_FORMAT.md #3/#6.7.
+NATIVE_METHOD_SINCE_MINOR = {
+    name: 6
+    for name in (
+        "split", "trim", "trim_start", "trim_end", "pad_start", "pad_end", "replace", "replace_all",
+        "starts_with", "ends_with", "contains", "index_of", "repeat", "to_upper", "to_lower", "lines",
+        "parse_number", "join",
+        # prelude methods (M29) that rely on the 1.6 native methods
+        "to_number",
+    )
+}
+
+# The opcodes that call a method by name: operand 1 is the method's name.
+METHOD_CALL_OPCODES = ("callmethod", "callmethodkw", "detachmethod", "detachmethodkw")
 
 # -- opcodes (docs/MAHC_FORMAT.md #4.6) --------------------------------------
 # name -> (code, operand_kinds); operand kinds use the letters of #4.6's

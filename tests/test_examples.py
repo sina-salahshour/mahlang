@@ -129,6 +129,15 @@ class ExampleTests(unittest.TestCase):
             "0 1\n",
         )
 
+    def test_string_methods(self):
+        # M29: the String methods.
+        out = run_file(example_path("string_methods.mh"))
+        self.assertEqual(
+            out,
+            "MAH v0.2.0\n01. Sina\n02. Claude\nmajor version: 0 next: 1\n"
+            "not a number none\nsome(2) -1 mAh\na -> b -> c\n",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

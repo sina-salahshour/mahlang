@@ -307,6 +307,35 @@ import math from "std:math"
 let s: Unknown = "x"
 print(math.tan(s))
 """, b""),
+    # M29: the String methods and Vector.join (mah/string_methods.py).
+    ("string_methods", """
+let u: Unknown = "  Hello, World  "
+print(u.trim(), "|" + u.trim_start() + "|", "|" + u.trim_end() + "|")
+print("a,b,,c".split(","), "  one two   three ".split(), " a b c ".split(limit: 1), "k=v=w".split("=", 1))
+print("7".pad_start(3, "0"), "ab".pad_end(5, "xy") + "|", "abc".pad_start(2), "日本語".pad_start(5, "*"))
+print("aXbXc".replace("X", "-"), "aXbXc".replace_all("X", "-"), "ab".replace("", "x"), "ab".replace_all("", "-"))
+print("hello".starts_with("he"), "hello".ends_with("lo"), "hello".contains("ell"), "hello".contains("z"))
+print("héllo wörld".index_of("w"), "hello".index_of("z"), "x".index_of(""), "ab".repeat(3), "ab".repeat(0) + "|")
+print("Straße".to_upper(), "ÀB".to_lower(), "ΣΑΣ".to_lower())
+print("a\r\nb\n".lines(), "".lines(), "a\n\nb".lines(), "x\ry".lines().len())
+print(["x", 1, true, none, [2]].join(", "), [1, 2].join(), [].join("-") + "|")
+print(" 42 ".parse_number(), "-1.5e2".parse_number(), "abc".parse_number(), ".5".parse_number(), "1.".parse_number())
+print("+.5E-3".parse_number(), "1e123456".parse_number(), "1e99999".parse_number() > 1, "0x10".parse_number())
+print("a\u00a0b\u2003c".split(), " \u3000x\u2028".trim() + "|", "\u001cx".trim().len())
+print("42".to_number() + 1, "x".index_of("x").unwrap(), "x".index_of("y").unwrap_or(0 - 1))
+""", b""),
+    ("string_method_errors", """
+let u: Unknown = 5
+print(try { "ab".repeat(0 - 1) } catch { e => { e.message() } })
+print(try { "ab".repeat(1.5) } catch { e => { e.message() } })
+print(try { "a".split("") } catch { e => { e.message() } })
+print(try { "a".split(limit: "2") } catch { e => { e.message() } })
+print(try { "a".contains(u) } catch { e => { e.message() } })
+print(try { "x".pad_start(3, "") } catch { e => { e.message() } })
+print(try { [1].join(u) } catch { e => { e.message() } })
+print(try { "x".index_of("y").unwrap() } catch { e => { e.message() } })
+"abc".to_number()
+""", b""),
     ("std_math_sqrt_negative", """
 import math from "std:math"
 print(math.sqrt(0 - 4))
@@ -359,7 +388,7 @@ def build_malformed_cases(tmpdir: str) -> list[tuple[str, bytes]]:
     with open(std_path, "rb") as f:
         std = f.read()
     std_body = bytearray(std[std.index(b"\n") + 1 :].replace(b"math.tan", b"math.zzz"))
-    std_body[6:8] = (6).to_bytes(2, "little")
+    std_body[6:8] = (7).to_bytes(2, "little")
     cases.append(("newer_minor_names_missing_natives", bytes(std_body)))
     cases.append(("truncated_at_10_bytes", body[:10]))
     cases.append(("truncated_at_magic", body[:2]))

@@ -2,7 +2,8 @@
 
 Status: **M27 landed 2026-09-28: Phase 0 steps 1, 2 and 5 (`std:`
 resolution, `extern fn`, native table versioning) and `std:math`**, the
-first module. The rest is design. Agreed 2026-09-28. Depends on
+first module; **M29 landed the String methods** (Phase 1's first item).
+The rest is design. Agreed 2026-09-28. Depends on
 [`ERRORS.md`](ERRORS.md) (every failure below is a thrown, typed error)
 and on the static checker in [`TYPES.md`](TYPES.md).
 
@@ -138,11 +139,38 @@ Native inherent methods (resolver tables, both runtimes,
 | `repeat(n)` | |
 | `to_upper()`, `to_lower()` | |
 | `lines()` | splits on `\n` / `\r\n` |
-| `to_number()` | throws `ParseError`; allows surrounding whitespace |
+| `to_number()` | throws `NumberParseError` (M29; see below); allows surrounding whitespace |
 
 Plus `Vector.join(sep)`, and on `Option`: `unwrap()` (throws
 `RuntimeError.UnwrapNone`), `unwrap_or(default)`, `is_some()`,
 `is_none()`.
+
+✅ **Landed (M29)**, with these decisions (docs/MAHC_FORMAT.md §6.7 has
+the exact rules; `mah/string_methods.py` is the reference):
+
+- Native methods on both VMs (bytecode 1.6, gated by method name, §3).
+  Positions count code points and whitespace is Unicode White_Space,
+  defined explicitly so the two VMs can't drift apart on edge cases.
+  `split`'s `limit` counts splits (Python's `maxsplit`); `pad_*` cut the
+  last repetition of `fill` to fit; `lines` drops a `\r` only before a
+  `\n`; `Vector.join`'s `sep` defaults to `""` and uses each item's
+  `to_string`.
+- `to_number()` throws **`NumberParseError { text }`**, not `ParseError`:
+  programs commonly declare their own `ParseError` (`examples/errors.mh`
+  does), and a prelude type of that name would clash with it. It's a
+  prelude trait method (`ToNumber`) over a new native method,
+  **`parse_number()`**, which returns the Number or `none` and is public
+  too. The checker tracks `NumberParseError` like any error.
+- `unwrap()` on `none` throws `RuntimeError.ArgumentError` ("unwrap: the
+  value is none") rather than a new `UnwrapNone` variant, which would
+  change the built-in `RuntimeError` layout in the bytecode. The Option
+  helpers are an `impl<T> Option<T>` in the prelude.
+- Fully annotated prelude methods are now typed from their annotations
+  (bodies unchecked), which is how `to_number`'s `throws` reaches the
+  checker.
+- An uncaught error thrown inside the prelude is now located at the
+  innermost call outside it (the thrown value's backtrace), not at a
+  prelude line.
 
 ### `std:math`
 

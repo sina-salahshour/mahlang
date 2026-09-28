@@ -6,9 +6,9 @@ tags: [changelog]
 version: "0.2.0"
 ---
 
-This release (milestones M22 through M28) adds a static type checker,
+This release (milestones M22 through M29) adds a static type checker,
 errors you can throw, catch, and have checked, the first modules of a
-standard library, and a test runner. Types and error sets cost nothing at run time: they're
+standard library, a test runner, and String methods. Types and error sets cost nothing at run time: they're
 erased before codegen. The bytecode gains 1.4's handler table for `try`
 and 1.5's math natives.
 
@@ -115,6 +115,24 @@ bytecode version it needs, 1.4 unless it uses the new natives. So a
 1.4 runtime still runs programs that don't use them, and a runtime that's
 too old names the natives it's missing. See
 [Standard library](/docs/standard-library).
+
+## String methods
+
+Strings finally have the methods you'd expect, the same on both VMs:
+
+```mah
+print("a,b,,c".split(","), "  one  two ".split(), "|" + "  hi ".trim() + "|")  # [a, b, , c] [one, two] |hi|
+print("7".pad_start(3, "0"), "a-b".replace_all("-", "+"), "hello".index_of("l"))  # 007 a+b some(2)
+print("Straße".to_upper(), "A\nB\n".lines(), ["x", 1].join(", "))              # STRASSE [A, B] x, 1
+print("42".to_number() + 1, "abc".parse_number())                               # 43 none
+```
+
+Also `trim_start`/`trim_end`, `pad_end`, `replace`, `starts_with`/
+`ends_with`/`contains`, `repeat`, and `to_lower`. `to_number()` throws
+a `NumberParseError` that the checker tracks, and `index_of`'s Option
+has `unwrap()`, `unwrap_or()`, `is_some()` and `is_none()`. An uncaught
+error from inside the prelude, such as `"x".to_number()`, is now reported
+at your line, not at the prelude's. See [Strings](/docs/strings).
 
 ## `mah test`
 

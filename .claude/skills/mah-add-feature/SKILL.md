@@ -101,6 +101,17 @@ VMs from it, so a feature isn't done until that document describes it.
   `runtime/tests/vm_diff.py`, and Mah-level tests for the module in
   `mah/std/<module>.test.mh` (`std:test` + `test "..." { }` blocks; M28 --
   `tests/test_stdlib.py` runs every std test file on both VMs).
+- **A new native *method*** on a built-in type (like M29's String
+  methods): implement it in both VMs' method tables
+  (`code_interpreter.py` + `mah/string_methods.py`-style module, and
+  `runtime/src/vm/methods.rs`/`exec.rs`), add it to the resolver's native
+  inherent table (`resolve.py`, for completion/hover/`Type.f(...)`) and the
+  checker's `_native_method` signatures, list its name in
+  `format.NATIVE_METHOD_SINCE_MINOR` (methods are called by name, so the
+  encoder gates the file's minor on the names it calls), and document it
+  in `MAHC_FORMAT.md` §6.7. Define every edge case explicitly rather than
+  inheriting Python's or Rust's library semantics, and add `vm_diff.py`
+  parity cases.
 - **Needs a genuinely new instruction**: add it to `bytecode/format.py`'s
   `OPCODES` (a reserved code + operand kinds), map the IR tuple to it in
   `bytecode/lower.py` (lowering stays 1:1 per instruction), handle it in

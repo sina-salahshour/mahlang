@@ -204,6 +204,57 @@ impl Iterator<String> for StringIterator {
     }
 }
 
+# M29: `"42".to_number()` -- the Number a String spells, like
+# `parse_number()` (surrounding whitespace allowed; see docs/STDLIB.md), but
+# throwing NumberParseError instead of returning `none`.
+struct NumberParseError { text: String }
+
+impl Error for NumberParseError {
+    fn message(self) { "not a number: \"" + self.text + "\"" }
+}
+
+trait ToNumber {
+    fn to_number(self) -> Number throws NumberParseError
+}
+
+impl ToNumber for String {
+    fn to_number(self) -> Number throws NumberParseError {
+        let n = self.parse_number()
+        if n == none { throw NumberParseError { text: self } }
+        n
+    }
+}
+
+# -- Option -------------------------------------------------------------------
+
+# M29: helpers for `some(x)`/`none` values, like the `index_of` result.
+impl<T> Option<T> {
+    # The value inside `some(x)`; throws on `none`.
+    fn unwrap(self) -> T {
+        match self {
+            some(value) => { value }
+            none => { throw RuntimeError.ArgumentError { message: "unwrap: the value is none" } }
+        }
+    }
+
+    # The value inside `some(x)`, or `default` for `none`.
+    fn unwrap_or(self, default: T) -> T {
+        match self {
+            some(value) => { value }
+            none => { default }
+        }
+    }
+
+    fn is_some(self) -> Bool {
+        match self {
+            some(_value) => { true }
+            none => { false }
+        }
+    }
+
+    fn is_none(self) -> Bool { !self.is_some() }
+}
+
 # -- adapters ---------------------------------------------------------------
 #
 # Each adapter is an Iterable (so adapters chain) whose `iter` builds a fresh

@@ -15,7 +15,7 @@ use std::fmt;
 
 pub const MAGIC: &[u8; 4] = b"MAHC";
 pub const MAJOR: u16 = 1;
-pub const MINOR: u16 = 5;
+pub const MINOR: u16 = 6;
 
 const SEC_STRINGS: u8 = 0x01;
 const SEC_CONSTANTS: u8 = 0x02;
@@ -1484,7 +1484,7 @@ mod tests {
         // M27: the current maximum is 5; the file has no sections at all,
         // so there are no natives to name.
         assert_eq!(e.0, format!("unsupported minor version 99 (this VM supports up to minor version {MINOR})"));
-        assert_eq!(MINOR, 5);
+        assert_eq!(MINOR, 6);
     }
 
     #[test]

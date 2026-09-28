@@ -4,8 +4,8 @@ A project written in **Mah**, a small dynamically typed language (`.mh`
 files). Mah isn't a mainstream language, so don't guess its syntax from
 Python, JavaScript, or Rust: **read `docs/mah-language.md` before writing or
 changing any Mah code.** It's short and lists exactly what exists (including
-`throw`/`try`/`catch`), plus what doesn't (no tuples, almost no string
-methods, ...).
+`throw`/`try`/`catch` and the String methods), plus what doesn't (no
+tuples, no regular expressions, ...).
 
 ## Layout
 

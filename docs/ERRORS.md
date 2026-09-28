@@ -221,7 +221,7 @@ So a quick script still runs in `loose` mode, and fails cleanly on bad
 input:
 
 ```mah
-let x = input("decimal: ").to_number()   # warning: unhandled ParseError, EndOfInput
+let x = input("decimal: ").to_number()   # warning: unhandled NumberParseError, EndOfInput
 ```
 
 ## Interactions

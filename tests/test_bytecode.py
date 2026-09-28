@@ -90,8 +90,9 @@ class RoundTripTests(unittest.TestCase):
                 # M25: the reference encoder now writes minor version 4
                 # (typed, catchable errors; 3 was M19's Vectors/Maps) --
                 # see docs/MAHC_FORMAT.md #7. M27: or 5, the lowest minor
-                # the program needs, when it uses a 1.5 native (std:math).
-                minor = 5 if name == "std_math.mh" else 4
+                # the program needs, when it uses a 1.5 native (std:math);
+                # M29: 1.6 when it calls a String method.
+                minor = {"std_math.mh": 5, "string_methods.mh": 6}.get(name, 4)
                 self.assertEqual(data[:8], b"MAHC\x01\x00" + bytes([minor, 0]))
 
     def test_decoded_bytes_run_the_same_as_the_source(self):
@@ -141,10 +142,10 @@ class LoaderValidationTests(unittest.TestCase):
         self.assertIn("major", str(cm.exception))
 
     def test_unsupported_minor_version(self):
-        # M27: this VM now implements minor version 5, so the smallest
-        # genuinely unsupported minor version is 6.
+        # M29: this VM now implements minor version 6, so the smallest
+        # genuinely unsupported minor version is 7.
         data = bytearray(compile_bytes(text="print(1)"))
-        data[6] = 6
+        data[6] = 7
         with self.assertRaises(MahcFormatError) as cm:
             decode(bytes(data))
         self.assertIn("minor", str(cm.exception))
@@ -157,11 +158,11 @@ class LoaderValidationTests(unittest.TestCase):
         data = compile_bytes(text='import math from "std:math"\nprint(math.tan(1))')
         self.assertIn(b"math.tan", data)
         data = bytearray(data.replace(b"math.tan", b"math.zzz"))
-        data[6] = 6
+        data[6] = 7
         with self.assertRaises(MahcFormatError) as cm:
             decode(bytes(data))
         message = str(cm.exception)
-        self.assertIn("unsupported minor version 6", message)
+        self.assertIn("unsupported minor version 7", message)
         self.assertIn("natives this VM doesn't have ('math.zzz')", message)
 
     def test_minor_is_the_lowest_the_program_needs(self):
@@ -169,6 +170,11 @@ class LoaderValidationTests(unittest.TestCase):
         # need the newer natives still runs on a 1.4 VM.
         self.assertEqual(decode(compile_bytes(text="print(sin(1))")).minor, 4)
         self.assertEqual(decode(compile_bytes(text='import math from "std:math"\nprint(math.log(1))')).minor, 5)
+        # M29: a call of a 1.6 native method (by name) makes it 1.6 -- but the
+        # prelude's own calls don't, only the program's.
+        self.assertEqual(decode(compile_bytes(text='print(" a ".trim())')).minor, 6)
+        self.assertEqual(decode(compile_bytes(text='print("5".to_number())')).minor, 6)
+        self.assertEqual(decode(compile_bytes(text="for let i in 1..3 { print(i) }")).minor, 4)
 
     def test_leading_shebang_line_is_skipped(self):
         data = compile_bytes(text="print(1)")

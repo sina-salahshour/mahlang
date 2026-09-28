@@ -439,6 +439,43 @@ pub enum NativeMethodKind {
     MapIndex,
     VectorIndexAssign,
     MapIndexAssign,
+    // M29 (1.6): docs/STDLIB.md's String methods, and Vector.join.
+    StringSplit,
+    StringTrim,
+    StringTrimStart,
+    StringTrimEnd,
+    StringPadStart,
+    StringPadEnd,
+    StringReplace,
+    StringReplaceAll,
+    StringStartsWith,
+    StringEndsWith,
+    StringContains,
+    StringIndexOf,
+    StringRepeat,
+    StringToUpper,
+    StringToLower,
+    StringLines,
+    StringParseNumber,
+    VectorJoin,
+}
+
+/// The default of a native method's optional parameter.
+#[derive(Clone, Copy)]
+pub enum OptDefault {
+    False,
+    None,
+    Str(&'static str),
+}
+
+impl OptDefault {
+    pub fn value(self) -> Value {
+        match self {
+            OptDefault::False => Value::Bool(false),
+            OptDefault::None => Value::None,
+            OptDefault::Str(s) => Value::Str(Rc::from(s)),
+        }
+    }
 }
 
 impl NativeMethodKind {
@@ -449,13 +486,22 @@ impl NativeMethodKind {
             | MapKeys | MapValues | MapCopy => 0,
             StringCharAt | VectorPush | VectorPushStart | MapHas | MapRemove | StringIndex | VectorIndex | MapIndex => 1,
             VectorIndexAssign | MapIndexAssign => 2,
+            StringSplit | StringTrim | StringTrimStart | StringTrimEnd | StringToUpper | StringToLower | StringLines
+            | StringParseNumber | VectorJoin => 0,
+            StringPadStart | StringPadEnd | StringStartsWith | StringEndsWith | StringContains | StringIndexOf
+            | StringRepeat => 1,
+            StringReplace | StringReplaceAll => 2,
         }
     }
 
-    pub fn optional_name(self) -> Option<&'static str> {
+    /// Optional parameters after the required ones: `(name, default)`.
+    pub fn optional_params(self) -> &'static [(&'static str, OptDefault)] {
         match self {
-            NativeMethodKind::VectorCopy | NativeMethodKind::MapCopy => Some("deep"),
-            _ => None,
+            NativeMethodKind::VectorCopy | NativeMethodKind::MapCopy => &[("deep", OptDefault::False)],
+            NativeMethodKind::StringSplit => &[("sep", OptDefault::None), ("limit", OptDefault::None)],
+            NativeMethodKind::StringPadStart | NativeMethodKind::StringPadEnd => &[("fill", OptDefault::Str(" "))],
+            NativeMethodKind::VectorJoin => &[("sep", OptDefault::Str(""))],
+            _ => &[],
         }
     }
 }
@@ -557,5 +603,224 @@ pub fn call_native_method(kind: NativeMethodKind, bound: &[Value], vm: &mut supe
             Value::Map(m) => map_index_assign(m, bound[1].clone(), bound[2].clone(), names),
             _ => unreachable!(),
         },
+        NativeMethodKind::VectorJoin => match &bound[0] {
+            Value::Vector(v) => {
+                let sep = arg_str("join", "sep", &bound[1], names)?.to_string();
+                let items: Vec<Value> = v.borrow().clone();
+                let mut parts = Vec::with_capacity(items.len());
+                for item in &items {
+                    parts.push(vm.to_str(item)?);
+                }
+                Ok(str_value(&parts.join(&sep)))
+            }
+            _ => unreachable!(),
+        },
+        kind => match &bound[0] {
+            Value::Str(s) => string_method(kind, s, &bound[1..], names),
+            _ => unreachable!(),
+        },
     }
+}
+
+// ---------------------------------------------------------------------------
+// M29: the String methods -- docs/STDLIB.md, a port of mah/string_methods.py
+// (every rule and message is defined there). Positions count code points;
+// whitespace is Unicode White_Space (`char::is_whitespace`).
+// ---------------------------------------------------------------------------
+
+fn str_value(s: &str) -> Value {
+    Value::Str(Rc::from(s))
+}
+
+fn str_vector(items: Vec<String>) -> Value {
+    Value::Vector(Rc::new(RefCell::new(items.iter().map(|s| str_value(s)).collect())))
+}
+
+fn arg_str<'a>(method: &str, what: &str, v: &'a Value, names: &BuiltinTypeNames) -> RResult<&'a Rc<str>> {
+    match v {
+        Value::Str(s) => Ok(s),
+        other => Err(RuntimeError::with_kind(
+            format!("{method}: {what} must be a String, got {}", type_name_of(other, names)),
+            ErrorKind::TypeMismatch,
+        )),
+    }
+}
+
+fn arg_count(method: &str, what: &str, v: &Value, names: &BuiltinTypeNames) -> RResult<usize> {
+    let n = match v {
+        Value::Number(n) => n,
+        other => {
+            return Err(RuntimeError::with_kind(
+                format!("{method}: {what} must be a Number, got {}", type_name_of(other, names)),
+                ErrorKind::TypeMismatch,
+            ))
+        }
+    };
+    match n.to_i64() {
+        Some(i) if n.is_integer() && i >= 0 => Ok(i as usize),
+        _ => Err(RuntimeError::with_kind(
+            format!("{method}: {what} must be a whole number of at least 0, got {}", n.format()),
+            ErrorKind::ArgumentError,
+        )),
+    }
+}
+
+fn padding(method: &str, s: &str, width: &Value, fill: &Value, names: &BuiltinTypeNames) -> RResult<String> {
+    let width = arg_count(method, "width", width, names)?;
+    let fill = arg_str(method, "fill", fill, names)?;
+    if fill.is_empty() {
+        return Err(RuntimeError::with_kind(format!("{method}: fill can't be empty"), ErrorKind::ArgumentError));
+    }
+    let len = s.chars().count();
+    if width <= len {
+        return Ok(String::new());
+    }
+    Ok(fill.chars().cycle().take(width - len).collect())
+}
+
+/// What `parse_number` accepts after trimming: `[+-]?(digits[.digits*] |
+/// .digits)([eE][+-]?d{1,5})?`, ASCII only (see mah/string_methods.py).
+fn is_number_text(t: &str) -> bool {
+    let b = t.as_bytes();
+    let mut i = 0;
+    if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+        i += 1;
+    }
+    let int_start = i;
+    while i < b.len() && b[i].is_ascii_digit() {
+        i += 1;
+    }
+    let int_digits = i - int_start;
+    let mut frac_digits = 0;
+    if i < b.len() && b[i] == b'.' {
+        i += 1;
+        let frac_start = i;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        frac_digits = i - frac_start;
+    }
+    if int_digits == 0 && frac_digits == 0 {
+        return false;
+    }
+    if i < b.len() && (b[i] == b'e' || b[i] == b'E') {
+        i += 1;
+        if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+            i += 1;
+        }
+        let exp_start = i;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == exp_start || i - exp_start > 5 {
+            return false;
+        }
+    }
+    i == b.len()
+}
+
+fn string_method(kind: NativeMethodKind, s: &str, args: &[Value], names: &BuiltinTypeNames) -> RResult<Value> {
+    use NativeMethodKind::*;
+    Ok(match kind {
+        StringSplit => {
+            let max = match &args[1] {
+                Value::None => None,
+                v => Some(arg_count("split", "limit", v, names)?),
+            };
+            match &args[0] {
+                Value::None => {
+                    let chars: Vec<char> = s.chars().collect();
+                    let (mut parts, mut i) = (Vec::new(), 0usize);
+                    loop {
+                        while i < chars.len() && chars[i].is_whitespace() {
+                            i += 1;
+                        }
+                        if i >= chars.len() {
+                            break;
+                        }
+                        if max == Some(parts.len()) {
+                            parts.push(chars[i..].iter().collect());
+                            break;
+                        }
+                        let start = i;
+                        while i < chars.len() && !chars[i].is_whitespace() {
+                            i += 1;
+                        }
+                        parts.push(chars[start..i].iter().collect());
+                    }
+                    str_vector(parts)
+                }
+                sep => {
+                    let sep = arg_str("split", "sep", sep, names)?;
+                    if sep.is_empty() {
+                        return Err(RuntimeError::with_kind("split: sep can't be empty", ErrorKind::ArgumentError));
+                    }
+                    let parts: Vec<String> = match max {
+                        None => s.split(&**sep).map(String::from).collect(),
+                        Some(m) => s.splitn(m + 1, &**sep).map(String::from).collect(),
+                    };
+                    str_vector(parts)
+                }
+            }
+        }
+        StringTrim => str_value(s.trim()),
+        StringTrimStart => str_value(s.trim_start()),
+        StringTrimEnd => str_value(s.trim_end()),
+        StringPadStart => str_value(&(padding("pad_start", s, &args[0], &args[1], names)? + s)),
+        StringPadEnd => str_value(&(s.to_string() + &padding("pad_end", s, &args[0], &args[1], names)?)),
+        StringReplace => {
+            let from = arg_str("replace", "from", &args[0], names)?;
+            let to = arg_str("replace", "to", &args[1], names)?;
+            str_value(&s.replacen(&**from, to, 1))
+        }
+        StringReplaceAll => {
+            let from = arg_str("replace_all", "from", &args[0], names)?;
+            let to = arg_str("replace_all", "to", &args[1], names)?;
+            str_value(&s.replace(&**from, to))
+        }
+        StringStartsWith => Value::Bool(s.starts_with(&**arg_str("starts_with", "prefix", &args[0], names)?)),
+        StringEndsWith => Value::Bool(s.ends_with(&**arg_str("ends_with", "suffix", &args[0], names)?)),
+        StringContains => Value::Bool(s.contains(&**arg_str("contains", "part", &args[0], names)?)),
+        StringIndexOf => match s.find(&**arg_str("index_of", "part", &args[0], names)?) {
+            None => Value::None,
+            Some(byte) => Value::Enum(Rc::new(RefCell::new(EnumData {
+                type_name: Rc::from("Option"),
+                variant: Rc::from("some"),
+                fields: vec![(Rc::from("value"), number_from_usize(s[..byte].chars().count()))],
+                thrown_at: None,
+                backtrace: None,
+            }))),
+        },
+        StringRepeat => str_value(&s.repeat(arg_count("repeat", "count", &args[0], names)?)),
+        StringToUpper => str_value(&s.to_uppercase()),
+        StringToLower => str_value(&s.to_lowercase()),
+        StringLines => {
+            let parts: Vec<&str> = s.split('\n').collect();
+            let terminated = parts.len() - 1;
+            let mut out: Vec<String> = parts
+                .iter()
+                .enumerate()
+                .map(|(i, p)| match p.strip_suffix('\r') {
+                    Some(stripped) if i < terminated => stripped.to_string(),
+                    _ => p.to_string(),
+                })
+                .collect();
+            if parts.last() == Some(&"") {
+                out.pop();
+            }
+            str_vector(out)
+        }
+        StringParseNumber => {
+            let t = s.trim();
+            if is_number_text(t) {
+                match Decimal::parse(t) {
+                    Some(d) => Value::Number(d),
+                    None => Value::None,
+                }
+            } else {
+                Value::None
+            }
+        }
+        _ => unreachable!("not a String method"),
+    })
 }

@@ -930,12 +930,15 @@ class Checker:
     def _method_scheme(self, m: _Method):
         """The method's generalized signature (receiver included), checking
         its body first if it hasn't been; None when it isn't typed (a
-        prelude method)."""
+        prelude method without full annotations). M29: a fully annotated
+        prelude method is taken at its word -- its written signature and
+        `throws`, body unchecked -- so e.g. `to_number()` throws
+        NumberParseError as far as the checker knows."""
         if m.state == "done":
             return m.scheme
         if m.state == "busy":
             return Scheme((), m.mono)
-        if m.system:
+        if m.system and not self._fully_annotated(m.decl):
             m.state = "done"
             return None
         m.state = "busy"
@@ -943,8 +946,9 @@ class Checker:
         self.fn_stack, self.tparams, self.self_type = [], [m.scope], m.target
         try:
             decl = m.decl
-            if decl.fn is None:
-                # A required trait method: its written signature only.
+            if decl.fn is None or m.system:
+                # A required trait method (or an annotated prelude one):
+                # its written signature only.
                 own = {tp.name: TParam(tp.name) for tp in decl.type_params}
                 self.tparams.append(own)
                 params = []
@@ -974,6 +978,18 @@ class Checker:
             self.fn_stack, self.tparams, self.self_type = saved
             m.state = "done"
 
+    @staticmethod
+    def _fully_annotated(decl) -> bool:
+        """Every parameter but `self`, and the return type, written."""
+        if decl.return_type is None:
+            return False
+        for index, name in enumerate(decl.params):
+            if index == 0 and name == "self":
+                continue
+            if index >= len(decl.param_types) or decl.param_types[index] is None:
+                return False
+        return True
+
     def _find_method(self, type_name: str, name: str):
         """The `_Method` `Type.name` dispatches to: the inherent impl first,
         then the one trait impl (or its trait's default) providing it."""
@@ -997,11 +1013,33 @@ class Checker:
             return None
         if name == "to_string":
             return TFn([receiver], STRING, 1, ["self"])
+        # (extra parameters, return type, how many extras are required)
+        optional: dict = {"copy": 0}
         if receiver.name == "String":
-            if name == "len":
-                return TFn([STRING], NUMBER, 1, ["self"])
-            if name == "char_at":
-                return TFn([STRING, NUMBER], STRING, 2, ["self", "i"])
+            strings = TCon("Vector", [STRING])
+            # M29: docs/STDLIB.md's String methods.
+            table = {
+                "len": ([], NUMBER),
+                "char_at": ([("i", NUMBER)], STRING),
+                "split": ([("sep", STRING), ("limit", NUMBER)], strings),
+                "trim": ([], STRING),
+                "trim_start": ([], STRING),
+                "trim_end": ([], STRING),
+                "pad_start": ([("width", NUMBER), ("fill", STRING)], STRING),
+                "pad_end": ([("width", NUMBER), ("fill", STRING)], STRING),
+                "replace": ([("from", STRING), ("to", STRING)], STRING),
+                "replace_all": ([("from", STRING), ("to", STRING)], STRING),
+                "starts_with": ([("prefix", STRING)], BOOL),
+                "ends_with": ([("suffix", STRING)], BOOL),
+                "contains": ([("part", STRING)], BOOL),
+                "index_of": ([("part", STRING)], TCon("Option", [NUMBER])),
+                "repeat": ([("count", NUMBER)], STRING),
+                "to_upper": ([], STRING),
+                "to_lower": ([], STRING),
+                "lines": ([], strings),
+                "parse_number": ([], NUMBER),
+            }
+            optional = {"split": 0, "pad_start": 1, "pad_end": 1}
         elif receiver.name == "Vector" and len(receiver.args) == 1:
             (t,) = receiver.args
             table = {
@@ -1011,7 +1049,9 @@ class Checker:
                 "push_start": ([("value", t)], NONE),
                 "pop_start": ([], t),
                 "copy": ([("deep", BOOL)], receiver),
+                "join": ([("sep", STRING)], STRING),  # M29
             }
+            optional = {"copy": 0, "join": 0}
         elif receiver.name == "Map" and len(receiver.args) == 2:
             k, v = receiver.args
             table = {
@@ -1024,10 +1064,10 @@ class Checker:
             }
         else:
             return None
-        if receiver.name == "String" or name not in table:
+        if name not in table:
             return None
         extra, ret = table[name]
-        required = 1 if name == "copy" else 1 + len(extra)
+        required = 1 + optional.get(name, len(extra))
         return TFn([receiver] + [t for _n, t in extra], ret, required, ["self"] + [n for n, _t in extra])
 
     def _instance(self, type_name: str):

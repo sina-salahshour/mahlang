@@ -283,7 +283,11 @@ class ErrorTests(unittest.TestCase):
         self.assertIn("'Number' has no method 'nope'", message)
         self.assertIn("at position #1:", message)
 
-    def test_error_inside_prelude_code_is_located_in_the_prelude(self):
+    def test_error_inside_prelude_code_is_located_at_the_callers_line(self):
+        # M29: an uncaught error thrown inside the prelude is located at the
+        # innermost call outside it (from the thrown value's backtrace), not
+        # at a prelude line the user never wrote -- it used to be
+        # `<prelude>#...`.
         src = """
         struct Z { }
         impl Iterable for Z { fn iter(self) { 5 } }
@@ -293,7 +297,8 @@ class ErrorTests(unittest.TestCase):
             run_source(src)
         message = str(cm.exception)
         self.assertIn("'Number' has no method 'next'", message)
-        self.assertIn("at position <prelude>#", message)
+        self.assertIn("at position #4:", message)
+        self.assertNotIn("<prelude>", message)
 
 
 class SyntaxErrorTests(unittest.TestCase):

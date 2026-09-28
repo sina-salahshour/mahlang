@@ -20,7 +20,7 @@ from decimal import Decimal
 
 from ..preprocessor import BUFFER_PATH, PRELUDE_PATH, demangle_message, source_label, std_module_name
 from ..runtime_values import NONE_VALUE
-from .format import MINOR, NATIVE_ARITIES, NATIVE_SINCE_MINOR, TAG_DEC, TAG_FALSE, TAG_INT, TAG_NONE, TAG_STR, TAG_TRUE
+from .format import METHOD_CALL_OPCODES, MINOR, NATIVE_ARITIES, NATIVE_METHOD_SINCE_MINOR, NATIVE_SINCE_MINOR, TAG_DEC, TAG_FALSE, TAG_INT, TAG_NONE, TAG_STR, TAG_TRUE
 from .program import Const, DebugInfo, FunctionDecl, Instr, NativeRef, Program, TestEntry, TypeDecl
 
 # IR op -> bytecode op, for the binary/comparison ops whose bytecode
@@ -453,7 +453,7 @@ def lower(buf, resolver, pp, target: str = "debug") -> Program:
         functions=lowerer.functions,
         code=lowerer.code,
         debug=debug,
-        minor=_file_minor(lowerer.natives, lowerer.strings),
+        minor=_file_minor(lowerer.natives, lowerer.strings, lowerer.code, buf.positions, pp.prelude_start),
         handlers=list(buf.handlers),
         tests=[
             TestEntry(lowerer.intern_str(name), slot, lowerer.line_of(position)) for name, slot, position in buf.tests
@@ -466,14 +466,24 @@ def lower(buf, resolver, pp, target: str = "debug") -> Program:
 _BASE_MINOR = 4
 
 
-def _file_minor(natives: list, strings: list) -> int:
+def _file_minor(natives: list, strings: list, code: list, positions: list, prelude_start) -> int:
     """M27 (docs/MAHC_FORMAT.md #3/#4.4): the lowest minor version whose
     features this file uses -- 1.4, or higher only when it calls a native
     added later (the `std:math` ones are 1.5). So a program that doesn't use
     newer natives still runs on an older 1.4 VM, and one that does is
-    refused by it with a message naming those natives."""
+    refused by it with a message naming those natives. M29: likewise a call
+    of a method named like a later native method (the String methods, 1.6),
+    outside the prelude -- the prelude's own calls only happen through a
+    prelude method the program calls, which is itself in that table (e.g.
+    `to_number`, which calls `parse_number`)."""
     minor = _BASE_MINOR
     for ref in natives:
         minor = max(minor, NATIVE_SINCE_MINOR.get(strings[ref.name], 0))
+    for pc, instr in enumerate(code):
+        position = positions[pc] if pc < len(positions) else None
+        if prelude_start is not None and position is not None and position >= prelude_start:
+            continue
+        if instr.op in METHOD_CALL_OPCODES:
+            minor = max(minor, NATIVE_METHOD_SINCE_MINOR.get(strings[instr.args[1]], 0))
     assert minor <= MINOR
     return minor
