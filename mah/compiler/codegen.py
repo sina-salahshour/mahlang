@@ -194,6 +194,7 @@ import dataclasses
 from decimal import Decimal
 
 from .ast_nodes import (
+    NativeCall,
     AssignStmt,
     Binary,
     BindPat,
@@ -988,6 +989,11 @@ class Codegen:
             self.buf.emit((expr.op, left, right, tmp))
             return tmp
         if isinstance(expr, Call):
+            if expr.builtin is not None:
+                # M27: an unbound `sin(x)`/`cos(x)` -- the same code the
+                # pre-M27 keyword forms produced.
+                node = (SinExpr if expr.builtin == "sin" else CosExpr)(arg=expr.args[0], position=expr.position)
+                return self.gen_expr(node)
             return self._gen_call(expr)
         if isinstance(expr, SinExpr):
             src = self.gen_expr(expr.arg)
@@ -1127,6 +1133,12 @@ class Codegen:
             dest = self._temp()
             self._gen_block_into(expr, dest)
             return dest
+        if isinstance(expr, NativeCall):
+            # M27: an `extern fn`'s body -- one `native` instruction.
+            args = tuple(self.gen_expr(arg) for arg in expr.args)
+            tmp = self._temp()
+            self.buf.emit(("native", expr.native, args, tmp))
+            return tmp
         if isinstance(expr, ThrowExpr):
             # docs/MAHC_FORMAT.md #5.1: never actually reached -- the
             # returned temp is never written; a never-written slot reads

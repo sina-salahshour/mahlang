@@ -174,6 +174,7 @@ declaration ("hoisting"):
 from __future__ import annotations
 
 from .ast_nodes import (
+    NativeCall,
     AssignStmt,
     Binary,
     BindPat,
@@ -182,7 +183,6 @@ from .ast_nodes import (
     BreakStmt,
     Call,
     ContinueStmt,
-    CosExpr,
     DeferStmt,
     DetachExpr,
     EnumDecl,
@@ -211,7 +211,6 @@ from .ast_nodes import (
     PrintStmt,
     RangePat,
     ReturnStmt,
-    SinExpr,
     SleepAsyncExpr,
     StringLit,
     StructDecl,
@@ -225,6 +224,7 @@ from .ast_nodes import (
     WhileStmt,
     WildcardPat,
 )
+from ..bytecode.format import NATIVE_ARITIES
 from ..runtime_values import BUILTIN_TYPE_NAMES, SYSTEM_TRAIT_NATIVE_TYPES, SYSTEM_TRAITS
 
 # M21 (syntax only -- see docs/TYPES.md): known type names' arity (the
@@ -245,6 +245,11 @@ _BUILTIN_TYPE_ARITY = {
     "Map": 2,
 }
 _SYSTEM_TRAIT_ARITY = {"Printable": 0, "Index": 2, "IndexAssign": 2}
+
+
+# M27: built-in functions that are ordinary names, not keywords -- used
+# only when nothing in scope binds the name (`_resolve_builtin_call`).
+_BUILTIN_FNS = frozenset({"sin", "cos"})
 
 
 class FrameLevel:
@@ -1837,13 +1842,18 @@ class Resolver:
             self.resolve_expr(expr.rhs)
             return
         if isinstance(expr, Call):
-            self.resolve_expr(expr.callee)
+            if isinstance(expr.callee, Ident) and expr.callee.name in _BUILTIN_FNS:
+                try:
+                    self.resolve_expr(expr.callee)
+                except NameError:
+                    # M27: nothing binds `sin`/`cos` here -- the built-in.
+                    self._resolve_builtin_call(expr)
+                    return
+            else:
+                self.resolve_expr(expr.callee)
             for arg in expr.args:
                 self.resolve_expr(arg)
             self._resolve_kwargs(expr.kwargs)
-            return
-        if isinstance(expr, (SinExpr, CosExpr)):
-            self.resolve_expr(expr.arg)
             return
         if isinstance(expr, InputExpr):
             return
@@ -2018,6 +2028,21 @@ class Resolver:
             self.resolve_expr(expr.obj)
             self.resolve_expr(expr.key)
             return
+        if isinstance(expr, NativeCall):
+            # M27: an `extern fn`'s body. The native must exist, with the
+            # arity the declaration gives it -- a compile error otherwise,
+            # rather than a VM that refuses the file at load time.
+            arity = NATIVE_ARITIES.get(expr.native)
+            if arity is None:
+                raise NameError(f"Unknown native '{expr.native}' at position {expr.position}")
+            if arity != len(expr.args):
+                raise SyntaxError(
+                    f"Native '{expr.native}' takes {arity} argument(s), but the extern fn declares "
+                    f"{len(expr.args)} at position {expr.position}"
+                )
+            for arg in expr.args:
+                self.resolve_expr(arg)
+            return
         if isinstance(expr, ThrowExpr):
             # M25 (docs/ERRORS.md): `throw e` -- just resolve the operand;
             # nothing to declare, and its type (Never) is a typecheck.py
@@ -2046,6 +2071,19 @@ class Resolver:
                 self.resolve_expr(expr.fallback)
             return
         raise AssertionError(f"unhandled expression node {expr!r}")
+
+    def _resolve_builtin_call(self, expr: Call) -> None:
+        """M27: `sin(x)`/`cos(x)` stopped being lexer keywords (so `std:math`
+        can export functions of those names, and `math.sin` parses); an
+        unbound call to one is still the built-in, with the same one-
+        positional-argument rule the keyword forms had."""
+        name = expr.callee.name
+        if expr.kwargs:
+            raise SyntaxError(f"'{name}' doesn't take keyword arguments at position '{expr.position}'")
+        if len(expr.args) != 1:
+            raise SyntaxError(f"'{name}' can only have one argument at position '{expr.position}'")
+        self.resolve_expr(expr.args[0])
+        expr.builtin = name
 
     # -- patterns (M4) -----------------------------------------------------
     #

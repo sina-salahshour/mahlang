@@ -2964,6 +2964,49 @@ node that resolved to it. Then:
       highlighter's keywords, and the v0.2.0 changelog post (LSP
       `SERVER_VERSION` and `mah-vm` bumped to 0.2.0).
 
+28. **M27 — standard library foundations and `std:math`. ✅ Landed.**
+    Design in `docs/STDLIB.md` (Phase 0 steps 1, 2 and 5, plus Phase 1's
+    `std:math`); bytecode 1.5 in `docs/MAHC_FORMAT.md` (natives only).
+
+    - **`std:` imports** (`mah/preprocessor.py`): `import "std:<name>"`/
+      `import m from "std:<name>"` resolve to `mah/std/<name>.mh` only
+      (`STD_DIR`), never a user file; unknown modules (`std:prelude`
+      included) are a compile error. `source_label` names std files
+      `std:<name>` in compile errors, DEBUG locations (so runtime errors),
+      and LSP hover/completion details.
+    - **`extern fn NAME(params) -> T [throws E] = "module.native"`**:
+      contextual `extern` (parser `_parse_extern_fn`), desugared to an
+      ordinary named `FnExpr` whose body is a `NativeCall` node; resolver
+      checks the native and its arity against `NATIVE_ARITIES`; codegen
+      emits one `native` IR op, lowered 1:1 to the `native` opcode.
+      Allowed only in std modules and the prelude (preprocessor gate, for
+      the entry file and imported user files alike). `export extern fn`
+      is understood by the preprocessor and the formatter.
+    - **Natives** (both VMs): `math.tan`/`asin`/`acos`/`atan`/`atan2`/
+      `exp`/`log`/`log10`, double precision, non-finite results as
+      `RuntimeError.ArgumentError`, non-Numbers as `TypeMismatch`, with
+      identical messages. `MINOR` is 5, but `lower.py`'s `_file_minor`
+      writes the lowest minor the file's natives need (4 otherwise), and
+      both decoders name a newer file's unknown natives when refusing it.
+    - **`std:math`** (`mah/std/math.mh`): constants, exact functions in
+      plain Mah, and the float natives via `extern fn`, with doc comments
+      (they show in hover).
+    - **`sin`/`cos`** are no longer lexer keywords: `Call.builtin` is set
+      by the resolver for an unbound `sin(x)`/`cos(x)`, compiled exactly as
+      the old keyword forms (so existing programs' bytecode is unchanged);
+      the `sin`/`cos` one-argument/no-keyword rules moved from the parser
+      to the resolver. Tree-sitter (`sin_call`/`cos_call` gone, a query
+      highlights bare `sin`/`cos` calls; new `extern_fn_stmt`), TextMate,
+      the website highlighter and LSP hover follow.
+    - Tests: `tests/test_stdlib.py` (imports, `extern fn` rules, every
+      `std:math` function and error on both VMs, checker types, formatter,
+      LSP hover/definition/diagnostics, built-in `sin`/`cos`),
+      `tests/test_bytecode.py` (the lowest-minor rule, the newer-file
+      message), `examples/std_math.mh` + `tests/test_examples.py`, and
+      `runtime/tests/vm_diff.py` parity cases for every new native and
+      error. Two tests changed on purpose: the unsupported-minor test now
+      uses 6, and `sin(x: 1)`'s error now comes from the resolver.
+
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
 it** (`make test` must stay green) — see `docs/TESTING.md` for where

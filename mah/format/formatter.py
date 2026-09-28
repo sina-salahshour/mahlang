@@ -162,7 +162,13 @@ def _blank_module_syntax(text: str, toks: list):
                 continue
         if tok.type is TokenType.ID and tok.text == "export" and not after_dot and i + 1 < n:
             following = toks[i + 1].type
-            if following in (TokenType.FN, TokenType.LET):
+            is_extern = (
+                following is TokenType.ID
+                and toks[i + 1].text == "extern"
+                and i + 2 < n
+                and toks[i + 2].type is TokenType.FN
+            )
+            if following in (TokenType.FN, TokenType.LET) or is_extern:  # M27: `export extern fn`
                 blank(i, i)
                 starts.add(i)
             elif following is TokenType.ID:
@@ -425,8 +431,6 @@ def _last_tok(element) -> _Tok:
 
 _CALL_LIKE = {
     TokenType.PRINT,
-    TokenType.SIN,
-    TokenType.COS,
     TokenType.INPUT,
     TokenType.SLEEP_ASYNC,
     TokenType.SOME,

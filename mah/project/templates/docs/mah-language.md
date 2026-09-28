@@ -88,7 +88,7 @@ loosest of all, `&`/`|` share one level, and `%` shares a level with
 |---|---|
 | `print(a, b, ..., sep: " ", end: "\n")` | prints the arguments separated by `sep` (default: a space), then `end` (default: a newline). `print()` prints just a newline |
 | `input()` | reads an integer from stdin (skips non-digits until one) |
-| `sin(x)`, `cos(x)` | radians |
+| `sin(x)`, `cos(x)` | radians (ordinary names: a `fn sin` of your own takes over) |
 | `sleep_async(ms)` | pauses (see Async) |
 
 ## Control flow
@@ -611,6 +611,30 @@ Only `fn`/`let` names marked `export` are visible to importers. Paths are
 relative to the importing file. `struct`, `enum`, and `trait` declarations
 are global across all imported files and need no `export`.
 
+## Standard library
+
+Standard library modules are imported as `"std:<name>"`, the same two ways
+as a file. So far there is `std:math`:
+
+```mah
+import math from "std:math"
+print(math.sqrt(2), math.round(math.pi, 2))     # 1.414213562373095048801688724 3.14
+print(math.floor(0 - 2.5), math.max(3, 7))      # -3 7
+print(try math.log(0) else "undefined")         # undefined
+```
+
+| `std:math` | |
+|---|---|
+| `pi`, `e` | constants |
+| `sqrt(x)`, `pow(x, y)`, `abs(x)` | exact on Numbers (28 digits) |
+| `floor(x)`, `ceil(x)`, `round(x, digits = 0)` | `round` rounds halves away from zero |
+| `min(a, b)`, `max(a, b)`, `clamp(x, lo, hi)` | two arguments each (plus the range for `clamp`) |
+| `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2(y, x)` | radians, double precision |
+| `exp(x)`, `log(x)`, `log10(x)` | natural log and base 10, double precision |
+
+A domain error (`log(0)`, `sqrt(-1)`, `asin(2)`) throws
+`RuntimeError.ArgumentError`. Any other `std:` name is a compile error.
+
 ## Errors
 
 `throw` raises a value -- any struct/enum that `impl`s the built-in `Error`
@@ -689,5 +713,6 @@ before anything runs.
 - `&&`, `||`, `+=`, `++`, ternary `?:`.
 - Type-checking trait-typed values, bounds, and the prelude's iterator methods (the checker skips these for now); classes/inheritance.
 - Variadic parameters (`*args`, `**kwargs`); only `print` takes any number of arguments.
-- File, network, or OS access (planned as future built-ins).
+- File, network, or OS access, JSON, randomness, and every other planned
+  `std:` module besides `std:math`.
 - `null`/`nil`/`undefined`: use `none`.

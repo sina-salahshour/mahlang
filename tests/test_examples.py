@@ -115,6 +115,20 @@ class ExampleTests(unittest.TestCase):
             "Rect(5x5)\n",
         )
 
+    def test_std_math(self):
+        # M27: the first standard library module.
+        out = run_file(example_path("std_math.mh"))
+        self.assertEqual(
+            out,
+            "1.414213562373095048801688724\n"
+            "3.1416 -3 3\n"
+            "45\n"
+            "3 2.718\n"
+            "log(0) is undefined\n"
+            "5\n"
+            "0 1\n",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

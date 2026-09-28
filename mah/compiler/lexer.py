@@ -53,8 +53,6 @@ class TokenType(Enum):
     LET = "let"
     PRINT = "print"
     INPUT = "input"
-    SIN = "sin"
-    COS = "cos"
     IF = "if"
     ELIF = "elif"
     ELSE = "else"
@@ -98,8 +96,6 @@ KEYWORDS = {
     "let": TokenType.LET,
     "print": TokenType.PRINT,
     "input": TokenType.INPUT,
-    "sin": TokenType.SIN,
-    "cos": TokenType.COS,
     "if": TokenType.IF,
     "elif": TokenType.ELIF,
     "else": TokenType.ELSE,

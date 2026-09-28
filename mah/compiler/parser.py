@@ -17,6 +17,7 @@ from decimal import Decimal
 from typing import Optional
 
 from .ast_nodes import (
+    NativeCall,
     AssignStmt,
     Binary,
     BindPat,
@@ -25,7 +26,6 @@ from .ast_nodes import (
     BreakStmt,
     Call,
     ContinueStmt,
-    CosExpr,
     DeferStmt,
     DetachExpr,
     EnumDecl,
@@ -55,7 +55,6 @@ from .ast_nodes import (
     PrintStmt,
     RangePat,
     ReturnStmt,
-    SinExpr,
     SleepAsyncExpr,
     StringLit,
     StructDecl,
@@ -118,8 +117,6 @@ _RANGE_END_STARTERS = {
     TokenType.WHILE,
     TokenType.FOR,
     TokenType.FN,
-    TokenType.SIN,
-    TokenType.COS,
     TokenType.INPUT,
     TokenType.DETACH,
     TokenType.SLEEP_ASYNC,
@@ -289,6 +286,10 @@ class Parser:
             try:
                 if self.current.type in _STATEMENT_LEADING:
                     stmts.append(self.parse_stmt())
+                    continue
+
+                if self._at_extern_fn():
+                    stmts.append(self._parse_extern_fn())
                     continue
 
                 if self.current.type is TokenType.FN:
@@ -1269,6 +1270,56 @@ class Parser:
             throws=throws,
         )
 
+    # -- M27: extern fn ------------------------------------------------------
+
+    def _at_extern_fn(self) -> bool:
+        """`extern` is contextual (still an ordinary name elsewhere): it
+        starts a declaration only when directly followed by `fn`."""
+        return (
+            self.current.type is TokenType.ID
+            and self.current.literal == "extern"
+            and self.lexer.peek_token().type is TokenType.FN
+        )
+
+    def _parse_extern_fn(self) -> LetStmt:
+        """`extern fn NAME[<T>](params) [-> T] [throws E] = "module.native"`
+        (docs/STDLIB.md, Phase 0) -- desugared to an ordinary named function
+        whose body calls the native with its parameters. Only standard
+        library modules may use it (the preprocessor enforces that);
+        parameters can't have defaults, since a native's arity is fixed."""
+        extern_tok = self.advance()  # `extern`
+        self.advance()  # FN
+        name_tok = self.expect(TokenType.ID)
+        type_params = self._parse_type_params()
+        params, param_positions, param_types, defaults = self._parse_param_list()
+        if any(d is not None for d in defaults):
+            raise SyntaxError(f"an extern fn's parameters can't have defaults at position '{name_tok.position}'")
+        return_type = None
+        if self.current.type is TokenType.ARROW:
+            self.advance()
+            return_type = self._parse_type()
+        throws = self._parse_throws_clause()
+        self.expect(TokenType.ASSIGN)
+        native_tok = self.expect(TokenType.STRING)
+        native = native_tok.literal[1:-1] if native_tok.literal.startswith('"') else native_tok.literal
+        args = [Ident(name=p, position=pos) for p, pos in zip(params, param_positions)]
+        body = Block(stmts=[], position=native_tok.position, tail=NativeCall(native=native, args=args, position=native_tok.position))
+        fn = FnExpr(
+            name=name_tok.literal,
+            params=params,
+            body=body,
+            position=extern_tok.position,
+            name_position=name_tok.position,
+            param_positions=param_positions,
+            defaults=defaults,
+            type_params=type_params,
+            param_types=param_types,
+            return_type=return_type,
+            throws=throws,
+        )
+        fn.native = native
+        return LetStmt(name=fn.name, value=fn, position=extern_tok.position, name_position=name_tok.position)
+
     # -- M12: trait / impl / method decls ---------------------------------
 
     def _parse_trait_decl(self) -> TraitDecl:
@@ -1586,20 +1637,6 @@ class Parser:
         if tok.type is TokenType.FN:
             return self._parse_postfix_from(self._parse_fn_expr())
 
-        if tok.type is TokenType.SIN:
-            self.advance()
-            args = self._parse_no_kwargs_args(tok, "sin")
-            if len(args) != 1:
-                raise SyntaxError(f"'sin' can only have one argument")
-            return self._parse_postfix_from(SinExpr(arg=args[0], position=tok.position))
-
-        if tok.type is TokenType.COS:
-            self.advance()
-            args = self._parse_no_kwargs_args(tok, "cos")
-            if len(args) != 1:
-                raise SyntaxError(f"'cos' can only have one argument")
-            return self._parse_postfix_from(CosExpr(arg=args[0], position=tok.position))
-
         if tok.type is TokenType.INPUT:
             self.advance()
             self.expect(TokenType.PAREN_OPEN)
@@ -1844,8 +1881,9 @@ class Parser:
         )
 
     def _parse_no_kwargs_args(self, tok: Token, label: str) -> list:
-        """M16: `sin`/`cos`/`sleep_async` -- built-ins with a fixed,
-        unnamed single parameter -- never accept keyword arguments."""
+        """M16: `sleep_async` -- a built-in with a fixed, unnamed single
+        parameter -- never accepts keyword arguments. (M27: `sin`/`cos`
+        are ordinary calls now, checked by the resolver.)"""
         args, kwargs = self._parse_paren_args()
         if kwargs:
             raise SyntaxError(f"'{label}' doesn't take keyword arguments at position '{tok.position}'")

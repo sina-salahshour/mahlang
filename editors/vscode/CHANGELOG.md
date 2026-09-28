@@ -5,6 +5,10 @@
 - **Highlighting** for errors (Mah v0.2.0): `throw`/`try`, and `catch`,
   `throws` and `never` where they're keywords (`try { } catch {`, a
   `throws A | B` / `throws never` clause); elsewhere they stay plain names.
+- **Highlighting** for `extern fn` (standard library modules), and `sin`/
+  `cos` only as bare calls, since they're ordinary names now.
+- **Language server**: hover and go-to-definition work on `std:` imports
+  (`std:math`), naming them `std:math` rather than an install path.
 - **Language server**: hover shows what a function throws, and the checker
   reports unhandled errors, `throws` clauses the body doesn't honor, and
   `catch` arms for errors that are never thrown (always a warning).

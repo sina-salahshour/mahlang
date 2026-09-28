@@ -41,7 +41,7 @@ refuses to touch a file with a syntax error.
 A compile error (syntax, undefined name, wrong struct fields) is reported
 before anything runs. A runtime error stops the program and says where it
 happened, `at position #LINE:COL` (or `file.mh#LINE:COL` inside an imported
-file). There's no test framework yet: check your changes by running the
+file, `std:math#LINE:COL` inside the standard library). There's no test framework yet: check your changes by running the
 program and reading its output.
 
 ## `mah-project.toml`
@@ -66,7 +66,8 @@ program and reading its output.
 
 - Split code into files with `export fn` / `export let` and `import
   "file.mh"` (or `import name from "file"` for namespaced access). Paths are
-  relative to the importing file.
+  relative to the importing file. The standard library is imported the same
+  way, as `"std:<name>"` (so far only `std:math`; see `docs/mah-language.md`).
 - Model data with `struct`/`enum` + `match`, and give behavior to types with
   `impl` blocks and traits. Implement `Printable` (`fn to_string(self)`) to
   control how a value prints.

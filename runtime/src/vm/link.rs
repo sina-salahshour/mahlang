@@ -24,6 +24,22 @@ pub enum NativeFn {
     MathSin,
     MathCos,
     TimeSleepAsync,
+    /// M27 (1.5): `std:math`'s transcendental functions -- all computed in
+    /// f64, like `math.sin`/`math.cos` (docs/MAHC_FORMAT.md #4.4).
+    MathTan,
+    MathAsin,
+    MathAcos,
+    MathAtan,
+    MathAtan2,
+    MathExp,
+    MathLog,
+    MathLog10,
+}
+
+/// Whether this VM implements a native of that name (any arity) -- for
+/// `decode.rs`'s message about a file newer than this VM.
+pub fn is_known_native(name: &str) -> bool {
+    native_by_name(name).is_some()
 }
 
 fn native_by_name(name: &str) -> Option<(u64, NativeFn)> {
@@ -34,6 +50,14 @@ fn native_by_name(name: &str) -> Option<(u64, NativeFn)> {
         "math.sin" => Some((1, NativeFn::MathSin)),
         "math.cos" => Some((1, NativeFn::MathCos)),
         "time.sleep_async" => Some((1, NativeFn::TimeSleepAsync)),
+        "math.tan" => Some((1, NativeFn::MathTan)),
+        "math.asin" => Some((1, NativeFn::MathAsin)),
+        "math.acos" => Some((1, NativeFn::MathAcos)),
+        "math.atan" => Some((1, NativeFn::MathAtan)),
+        "math.atan2" => Some((2, NativeFn::MathAtan2)),
+        "math.exp" => Some((1, NativeFn::MathExp)),
+        "math.log" => Some((1, NativeFn::MathLog)),
+        "math.log10" => Some((1, NativeFn::MathLog10)),
         _ => None,
     }
 }

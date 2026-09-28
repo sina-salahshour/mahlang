@@ -1,6 +1,8 @@
 # Mah standard library
 
-Status: **design, not implemented.** Agreed 2026-09-28. Depends on
+Status: **M27 landed 2026-09-28: Phase 0 steps 1, 2 and 5 (`std:`
+resolution, `extern fn`, native table versioning) and `std:math`**, the
+first module. The rest is design. Agreed 2026-09-28. Depends on
 [`ERRORS.md`](ERRORS.md) (every failure below is a thrown, typed error)
 and on the static checker in [`TYPES.md`](TYPES.md).
 
@@ -31,12 +33,21 @@ import "std:math"            # flat import works too
 
 ## Phase 0: foundations
 
-1. **`std:` resolution.** `_resolve_import` in `mah/preprocessor.py`
-   maps `std:<name>` to `mah/std/<name>.mh`. An unknown std module is a
-   compile error. The LSP resolves go-to-definition and hover into std
-   files. Bundles (`.mahc`) compile std code in like any other import.
-2. **`extern fn`.** Std modules reach natives through declarations that
-   only `std:` files may use:
+1. **`std:` resolution. ✅ Landed (M27).** `_resolve_import` in
+   `mah/preprocessor.py` maps `std:<name>` to `mah/std/<name>.mh`, and
+   never to a user file. An unknown std module (`std:prelude` included) is
+   a compile error: `unknown standard library module 'std:nope'`. The LSP
+   resolves go-to-definition and hover into std files. Bundles (`.mahc`)
+   compile std code in like any other import. Locations inside a std file
+   read `std:math#20:9` (compile errors, runtime errors, hover), never the
+   install path.
+2. **`extern fn`. ✅ Landed (M27).** Std modules reach natives through
+   declarations that only `std:` files (and the prelude) may use; anywhere
+   else it's a compile error. `extern` is contextual (`let extern = 1`
+   still works). The parser desugars it to an ordinary function whose body
+   calls the native, so it's first-class and typed by its annotations; the
+   resolver checks the native exists with that arity. No `Promise`-typed
+   natives exist yet, so no async extern has been written:
    ```mah
    extern fn read_text(path: String) -> Promise<String, FsError> = "fs.read_text"
    ```
@@ -55,9 +66,14 @@ import "std:math"            # flat import works too
    - callback timers with cancellation, for `std:async`;
    - "the program is done when the main task has finished and no timer
      or I/O is pending", as in Node.
-5. **Native table versioning.** New natives bump the table version in
-   `docs/MAHC_FORMAT.md` §4.4, so an old VM running a newer bundle fails
-   with a clear link error naming the missing native.
+5. **Native table versioning. ✅ Landed (M27).** New natives bump the
+   minor version (`docs/MAHC_FORMAT.md` §4.4/§7: the `std:math` ones are
+   1.5). The encoder writes the lowest minor a file needs (1.4 unless it
+   lists a 1.5 native), so old VMs keep running programs that don't need
+   the new natives. A VM refusing a newer file reads its NATIVES section
+   and names the natives it's missing: `unsupported minor version 6 (...):
+   it uses natives this VM doesn't have ('fs.read_text'); upgrade mah to
+   run it`.
 6. **A shared PRNG.** The same algorithm (PCG or xoshiro256**) in both
    runtimes, not Python's `random`, so seeded output is identical and
    `runtime/tests/vm_diff.py` keeps working.
@@ -132,8 +148,23 @@ Plus `Vector.join(sep)`, and on `Option`: `unwrap()` (throws
 
 `sqrt`, `pow`, `abs`, `floor`, `ceil`, `round(digits = 0)`, `min`, `max`,
 `clamp`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `log`,
-`log10`, `exp`, and the constants `pi`, `e`. This replaces today's
-standalone `sin`/`cos` keywords and natives.
+`log10`, `exp`, and the constants `pi`, `e`.
+
+✅ **Landed (M27)**, in `mah/std/math.mh`, with these decisions:
+
+- `sqrt`, `pow`, `abs`, `floor`, `ceil`, `round`, `min`, `max` and `clamp`
+  are plain Mah on Numbers (`sqrt(x)` is `x ** 0.5`), so they're exact to
+  28 digits and identical on both VMs. `round` rounds halves away from
+  zero; `min`/`max` take two arguments.
+- The trigonometric, exponential and logarithmic functions are 1.5
+  natives computed in double precision, like the old `sin`/`cos`. A
+  domain error or overflow (`log(0)`, `asin(2)`, `sqrt(-1)`) throws
+  `RuntimeError.ArgumentError`.
+- `sin`/`cos` stopped being lexer keywords, so `std:math` can export them
+  and `math.sin(x)` parses. An unbound `sin(x)`/`cos(x)` is still the
+  built-in, with the same bytecode as before, and any binding of the name
+  (a user's `fn sin`, a flat `import "std:math"`) wins. Removing the
+  built-ins entirely would break existing programs for no gain.
 
 ### `std:random`
 

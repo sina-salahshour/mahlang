@@ -33,6 +33,7 @@
 "catch" @keyword
 "throws" @keyword
 "never" @keyword
+"extern" @keyword
 (continue_stmt) @keyword
 (none_expr) @keyword
 (none_pattern) @keyword
@@ -43,10 +44,13 @@
 
 ; Built-in functions
 "print" @function.builtin
-"sin" @function.builtin
-"cos" @function.builtin
 "input" @function.builtin
 "sleep_async" @function.builtin
+; M27: `sin`/`cos` are ordinary names now (so `std:math` can export them);
+; a bare call to one is the built-in.
+(call_expr
+  function: (identifier) @function.builtin
+  (#any-of? @function.builtin "sin" "cos"))
 
 ; M10 (async): `.await` is not its own grammar rule (an ordinary
 ; `field_access` with field name "await" covers it structurally -- see

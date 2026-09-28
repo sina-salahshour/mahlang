@@ -67,6 +67,33 @@ DEFAULT_EXT = ".mh"
 # once installed too (`make install-mah` copies the `mah/` package
 # wholesale, prelude.mh included, keeping this same relative layout).
 PRELUDE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "std", "prelude.mh")
+# M27 (docs/STDLIB.md, Phase 0): `import "std:<name>"` resolves to
+# `mah/std/<name>.mh` -- the standard library ships inside the package, so
+# it's found wherever mah is installed. `std:` is reserved: it never falls
+# back to a user file.
+STD_DIR = os.path.dirname(PRELUDE_PATH)
+STD_PREFIX = "std:"
+_STD_NAME_RE = re.compile(r"[a-z][a-z0-9_]*")
+
+
+def std_module_name(path: str) -> Optional[str]:
+    """`"math"` for `mah/std/math.mh`, None for anything that isn't a
+    standard library module (the prelude included)."""
+    if path == PRELUDE_PATH or os.path.dirname(path) != STD_DIR or not path.endswith(".mh"):
+        return None
+    return os.path.basename(path)[: -len(".mh")]
+
+
+def source_label(path: str) -> str:
+    """How locations name a file other than the entry file: `std:math` for
+    a standard library module, `<prelude>` for the prelude, else its base
+    name -- never a path into wherever mah happens to be installed."""
+    if path == PRELUDE_PATH:
+        return "<prelude>"
+    name = std_module_name(path)
+    if name is not None:
+        return STD_PREFIX + name
+    return os.path.basename(path)
 
 # Prefix used when mangling a module's top-level names.
 _MODULE_PREFIX = "__mah_m"
@@ -351,6 +378,13 @@ def analyze_module(tokens: list) -> ModuleInfo:
                     top_level.add(name)
                 i += 1
                 continue
+            if _is_extern_fn(tokens, i + 1):
+                # M27: `export extern fn NAME` (std modules only).
+                if i + 3 < count and tokens[i + 3].kind == "id":
+                    exported.add(tokens[i + 3].value)
+                    top_level.add(tokens[i + 3].value)
+                i += 1
+                continue
             if nxt is not None and nxt.kind == "id":
                 exported.add(nxt.value)
                 i += 2
@@ -367,11 +401,28 @@ def analyze_module(tokens: list) -> ModuleInfo:
     return ModuleInfo(exported=exported, top_level=top_level)
 
 
+def _is_extern_fn(tokens: list, i: int) -> bool:
+    """M27: whether tokens[i:] start `extern fn` (`extern` is contextual)."""
+    return (
+        i + 1 < len(tokens)
+        and tokens[i].kind == "id"
+        and tokens[i].value == "extern"
+        and tokens[i + 1].kind == "id"
+        and tokens[i + 1].value == "fn"
+    )
+
+
 def _resolve_import(base_dir: str, literal: str):
     """Resolve an import path; the ``.mh`` extension is optional.
 
-    Returns ``(resolved_path, exists)``.
+    Returns ``(resolved_path, exists)``. M27: `std:<name>` is a standard
+    library module, looked up only in `STD_DIR` (the prelude isn't one).
     """
+    if literal.startswith(STD_PREFIX):
+        name = literal[len(STD_PREFIX) :]
+        candidate = os.path.join(STD_DIR, name + DEFAULT_EXT)
+        exists = _STD_NAME_RE.fullmatch(name) is not None and name != "prelude" and os.path.isfile(candidate)
+        return candidate, exists
     decoded = _decode_path(literal)
     candidate = os.path.abspath(os.path.join(base_dir, decoded))
     if os.path.isfile(candidate):
@@ -451,6 +502,8 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
     def process(fpath: str, source: str, root, is_entry: bool) -> None:
         tokens = scan(source)
         count = len(tokens)
+        # M27: only the standard library (and the prelude) may bind natives.
+        may_extern = fpath == PRELUDE_PATH or std_module_name(fpath) is not None
         program_tokens.append(tokens)
 
         info = analyze_module(tokens)
@@ -544,9 +597,14 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
 
                     if not exists:
                         if is_entry:
+                            what = (
+                                f"unknown standard library module '{literal}'"
+                                if literal.startswith(STD_PREFIX)
+                                else f"cannot find imported file '{literal}'"
+                            )
                             errors.append(
                                 (
-                                    f"cannot find imported file '{literal}'",
+                                    what,
                                     str_tok.start,
                                     len(str_tok.value),
                                 )
@@ -571,10 +629,23 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
                     i = end_i + 1
                     continue
 
+            # -- extern fn: std modules only (M27) ---------------------------
+            if _is_extern_fn(tokens, i) and not may_extern:
+                if is_entry:
+                    errors.append(("'extern fn' is only allowed in standard library modules", tok.start, len(tok.value)))
+                elif root is not None:
+                    errors.append(
+                        (
+                            f"'extern fn' is only allowed in standard library modules (used in '{source_label(fpath)}')",
+                            root.offset,
+                            root.length,
+                        )
+                    )
+
             # -- export keyword (depth 0) -----------------------------------
             if depth == 0 and tok.kind == "id" and tok.value == "export":
                 nxt = tokens[i + 1] if i + 1 < count else None
-                if nxt is not None and nxt.kind == "id" and nxt.value in ("fn", "let"):
+                if (nxt is not None and nxt.kind == "id" and nxt.value in ("fn", "let")) or _is_extern_fn(tokens, i + 1):
                     emit_gap(tok.start)
                     cursor = tok.end  # drop the `export` keyword only
                     i += 1

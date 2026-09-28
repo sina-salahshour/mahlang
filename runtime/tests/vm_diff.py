@@ -288,6 +288,29 @@ let x = input()
 let v = [1, 2, 3]
 v[0..1] = [9]
 """, b""),
+    # M27: std:math -- values from every 1.5 native, then its errors.
+    ("std_math_values", """
+import math from "std:math"
+print(math.tan(1), math.asin(0.5), math.acos(0.5), math.atan(2), math.atan2(0 - 1, 0 - 1))
+print(math.exp(2), math.log(10), math.log10(2), math.sqrt(2), math.round(math.pi, 5))
+""", b""),
+    ("std_math_log_domain", """
+import math from "std:math"
+print(math.log(0 - 1))
+""", b""),
+    ("std_math_exp_overflow", """
+import math from "std:math"
+print(math.exp(100000))
+""", b""),
+    ("std_math_native_type_error", """
+import math from "std:math"
+let s: Unknown = "x"
+print(math.tan(s))
+""", b""),
+    ("std_math_sqrt_negative", """
+import math from "std:math"
+print(math.sqrt(0 - 4))
+""", b""),
 ]
 
 
@@ -330,6 +353,14 @@ def build_malformed_cases(tmpdir: str) -> list[tuple[str, bytes]]:
     minor_bad = bytearray(body)
     minor_bad[6:8] = (999).to_bytes(2, "little")
     cases.append(("bad_minor_version", bytes(minor_bad)))
+    # M27: a newer file whose natives this VM lacks -- both VMs must name
+    # them the same way (`math.tan` respelled as a pretend `math.zzz`).
+    std_path = compile_source('import math from "std:math"\nprint(math.tan(1))\n', tmpdir, "std_for_malformed")
+    with open(std_path, "rb") as f:
+        std = f.read()
+    std_body = bytearray(std[std.index(b"\n") + 1 :].replace(b"math.tan", b"math.zzz"))
+    std_body[6:8] = (6).to_bytes(2, "little")
+    cases.append(("newer_minor_names_missing_natives", bytes(std_body)))
     cases.append(("truncated_at_10_bytes", body[:10]))
     cases.append(("truncated_at_magic", body[:2]))
     cases.append(("empty_file", b""))

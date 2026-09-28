@@ -89,6 +89,11 @@
           "match": "\\bcatch(?=\\s*\\{)"
         },
         {
+          "comment": "M27: `extern` is contextual too -- a keyword only right before `fn` (standard library modules).",
+          "name": "storage.modifier.mah",
+          "match": "\\bextern(?=\\s+fn\\b)"
+        },
+        {
           "begin": "\\b(throws)\\s+(?=never\\b|[A-Z])",
           "beginCaptures": { "1": { "name": "keyword.control.mah" } },
           "end": "(?=[{=,);]|$)",
@@ -219,7 +224,12 @@
       "patterns": [
         {
           "name": "support.function.builtin.mah",
-          "match": "\\b(print|input|sin|cos|sleep_async)\\b"
+          "match": "\\b(print|input|sleep_async)\\b"
+        },
+        {
+          "comment": "M27: `sin`/`cos` are ordinary names (`std:math` exports functions of those names, and `fn sin` is allowed); only a bare call -- not `math.sin(...)` or `fn sin(...)` -- is the built-in.",
+          "name": "support.function.builtin.mah",
+          "match": "(?<![.\\w])(?<!fn )(sin|cos)(?=\\s*\\()"
         },
         {
           "name": "support.function.builtin.option.mah",

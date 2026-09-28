@@ -20,7 +20,7 @@ from ..compiler.lexer import Lexer
 from ..compiler.parser import Parser
 from ..compiler.resolve import Resolver
 from ..compiler import typecheck
-from ..preprocessor import demangle_message, preprocess
+from ..preprocessor import demangle_message, preprocess, source_label
 from ..project.init import init_project
 from ..project.manifest import MANIFEST_NAME, MahProjectError, check_level_for, find_manifest, load_project
 
@@ -94,7 +94,7 @@ def _location_label(pp, entry_path: str, combined_offset: int) -> str:
     line, row = line_info
     if path == entry_path:
         return f"#{line}:{row}"
-    return f"{os.path.basename(path)}#{line}:{row}"
+    return f"{source_label(path)}#{line}:{row}"
 
 
 def _default_mahc_path(source_path: str) -> str:

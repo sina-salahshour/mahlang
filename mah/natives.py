@@ -19,7 +19,7 @@ import math
 import sys
 from decimal import Decimal
 
-from .runtime_values import MahRuntimeError, NONE_VALUE, PromiseInstance
+from .runtime_values import MahRuntimeError, NONE_VALUE, PromiseInstance, type_name_of
 
 
 class NativeContext:
@@ -87,6 +87,33 @@ def _math_cos(ctx: NativeContext, args) -> object:
     return Decimal(repr(math.cos(float(value))))
 
 
+def _float_math(name: str, fn):
+    """M27 (1.5): a `math.*` native computed in IEEE-754 double precision,
+    exactly like `math.sin`/`math.cos`: the arguments are converted to
+    doubles, the result back to a Number via its shortest round-trip
+    decimal text. A non-finite result (or Python's own domain/overflow
+    error) is a `RuntimeError.ArgumentError` -- docs/MAHC_FORMAT.md #4.4."""
+    short = name.split(".", 1)[1]
+
+    def impl(ctx: NativeContext, args) -> object:
+        floats = []
+        for value in args:
+            if not isinstance(value, Decimal) or isinstance(value, bool):
+                raise MahRuntimeError(
+                    f"{short}: expected a Number, got {type_name_of(value)}", kind="TypeMismatch"
+                )
+            floats.append(float(value))
+        try:
+            result = fn(*floats)
+        except (ValueError, OverflowError):
+            result = math.nan
+        if math.isnan(result) or math.isinf(result):
+            raise MahRuntimeError(f"{short}: argument out of range", kind="ArgumentError")
+        return Decimal(repr(result))
+
+    return impl
+
+
 def _time_sleep_async(ctx: NativeContext, args) -> object:
     (ms,) = args
     promise = PromiseInstance()
@@ -102,4 +129,13 @@ NATIVES: dict[str, tuple[int, object]] = {
     "math.sin": (1, _math_sin),
     "math.cos": (1, _math_cos),
     "time.sleep_async": (1, _time_sleep_async),
+    # M27 (1.5): the transcendental half of `std:math` (mah/std/math.mh).
+    "math.tan": (1, _float_math("math.tan", math.tan)),
+    "math.asin": (1, _float_math("math.asin", math.asin)),
+    "math.acos": (1, _float_math("math.acos", math.acos)),
+    "math.atan": (1, _float_math("math.atan", math.atan)),
+    "math.atan2": (2, _float_math("math.atan2", math.atan2)),
+    "math.exp": (1, _float_math("math.exp", math.exp)),
+    "math.log": (1, _float_math("math.log", math.log)),
+    "math.log10": (1, _float_math("math.log10", math.log10)),
 }

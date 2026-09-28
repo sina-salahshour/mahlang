@@ -86,7 +86,7 @@ loosest of all, `&`/`|` share one level, and `%` shares a level with
 |---|---|
 | `print(a, b, ..., sep: " ", end: "\n")` | prints the arguments separated by `sep` (default: a space), then `end` (default: a newline). `print()` prints just a newline |
 | `input()` | reads an integer from stdin (skips non-digits until one) |
-| `sin(x)`, `cos(x)` | radians |
+| `sin(x)`, `cos(x)` | radians; the rest of the math is in [`std:math`](/docs/standard-library) |
 | `sleep_async(ms)` | pauses (see [Async](/docs/async)) |
 
 ## Control flow

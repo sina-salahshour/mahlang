@@ -12,8 +12,6 @@ const KEYWORDS = new Set([
 	'let',
 	'print',
 	'input',
-	'sin',
-	'cos',
 	'if',
 	'elif',
 	'else',
@@ -42,7 +40,9 @@ const KEYWORDS = new Set([
 	'try',
 	'catch',
 	'throws',
-	'never'
+	'never',
+	// M27: contextual, only before `fn` (std modules); never a name in docs.
+	'extern'
 ]);
 
 // Constant-like keywords get their own token class.
