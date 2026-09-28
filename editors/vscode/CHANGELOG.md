@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
 - **Highlighting**: `input` is no longer a keyword (Mah's `input(prompt)`
   now returns a String and can be detached); only a bare `input(...)` call
