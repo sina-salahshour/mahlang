@@ -138,6 +138,39 @@ class ExampleTests(unittest.TestCase):
             "not a number none\nsome(2) -1 mAh\na -> b -> c\n",
         )
 
+    def test_data_formats(self):
+        # M30: std:csv -> FromCsvRow -> std:json, with std:path.
+        out = run_file(example_path("data_formats.mh"))
+        self.assertEqual(
+            out,
+            'writing data/scores.json\n'
+            '{\n'
+            '  "source": "scores.csv",\n'
+            '  "players": [\n'
+            '    {\n'
+            '      "name": "ada",\n'
+            '      "score": 91,\n'
+            '      "team": "red"\n'
+            '    },\n'
+            '    {\n'
+            '      "name": "bo",\n'
+            '      "score": 78,\n'
+            '      "team": "blue"\n'
+            '    },\n'
+            '    {\n'
+            '      "name": "Chen, Li",\n'
+            '      "score": 85,\n'
+            '      "team": "red"\n'
+            '    }\n'
+            '  ],\n'
+            '  "teams": {\n'
+            '    "red": 176,\n'
+            '    "blue": 78\n'
+            '  }\n'
+            '}\n'
+            'Chen, Li scored 85\n'
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

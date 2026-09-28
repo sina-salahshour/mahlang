@@ -29,6 +29,10 @@ M27 bumps MINOR to 5: new natives only (`math.tan`/`asin`/`acos`/`atan`/
 
 M29 bumps MINOR to 6: new native inherent methods only -- the String
 methods and `Vector.join` (docs/MAHC_FORMAT.md #6.7, NATIVE_METHOD_SINCE_MINOR).
+
+M30 bumps MINOR to 7: new natives only (`value.type_name`/`fields`/
+`variant`, `string.chars`/`code_point`/`from_code_point`, behind std:json
+and std:csv) -- docs/MAHC_FORMAT.md #4.4.
 """
 
 from __future__ import annotations
@@ -41,7 +45,7 @@ MAGIC = b"MAHC"
 # `.mahc` extension).
 SHEBANG = b"#!/usr/bin/env -S mah runc\n"
 MAJOR = 1
-MINOR = 6
+MINOR = 7
 
 # -- section ids (docs/MAHC_FORMAT.md #3) -----------------------------------
 SEC_STRINGS = 0x01
@@ -137,6 +141,13 @@ NATIVE_ARITIES = {
     "math.exp": 1,
     "math.log": 1,
     "math.log10": 1,
+    # M30 (1.7): reflection and characters, for std:json/std:csv.
+    "value.type_name": 1,
+    "value.fields": 1,
+    "value.variant": 1,
+    "string.chars": 1,
+    "string.code_point": 1,
+    "string.from_code_point": 1,
 }
 
 # M16: which minor version introduced each 1.1+ native -- a 1.0 file
@@ -153,6 +164,12 @@ NATIVE_SINCE_MINOR = {
     "math.exp": 5,
     "math.log": 5,
     "math.log10": 5,
+    "value.type_name": 7,
+    "value.fields": 7,
+    "value.variant": 7,
+    "string.chars": 7,
+    "string.code_point": 7,
+    "string.from_code_point": 7,
 }
 
 # M29: native inherent methods added after 1.0, by the minor that added

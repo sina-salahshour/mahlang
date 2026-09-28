@@ -1,4 +1,4 @@
-# The `.mahc` bytecode format (version 1.6)
+# The `.mahc` bytecode format (version 1.7)
 
 `mah build prog.mh` compiles a program (its entry file plus everything it
 imports) into a single `.mahc` file; `mah runc prog.mahc` runs one. This
@@ -64,7 +64,7 @@ sections   (id u8, length varuint, payload bytes(length))*   until end of file
   version whose features it uses. *(1.5)* The reference encoder writes 4
   (every file it produces has 1.4's TYPES layout and HANDLERS section),
   or the highest `(1.x)` marker among the natives the file lists (5 for
-  the `std:math` natives), so a program that doesn't call newer natives
+  the `std:math` natives, 7 for the ones behind `std:json`/`std:csv`), so a program that doesn't call newer natives
   still runs on an older VM. *(1.6)* Native methods (§6.7) are called by
   name, so it also writes the minor that added any native method whose
   *name* a `callmethod`/`callmethodkw`/`detachmethod`/`detachmethodkw` in
@@ -185,6 +185,12 @@ Version 1.0 defines:
 | `math.exp` | 1 | *(1.5)* `e` raised to the argument |
 | `math.log` | 1 | *(1.5)* natural logarithm |
 | `math.log10` | 1 | *(1.5)* base-10 logarithm |
+| `value.type_name` | 1 | *(1.7)* the argument's runtime type name, the one method dispatch uses: `Number`, `String`, `Bool`, `Vector`, `Map`, `Function`, or a struct's or enum's name (`Option` for `some(x)`, `Promise`) -- except `"None"` for `none` |
+| `value.fields` | 1 | *(1.7)* a struct's or enum value's fields, as a new Map from field name to value in declaration order (`{value: x}` for `some(x)`, empty for a unit variant); `none` for anything else, `none` and Promises included |
+| `value.variant` | 1 | *(1.7)* an enum value's variant name (`"some"` for `some(x)`); `none` for anything else, `none` itself included |
+| `string.chars` | 1 | *(1.7)* a new Vector of the String's code points, each a one-code-point String |
+| `string.code_point` | 1 | *(1.7)* the code point of a one-code-point String, as a Number |
+| `string.from_code_point` | 1 | *(1.7)* the one-code-point String for a Unicode scalar value (a whole Number in 0–0x10FFFF, not 0xD800–0xDFFF) |
 
 The `(1.5)` `math.*` natives follow `math.sin`'s rules: each argument
 must be a Number (otherwise a `RuntimeError.TypeMismatch`, message
@@ -195,6 +201,15 @@ isn't finite (a domain error such as `log(0)` or `asin(2)`, or an overflow
 such as `exp(100000)`) is a `RuntimeError.ArgumentError` with the message
 `NAME: argument out of range`. Programs reach them through the standard
 library's `std:math` module (`extern fn`, docs/STDLIB.md).
+
+The `(1.7)` natives are reached through `std:json` and `std:csv`. A
+`string.*` argument of the wrong type is a `RuntimeError.TypeMismatch`,
+`NAME: expected a String, got TYPE` (`from_code_point`: `expected a
+Number`), with NAME the part after `string.`. `code_point` of a String
+that isn't exactly one code point is an `ArgumentError`, `code_point:
+expected one character, got N`; `from_code_point` of anything but a
+Unicode scalar value is an `ArgumentError`, `from_code_point: not a
+Unicode scalar value`. The `value.*` natives accept any value.
 
 **Adding natives** (files, sockets, string utilities, processes, ...) is
 the intended way to grow the platform, e.g. `fs.read`, `fs.write`,
@@ -789,6 +804,12 @@ exactly as a pre-1.4 runtime error, `at position ...` included):
   synchronously; if that throws, suspends, or returns a non-String, `<m>`
   is `to_string(value)` instead; if that fails too, the report is just
   `Uncaught T` (no `: <m>` at all).
+- Either way, when `thrown_at` is in library code -- its DEBUG file path
+  is `<prelude>` (M29) or starts with `std:` (M30) -- the location is
+  instead the first pc of the error's recorded backtrace (§6.10: the
+  throw site, then each return address, innermost first) that isn't; if
+  every one is, `thrown_at` after all. So `"x".to_number()` or a failing
+  `json.parse(text)` is reported at the program's own call.
 
 With DEBUG present, VMs should add the failing instruction's location:
 the reference CLI appends `at position #LINE:COL` for the entry file and
@@ -935,6 +956,10 @@ message
   `repeat`, `to_upper`, `to_lower`, `lines`, `parse_number`, and
   `Vector.join` (§6.7). The encoder writes 1.6 only for a program that
   calls a method by one of those names (§3).
+- **1.7** added natives only: `value.type_name`, `value.fields`,
+  `value.variant`, `string.chars`, `string.code_point`, and
+  `string.from_code_point` (§4.4), behind the standard library's
+  `std:json` and `std:csv`.
 - Planned growth, for orientation: error-set checking (the static
   checker's `throws` inference and "unhandled error" diagnostics -- M26),
   string utilities, filesystem, networking, and process natives.

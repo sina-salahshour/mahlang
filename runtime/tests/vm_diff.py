@@ -340,6 +340,41 @@ print(try { "x".index_of("y").unwrap() } catch { e => { e.message() } })
 import math from "std:math"
 print(math.sqrt(0 - 4))
 """, b""),
+    # M30: std:path, std:json, std:csv -- and through them the 1.7 natives.
+    ("std_path", """
+import path from "std:path"
+print(path.normalize("a/./b/../c//d/"), path.normalize("C:/x/../y"), path.dirname("/a"), path.basename("a/b/"))
+print(path.extension("a.tar.gz"), path.stem("a.tar.gz"), path.join("a", "/b"), path.relative("/a/b/c", "/a/x"))
+""", b""),
+    ("std_json", """
+import json from "std:json"
+struct P { x, y }
+enum S {
+    C { r },
+    E
+}
+let v = json.parse("{\\"a\\": [1, -2.5e1, true, null, \\"\\\\u00e9\\\\ud83d\\\\ude00\\\\n\\"], \\"b\\": {}}")
+print(v, json.stringify(v))
+print(json.stringify([P { x: 1, y: [:] }, S.C { r: 2 }, S.E, some("\\u0001")], indent: 2))
+for let bad in ["[1,]", "{\\"a\\" 1}", "01", "\\"\\\\ud800\\"", "[\\n  tru"] {
+    print(try { json.parse(bad) } catch { e => { e.message() } })
+}
+""", b""),
+    ("std_json_uncaught", """
+import json from "std:json"
+json.parse("[1, 2")
+""", b""),
+    ("std_json_native_type_error", """
+import json from "std:json"
+let u: Unknown = 5
+json.parse(u)
+""", b""),
+    ("std_csv", """
+import csv from "std:csv"
+print(csv.parse("a,\\"b,c\\"\\r\\n\\n\\"q\\"\\"x\\",\\n"), csv.parse_records("n,v\\nx,1\\n"))
+print(csv.stringify([["a b", "c,d"], ["say \\"hi\\"", none], [""]]))
+print(try { csv.parse("a\\n\\"b") } catch { e => { e.message() } })
+""", b""),
 ]
 
 

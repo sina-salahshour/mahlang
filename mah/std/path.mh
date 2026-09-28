@@ -1,0 +1,195 @@
+# std:path -- file paths as Strings (docs/STDLIB.md).
+# Pure string logic: nothing here touches the file system.
+#
+#   import path from "std:path"
+#   path.join("src", "main.mh")        # src/main.mh
+#   path.extension("notes.tar.gz")     # .gz
+#
+# Both `/` and Windows' `\` separate path segments on input, and a path may
+# start with a drive (`C:`); `normalize` and `relative` always answer with
+# `/`. A path is absolute when it starts with a separator, or a drive and a
+# separator (`C:/x`).
+
+fn to_slashes(p: String) -> String { p.replace_all("\\", "/") }
+
+# `C:` -- one ASCII letter and a colon.
+# (`&` and `|` evaluate both sides, so guards here are nested `if`s.)
+fn has_drive(p: String) -> Bool {
+    if p.len() < 2 { return false }
+    if p[1] != ":" { return false }
+    "abcdefghijklmnopqrstuvwxyz".contains(p[0].to_lower())
+}
+
+# A lone root: "/", "C:/".
+fn is_root(p: String) -> Bool {
+    if p == "/" { return true }
+    if !has_drive(p) { return false }
+    p.len() == 3 & p[2] == "/"
+}
+
+# The position of the last "/", or -1.
+fn last_slash(p: String) -> Number {
+    let i = p.len() - 1
+    while i >= 0 {
+        if p[i] == "/" { return i }
+        i = i - 1
+    }
+    0 - 1
+}
+
+# Without trailing separators, except a lone root ("/", "C:/").
+fn strip_trailing(p: String) -> String {
+    let q = p
+    while q.len() > 1 & q.ends_with("/") & !is_root(q) {
+        q = q[..q.len() - 1]
+    }
+    q
+}
+
+# Whether `p` starts at a root: a separator, or a drive and a separator.
+export fn is_absolute(p: String) -> Bool {
+    let q = to_slashes(p)
+    if q.starts_with("/") { return true }
+    if !has_drive(q) | q.len() < 3 { return false }
+    q[2] == "/"
+}
+
+# `p` with `.` segments and repeated separators removed and each `..`
+# applied to the segment before it (at a root, `..` stays at the root).
+# Always with `/`, no trailing separator, and "." for an empty result.
+export fn normalize(p: String) -> String {
+    let q = to_slashes(p)
+    let prefix = ""
+    if has_drive(q) {
+        prefix = q[..2]
+        q = q[2..]
+    }
+    if q.starts_with("/") {
+        prefix = prefix + "/"
+        q = q[1..]
+    }
+    let parts = []
+    for let part in q.split("/") {
+        if part == "" | part == "." { continue }
+        if part == ".." {
+            let climbs = parts.len() == 0
+            if !climbs { climbs = parts[-1] == ".." }
+            if !climbs {
+                parts.pop()
+            } elif !prefix.ends_with("/") {
+                parts.push("..")
+            }
+            continue
+        }
+        parts.push(part)
+    }
+    let body = parts.join("/")
+    if prefix == "" & body == "" { return "." }
+    prefix + body
+}
+
+# The directory part: everything before the last segment ("." if there is
+# none, the root for a path directly under it).
+export fn dirname(p: String) -> String {
+    let q = strip_trailing(to_slashes(p))
+    let i = last_slash(q)
+    if i < 0 {
+        return if has_drive(q) { q[..2] } else { "." }
+    }
+    if i == 0 { return "/" }
+    if has_drive(q) & i == 2 { return q[..3] }
+    q[..i]
+}
+
+# The last segment ("" for a root).
+export fn basename(p: String) -> String {
+    let q = strip_trailing(to_slashes(p))
+    if q == "/" { return "" }
+    if has_drive(q) & q.len() <= 3 { return "" }
+    q[last_slash(q) + 1..]
+}
+
+# The last segment's extension, from its last "." (".gz" for
+# "a.tar.gz"); "" when it has none or only starts with one (".bashrc").
+export fn extension(p: String) -> String {
+    let name = basename(p)
+    let i = name.len() - 1
+    while i > 0 {
+        if name[i] == "." { return name[i..] }
+        i = i - 1
+    }
+    ""
+}
+
+# The last segment without its extension ("a.tar" for "a.tar.gz").
+export fn stem(p: String) -> String {
+    let name = basename(p)
+    name[..name.len() - extension(p).len()]
+}
+
+# `b` appended to `a` with a separator between them -- or `b` itself when
+# it's absolute. Not normalized.
+export fn join(a: String, b: String) -> String {
+    if a == "" { return b }
+    if b == "" { return a }
+    if is_absolute(b) { return b }
+    if a.ends_with("/") | a.ends_with("\\") { return a + b }
+    a + "/" + b
+}
+
+# `join` over every part, left to right.
+export fn join_all(parts: Vector<String>) -> String {
+    let out = ""
+    for let part in parts {
+        out = join(out, part)
+    }
+    out
+}
+
+# The root of a normalized path ("/", "C:/", "C:" or "") and its segments.
+fn split_root(p: String) -> Vector<String> {
+    let root = ""
+    let rest = p
+    if has_drive(rest) {
+        root = rest[..2]
+        rest = rest[2..]
+    }
+    if rest.starts_with("/") {
+        root = root + "/"
+        rest = rest[1..]
+    }
+    let out = [root]
+    for let part in rest.split("/") {
+        if part != "" & part != "." { out.push(part) }
+    }
+    out
+}
+
+# The path that leads from directory `from` to `to`, e.g. "../b" from "x/a"
+# to "x/b". Both are normalized first; when they have different roots (or
+# `from` climbs out through ".." further than `to`), there's no relative
+# path, and the answer is `to`, normalized.
+export fn relative(from: String, to: String) -> String {
+    let a = split_root(normalize(from))
+    let b = split_root(normalize(to))
+    if a[0] != b[0] { return normalize(to) }
+    let common = 1
+    let n = if a.len() < b.len() { a.len() } else { b.len() }
+    while common < n {
+        if a[common] != b[common] { break }
+        common = common + 1
+    }
+    let parts = []
+    let i = common
+    while i < a.len() {
+        if a[i] == ".." { return normalize(to) }
+        parts.push("..")
+        i = i + 1
+    }
+    i = common
+    while i < b.len() {
+        parts.push(b[i])
+        i = i + 1
+    }
+    if parts.len() == 0 { "." } else { parts.join("/") }
+}

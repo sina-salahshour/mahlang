@@ -4,6 +4,8 @@
 //! also accepts ~128 non-Nd characters there, which then fail `Decimal()`
 //! anyway -- an accepted, documented corner case).
 
+use std::rc::Rc;
+
 use crate::decimal::Decimal;
 
 use super::error::{ErrorKind, RuntimeError};
@@ -118,6 +120,94 @@ fn float_math(short: &str, args: &[Value], f: impl Fn(&[f64]) -> f64) -> Result<
     Decimal::from_f64(result).map(Value::Number).map_err(|e| RuntimeError::new(e.message()))
 }
 
+// -- M30 (1.7): reflection and characters -- mirrors mah/natives.py --------
+
+fn value_type_name(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
+    let name = match &args[0] {
+        Value::None => Rc::from("None"),
+        other => super::value::type_name_of(other, &vm.names),
+    };
+    Ok(Value::Str(name))
+}
+
+/// A struct, or an enum value other than none/Promise, as `(fields, variant)`.
+fn record(v: &Value) -> Option<(Vec<(Rc<str>, Value)>, Option<Rc<str>>)> {
+    match v {
+        Value::Struct(s) => Some((s.borrow().fields.clone(), None)),
+        Value::Enum(e) => {
+            let b = e.borrow();
+            Some((b.fields.clone(), Some(b.variant.clone())))
+        }
+        _ => None,
+    }
+}
+
+fn value_fields(_vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
+    let Some((fields, _)) = record(&args[0]) else { return Ok(Value::None) };
+    let map = super::value::MapData::new();
+    {
+        let mut m = map.borrow_mut();
+        for (name, value) in fields {
+            let key = Value::Str(name);
+            let mk = super::value::map_key(&key).expect("a String is always a Map key");
+            m.index_assign(mk, key, value);
+        }
+    }
+    Ok(Value::Map(map))
+}
+
+fn value_variant(_vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
+    match record(&args[0]) {
+        Some((_, Some(variant))) => Ok(Value::Str(variant)),
+        _ => Ok(Value::None),
+    }
+}
+
+fn string_arg<'a>(vm: &Vm, name: &str, v: &'a Value) -> Result<&'a Rc<str>, RuntimeError> {
+    match v {
+        Value::Str(s) => Ok(s),
+        other => Err(RuntimeError::with_kind(
+            format!("{name}: expected a String, got {}", super::value::type_name_of(other, &vm.names)),
+            ErrorKind::TypeMismatch,
+        )),
+    }
+}
+
+fn string_chars(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
+    let s = string_arg(vm, "chars", &args[0])?;
+    let items: Vec<Value> = s.chars().map(|c| Value::Str(Rc::from(c.to_string().as_str()))).collect();
+    Ok(Value::Vector(Rc::new(std::cell::RefCell::new(items))))
+}
+
+fn string_code_point(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
+    let s = string_arg(vm, "code_point", &args[0])?;
+    let mut chars = s.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) => Ok(Value::Number(Decimal::from_i64(c as i64))),
+        _ => Err(RuntimeError::with_kind(
+            format!("code_point: expected one character, got {}", s.chars().count()),
+            ErrorKind::ArgumentError,
+        )),
+    }
+}
+
+fn string_from_code_point(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
+    let n = match &args[0] {
+        Value::Number(n) => n,
+        other => {
+            return Err(RuntimeError::with_kind(
+                format!("from_code_point: expected a Number, got {}", super::value::type_name_of(other, &vm.names)),
+                ErrorKind::TypeMismatch,
+            ))
+        }
+    };
+    let c = if n.is_integer() { n.to_i64().and_then(|i| u32::try_from(i).ok()).and_then(char::from_u32) } else { None };
+    match c {
+        Some(c) => Ok(Value::Str(Rc::from(c.to_string().as_str()))),
+        None => Err(RuntimeError::with_kind("from_code_point: not a Unicode scalar value", ErrorKind::ArgumentError)),
+    }
+}
+
 fn time_sleep_async(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
     let ms = expect_number(&args[0])?;
     let promise = super::value::PromiseData::new_pending();
@@ -151,5 +241,11 @@ pub fn call_native(vm: &mut Vm, native: NativeFn, args: &[Value]) -> Result<Valu
         NativeFn::MathExp => float_math("exp", args, |x| x[0].exp()),
         NativeFn::MathLog => float_math("log", args, |x| x[0].ln()),
         NativeFn::MathLog10 => float_math("log10", args, |x| x[0].log10()),
+        NativeFn::ValueTypeName => value_type_name(vm, args),
+        NativeFn::ValueFields => value_fields(vm, args),
+        NativeFn::ValueVariant => value_variant(vm, args),
+        NativeFn::StringChars => string_chars(vm, args),
+        NativeFn::StringCodePoint => string_code_point(vm, args),
+        NativeFn::StringFromCodePoint => string_from_code_point(vm, args),
     }
 }

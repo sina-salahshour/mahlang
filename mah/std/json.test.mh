@@ -1,0 +1,132 @@
+# Tests for std:json, run by tests/test_stdlib.py (or
+# `mah test --file mah/std/json.test.mh`).
+import "std:test"
+import json from "./json"
+
+fn syntax_error(text: String) -> String {
+    let e = assert_throws(fn() { json.parse(text) })
+    e.message()
+}
+
+test "parse values" {
+    assert_eq(json.parse(" 42 "), 42)
+    assert_eq(json.parse("-2.5e2"), 0 - 250)
+    assert_eq(json.parse("\"hi\""), "hi")
+    assert_eq(json.parse("true"), true)
+    assert_eq(json.parse("null"), none)
+    let v = json.parse("{\"a\": [1, {\"b\": false}], \"c\": {}}")
+    assert_eq(v["a"][0], 1)
+    assert_eq(v["a"][1]["b"], false)
+    assert_eq(v["c"].len(), 0)
+    assert_eq(v.keys().join(","), "a,c")
+}
+
+test "string escapes" {
+    assert_eq(json.parse("\"a\\n\\t\\\"\\\\\\/\""), "a\n\t\"\\/")
+    assert_eq(json.parse("\"\\u00e9\""), "é")
+    assert_eq(json.parse("\"\\ud83d\\ude00\""), "😀")
+}
+
+test "syntax errors say where" {
+    assert_eq(syntax_error(""), "expected a value, found end of input at line 1, column 1")
+    assert_eq(syntax_error("[1,]"), "expected a value, found ']' at line 1, column 4")
+    assert_eq(syntax_error("{\"a\" 1}"), "expected ':', found '1' at line 1, column 6")
+    assert_eq(syntax_error("[\n  01]"), "a number can't have a leading zero at line 2, column 4")
+    assert_eq(syntax_error("[1] x"), "unexpected 'x' after the value at line 1, column 5")
+    assert_eq(syntax_error("\"abc"), "unterminated string at line 1, column 5")
+    assert_eq(syntax_error("nul"), "invalid literal, expected null at line 1, column 1")
+    assert_eq(syntax_error("\"\\ud800\""), "unpaired surrogate in a \\u escape at line 1, column 2")
+    assert_eq(syntax_error("1e999999"), "number out of range at line 1, column 1")
+    let e = assert_throws(fn() { json.parse("[") })
+    match e {
+        JsonError.Syntax { message, line, column } => {
+            assert_eq([message, line, column].join("|"), "expected a value, found end of input|1|2")
+        }
+        _ => { fail("not a JsonError.Syntax") }
+    }
+}
+
+struct Point { x: Number, y: Number }
+
+enum Shape {
+    Circle { r: Number },
+    Empty
+}
+
+test "stringify" {
+    assert_eq(
+        json.stringify(["a": [1, 2.5, true, none], "b": "x\"y\n\u0001"]),
+        "{\"a\":[1,2.5,true,null],\"b\":\"x\\\"y\\n\\u0001\"}"
+    )
+    assert_eq(json.stringify(Point { x: 1, y: 2 }), "{\"x\":1,\"y\":2}")
+    assert_eq(json.stringify(Shape.Circle { r: 2 }), "{\"Circle\":{\"r\":2}}")
+    assert_eq(json.stringify(Shape.Empty), "\"Empty\"")
+    assert_eq(json.stringify(some(3)), "3")
+    assert_eq(json.stringify([1: "one", true: "t"]), "{\"1\":\"one\",\"true\":\"t\"}")
+    assert_eq(json.stringify([[], [:]]), "[[],{}]")
+}
+
+test "stringify with an indent" {
+    assert_eq(
+        json.stringify(["a": [1, 2], "b": [:]], indent: 2),
+        "{\n  \"a\": [\n    1,\n    2\n  ],\n  \"b\": {}\n}"
+    )
+    assert_eq(
+        json.stringify(Shape.Circle { r: 2 }, indent: 1),
+        "{\n \"Circle\": {\n  \"r\": 2\n }\n}"
+    )
+}
+
+test "stringify refuses what JSON can't hold" {
+    let me = []
+    me.push(me)
+    assert_eq(
+        assert_throws(fn() { json.stringify(me) }).message(),
+        "stringify: a value contains itself"
+    )
+    assert_eq(
+        assert_throws(fn() { json.stringify(fn() { 1 }) }).message(),
+        "stringify: can't write a Function as JSON"
+    )
+    assert_eq(
+        assert_throws(fn() { json.stringify(1, indent: 0 - 1) }).message(),
+        "stringify: indent must be a whole number of at least 0"
+    )
+    # the same value twice (not inside itself) is fine
+    let shared = [1]
+    assert_eq(json.stringify([shared, shared]), "[[1],[1]]")
+}
+
+test "round trip" {
+    let text = "{\"name\":\"mah\",\"tags\":[1,-2.5,\"é\",null,false],\"n\":{\"deep\":[[]]}}"
+    assert_eq(json.stringify(json.parse(text)), text)
+    assert_eq(json.stringify(json.parse(json.stringify(json.parse(text), indent: 4))), text)
+}
+
+impl FromJson for Point {
+    fn from_json(value) {
+        Point {
+            x: json.as_number(json.field(value, "x"), "x"),
+            y: json.as_number(json.field(value, "y"), "y")
+        }
+    }
+}
+
+test "FromJson and the helpers" {
+    let p = Point.from_json(json.parse("{\"x\": 1, \"y\": 2}"))
+    assert_eq(p.x + p.y, 3)
+    let shape_error = fn(text: String) -> String {
+        assert_throws(fn() { Point.from_json(json.parse(text)) }).message()
+    }
+    assert_eq(shape_error("{\"x\": \"1\", \"y\": 2}"), "expected a Number for x, got String")
+    assert_eq(shape_error("[]"), "expected an object for field 'x', got Vector")
+    assert_eq(shape_error("{\"x\": 1}"), "missing field 'y'")
+    assert_eq(json.as_string("s"), "s")
+    assert_eq(json.as_bool(true), true)
+    assert_eq(json.as_vector([1]).len(), 1)
+    assert_eq(json.as_map(["a": 1])["a"], 1)
+    assert_eq(
+        assert_throws(fn() { json.as_bool(none, "flag") }).message(),
+        "expected a Bool for flag, got None"
+    )
+}

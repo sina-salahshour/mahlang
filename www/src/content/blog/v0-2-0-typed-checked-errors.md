@@ -1,16 +1,17 @@
 ---
-title: "v0.2.0: checked errors, the type checker, std:math, and mah test"
+title: "v0.2.0: checked errors, the type checker, a standard library, and mah test"
 date: 2026-09-28
-description: "throw/try/catch with a built-in Error trait and RuntimeError enum on both VMs, a checker that infers what every function throws, the first static type checker with mah check, the start of the standard library, and a built-in test runner."
+description: "throw/try/catch with a built-in Error trait and RuntimeError enum on both VMs, a checker that infers what every function throws, the first static type checker with mah check, a standard library with math, path, JSON and CSV modules, and a built-in test runner."
 tags: [changelog]
 version: "0.2.0"
 ---
 
-This release (milestones M22 through M29) adds a static type checker,
+This release (milestones M22 through M30) adds a static type checker,
 errors you can throw, catch, and have checked, the first modules of a
-standard library, a test runner, and String methods. Types and error sets cost nothing at run time: they're
+standard library (math, paths, JSON, CSV), a test runner, and String
+methods. Types and error sets cost nothing at run time: they're
 erased before codegen. The bytecode gains 1.4's handler table for `try`
-and 1.5's math natives.
+1.5's math natives, and 1.7's natives behind JSON and CSV.
 
 ## Errors: `throw`, `try`, `catch`
 
@@ -134,6 +135,37 @@ has `unwrap()`, `unwrap_or()`, `is_some()` and `is_none()`. An uncaught
 error from inside the prelude, such as `"x".to_number()`, is now reported
 at your line, not at the prelude's. See [Strings](/docs/strings).
 
+## `std:path`, `std:json` and `std:csv`
+
+Three more modules, written in Mah:
+
+```mah
+import path from "std:path"
+import json from "std:json"
+import csv from "std:csv"
+
+print(path.join("src", "main.mh"), path.extension("a.tar.gz"), path.relative("x/a", "x/b"))  # src/main.mh .gz ../b
+let doc = try json.parse("{\"tags\": [1, 2], \"ok\": true}") else [:]
+print(doc["tags"][1], try json.stringify(doc) else "")      # 2 {"tags":[1,2],"ok":true}
+let rows = try csv.parse_records("name,age\nal,3\n") else []
+print(rows[0]["name"], rows[0]["age"])                      # al 3
+```
+
+- `std:path` is string logic over `/` and `\` paths: `join`, `dirname`,
+  `basename`, `extension`, `stem`, `normalize`, `is_absolute` and
+  `relative`.
+- `std:json` parses strictly and throws `JsonError.Syntax` with the line
+  and column. `stringify` can indent, and it writes structs and enums too.
+- `std:csv` follows RFC 4180. `parse` gives rows of Strings, and
+  `parse_records` gives Maps keyed by the header.
+- `FromJson` and `FromCsvRow` read into your own structs, with helpers
+  (`json.field`, `json.as_number`, `csv.column`, ...) that throw on a
+  shape mismatch.
+- An uncaught error from inside a standard library module is now reported
+  at your call to it, as prelude errors already were.
+
+See [Standard library](/docs/standard-library).
+
 ## `mah test`
 
 Tests live in `*.test.mh` files: `test "name" { ... }` blocks, with
@@ -181,4 +213,13 @@ highlight `throw`, `try`, `catch`, `throws`, `never`, `extern` and
 `test`. The last five only count as keywords where they can be one, so
 `let catch = 1` still works. The editor lists a test file's tests as
 symbols. Hover and go-to-definition reach into standard library
+modules. Completion inside an `import "..."` string offers the `std:`
 modules.
+
+## Self-contained builds
+
+`mah-vm --version` now also prints the newest bytecode version it runs
+(`mah-vm 0.2.0 (x86_64-linux) bytecode 1.7`). `mah build
+--self-contained` refuses to bundle a program with a `mah-vm` that's too
+old to run it, and says to rebuild it (`make vm`). Previously you got an
+executable that failed with "unsupported minor version" when you ran it.

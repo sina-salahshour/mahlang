@@ -645,8 +645,8 @@ impl<'p> Vm<'p> {
     }
 
     /// M29: where to locate an uncaught error -- its throw site, unless that's
-    /// in the prelude, in which case the innermost enclosing call outside it
-    /// (from the backtrace). Mirrors `code_interpreter.py`'s `report_pc`.
+    /// in the prelude or (M30) a standard library module, in which case the
+    /// innermost enclosing call outside them (from the backtrace). Mirrors `code_interpreter.py`'s `report_pc`.
     fn report_pc(&self, value: &Value, pc: usize) -> usize {
         let Some(debug) = self.debug else { return pc };
         let backtrace = match value {
@@ -657,7 +657,8 @@ impl<'p> Vm<'p> {
         .unwrap_or_else(|| vec![pc]);
         for candidate in backtrace {
             let idx = debug.pcs.partition_point(|&x| x <= candidate);
-            if idx == 0 || debug.file_paths[debug.runs[idx - 1].0].as_ref() != "<prelude>" {
+            let path: &str = if idx == 0 { "" } else { debug.file_paths[debug.runs[idx - 1].0].as_ref() };
+            if idx == 0 || !(path == "<prelude>" || path.starts_with("std:")) {
                 return candidate;
             }
         }
