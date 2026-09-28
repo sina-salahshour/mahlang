@@ -15,6 +15,7 @@ mod natives;
 mod value;
 
 pub use error::RuntimeError;
+pub use link::is_known_native;
 
 use crate::decode::{self, FormatError};
 

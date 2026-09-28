@@ -1,16 +1,16 @@
 ---
-title: "v0.2.0: typed, checked errors and the static type checker"
+title: "v0.2.0: typed, checked errors, the type checker, and std:math"
 date: 2026-09-28
-description: "throw/try/catch with a built-in Error trait and RuntimeError enum on both VMs, a checker that infers what every function throws, and the first static type checker with mah check."
+description: "throw/try/catch with a built-in Error trait and RuntimeError enum on both VMs, a checker that infers what every function throws, the first static type checker with mah check, and the start of the standard library."
 tags: [changelog]
 version: "0.2.0"
 ---
 
-This release (milestones M22 through M26) adds two things Mah didn't
-have: a static type checker, and errors you can throw, catch, and have
-checked. Neither costs anything at run time. Types and error sets are
-erased before codegen, and the only bytecode change is 1.4's handler table
-for `try`.
+This release (milestones M22 through M27) adds a static type checker,
+errors you can throw, catch, and have checked, and the first module of a
+standard library. Types and error sets cost nothing at run time: they're
+erased before codegen. The bytecode gains 1.4's handler table for `try`
+and 1.5's math natives.
 
 ## Errors: `throw`, `try`, `catch`
 
@@ -93,9 +93,33 @@ check = "loose"      # "loose" | "strict" | "explicit"
 `mah check` prints every diagnostic, and the editor shows them as you type,
 along with inferred types on hover. See [Types](/docs/types).
 
+## The standard library begins: `std:math`
+
+Standard library modules are imported with a `std:` path, namespaced or
+flat, and the first one is `std:math`:
+
+```mah
+import math from "std:math"
+print(math.sqrt(2))                                       # 1.414213562373095048801688724
+print(math.round(math.pi, 4), math.floor(0 - 2.5))        # 3.1416 -3
+print(math.log10(1000), try math.log(0) else "undefined") # 3 undefined
+```
+
+`sqrt`, `pow` and the rounding functions are exact on Mah's 28-digit
+Numbers. `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `log` and `log10`
+are new natives, computed in double precision like `sin`/`cos`, and bad
+input throws `RuntimeError.ArgumentError`. `sin` and `cos` are no longer
+keywords: they still work with no import, but a function of your own
+named `sin` now takes over. A compiled program is marked with the lowest
+bytecode version it needs, 1.4 unless it uses the new natives. So a
+1.4 runtime still runs programs that don't use them, and a runtime that's
+too old names the natives it's missing. See
+[Standard library](/docs/standard-library).
+
 ## Editors
 
 The tree-sitter grammar (Neovim) and the VS Code TextMate grammar now
-highlight `throw`, `try`, `catch`, `throws` and `never`. The last three
-only count as keywords where they can be one, so `let catch = 1` still
-works.
+highlight `throw`, `try`, `catch`, `throws`, `never` and `extern`. The
+last four only count as keywords where they can be one, so `let catch = 1`
+still works. Hover and go-to-definition reach into standard library
+modules.

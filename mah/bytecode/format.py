@@ -23,6 +23,9 @@ built-in type `RuntimeError` (index 2; user types now numbered from 3),
 `Promise` gains a `Failed { error }` variant, the new opcodes `matchtype`/
 `deferdepth`/`deferabove`/`throw`, and a new required section HANDLERS
 (`0x08`, required iff minor >= 4) -- docs/MAHC_FORMAT.md #4.1/#4.3/#4.6/#4.8.
+
+M27 bumps MINOR to 5: new natives only (`math.tan`/`asin`/`acos`/`atan`/
+`atan2`/`exp`/`log`/`log10`, behind `std:math`) -- docs/MAHC_FORMAT.md #4.4.
 """
 
 from __future__ import annotations
@@ -35,7 +38,7 @@ MAGIC = b"MAHC"
 # `.mahc` extension).
 SHEBANG = b"#!/usr/bin/env -S mah runc\n"
 MAJOR = 1
-MINOR = 4
+MINOR = 5
 
 # -- section ids (docs/MAHC_FORMAT.md #3) -----------------------------------
 SEC_STRINGS = 0x01
@@ -121,6 +124,15 @@ NATIVE_ARITIES = {
     "math.sin": 1,
     "math.cos": 1,
     "time.sleep_async": 1,
+    # M27 (1.5): std:math's transcendental functions.
+    "math.tan": 1,
+    "math.asin": 1,
+    "math.acos": 1,
+    "math.atan": 1,
+    "math.atan2": 2,
+    "math.exp": 1,
+    "math.log": 1,
+    "math.log10": 1,
 }
 
 # M16: which minor version introduced each 1.1+ native -- a 1.0 file
@@ -129,6 +141,14 @@ NATIVE_ARITIES = {
 # since 1.0.
 NATIVE_SINCE_MINOR = {
     "io.write": 1,
+    "math.tan": 5,
+    "math.asin": 5,
+    "math.acos": 5,
+    "math.atan": 5,
+    "math.atan2": 5,
+    "math.exp": 5,
+    "math.log": 5,
+    "math.log10": 5,
 }
 
 # -- opcodes (docs/MAHC_FORMAT.md #4.6) --------------------------------------

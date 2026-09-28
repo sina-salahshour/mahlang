@@ -126,6 +126,7 @@ module.exports = grammar({
         $.continue_stmt,
         $.print_stmt,
         $.defer_stmt,
+        $.extern_fn_stmt,
         $.expr_stmt,
       ),
 
@@ -142,7 +143,26 @@ module.exports = grammar({
       ),
 
     export_stmt: ($) =>
-      seq("export", choice($.let_stmt, $.fn_stmt, $.identifier)),
+      seq("export", choice($.let_stmt, $.fn_stmt, $.extern_fn_stmt, $.identifier)),
+
+    // M27 (docs/STDLIB.md): `extern fn NAME(params) -> T = "module.native"`
+    // binds a VM native (standard library modules only -- the real
+    // preprocessor enforces that; this grammar just highlights it).
+    // `extern` is contextual: it's a keyword only right before `fn`.
+    extern_fn_stmt: ($) =>
+      seq(
+        "extern",
+        "fn",
+        field("name", $.identifier),
+        optional($.type_parameters),
+        "(",
+        optional($._params),
+        ")",
+        optional($._return_type),
+        optional($.throws_clause),
+        "=",
+        field("native", $.string),
+      ),
 
     let_stmt: ($) =>
       seq(
@@ -542,8 +562,6 @@ module.exports = grammar({
         $.enum_literal,
         $.some_expr,
         $.none_expr,
-        $.sin_call,
-        $.cos_call,
         $.input_call,
         $.detach_expr,
         $.throw_expr,
@@ -751,9 +769,6 @@ module.exports = grammar({
 
     none_expr: ($) => "none",
 
-    sin_call: ($) => seq("sin", "(", $.expr, ")"),
-
-    cos_call: ($) => seq("cos", "(", $.expr, ")"),
 
     input_call: ($) => seq("input", "(", ")"),
 

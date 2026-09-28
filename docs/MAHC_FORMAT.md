@@ -1,4 +1,4 @@
-# The `.mahc` bytecode format (version 1.4)
+# The `.mahc` bytecode format (version 1.5)
 
 `mah build prog.mh` compiles a program (its entry file plus everything it
 imports) into a single `.mahc` file; `mah runc prog.mahc` runs one. This
@@ -43,7 +43,7 @@ recommended.
 ```
 magic      bytes(4)  = 0x4D 0x41 0x48 0x43   ("MAHC")
 major      u16       = 1
-minor      u16       = 4          (0-3 for older files; see §7)
+minor      u16       = 5          (0-4 for older files; see §7)
 sections   (id u8, length varuint, payload bytes(length))*   until end of file
 ```
 
@@ -56,9 +56,16 @@ sections   (id u8, length varuint, payload bytes(length))*   until end of file
   runtime; that container is described in docs/RUST_VM.md.
 - A VM **must** reject a file whose `major` differs from the one it
   implements, and **should** reject one whose `minor` is greater than the
-  one it implements (it may use opcodes/natives the VM doesn't know). An
-  encoder writes the lowest minor version whose features it uses (the
-  reference encoder always writes the current minor, 4).
+  one it implements (it may use opcodes/natives the VM doesn't know). When
+  it does, it **should** still read that file's STRINGS and NATIVES
+  sections (their layout is the same in every 1.x file) and name any
+  natives it doesn't implement in its error, since those are the usual
+  reason a newer file won't run. An encoder writes the lowest minor
+  version whose features it uses. *(1.5)* The reference encoder writes 4
+  (every file it produces has 1.4's TYPES layout and HANDLERS section),
+  or the highest `(1.x)` marker among the natives the file lists (5 for
+  the `std:math` natives), so a program that doesn't call newer natives
+  still runs on an older VM.
 - **Required sections**, each present exactly once and in increasing id
   order: STRINGS (`0x01`), CONSTANTS (`0x02`), TYPES (`0x03`), NATIVES
   (`0x04`), FUNCTIONS (`0x05`), CODE (`0x06`), — in files with minor ≥ 1 —
@@ -165,6 +172,24 @@ Version 1.0 defines:
 | `math.sin` | 1 | sine of a Number (radians); the result is computed in IEEE-754 double precision and converted to Number via its shortest round-trip decimal text |
 | `math.cos` | 1 | cosine, same rules |
 | `time.sleep_async` | 1 | returns a new pending Promise that the scheduler settles with `none` after the argument's number of milliseconds (§6.4) |
+| `math.tan` | 1 | *(1.5)* tangent (radians) |
+| `math.asin` | 1 | *(1.5)* arc sine, in radians |
+| `math.acos` | 1 | *(1.5)* arc cosine, in radians |
+| `math.atan` | 1 | *(1.5)* arc tangent, in radians |
+| `math.atan2` | 2 | *(1.5)* `atan2(y, x)`: the angle of the point (x, y), in radians, correct in every quadrant |
+| `math.exp` | 1 | *(1.5)* `e` raised to the argument |
+| `math.log` | 1 | *(1.5)* natural logarithm |
+| `math.log10` | 1 | *(1.5)* base-10 logarithm |
+
+The `(1.5)` `math.*` natives follow `math.sin`'s rules: each argument
+must be a Number (otherwise a `RuntimeError.TypeMismatch`, message
+`NAME: expected a Number, got TYPE`, where NAME is the part after
+`math.`), is converted to IEEE-754 double precision, and the result is
+converted back via its shortest round-trip decimal text. A result that
+isn't finite (a domain error such as `log(0)` or `asin(2)`, or an overflow
+such as `exp(100000)`) is a `RuntimeError.ArgumentError` with the message
+`NAME: argument out of range`. Programs reach them through the standard
+library's `std:math` module (`extern fn`, docs/STDLIB.md).
 
 **Adding natives** (files, sockets, string utilities, processes, ...) is
 the intended way to grow the platform, e.g. `fs.read`, `fs.write`,
@@ -812,6 +837,11 @@ instruction index -- unchanged from 1.0–1.3.
   change. A 1.4 VM still runs 1.0–1.3 files unchanged (no HANDLERS
   section, no new opcodes, `Promise` only ever `Pending`/`Settled`, user
   types numbered from 2 as before).
+- **1.5** added natives only: `math.tan`, `math.asin`, `math.acos`,
+  `math.atan`, `math.atan2`, `math.exp`, `math.log`, and `math.log10`
+  (§4.4), behind the standard library's `std:math`. From 1.5 on, the
+  reference encoder writes the lowest minor its natives need (§3), so a
+  program that doesn't use them is still a 1.4 file.
 - Planned growth, for orientation: error-set checking (the static
   checker's `throws` inference and "unhandled error" diagnostics -- M26),
   string utilities, filesystem, networking, and process natives.

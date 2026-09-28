@@ -18,7 +18,7 @@ import re
 from ..bytecode.encode import encode
 from ..bytecode.lower import line_col, lower
 from ..bytecode.program import Program
-from ..preprocessor import demangle_message, preprocess
+from ..preprocessor import demangle_message, preprocess, source_label
 from . import typecheck
 from .codegen import Codegen
 from .lexer import Lexer
@@ -34,7 +34,7 @@ def _location_label(pp, entry_path: str, combined_offset: int) -> str | None:
     line, col = line_col(text, src_offset)
     if path == entry_path:
         return f"#{line}:{col}"
-    return f"{os.path.basename(path)}#{line}:{col}"
+    return f"{source_label(path)}#{line}:{col}"
 
 
 def _format_located_messages(pp, items: list[tuple[str, int]], prefix: str = "") -> str:

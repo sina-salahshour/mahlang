@@ -87,10 +87,18 @@ Since M14 the VM runs only the portable `.mahc` format, and
 VMs from it, so a feature isn't done until that document describes it.
 
 - **Needs a host capability** (I/O, files, sockets, string utilities, OS)?
-  Don't add an opcode. Add a **native** instead: a dotted name +
-  arity in `bytecode/format.py`'s `NATIVE_ARITIES`, an `impl(ctx, args)` in
-  `mah/natives.py`, a lowering rule in `bytecode/lower.py`, and a row in
-  `MAHC_FORMAT.md` §4.4 (bump the minor version).
+  Don't add an opcode, and don't add syntax either. Add a **native** and
+  expose it through a **standard library module** (M27, docs/STDLIB.md):
+  a dotted name + arity in `bytecode/format.py`'s `NATIVE_ARITIES` and its
+  minor in `NATIVE_SINCE_MINOR` (bump `MINOR` if it's the first native of
+  a new version), an `impl(ctx, args)` in `mah/natives.py`, the same in
+  the Rust VM (`runtime/src/vm/link.rs` + `natives.rs`, and
+  `native_since_minor` in `runtime/src/decode.rs`), a row in
+  `MAHC_FORMAT.md` §4.4, and an `export extern fn NAME(params: T) -> R =
+  "module.native"` in `mah/std/<module>.mh` (only std modules may use
+  `extern fn`). No lowering rule is needed: `extern fn` lowers to the
+  `native` opcode by itself. Add parity cases to
+  `runtime/tests/vm_diff.py`.
 - **Needs a genuinely new instruction**: add it to `bytecode/format.py`'s
   `OPCODES` (a reserved code + operand kinds), map the IR tuple to it in
   `bytecode/lower.py` (lowering stays 1:1 per instruction), handle it in
@@ -154,7 +162,7 @@ not just in the compiler:
   in VS Code even though it does in Neovim.
 - **`mah/lsp/analysis.py`** — a new reserved keyword needs an entry in
   `KEYWORD_TOKENS`/`KEYWORD_DOCS` (or `BUILTIN_TOKENS`/`BUILTIN_DOCS` for a
-  builtin-function-shaped addition like `sin`/`cos`) so hover and
+  builtin-function-shaped addition like `print`/`sleep_async`) so hover and
   completion pick it up automatically — both dispatch off these same
   tables, no separate registration needed. If the feature adds a new kind
   of *declaration* (like M2's structs, M3's enums) rather than just a

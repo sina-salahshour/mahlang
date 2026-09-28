@@ -67,6 +67,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "extern_fn_stmt"
+        },
+        {
+          "type": "SYMBOL",
           "name": "expr_stmt"
         }
       ]
@@ -133,9 +137,102 @@
             },
             {
               "type": "SYMBOL",
+              "name": "extern_fn_stmt"
+            },
+            {
+              "type": "SYMBOL",
               "name": "identifier"
             }
           ]
+        }
+      ]
+    },
+    "extern_fn_stmt": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "extern"
+        },
+        {
+          "type": "STRING",
+          "value": "fn"
+        },
+        {
+          "type": "FIELD",
+          "name": "name",
+          "content": {
+            "type": "SYMBOL",
+            "name": "identifier"
+          }
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "type_parameters"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "STRING",
+          "value": "("
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "_params"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "STRING",
+          "value": ")"
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "_return_type"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "throws_clause"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "STRING",
+          "value": "="
+        },
+        {
+          "type": "FIELD",
+          "name": "native",
+          "content": {
+            "type": "SYMBOL",
+            "name": "string"
+          }
         }
       ]
     },
@@ -2152,14 +2249,6 @@
         },
         {
           "type": "SYMBOL",
-          "name": "sin_call"
-        },
-        {
-          "type": "SYMBOL",
-          "name": "cos_call"
-        },
-        {
-          "type": "SYMBOL",
           "name": "input_call"
         },
         {
@@ -3023,48 +3112,6 @@
     "none_expr": {
       "type": "STRING",
       "value": "none"
-    },
-    "sin_call": {
-      "type": "SEQ",
-      "members": [
-        {
-          "type": "STRING",
-          "value": "sin"
-        },
-        {
-          "type": "STRING",
-          "value": "("
-        },
-        {
-          "type": "SYMBOL",
-          "name": "expr"
-        },
-        {
-          "type": "STRING",
-          "value": ")"
-        }
-      ]
-    },
-    "cos_call": {
-      "type": "SEQ",
-      "members": [
-        {
-          "type": "STRING",
-          "value": "cos"
-        },
-        {
-          "type": "STRING",
-          "value": "("
-        },
-        {
-          "type": "SYMBOL",
-          "name": "expr"
-        },
-        {
-          "type": "STRING",
-          "value": ")"
-        }
-      ]
     },
     "input_call": {
       "type": "SEQ",

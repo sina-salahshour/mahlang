@@ -250,9 +250,11 @@ class CompileAndSyntaxErrorTests(unittest.TestCase):
         self.assertIn("print() got an unexpected keyword argument 'sepp'", parser.errors[0][0])
 
     def test_sin_does_not_take_keyword_arguments(self):
-        _program, parser = parse_source("sin(x: 1)")
-        self.assertTrue(parser.errors, "expected a recorded syntax error")
-        self.assertIn("'sin' doesn't take keyword arguments", parser.errors[0][0])
+        # M27: `sin` is an ordinary name now, so the built-in's rules are
+        # the resolver's to enforce, not the parser's.
+        with self.assertRaises(Exception) as cm:
+            compile_source(text="sin(x: 1)")
+        self.assertIn("'sin' doesn't take keyword arguments", str(cm.exception))
 
     def test_a_default_cannot_see_a_later_parameter(self):
         with self.assertRaises(Exception) as cm:

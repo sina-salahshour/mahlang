@@ -1,0 +1,98 @@
+# std:math -- numbers beyond the built-in operators (docs/STDLIB.md).
+#
+#   import math from "std:math"      math.sqrt(2), math.pi
+#   import "std:math"                sqrt(2), pi
+#
+# `sqrt`, `pow` and the rounding functions work on Mah's own Numbers, so
+# they're exact to Number's 28 significant digits on every VM. The
+# trigonometric, exponential and logarithmic functions are natives computed
+# in double precision (about 16 digits), like the built-in `sin`/`cos`.
+
+# The ratio of a circle's circumference to its diameter.
+export let pi = 3.141592653589793238462643383
+
+# Euler's number, the base of `exp` and `log`.
+export let e = 2.718281828459045235360287471
+
+# The square root of `x`; `x` must not be negative.
+export fn sqrt(x: Number) -> Number {
+    if x < 0 {
+        throw RuntimeError.ArgumentError { message: "sqrt: argument out of range" }
+    }
+    x ** 0.5
+}
+
+# `x` raised to the power `y` -- the same as `x ** y`.
+export fn pow(x: Number, y: Number) -> Number { x ** y }
+
+# `x` without its sign.
+export fn abs(x: Number) -> Number {
+    if x < 0 { 0 - x } else { x }
+}
+
+# The largest whole number that is not greater than `x`.
+export fn floor(x: Number) -> Number {
+    let t = x // 1
+    if x < t { t - 1 } else { t }
+}
+
+# The smallest whole number that is not less than `x`.
+export fn ceil(x: Number) -> Number {
+    let t = x // 1
+    if x > t { t + 1 } else { t }
+}
+
+# `x` rounded to `digits` decimal places (negative `digits` round to tens,
+# hundreds, ...). Halves round away from zero: round(2.5) is 3,
+# round(-2.5) is -3.
+export fn round(x: Number, digits: Number = 0) -> Number {
+    let scale = 10 ** digits
+    let r = floor(abs(x) * scale + 0.5) / scale
+    if x < 0 { 0 - r } else { r }
+}
+
+# The smaller of `a` and `b`.
+export fn min(a: Number, b: Number) -> Number {
+    if b < a { b } else { a }
+}
+
+# The larger of `a` and `b`.
+export fn max(a: Number, b: Number) -> Number {
+    if b > a { b } else { a }
+}
+
+# `x` limited to the range `lo..=hi`.
+export fn clamp(x: Number, lo: Number, hi: Number) -> Number {
+    if x < lo { lo } elif x > hi { hi } else { x }
+}
+
+# Sine of `x` radians.
+export extern fn sin(x: Number) -> Number = "math.sin"
+
+# Cosine of `x` radians.
+export extern fn cos(x: Number) -> Number = "math.cos"
+
+# Tangent of `x` radians.
+export extern fn tan(x: Number) -> Number = "math.tan"
+
+# Arc sine of `x`, in radians; `x` must be in -1..=1.
+export extern fn asin(x: Number) -> Number = "math.asin"
+
+# Arc cosine of `x`, in radians; `x` must be in -1..=1.
+export extern fn acos(x: Number) -> Number = "math.acos"
+
+# Arc tangent of `x`, in radians.
+export extern fn atan(x: Number) -> Number = "math.atan"
+
+# The angle, in radians, of the point (`x`, `y`) from the positive x axis:
+# `atan(y / x)`, but correct in every quadrant and when `x` is 0.
+export extern fn atan2(y: Number, x: Number) -> Number = "math.atan2"
+
+# `e` raised to the power `x`.
+export extern fn exp(x: Number) -> Number = "math.exp"
+
+# The natural logarithm of `x`; `x` must be positive.
+export extern fn log(x: Number) -> Number = "math.log"
+
+# The base-10 logarithm of `x`; `x` must be positive.
+export extern fn log10(x: Number) -> Number = "math.log10"

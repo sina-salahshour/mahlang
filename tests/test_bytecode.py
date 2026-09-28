@@ -89,8 +89,10 @@ class RoundTripTests(unittest.TestCase):
                 data = compile_bytes(path=example_path(name))
                 # M25: the reference encoder now writes minor version 4
                 # (typed, catchable errors; 3 was M19's Vectors/Maps) --
-                # see docs/MAHC_FORMAT.md #7.
-                self.assertEqual(data[:8], b"MAHC\x01\x00\x04\x00")
+                # see docs/MAHC_FORMAT.md #7. M27: or 5, the lowest minor
+                # the program needs, when it uses a 1.5 native (std:math).
+                minor = 5 if name == "std_math.mh" else 4
+                self.assertEqual(data[:8], b"MAHC\x01\x00" + bytes([minor, 0]))
 
     def test_decoded_bytes_run_the_same_as_the_source(self):
         for name, stdin in (("traits.mh", ""), ("enums.mh", "")):
@@ -139,13 +141,34 @@ class LoaderValidationTests(unittest.TestCase):
         self.assertIn("major", str(cm.exception))
 
     def test_unsupported_minor_version(self):
-        # M25: this VM now implements minor version 4, so the smallest
-        # genuinely unsupported minor version is 5.
+        # M27: this VM now implements minor version 5, so the smallest
+        # genuinely unsupported minor version is 6.
         data = bytearray(compile_bytes(text="print(1)"))
-        data[6] = 5
+        data[6] = 6
         with self.assertRaises(MahcFormatError) as cm:
             decode(bytes(data))
         self.assertIn("minor", str(cm.exception))
+        self.assertNotIn("natives", str(cm.exception))
+
+    def test_a_newer_file_names_the_natives_this_vm_lacks(self):
+        # M27 (docs/MAHC_FORMAT.md #3): a newer file is still refused, but
+        # the message says which natives it needs -- here a pretend future
+        # `math.zzz`, spelled over `math.tan` (same length) in STRINGS.
+        data = compile_bytes(text='import math from "std:math"\nprint(math.tan(1))')
+        self.assertIn(b"math.tan", data)
+        data = bytearray(data.replace(b"math.tan", b"math.zzz"))
+        data[6] = 6
+        with self.assertRaises(MahcFormatError) as cm:
+            decode(bytes(data))
+        message = str(cm.exception)
+        self.assertIn("unsupported minor version 6", message)
+        self.assertIn("natives this VM doesn't have ('math.zzz')", message)
+
+    def test_minor_is_the_lowest_the_program_needs(self):
+        # M27: 1.4 unless a 1.5 native is used, so a program that doesn't
+        # need the newer natives still runs on a 1.4 VM.
+        self.assertEqual(decode(compile_bytes(text="print(sin(1))")).minor, 4)
+        self.assertEqual(decode(compile_bytes(text='import math from "std:math"\nprint(math.log(1))')).minor, 5)
 
     def test_leading_shebang_line_is_skipped(self):
         data = compile_bytes(text="print(1)")

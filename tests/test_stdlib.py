@@ -1,0 +1,281 @@
+"""M27 (docs/STDLIB.md, Phase 0): the standard library's foundations --
+`std:` imports, `extern fn`, native table versioning (see also
+tests/test_bytecode.py's newer-minor tests) -- and its first module,
+`std:math`. `sin`/`cos` stopped being lexer keywords in the same change.
+
+Every program here runs on whichever VM `MAH_TEST_VM` selects (see
+tests/support.py), so `make test-rust` checks the Rust natives too.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import tempfile
+import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from mah.compiler.lexer import Lexer  # noqa: E402
+from mah.compiler.parser import Parser  # noqa: E402
+from mah.compiler.resolve import Resolver  # noqa: E402
+from mah.format.formatter import format_source  # noqa: E402
+from mah.lsp import analysis  # noqa: E402
+from mah.preprocessor import STD_DIR, preprocess  # noqa: E402
+from mah.runtime_values import MahRuntimeError  # noqa: E402
+from tests.support import compile_bytes, run_file, run_source, run_source_and_error  # noqa: E402
+from tests.test_typecheck import check  # noqa: E402
+
+MATH = 'import math from "std:math"\n'
+
+
+def _compile_error(src: str) -> str:
+    with self_raises() as box:
+        compile_bytes(text=src)
+    return box[0]
+
+
+class self_raises:
+    """`with self_raises() as box:` -- captures the message of whatever the
+    block raises (the compile-error form tests need, without a TestCase)."""
+
+    def __enter__(self):
+        self.box = []
+        return self.box
+
+    def __exit__(self, exc_type, exc, _tb):
+        if exc is None:
+            raise AssertionError("expected a compile error")
+        self.box.append(str(exc))
+        return True
+
+
+class StdImportTests(unittest.TestCase):
+    def test_namespace_import(self):
+        self.assertEqual(run_source(MATH + "print(math.sqrt(16), math.pi)"), "4 3.141592653589793238462643383\n")
+
+    def test_flat_import(self):
+        self.assertEqual(run_source('import "std:math"\nprint(max(2, 7), round(e, 3))'), "7 2.718\n")
+
+    def test_std_modules_are_found_from_any_directory(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "main.mh")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(MATH + "print(math.abs(0 - 2))\n")
+            self.assertEqual(run_file(path), "2\n")
+
+    def test_unknown_std_module(self):
+        self.assertIn("unknown standard library module 'std:nope'", _compile_error('import "std:nope"'))
+
+    def test_the_prelude_is_not_a_std_module(self):
+        self.assertIn("unknown standard library module 'std:prelude'", _compile_error('import "std:prelude"'))
+
+    def test_std_never_falls_back_to_a_user_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            with open(os.path.join(td, "std:math.mh"), "w", encoding="utf-8") as f:
+                f.write("export let pi = 3\n")
+            path = os.path.join(td, "main.mh")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(MATH + "print(math.pi)\n")
+            self.assertEqual(run_file(path), "3.141592653589793238462643383\n")
+
+    def test_runtime_errors_in_std_code_are_located_as_std(self):
+        out, exc = run_source_and_error(MATH + "print(math.sqrt(0 - 1))")
+        self.assertEqual(out, "")
+        self.assertIsInstance(exc, MahRuntimeError)
+        self.assertRegex(str(exc), r"^sqrt: argument out of range at position std:math#\d+:\d+$")
+
+
+class ExternFnTests(unittest.TestCase):
+    def test_extern_fn_is_rejected_outside_the_standard_library(self):
+        self.assertIn(
+            "'extern fn' is only allowed in standard library modules",
+            _compile_error('extern fn f(x: Number) -> Number = "math.sin"'),
+        )
+
+    def test_extern_fn_is_rejected_in_an_imported_user_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            with open(os.path.join(td, "lib.mh"), "w", encoding="utf-8") as f:
+                f.write('export extern fn f(x: Number) -> Number = "math.sin"\n')
+            pp = preprocess(os.path.join(td, "main.mh"), 'import "lib.mh"\n')
+            self.assertEqual(len(pp.errors), 1)
+            self.assertIn("only allowed in standard library modules (used in 'lib.mh')", pp.errors[0][0])
+
+    def test_extern_is_still_an_ordinary_name(self):
+        self.assertEqual(run_source("let extern = 2\nprint(extern + 1)"), "3\n")
+
+    def _resolve(self, src: str):
+        # Parse + resolve directly, bypassing the preprocessor's std-only
+        # gate, to reach the resolver's own checks.
+        parser = Parser(Lexer(src))
+        program = parser.parse_program()
+        if parser.errors:
+            raise SyntaxError(parser.errors[0][0])
+        Resolver().resolve_program(program)
+        return program
+
+    def test_the_native_must_exist(self):
+        with self.assertRaises(NameError) as cm:
+            self._resolve('extern fn f(x) = "math.nope"')
+        self.assertIn("Unknown native 'math.nope'", str(cm.exception))
+
+    def test_the_arity_must_match(self):
+        with self.assertRaises(SyntaxError) as cm:
+            self._resolve('extern fn f(x, y) = "math.sin"')
+        self.assertIn("Native 'math.sin' takes 1 argument(s), but the extern fn declares 2", str(cm.exception))
+
+    def test_parameters_cannot_have_defaults(self):
+        with self.assertRaises(SyntaxError) as cm:
+            self._resolve('extern fn f(x = 1) = "math.sin"')
+        self.assertIn("can't have defaults", str(cm.exception))
+
+    def test_an_extern_fn_is_a_first_class_function(self):
+        program = self._resolve('extern fn f(y: Number, x: Number) -> Number = "math.atan2"\nlet g = f')
+        fn = program[0].value
+        self.assertEqual(fn.native, "math.atan2")
+        self.assertEqual(fn.params, ["y", "x"])
+        self.assertEqual(run_source(MATH + "let f = math.atan2\nprint(f(0, 1))"), "0\n")
+
+    def test_formatter_keeps_extern_fn(self):
+        src = 'export extern fn tan(x: Number) -> Number = "math.tan"\n'
+        self.assertEqual(format_source(src), src)
+
+    def test_every_std_module_formats_unchanged(self):
+        for name in sorted(os.listdir(STD_DIR)):
+            if name.endswith(".mh") and name != "prelude.mh":
+                with self.subTest(module=name):
+                    with open(os.path.join(STD_DIR, name), encoding="utf-8") as f:
+                        text = f.read()
+                    self.assertEqual(format_source(text), text)
+
+
+class StdMathTests(unittest.TestCase):
+    def run_math(self, expr: str) -> str:
+        return run_source(MATH + f"print({expr})").strip()
+
+    def test_constants(self):
+        self.assertEqual(self.run_math("math.pi, math.e"), "3.141592653589793238462643383 2.718281828459045235360287471")
+
+    def test_exact_functions(self):
+        self.assertEqual(self.run_math("math.sqrt(2)"), "1.414213562373095048801688724")
+        self.assertEqual(self.run_math("math.sqrt(0), math.sqrt(9), math.pow(2, 10), math.pow(4, 0.5)"), "0 3 1024 2")
+        self.assertEqual(self.run_math("math.abs(0 - 3), math.abs(3), math.min(3, 1), math.max(3, 1)"), "3 3 1 3")
+        self.assertEqual(self.run_math("math.clamp(15, 0, 10), math.clamp(0 - 5, 0, 10), math.clamp(5, 0, 10)"), "10 0 5")
+
+    def test_rounding(self):
+        self.assertEqual(
+            self.run_math("math.floor(2.7), math.floor(0 - 2.1), math.floor(3), math.floor(0 - 3)"), "2 -3 3 -3"
+        )
+        self.assertEqual(self.run_math("math.ceil(2.1), math.ceil(0 - 2.7), math.ceil(3)"), "3 -2 3")
+        self.assertEqual(self.run_math("math.round(2.5), math.round(0 - 2.5), math.round(2.4)"), "3 -3 2")
+        self.assertEqual(self.run_math("math.round(3.14159, 2), math.round(1250, 0 - 2)"), "3.14 1300")
+
+    def test_float_natives(self):
+        self.assertEqual(self.run_math("math.sin(0), math.cos(0), math.atan(0)"), "0 1 0")
+        self.assertEqual(self.run_math("math.tan(1)"), "1.5574077246549023")
+        self.assertEqual(self.run_math("math.asin(1), math.acos(1)"), "1.5707963267948966 0")
+        self.assertEqual(self.run_math("math.atan2(1, 1), math.atan2(0 - 1, 0 - 1)"), "0.7853981633974483 -2.356194490192345")
+        self.assertEqual(self.run_math("math.exp(1), math.log(math.e), math.log10(1000)"), "2.718281828459045 1 3")
+
+    def test_domain_errors_are_catchable_runtime_errors(self):
+        src = MATH + (
+            "print(try { math.log(0) } catch { RuntimeError.ArgumentError { message } => { message } })\n"
+            "print(try { math.asin(2) } catch { e: RuntimeError => { e.message } })\n"
+            "print(try { math.exp(100000) } catch { e: RuntimeError => { e.message } })\n"
+            "print(try { math.sqrt(0 - 1) } catch { e: RuntimeError => { e.message } })\n"
+        )
+        self.assertEqual(
+            run_source(src),
+            "log: argument out of range\nasin: argument out of range\n"
+            "exp: argument out of range\nsqrt: argument out of range\n",
+        )
+
+    def test_a_non_number_reaching_a_native(self):
+        src = MATH + 'let s: Unknown = "x"\nprint(try { math.tan(s) } catch { RuntimeError.TypeMismatch { message } => { message } })'
+        self.assertEqual(run_source(src), "tan: expected a Number, got String\n")
+
+    def test_checker_types_std_functions(self):
+        diagnostics, types = check(MATH + "let r = math.sqrt(2)\nlet f = math.floor")
+        self.assertEqual(diagnostics, [])
+        self.assertEqual(types["r"][-1], "Number")  # (math.mh has its own `r`s)
+        self.assertEqual(types["f"][-1], "fn(Number) -> Number")
+        diagnostics, _ = check(MATH + 'let r = math.sqrt("x")')
+        # (`check` numbers lines in the combined text, std module included.)
+        self.assertEqual(
+            [(k, m) for k, m, _line in diagnostics],
+            [("mismatch", "Type mismatch in an argument: expected Number, found String")],
+        )
+
+    def test_std_math_is_clean_at_explicit(self):
+        # The standard library stays fully typed (docs/TYPES.md's
+        # "Strictness"): nothing in it may be an implicit Unknown.
+        diagnostics, _ = check(MATH)
+        self.assertEqual(diagnostics, [])
+
+
+class BuiltinSinCosTests(unittest.TestCase):
+    """`sin`/`cos` aren't keywords any more: an unbound call is still the
+    built-in (same bytecode as before), and any binding of the name wins."""
+
+    def test_the_builtin_still_works(self):
+        self.assertEqual(run_source("print(sin(0), cos(0))"), "0 1\n")
+
+    def test_a_user_function_named_sin_wins(self):
+        self.assertEqual(run_source('fn sin(x) { "mine " + x }\nprint(sin(1))'), "mine 1\n")
+
+    def test_a_local_binding_wins(self):
+        self.assertEqual(run_source("fn f(cos) { cos * 2 }\nprint(f(4))"), "8\n")
+
+    def test_the_builtin_takes_exactly_one_argument(self):
+        self.assertIn("'sin' can only have one argument", _compile_error("sin(1, 2)"))
+        self.assertIn("'cos' can only have one argument", _compile_error("cos()"))
+
+    def test_the_builtin_is_still_typed(self):
+        diagnostics, types = check('let s = sin(1)\nlet t = sin("x")')
+        self.assertEqual(types["s"], ["Number"])
+        self.assertIn(("mismatch", "Type mismatch: expected Number, found String", 2), diagnostics)
+
+    def test_std_math_sin_is_a_method_like_member(self):
+        self.assertEqual(run_source(MATH + "print(math.sin(0) + math.cos(0))"), "1\n")
+
+
+class StdLspTests(unittest.TestCase):
+    def test_hover_on_a_std_function(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "main.mh")
+            src = MATH + "print(math.sqrt(2))\n"
+            hover = analysis.get_hover(src, 1, src.splitlines()[1].index("sqrt"), path)
+            self.assertIsNotNone(hover)
+            value = hover["contents"]["value"]
+            self.assertIn("fn sqrt(x: Number) -> Number", value)
+            self.assertIn("The square root of `x`", value)
+            self.assertIn("*declared in `std:math`*", value)
+
+    def test_hover_on_the_builtin_sin(self):
+        hover = analysis.get_hover("print(sin(1))\n", 0, 7)
+        self.assertIsNotNone(hover)
+        self.assertIn("**builtin** `sin`", hover["contents"]["value"])
+
+    def test_hover_on_extern(self):
+        src = 'export extern fn tan(x: Number) -> Number = "math.tan"\n'
+        hover = analysis.get_hover(src, 0, 8)
+        self.assertIsNotNone(hover)
+        self.assertIn("**keyword** `extern`", hover["contents"]["value"])
+
+    def test_extern_outside_std_is_an_editor_diagnostic(self):
+        diagnostics = analysis.get_diagnostics('extern fn f(x) = "math.sin"\n')
+        self.assertEqual(len(diagnostics), 1)
+        self.assertIn("only allowed in standard library modules", diagnostics[0]["message"])
+
+    def test_go_to_definition_lands_in_the_std_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "main.mh")
+            src = MATH + "print(math.sqrt(2))\n"
+            location = analysis.get_definition(src, 1, src.splitlines()[1].index("sqrt"), path)
+            self.assertIsNotNone(location)
+            self.assertEqual(location["path"], os.path.join(STD_DIR, "math.mh"))
+            self.assertEqual(location["range"]["start"]["line"], 17)  # `export fn sqrt`
+
+
+if __name__ == "__main__":
+    unittest.main()

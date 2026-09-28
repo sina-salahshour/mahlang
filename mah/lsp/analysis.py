@@ -28,7 +28,7 @@ from ..compiler.parser import Parser  # noqa: E402
 from ..compiler.resolve import Resolver  # noqa: E402
 from ..compiler import typecheck  # noqa: E402
 from ..compiler.types import TCon, TFn, prune as prune_type, show as show_type, show_throws  # noqa: E402
-from ..preprocessor import BUFFER_PATH, demangle_message, preprocess  # noqa: E402
+from ..preprocessor import BUFFER_PATH, demangle_message, preprocess, source_label  # noqa: E402
 from ..project.manifest import check_level_for  # noqa: E402
 from ..runtime_values import BUILTIN_TYPE_NAMES  # noqa: E402
 
@@ -68,8 +68,6 @@ KEYWORD_TOKENS = {
 BUILTIN_TOKENS = {
     TokenType.PRINT,
     TokenType.INPUT,
-    TokenType.SIN,
-    TokenType.COS,
     TokenType.SLEEP_ASYNC,
 }
 
@@ -173,6 +171,11 @@ KEYWORD_DOCS = {
     "no arm matches is re-thrown automatically. Contextual -- still usable "
     "as an ordinary identifier elsewhere.\n\n"
     "```mah\ntry { risky() } catch {\n\tMyError.Kind => { 0 }\n\te: OtherError => { 1 }\n\t_ => { 2 }\n}\n```",
+    "extern": "Binds a VM native to a Mah function: `extern fn NAME(params) "
+    "-> T = \"module.native\"`. Only standard library modules (`std:...`) "
+    "may use it; the annotations are the native's type. Contextual -- still "
+    "usable as an ordinary identifier elsewhere.\n\n"
+    "```mah\nexport extern fn tan(x: Number) -> Number = \"math.tan\"\n```",
     "throws": "Declares the error type(s) a function or function type can "
     "throw (`throws never` for none). Optional: left out, the checker "
     "infers the set; written, callers see exactly it and the body is "
@@ -189,8 +192,10 @@ BUILTIN_DOCS = {
     "`print()` alone just prints `end`.\n\n"
     "`print(a, b, ..., sep: \" \", end: \"\\n\")`",
     "input": "Read an integer from standard input.\n\n`input()`",
-    "sin": "Sine of a number, in radians.\n\n`sin(x)`",
-    "cos": "Cosine of a number, in radians.\n\n`cos(x)`",
+    "sin": "Sine of a number, in radians. Available without an import; "
+    "`std:math` has the rest (`tan`, `sqrt`, `log`, ...).\n\n`sin(x)`",
+    "cos": "Cosine of a number, in radians. Available without an import; "
+    "`std:math` has the rest (`tan`, `sqrt`, `log`, ...).\n\n`cos(x)`",
     "sleep_async": "Waits `ms` milliseconds -- the first genuinely "
     "scheduled (suspend-capable) operation. Called bare, it just blocks, "
     "exactly like an ordinary synchronous call -- no `.await` needed. "
@@ -380,6 +385,15 @@ def _token_index_at_offset(tokens: list[Token], offset: int) -> Optional[int]:
     return None
 
 
+def _is_member_name(tokens: list[Token], token: Token) -> bool:
+    """M27: whether ``token`` is a name after `.` (a field/method/namespace
+    member) or after `fn` (a declaration) -- never a bare built-in call."""
+    pos = next((i for i, t in enumerate(tokens) if t.position == token.position), None)
+    if pos is None or pos == 0:
+        return False
+    return tokens[pos - 1].type in (TokenType.DOT, TokenType.FN)
+
+
 def _is_await_field(token: Token, tokens: list[Token]) -> bool:
     """True when ``token`` is the ``await`` in a `.await` postfix access
     (M10 async -- see docs/V2_DESIGN.md's M10 milestone). `"await"` is not
@@ -407,9 +421,12 @@ def _is_error_contextual_keyword(token: Token, tokens: list[Token]) -> bool:
     counts after a parameter list's closing `)`, optionally with a
     `-> type` in between (walk back over the return type's own tokens --
     `ID`/`.`/`,`/`<`/`>`/`->` -- looking for the `)` they must lead back to)."""
-    if token.type != TokenType.ID or token.literal not in ("catch", "throws"):
+    if token.type != TokenType.ID or token.literal not in ("catch", "throws", "extern"):
         return False
     pos = next((i for i, t in enumerate(tokens) if t.position == token.position), None)
+    if token.literal == "extern":
+        # M27: `extern fn` (standard library modules only).
+        return pos is not None and pos + 1 < len(tokens) and tokens[pos + 1].type is TokenType.FN
     if pos is None or pos == 0:
         return False
     prev = tokens[pos - 1]
@@ -641,7 +658,7 @@ def _diagnostic_for_combined_offset(
     import_site = pp.root_import_for(combined_offset)
     origin_source = pp.files.get(origin_path, "")
     line_info = _line_col(origin_source, src_offset)
-    where = os.path.basename(origin_path)
+    where = source_label(origin_path)
     location = f"{where}:{line_info[0]}:{line_info[1]}" if line_info else where
 
     if import_site is not None:
@@ -909,7 +926,7 @@ def _symbol_completion_item(symbol: Symbol) -> dict:
     )
     detail = symbol.detail
     if symbol.file is not None:
-        detail = f"{detail}  (from {os.path.basename(symbol.file)})"
+        detail = f"{detail}  (from {source_label(symbol.file)})"
     item = {"label": symbol.name, "kind": kind, "detail": detail}
     if symbol.doc:
         item["documentation"] = {"kind": "markdown", "value": symbol.doc}
@@ -1232,7 +1249,7 @@ def get_completions(
                 if ns.name != ns_name or ns.resolved is None:
                     continue
                 return [
-                    {"label": member, "kind": COMPLETION_VARIABLE, "detail": f"(from {os.path.basename(ns.resolved)})"}
+                    {"label": member, "kind": COMPLETION_VARIABLE, "detail": f"(from {source_label(ns.resolved)})"}
                     for member in sorted(pp.exported_names(ns.resolved))
                 ]
             # `ns_name` isn't an actual namespace import -- not this
@@ -1312,7 +1329,7 @@ def get_completions(
             {
                 "label": ns.name,
                 "kind": COMPLETION_MODULE,
-                "detail": f"namespace (from {os.path.basename(ns.resolved)})" if ns.resolved else "namespace",
+                "detail": f"namespace (from {source_label(ns.resolved)})" if ns.resolved else "namespace",
             }
         )
     for imp in pp.entry_imports:
@@ -1323,7 +1340,7 @@ def get_completions(
                 {
                     "label": name,
                     "kind": COMPLETION_FUNCTION,
-                    "detail": f"(from {os.path.basename(imp.resolved)})",
+                    "detail": f"(from {source_label(imp.resolved)})",
                 }
             )
 
@@ -1383,6 +1400,15 @@ def get_hover(text: str, line: int, character: int, path: Optional[str] = None) 
         value = f"**keyword** `{token.literal}`\n\n" + KEYWORD_DOCS.get(token.literal, "")
     elif token.type is TokenType.ID and _is_error_contextual_keyword(token, tokens):
         value = f"**keyword** `{token.literal}`\n\n" + KEYWORD_DOCS.get(token.literal, "")
+    elif (
+        token.type is TokenType.ID
+        and token.literal in ("sin", "cos")
+        and _symbol_at_position(text, line, character, path) is None
+        and not _is_member_name(tokens, token)
+    ):
+        # M27: `sin`/`cos` aren't keywords any more; an unbound one is the
+        # built-in function.
+        value = f"**builtin** `{token.literal}`\n\n" + BUILTIN_DOCS.get(token.literal, "")
     elif token.type is TokenType.ID and _is_await_field(token, tokens):
         value = f"**keyword** `.{token.literal}`\n\n" + KEYWORD_DOCS.get(token.literal, "")
     elif token.type is TokenType.NUMBER:
@@ -1414,7 +1440,7 @@ def get_hover(text: str, line: int, character: int, path: Optional[str] = None) 
             if doc:
                 value += f"\n\n{doc}"
             if decl_path != pp.entry_path:
-                value += f"\n\n*declared in `{os.path.basename(decl_path)}`*"
+                value += f"\n\n*declared in `{source_label(decl_path)}`*"
         else:
             method_found = _method_at_position(text, line, character, path)
             if method_found is not None:

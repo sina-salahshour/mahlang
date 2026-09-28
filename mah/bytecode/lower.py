@@ -18,9 +18,9 @@ from __future__ import annotations
 import os
 from decimal import Decimal
 
-from ..preprocessor import BUFFER_PATH, PRELUDE_PATH, demangle_message
+from ..preprocessor import BUFFER_PATH, PRELUDE_PATH, demangle_message, source_label, std_module_name
 from ..runtime_values import NONE_VALUE
-from .format import MINOR, NATIVE_ARITIES, TAG_DEC, TAG_FALSE, TAG_INT, TAG_NONE, TAG_STR, TAG_TRUE
+from .format import MINOR, NATIVE_ARITIES, NATIVE_SINCE_MINOR, TAG_DEC, TAG_FALSE, TAG_INT, TAG_NONE, TAG_STR, TAG_TRUE
 from .program import Const, DebugInfo, FunctionDecl, Instr, NativeRef, Program, TypeDecl
 
 # IR op -> bytecode op, for the binary/comparison ops whose bytecode
@@ -380,6 +380,10 @@ class _Lowerer:
             return Instr("native", (self.intern_native("math.sin"), (a1,), a3))
         if op == "cos":
             return Instr("native", (self.intern_native("math.cos"), (a1,), a3))
+        if op == "native":
+            # M27: an `extern fn` body -- a1 is the native's name, a2 its
+            # argument addresses.
+            return Instr("native", (self.intern_native(a1), a2, a3))
         if op == "sleepasync":
             return Instr("native", (self.intern_native("time.sleep_async"), (a1,), a3))
         raise AssertionError(f"unhandled IR op {op!r}")
@@ -390,13 +394,14 @@ class _Lowerer:
         idx = self._file_index.get(path)
         if idx is not None:
             return idx
-        if path == PRELUDE_PATH:
+        if path == PRELUDE_PATH or std_module_name(path) is not None:
             # M17: the prelude's DEBUG file name is the fixed sentinel
             # `"<prelude>"`, never its real on-disk path -- a runtime error
             # raised inside prelude code is then located at
             # `<prelude>#L:C` (docs/MAHC_FORMAT.md #6.8), independent of
-            # where this Mah installation happens to keep prelude.mh.
-            name = "<prelude>"
+            # where this Mah installation happens to keep prelude.mh. M27:
+            # a standard library module is likewise `std:<name>`.
+            name = source_label(path)
         elif path == self.pp.entry_path:
             name = "<buffer>" if path == BUFFER_PATH else os.path.basename(path)
         else:
@@ -442,6 +447,24 @@ def lower(buf, resolver, pp, target: str = "debug") -> Program:
         functions=lowerer.functions,
         code=lowerer.code,
         debug=debug,
-        minor=MINOR,
+        minor=_file_minor(lowerer.natives, lowerer.strings),
         handlers=list(buf.handlers),
     )
+
+
+# The lowest minor version this lowering ever writes: its TYPES layout,
+# opcodes and HANDLERS section are all 1.4's (see `build_types`).
+_BASE_MINOR = 4
+
+
+def _file_minor(natives: list, strings: list) -> int:
+    """M27 (docs/MAHC_FORMAT.md #3/#4.4): the lowest minor version whose
+    features this file uses -- 1.4, or higher only when it calls a native
+    added later (the `std:math` ones are 1.5). So a program that doesn't use
+    newer natives still runs on an older 1.4 VM, and one that does is
+    refused by it with a message naming those natives."""
+    minor = _BASE_MINOR
+    for ref in natives:
+        minor = max(minor, NATIVE_SINCE_MINOR.get(strings[ref.name], 0))
+    assert minor <= MINOR
+    return minor

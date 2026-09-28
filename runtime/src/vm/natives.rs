@@ -92,6 +92,32 @@ fn math_cos(_vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
     Decimal::from_f64(f).map(Value::Number).map_err(|e| RuntimeError::new(e.message()))
 }
 
+/// M27 (1.5): a `math.*` native computed in f64, the same way as
+/// `math.sin`/`math.cos`; a non-finite result is an `ArgumentError`. Mirrors
+/// `mah/natives.py`'s `_float_math`, messages included.
+fn float_math(short: &str, args: &[Value], f: impl Fn(&[f64]) -> f64) -> Result<Value, RuntimeError> {
+    let mut floats = Vec::with_capacity(args.len());
+    for a in args {
+        match a {
+            Value::Number(n) => floats.push(n.to_f64()),
+            other => {
+                return Err(RuntimeError::with_kind(
+                    format!(
+                        "{short}: expected a Number, got {}",
+                        super::value::type_name_of(other, &super::value::BuiltinTypeNames::new())
+                    ),
+                    ErrorKind::TypeMismatch,
+                ))
+            }
+        }
+    }
+    let result = f(&floats);
+    if !result.is_finite() {
+        return Err(RuntimeError::with_kind(format!("{short}: argument out of range"), ErrorKind::ArgumentError));
+    }
+    Decimal::from_f64(result).map(Value::Number).map_err(|e| RuntimeError::new(e.message()))
+}
+
 fn time_sleep_async(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
     let ms = expect_number(&args[0])?;
     let promise = super::value::PromiseData::new_pending();
@@ -117,5 +143,13 @@ pub fn call_native(vm: &mut Vm, native: NativeFn, args: &[Value]) -> Result<Valu
         NativeFn::MathSin => math_sin(vm, args),
         NativeFn::MathCos => math_cos(vm, args),
         NativeFn::TimeSleepAsync => time_sleep_async(vm, args),
+        NativeFn::MathTan => float_math("tan", args, |x| x[0].tan()),
+        NativeFn::MathAsin => float_math("asin", args, |x| x[0].asin()),
+        NativeFn::MathAcos => float_math("acos", args, |x| x[0].acos()),
+        NativeFn::MathAtan => float_math("atan", args, |x| x[0].atan()),
+        NativeFn::MathAtan2 => float_math("atan2", args, |x| x[0].atan2(x[1])),
+        NativeFn::MathExp => float_math("exp", args, |x| x[0].exp()),
+        NativeFn::MathLog => float_math("log", args, |x| x[0].ln()),
+        NativeFn::MathLog10 => float_math("log10", args, |x| x[0].log10()),
     }
 }

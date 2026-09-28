@@ -44,3 +44,8 @@ import "mathlib.mh"                  # bring exported names in directly
 import m from "mathlib"              # or namespaced (the .mh is optional)
 print(square(3), m.answer)
 ```
+
+## The standard library
+
+`import "std:math"` / `import math from "std:math"` import a module of the
+standard library the same way. See [Standard library](/docs/standard-library).

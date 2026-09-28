@@ -15,7 +15,7 @@ use std::fmt;
 
 pub const MAGIC: &[u8; 4] = b"MAHC";
 pub const MAJOR: u16 = 1;
-pub const MINOR: u16 = 4;
+pub const MINOR: u16 = 5;
 
 const SEC_STRINGS: u8 = 0x01;
 const SEC_CONSTANTS: u8 = 0x02;
@@ -839,6 +839,8 @@ fn opcode_info(op: u8) -> Option<(&'static str, Option<u16>)> {
 fn native_since_minor(name: &str) -> Option<u16> {
     match name {
         "io.write" => Some(1),
+        "math.tan" | "math.asin" | "math.acos" | "math.atan" | "math.atan2" | "math.exp" | "math.log"
+        | "math.log10" => Some(5),
         _ => None,
     }
 }
@@ -1222,6 +1224,37 @@ fn parse_debug(payload: &[u8], nstrings: usize) -> FResult<DebugInfo> {
 
 /// Decode a `.mahc` file, including a possible leading shebang line (bytes
 /// `#!` up to and including the first `\n`) -- docs/MAHC_FORMAT.md #3.
+/// M27 (docs/MAHC_FORMAT.md #3/#4.4): a file newer than this VM is still
+/// rejected, but when it lists natives this VM doesn't have, the message
+/// names them. STRINGS and NATIVES keep their 1.0 layout in every 1.x file;
+/// anything unreadable just gives the plain message. Mirrors
+/// `mah/bytecode/decode.py`'s `_newer_minor_message`.
+fn newer_minor_message(r: &mut Reader, minor: u16) -> String {
+    let message = format!("unsupported minor version {minor} (this VM supports up to minor version {MINOR})");
+    let mut payloads: std::collections::HashMap<u8, &[u8]> = std::collections::HashMap::new();
+    while r.remaining() > 0 {
+        let Ok(id) = r.u8() else { return message };
+        let Ok(len) = r.varuint() else { return message };
+        let Ok(payload) = r.bytes(len as usize) else { return message };
+        payloads.insert(id, payload);
+    }
+    let (Some(strings), Some(natives)) = (payloads.get(&SEC_STRINGS), payloads.get(&SEC_NATIVES)) else {
+        return message;
+    };
+    let Ok(strings) = parse_strings(strings) else { return message };
+    let Ok(natives) = parse_natives(natives, strings.len()) else { return message };
+    let missing: Vec<String> = natives
+        .iter()
+        .map(|n| &strings[n.name])
+        .filter(|name| !crate::vm::is_known_native(name))
+        .map(|name| format!("'{name}'"))
+        .collect();
+    if missing.is_empty() {
+        return message;
+    }
+    format!("{message}: it uses natives this VM doesn't have ({}); upgrade mah to run it", missing.join(", "))
+}
+
 pub fn decode(data: &[u8]) -> FResult<Program> {
     let data: &[u8] = if data.starts_with(b"#!") {
         match data.iter().position(|&b| b == b'\n') {
@@ -1246,7 +1279,7 @@ pub fn decode(data: &[u8]) -> FResult<Program> {
     }
     let minor = r.u16()?;
     if minor > MINOR {
-        return err(format!("unsupported minor version {minor} (this VM supports up to minor version {MINOR})"));
+        return err(newer_minor_message(&mut r, minor));
     }
 
     let sections = read_sections(&mut r, minor)?;
@@ -1399,7 +1432,10 @@ mod tests {
         data.extend_from_slice(&1u16.to_le_bytes());
         data.extend_from_slice(&99u16.to_le_bytes());
         let e = decode(&data).unwrap_err();
-        assert_eq!(e.0, "unsupported minor version 99 (this VM supports up to minor version 4)");
+        // M27: the current maximum is 5; the file has no sections at all,
+        // so there are no natives to name.
+        assert_eq!(e.0, format!("unsupported minor version 99 (this VM supports up to minor version {MINOR})"));
+        assert_eq!(MINOR, 5);
     }
 
     #[test]

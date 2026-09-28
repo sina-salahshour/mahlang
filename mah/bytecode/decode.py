@@ -20,6 +20,7 @@ from .format import (
     MAGIC,
     MAJOR,
     MINOR,
+    NATIVE_ARITIES,
     NATIVE_SINCE_MINOR,
     OPCODE_SINCE_MINOR,
     OPCODES_BY_CODE,
@@ -86,6 +87,29 @@ class _Reader:
 def _check_consumed(reader: _Reader, section_name: str) -> None:
     if reader.remaining() != 0:
         raise MahcFormatError(f"{section_name} section payload not fully consumed (trailing garbage)")
+
+
+def _newer_minor_message(r: _Reader, minor: int) -> str:
+    """M27 (docs/MAHC_FORMAT.md #3/#4.4): a file newer than this VM is still
+    rejected, but when the reason is natives this VM doesn't have (the usual
+    one: a program using a newer standard library), say which. STRINGS and
+    NATIVES keep their 1.0 layout in every 1.x file, so they can be read
+    from a newer file; anything unreadable just gives the plain message."""
+    message = f"unsupported minor version {minor} (this VM supports up to minor version {MINOR})"
+    try:
+        payloads = {}
+        while r.remaining() > 0:
+            sec_id = r.u8()
+            payloads[sec_id] = r.bytes(r.varuint())
+        strings = _parse_strings(payloads[SEC_STRINGS])
+        natives = _parse_natives(payloads[SEC_NATIVES], len(strings))
+        missing = [strings[ref.name] for ref in natives if strings[ref.name] not in NATIVE_ARITIES]
+    except (MahcFormatError, KeyError, IndexError):
+        return message
+    if not missing:
+        return message
+    names = ", ".join(f"'{name}'" for name in missing)
+    return f"{message}: it uses natives this VM doesn't have ({names}); upgrade mah to run it"
 
 
 def _read_sections(r: _Reader, minor: int) -> tuple[dict, bytes | None]:
@@ -574,7 +598,7 @@ def decode(data: bytes) -> Program:
         raise MahcFormatError(f"unsupported major version {major} (this VM implements major version {MAJOR})")
     minor = r.u16()
     if minor > MINOR:
-        raise MahcFormatError(f"unsupported minor version {minor} (this VM supports up to minor version {MINOR})")
+        raise MahcFormatError(_newer_minor_message(r, minor))
 
     payloads, debug_payload = _read_sections(r, minor)
 

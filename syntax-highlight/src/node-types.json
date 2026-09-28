@@ -81,6 +81,10 @@
           "named": true
         },
         {
+          "type": "extern_fn_stmt",
+          "named": true
+        },
+        {
           "type": "impl_decl",
           "named": true
         },
@@ -257,21 +261,6 @@
     }
   },
   {
-    "type": "cos_call",
-    "named": true,
-    "fields": {},
-    "children": {
-      "multiple": false,
-      "required": true,
-      "types": [
-        {
-          "type": "expr",
-          "named": true
-        }
-      ]
-    }
-  },
-  {
     "type": "defer_stmt",
     "named": true,
     "fields": {},
@@ -301,6 +290,10 @@
         },
         {
           "type": "expr_stmt",
+          "named": true
+        },
+        {
+          "type": "extern_fn_stmt",
           "named": true
         },
         {
@@ -593,6 +586,10 @@
       "required": true,
       "types": [
         {
+          "type": "extern_fn_stmt",
+          "named": true
+        },
+        {
           "type": "fn_stmt",
           "named": true
         },
@@ -629,10 +626,6 @@
         },
         {
           "type": "call_expr",
-          "named": true
-        },
-        {
-          "type": "cos_call",
           "named": true
         },
         {
@@ -700,10 +693,6 @@
           "named": true
         },
         {
-          "type": "sin_call",
-          "named": true
-        },
-        {
           "type": "sleep_async_call",
           "named": true
         },
@@ -756,6 +745,72 @@
       "types": [
         {
           "type": "expr",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "extern_fn_stmt",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "native": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "string",
+            "named": true
+          }
+        ]
+      },
+      "return_type": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "(",
+            "named": false
+          },
+          {
+            "type": ")",
+            "named": false
+          },
+          {
+            "type": "function_type",
+            "named": true
+          },
+          {
+            "type": "named_type",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "param",
+          "named": true
+        },
+        {
+          "type": "throws_clause",
+          "named": true
+        },
+        {
+          "type": "type_parameters",
           "named": true
         }
       ]
@@ -1686,21 +1741,6 @@
     }
   },
   {
-    "type": "sin_call",
-    "named": true,
-    "fields": {},
-    "children": {
-      "multiple": false,
-      "required": true,
-      "types": [
-        {
-          "type": "expr",
-          "named": true
-        }
-      ]
-    }
-  },
-  {
     "type": "sleep_async_call",
     "named": true,
     "fields": {},
@@ -1820,6 +1860,10 @@
         },
         {
           "type": "expr_stmt",
+          "named": true
+        },
+        {
+          "type": "extern_fn_stmt",
           "named": true
         },
         {
@@ -2456,10 +2500,6 @@
     "named": true
   },
   {
-    "type": "cos",
-    "named": false
-  },
-  {
     "type": "defer",
     "named": false
   },
@@ -2481,6 +2521,10 @@
   },
   {
     "type": "export",
+    "named": false
+  },
+  {
+    "type": "extern",
     "named": false
   },
   {
@@ -2549,10 +2593,6 @@
   },
   {
     "type": "return",
-    "named": false
-  },
-  {
-    "type": "sin",
     "named": false
   },
   {

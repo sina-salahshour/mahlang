@@ -41,6 +41,7 @@ import dataclasses
 from dataclasses import dataclass
 
 from .ast_nodes import (
+    NativeCall,
     AssignStmt,
     Binary,
     BindPat,
@@ -49,7 +50,6 @@ from .ast_nodes import (
     BreakStmt,
     Call,
     ContinueStmt,
-    CosExpr,
     DeferStmt,
     DetachExpr,
     EnumDecl,
@@ -75,7 +75,6 @@ from .ast_nodes import (
     PrintStmt,
     RangePat,
     ReturnStmt,
-    SinExpr,
     SleepAsyncExpr,
     StringLit,
     StructDecl,
@@ -1290,9 +1289,6 @@ class Checker:
             return self._check_binary(expr)
         if isinstance(expr, Call):
             return self._check_call(expr)
-        if isinstance(expr, (SinExpr, CosExpr)):
-            self._expect(self._check_expr(expr.arg), NUMBER, expr.arg.position)
-            return NUMBER
         if isinstance(expr, InputExpr):
             return NUMBER
         if isinstance(expr, SleepAsyncExpr):
@@ -1345,6 +1341,12 @@ class Checker:
             return TCon("Map", [key, value])
         if isinstance(expr, Index):
             return self._check_index(expr)
+        if isinstance(expr, NativeCall):
+            # M27: an `extern fn`'s body; the declaration's annotations are
+            # the native's type, so the call itself is unchecked.
+            for arg in expr.args:
+                self._check_expr(arg)
+            return TUnknown("explicit")
         if isinstance(expr, ThrowExpr):
             # M25 (docs/ERRORS.md): `throw e` never produces a value.
             self._check_throw(expr)
@@ -1382,6 +1384,10 @@ class Checker:
         return self._binop(op, lhs, rhs, expr.position)
 
     def _check_call(self, expr: Call):
+        if expr.builtin is not None:
+            # M27: the built-in `sin`/`cos` (see resolve.py).
+            self._expect(self._check_expr(expr.args[0]), NUMBER, expr.args[0].position)
+            return NUMBER
         callee = prune(self._check_expr(expr.callee))
         return self._apply_callee(callee, expr.args, expr.kwargs, expr.position)
 

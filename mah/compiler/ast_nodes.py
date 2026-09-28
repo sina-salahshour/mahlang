@@ -196,6 +196,11 @@ class Call:
     # the NAME token's own position, for error messages/LSP). Empty for an
     # ordinary all-positional call.
     kwargs: list = field(default_factory=list, repr=False)
+    # M27: set by the resolver to "sin"/"cos" when the callee is that bare
+    # name and nothing in scope binds it -- the built-in, which codegen
+    # compiles exactly like the pre-M27 `sin(x)`/`cos(x)` keyword forms.
+    # A user's own `sin` (or `import "std:math"`'s) always wins.
+    builtin: Optional[str] = field(default=None, repr=False)
 
 
 @dataclass
@@ -531,6 +536,9 @@ class FnExpr:
     # after the optional `-> type`. Same `None`/`[]`/list[TypeExpr]
     # meaning as `FnType.throws` above. Ignored until M26.
     throws: Optional[list] = field(default=None, repr=False)
+    # M27: set by the parser for `extern fn ... = "native"` -- the native's
+    # name (the body is then a single `NativeCall`).
+    native: Optional[str] = field(default=None, repr=False)
 
 
 @dataclass
@@ -793,6 +801,22 @@ class MatchStmt:
     scrutinee: object  # Expr
     arms: list  # list[MatchArm]
     position: int
+
+
+# -- M27: extern fn (std modules only) -----------------------------------
+
+
+@dataclass
+class NativeCall:
+    """M27 (docs/STDLIB.md, Phase 0): the whole body of an `extern fn NAME(
+    a, b) = "module.native"` declaration, which the parser desugars to an
+    ordinary `fn NAME(a, b) { <NativeCall> }` -- so an extern function is a
+    first-class value like any other, typed by its annotations. Calls the
+    VM native `native` with the function's own parameters, in order."""
+
+    native: str  # the dotted native name, e.g. "math.tan"
+    args: list  # list[Ident], one per parameter
+    position: int  # the native name's string literal
 
 
 # -- M25: errors (throw/try/catch, throws clauses) -----------------------

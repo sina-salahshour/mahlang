@@ -218,6 +218,10 @@ collections, socket, http) in [`STDLIB.md`](STDLIB.md). **M25 landed the
 errors design's syntax + runtime** (both VMs), and **M26 the static
 checker's error sets** (inference, `throws` checking, unhandled-error
 diagnostics; `ERRORS.md`'s "M26: what landed" lists what's still open).
-The standard library is next.
+**M27 started the standard library**: `std:` imports, `extern fn`,
+native table versioning, and `std:math`. Next, per `STDLIB.md`:
+`std:test` and `mah test` ([`MAH_TEST.md`](MAH_TEST.md)), then the rest
+of Phase 0 (handle values, the async scheduler, the shared PRNG, `input`)
+and the remaining pure modules.
 `std:test` and the `mah test` runner ([`MAH_TEST.md`](MAH_TEST.md)) come
 right after errors and `std:` resolution.
