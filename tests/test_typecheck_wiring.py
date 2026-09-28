@@ -180,6 +180,18 @@ class DriverCheckTests(unittest.TestCase):
         )
         self.assertEqual(len(message.splitlines()), 2)
 
+    def test_errors_real_checker_at_strict(self):
+        # M26: an unhandled error fails a strict build; a catch arm for an
+        # error that's never thrown is only a warning, so it doesn't.
+        prelude = "enum A { X }\nimpl Error for A {}\nstruct B { }\nimpl Error for B {}\nfn f() { throw A.X }\n"
+        with self.assertRaises(SyntaxError) as cm:
+            driver.compile_to_bytes(text=prelude + "f()\n", check="strict")
+        self.assertIn("type error: Unhandled error: A", str(cm.exception))
+        data = driver.compile_to_bytes(
+            text=prelude + "try { f() } catch { e: A => { 1 }\ne: B => { 2 } }\n", check="strict"
+        )
+        self.assertIsInstance(data, bytes)
+
     def test_empty_diagnostics_compiles_fine_at_strict(self):
         with mock.patch("mah.compiler.typecheck.check_program", return_value=[]):
             data = driver.compile_to_bytes(text=SRC, check="strict")

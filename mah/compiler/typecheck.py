@@ -91,13 +91,17 @@ from .ast_nodes import (
     WildcardPat,
 )
 from .types import (
+    ALL,
     BOOL,
+    EMPTY,
     NEVER,
     NONE,
     NUMBER,
     PRIMITIVES,
     STRING,
     Scheme,
+    UNKNOWN_ERROR,
+    ESet,
     TCon,
     TFn,
     TParam,
@@ -109,7 +113,9 @@ from .types import (
     instantiate,
     is_con,
     prune,
+    esets,
     show,
+    solve,
     subst,
     unknowns,
 )
@@ -121,8 +127,13 @@ DEFAULT_CHECK_LEVEL = "loose"
 @dataclass
 class TypeDiagnostic:
     # "mismatch": a type error (warning in loose, error in strict/explicit).
-    # "implicit": a declaration whose type couldn't be inferred (reported
-    # only at the explicit level).
+    # "unhandled" (M26): an error that can escape to the top of the program,
+    # or a function that can throw something its `throws` clause doesn't
+    # list -- reported exactly like "mismatch".
+    # "implicit": a declaration whose type couldn't be inferred, or a call
+    # whose errors couldn't be (reported only at the explicit level).
+    # "warning" (M26): reported at every level, but always as a warning
+    # (a `catch` arm naming an error type the `try` body never throws).
     kind: str
     message: str  # no position in it
     position: int  # offset in the combined (preprocessed) text
@@ -140,11 +151,17 @@ def check_program(program: list, resolver) -> list[TypeDiagnostic]:
 
 
 def reportable(diagnostics: list[TypeDiagnostic], level: str) -> list[TypeDiagnostic]:
-    """The diagnostics that count at `level`: mismatches at every level,
-    implicit-Unknown ones only at "explicit"."""
+    """The diagnostics that count at `level`: everything but the
+    implicit-Unknown ones at every level; those only at "explicit"."""
     if level == "explicit":
         return list(diagnostics)
-    return [d for d in diagnostics if d.kind == "mismatch"]
+    return [d for d in diagnostics if d.kind != "implicit"]
+
+
+def is_warning(diagnostic: TypeDiagnostic, level: str) -> bool:
+    """Whether `diagnostic` is only a warning at `level` (everything is, in
+    "loose"); the rest are errors that fail `mah run`/`build`/`check`."""
+    return level == "loose" or diagnostic.kind == "warning"
 
 
 # -- helpers -----------------------------------------------------------------
@@ -224,9 +241,34 @@ class _Loop:
 
 
 class _FnCtx:
-    def __init__(self, ret):
+    def __init__(self, ret, acc):
         self.ret = ret
         self.loops: list = []
+        # M26: where errors raised right now go -- the function body's own
+        # error set, then one more per enclosing `try` body / `detach`.
+        self.accs: list = [acc]
+
+
+def _union_ex(a: frozenset, b: frozenset) -> frozenset:
+    """Excluding `a`, then `b`."""
+    if "*" in a or "*" in b:
+        return ALL
+    return a | b
+
+
+def _meet_ex(a: frozenset, b: frozenset) -> frozenset:
+    """What two paths excluding `a` and `b` both exclude."""
+    if "*" in a:
+        return b
+    if "*" in b:
+        return a
+    return a & b
+
+
+def _minus_ex(names: frozenset, excluded: frozenset) -> frozenset:
+    if "*" in excluded:
+        return EMPTY
+    return names - excluded
 
 
 class _Constraint:
@@ -275,6 +317,30 @@ class Checker:
         self.cstack: list = [[]]  # pending constraints, one list per level
         self.globals: set = set()  # Symbols of top-level non-function `let`s
         self.main_loops: list = []  # loops in the main program, outside any function
+        # M26 (docs/ERRORS.md): error sets. `main_accs` is the main
+        # program's accumulator stack (like `_FnCtx.accs`); `sites` are the
+        # places errors flow straight into the top of the program:
+        # (position, error set, excluded).
+        self.main_accs: list = [ESet("acc", 0)]
+        self.sites: list = []
+        # (inferred error set, sealed error set, position, whose) -- checked
+        # once every set is solved. `whose` is a function's name, or None for
+        # a value flowing where a written `throws` list is expected.
+        self.throw_checks: list = []
+        self._check_pos = None  # the position `_expect` is checking at
+        # (try-body error set, type name, position) per catch arm naming a
+        # type, for the "never thrown here" warning.
+        self.arm_checks: list = []
+        # Where an error the checker can't see through was raised:
+        # (position, the try-body error sets enclosing it in its function).
+        self.unknown_sites: list = []
+        self.catch_all: set = set()  # ids of try-body sets a catch-all handles
+        # A catch-all arm's binding -> its try body's error set, so `throw e`
+        # re-throws exactly what the body could.
+        self.rethrow: dict = {}
+        # (type name, position) of every name in a written `throws` list,
+        # checked to implement Error once every impl is known.
+        self.throws_names: list = []
 
     # -- entry -----------------------------------------------------------
 
@@ -296,6 +362,7 @@ class Checker:
             self._check_stmt(stmt)
         self._finish_constraints()
         self._report_implicit()
+        self._report_errors()
         diagnostics = [d for d in self.diagnostics if not self._in_prelude(d.position)]
         diagnostics.sort(key=lambda d: d.position)
         return diagnostics
@@ -333,6 +400,9 @@ class Checker:
         mark = self.u.mark()
         if relation(a, b):
             self.u.commit()
+            for source, sealed in self.u.checks:
+                self.throw_checks.append((source, sealed, self._check_pos or sealed.position, None))
+            self.u.checks = []
             self._after_binding()
             return True
         self.u.rollback(mark)
@@ -347,7 +417,12 @@ class Checker:
 
     def _expect(self, actual, expected, position: int, context: str = "") -> bool:
         """`actual` must be assignable to `expected`; report otherwise."""
-        if self._try_assign(actual, expected):
+        self._check_pos = position
+        try:
+            ok = self._try_assign(actual, expected)
+        finally:
+            self._check_pos = None
+        if ok:
             return True
         where = f" {context}" if context else ""
         self._error(position, f"Type mismatch{where}: expected {show(expected)}, found {show(actual)}")
@@ -495,7 +570,46 @@ class Checker:
                 param = TParam(self._param_name(used))
                 var.ref = param
                 params.append(param)
-        return Scheme(params, sig)
+        evars, enodes = self._generalize_esets(sig)
+        return Scheme(params, sig, evars, enodes)
+
+    def _generalize_esets(self, sig):
+        """M26: the signature's error-set variables created inside the
+        function (a callback parameter's, say) are quantified like type
+        variables. Every other error set created inside it is flattened in
+        place, down to error names plus references to outer sets and those
+        variables -- so an instance only needs to copy the flattened ones
+        that mention a variable."""
+        nodes = [n for n in esets(sig) if n.level > self.level]
+        evars = [n for n in nodes if n.kind == "var"]
+        stop = {n.id for n in evars}
+        for node in nodes:
+            if node.kind == "acc":
+                self._flatten(node, stop)
+        enodes = [n for n in nodes if n.kind == "acc" and any(sub.id in stop for sub, _ex in n.subs)]
+        return evars, enodes
+
+    def _flatten(self, node, stop: set) -> None:
+        names: set = set()
+        terminals: dict = {}
+        seen: dict = {}
+        stack = [(node, EMPTY)]
+        while stack:
+            n, excluded = stack.pop()
+            if n.id in seen:
+                met = _meet_ex(seen[n.id], excluded)
+                if met == seen[n.id]:
+                    continue
+                excluded = met
+            seen[n.id] = excluded
+            if n is not node and (n.level <= self.level or n.kind == "sealed" or n.id in stop):
+                terminals[n.id] = (n, excluded)
+                continue
+            names |= _minus_ex(n.names, excluded)
+            for sub, sub_excluded in n.subs:
+                stack.append((sub, _union_ex(excluded, sub_excluded)))
+        node.names = frozenset(names)
+        node.subs = tuple(terminals.values())
 
     @staticmethod
     def _param_name(used: set) -> str:
@@ -611,7 +725,12 @@ class Checker:
         if isinstance(texpr, FnType):
             params = [self._convert(p) for p in texpr.params]
             ret = self._convert(texpr.ret) if texpr.ret is not None else NONE
-            return TFn(params, ret)
+            # M26: no `throws` clause means "inferred", like any other part
+            # of a type left unwritten; one seals the function's error set.
+            throws = self._sealed(texpr.throws, texpr.position) if texpr.throws is not None else None
+            if throws is None:
+                throws = ESet("var", self.level)
+            return TFn(params, ret, throws=throws)
         if not isinstance(texpr, NamedType):
             return _unchecked()
         name = texpr.name
@@ -631,6 +750,9 @@ class Checker:
         if info is not None:
             if len(args) != len(info.params):
                 args = info.fresh_args(self.level)
+            if name == "Promise":
+                # What its `.await` re-throws: inferred (M26).
+                return TCon(name, args, ESet("var", self.level))
             return TCon(name, args)
         # A trait type (M23) or something the resolver already rejected.
         return _unchecked()
@@ -704,11 +826,20 @@ class Checker:
                 ret = exp.ret
             else:
                 ret = self._fresh()
-            sig = TFn(params, ret, required, fn.params)
+            # M26: the body's error set. A `throws` clause seals what
+            # callers see; the body is checked against it at the end.
+            acc = ESet("acc", self.level, position=fn.position)
+            throws = acc
+            sealed = self._sealed(fn.throws, fn.position) if fn.throws is not None else None
+            if sealed is not None:
+                throws = sealed
+                whose = f"'{fn.name}'" if fn.name else "This function"
+                self.throw_checks.append((acc, throws, fn.position, whose))
+            sig = TFn(params, ret, required, fn.params, throws)
             if on_sig is not None:
                 on_sig(sig)
 
-            self.fn_stack.append(_FnCtx(ret))
+            self.fn_stack.append(_FnCtx(ret, acc))
             try:
                 for index, name in enumerate(fn.params):
                     position = fn.param_positions[index] if index < len(fn.param_positions) else fn.position
@@ -825,7 +956,8 @@ class Checker:
                         params.append(self._convert(annotation) if annotation is not None else _unchecked())
                 ret = self._convert(decl.return_type) if decl.return_type is not None else _unchecked()
                 required = next((i for i, d in enumerate(decl.defaults) if d is not None), len(decl.params))
-                m.scheme = Scheme(list(own.values()) + m.params, TFn(params, ret, required, decl.params))
+                throws = self._sealed(decl.throws, decl.position) if decl.throws is not None else None
+                m.scheme = Scheme(list(own.values()) + m.params, TFn(params, ret, required, decl.params, throws))
                 return m.scheme
             self._enter_level()
 
@@ -942,9 +1074,17 @@ class Checker:
 
     def _check_args_only(self, args, kwargs) -> None:
         for arg in args:
-            self._check_expr(arg)
+            self._escape(self._check_expr(arg), arg.position)
         for _name, value, _position in kwargs:
-            self._check_expr(value)
+            self._escape(self._check_expr(value), value.position)
+
+    def _escape(self, actual, position: int) -> None:
+        """M26: a function value passed where the checker can't follow it
+        (an `Unknown` parameter, an unchecked prelude method) counts as
+        throwing its errors right there."""
+        actual = prune(actual)
+        if isinstance(actual, TFn):
+            self._raise(actual.throws, position)
 
     def _call_bound(self, sig, receiver, receiver_position, args, kwargs, position):
         """Call a method signature whose receiver was already checked."""
@@ -954,7 +1094,7 @@ class Checker:
             return sig if isinstance(sig, TUnknown) else _unchecked()
         self._expect(receiver, sig.params[0], receiver_position, "in the receiver")
         names = sig.names[1:] if sig.names is not None else None
-        bound = TFn(sig.params[1:], sig.ret, max(sig.required - 1, 0), names)
+        bound = TFn(sig.params[1:], sig.ret, max(sig.required - 1, 0), names, sig.throws)
         return self._apply(bound, args, kwargs, position)
 
     def _check_method_call(self, expr: MethodCall):
@@ -973,6 +1113,8 @@ class Checker:
                 self.field_types[expr.position] = (receiver, field)
                 return self._apply_callee(prune(field), expr.args, expr.kwargs, expr.position)
         if sig is None:
+            if isinstance(receiver, TUnknown) and receiver.kind != "unchecked":
+                self._raise_unknown(expr.position)
             self._check_args_only(expr.args, expr.kwargs)
             return _unchecked()
         self.method_types[expr.position] = sig
@@ -1057,7 +1199,11 @@ class Checker:
         if isinstance(stmt, ContinueStmt):
             return True
         if isinstance(stmt, DeferStmt):
-            self._check_expr(stmt.closure_expr)
+            # M26: a deferred block runs as this scope exits, so its
+            # errors are this scope's.
+            closure = prune(self._check_expr(stmt.closure_expr))
+            if isinstance(closure, TFn):
+                self._raise(closure.throws, stmt.position)
             return False
         if isinstance(stmt, (StructDecl, EnumDecl, TraitDecl, ImplDecl)):
             return False
@@ -1153,8 +1299,16 @@ class Checker:
             self._expect(self._check_expr(expr.arg), NUMBER, expr.arg.position)
             return NONE
         if isinstance(expr, DetachExpr):
-            inner = self._check_expr(expr.call)
-            return TCon("Promise", [inner])
+            # M26: the task's errors fail its Promise instead of happening
+            # here; `.await` re-throws them.
+            node = ESet("acc", self.level, position=expr.position)
+            accs = self._accs()
+            accs.append(node)
+            try:
+                inner = self._check_expr(expr.call)
+            finally:
+                accs.pop()
+            return TCon("Promise", [inner], node)
         if isinstance(expr, FnExpr):
             sig, _ = self._check_fn(expr, hint)
             return sig
@@ -1193,7 +1347,7 @@ class Checker:
             return self._check_index(expr)
         if isinstance(expr, ThrowExpr):
             # M25 (docs/ERRORS.md): `throw e` never produces a value.
-            self._check_expr(expr.value)
+            self._check_throw(expr)
             return NEVER
         if isinstance(expr, TryExpr):
             return self._check_try(expr, hint, used)
@@ -1234,13 +1388,15 @@ class Checker:
     def _apply_callee(self, callee, args, kwargs, position: int):
         """Call a value of type `callee` (already pruned)."""
         if isinstance(callee, TVar):
-            fn = TFn([self._fresh() for _ in args], self._fresh())
+            fn = TFn([self._fresh() for _ in args], self._fresh(), throws=ESet("var", self.level))
             self._try_unify(callee, fn)
             callee = fn
         if isinstance(callee, TUnknown) or not isinstance(callee, TFn):
             if not isinstance(callee, TUnknown):
                 self._error(position, f"{show(callee)} is not a function")
                 callee = _unchecked()
+            elif callee.kind != "unchecked":
+                self._raise_unknown(position)
             self._check_args_only(args, kwargs)
             return callee
         return self._apply(callee, args, kwargs, position)
@@ -1291,6 +1447,9 @@ class Checker:
             actual = self._check_expr(arg, param)
             if param is not None:
                 self._expect(actual, param, arg.position, "in an argument")
+            if param is None or isinstance(prune(param), TUnknown):
+                self._escape(actual, arg.position)
+        self._raise(callee.throws, position)
         return callee.ret
 
     # -- structs and enums -------------------------------------------------
@@ -1400,9 +1559,12 @@ class Checker:
             if isinstance(obj, TUnknown):
                 return obj
             result = self._fresh()
-            if not self._try_unify(obj, TCon("Promise", [result])):
+            if not self._try_unify(obj, TCon("Promise", [result], ESet("var", self.level))):
                 self._error(expr.position, f"'.await' needs a Promise, found {show(obj)}")
                 return _unchecked()
+            promise = prune(obj)
+            if isinstance(promise, TCon):
+                self._raise(promise.throws, expr.position)
             return result
         field = self._field_type(obj, expr.field, expr.position)[0]
         self.field_types[expr.position] = (obj, field)
@@ -1483,20 +1645,39 @@ class Checker:
         the value's real runtime type test happens at runtime, not here).
         Else form -> join the body and the fallback, exactly like
         `try/else` sugars to `try { E } catch { _ => { F } }`."""
-        body_type = (
-            self._check_block(expr.body, hint)
-            if isinstance(expr.body, Block)
-            else self._check_expr(expr.body, hint)
-        )
+        # M26: the body's errors go to their own set; what the arms don't
+        # fully handle flows on to the enclosing one (the arms' own errors
+        # go there directly).
+        body_errors = ESet("acc", self.level, position=expr.position)
+        accs = self._accs()
+        accs.append(body_errors)
+        try:
+            body_type = (
+                self._check_block(expr.body, hint)
+                if isinstance(expr.body, Block)
+                else self._check_expr(expr.body, hint)
+            )
+        finally:
+            accs.pop()
         types = [body_type]
         if expr.fallback is not None:
+            handled = ALL
             types.append(self._check_expr(expr.fallback, hint))
         else:
+            handled = self._handled(expr.arms)
             for arm in expr.arms:
+                named = self._arm_type_name(arm.pattern)
+                if named is not None:
+                    self.arm_checks.append((body_errors, named, arm.pattern.position))
                 self._check_pattern(arm.pattern, _unchecked())
+                if isinstance(arm.pattern, BindPat):
+                    self.rethrow[self._sym(arm.pattern.position)] = body_errors
                 if arm.guard is not None:
                     self._check_expr(arm.guard)
                 types.append(self._check_block(arm.body, hint))
+        if "*" in handled:
+            self.catch_all.add(body_errors.id)
+        self._raise(body_errors, expr.position, handled)
         if not used:
             return NEVER if types and all(is_con(prune(t), "Never") for t in types) else NONE
         return self._join(types, expr.position)
@@ -1624,6 +1805,154 @@ class Checker:
             instance = TCon(pattern.type_name, info.fresh_args(self.level)) if info is not None else _unchecked()
             self._declare(self._sym(pattern.position), instance, pattern.position, f"'{pattern.name}'")
             return
+
+    # -- errors (M26, docs/ERRORS.md) -----------------------------------------
+
+    def _accs(self) -> list:
+        return self.fn_stack[-1].accs if self.fn_stack else self.main_accs
+
+    def _raise(self, node, position: int, excluded: frozenset = EMPTY) -> None:
+        """The errors in `node` (minus `excluded`) can be thrown here."""
+        if node is None:
+            return
+        accs = self._accs()
+        self.u.flow(node, accs[-1], excluded)
+        self.u.commit()
+        if accs is self.main_accs and len(accs) == 1:
+            self.sites.append((position, node, excluded))
+
+    def _raise_names(self, names, position: int) -> None:
+        self._raise(ESet("acc", self.level, names), position)
+
+    def _raise_unknown(self, position: int) -> None:
+        """Something the checker can't see through may throw here."""
+        self._raise_names({UNKNOWN_ERROR}, position)
+        self.unknown_sites.append((position, [n.id for n in self._accs()[1:]]))
+
+    def _is_error_type(self, name: str) -> bool:
+        entry = self.impl_methods.get(name)
+        return entry is not None and "Error" in entry["traits"]
+
+    def _sealed(self, texprs: list, position: int):
+        """A written `throws A | B` (or `throws never`, `[]`) list; None when
+        it names a type parameter (`throws E` in a generic function), which
+        the checker infers instead, like an unwritten clause."""
+        names = []
+        for texpr in texprs:
+            name = getattr(texpr, "name", None)
+            if name is None:
+                continue
+            if any(name in scope for scope in self.tparams):
+                return None
+            if name != "Unknown" and name != "RuntimeError":
+                names.append(name)
+                self.throws_names.append((name, getattr(texpr, "position", position)))
+        return ESet("sealed", self.level, declared=names, position=position)
+
+    def _check_throw(self, expr: ThrowExpr) -> None:
+        value = expr.value
+        if isinstance(value, Ident):
+            symbol = self._sym(value.position)
+            if symbol in self.rethrow:
+                # Re-throwing what a catch-all arm caught.
+                self._check_expr(value)
+                self._raise(self.rethrow[symbol], expr.position)
+                return
+        t = prune(self._check_expr(value))
+        if isinstance(t, TCon):
+            if t.name == "RuntimeError":
+                return  # runtime errors are catchable but never tracked
+            if t.name in ("Never",):
+                return
+            if not self._is_error_type(t.name):
+                self._error(value.position, f"{show(t)} doesn't implement Error, so it can't be thrown")
+                return
+            self._raise_names({t.name}, expr.position)
+        elif isinstance(t, TFn):
+            self._error(value.position, f"{show(t)} doesn't implement Error, so it can't be thrown")
+        elif isinstance(t, TUnknown) and t.kind == "unchecked":
+            return
+        else:
+            self._raise_unknown(expr.position)
+
+    @staticmethod
+    def _irrefutable(pattern) -> bool:
+        return isinstance(pattern, (WildcardPat, BindPat))
+
+    def _arm_type_name(self, pattern):
+        """The error type a catch arm's pattern names, if any."""
+        if isinstance(pattern, (TypePat, StructPat, EnumPat)):
+            return pattern.type_name
+        return None
+
+    def _handled(self, arms: list) -> frozenset:
+        """The error types a `try`'s arms fully handle: unguarded arms
+        covering a whole type (`e: T`, `T { .. }` with only bindings, or
+        every variant of an enum), or everything (`_`/`e`)."""
+        handled = set()
+        variants: dict = {}
+        for arm in arms:
+            if arm.guard is not None:
+                continue
+            p = arm.pattern
+            if self._irrefutable(p):
+                return ALL
+            if isinstance(p, TypePat):
+                handled.add(p.type_name)
+            elif isinstance(p, StructPat) and all(self._irrefutable(sub) for _n, sub in p.fields):
+                handled.add(p.type_name)
+            elif isinstance(p, EnumPat) and all(self._irrefutable(sub) for _n, sub in p.fields):
+                variants.setdefault(p.type_name, set()).add(p.variant)
+        for name, covered in variants.items():
+            info = self.enums.get(name)
+            if info is not None and covered >= set(info.variants):
+                handled.add(name)
+        return frozenset(handled)
+
+    def _report_errors(self) -> None:
+        roots = [self.main_accs[0]]
+        roots += [node for _p, node, _e in self.sites]
+        roots += [n for check in self.throw_checks for n in check[:2]]
+        roots += [node for node, _n, _p in self.arm_checks]
+        for table in (self.decl_types, self.method_types):
+            for t in table.values():
+                roots += esets(t)
+        for obj, field in self.field_types.values():
+            roots += esets(obj) + esets(field)
+        for t in self.env.values():
+            roots += esets(t.type if isinstance(t, Scheme) else t)
+        solve(roots)
+
+        for position, node, excluded in self.sites:
+            names = sorted(_minus_ex(node.solved, excluded) - {UNKNOWN_ERROR})
+            if names:
+                self.diagnostics.append(
+                    TypeDiagnostic("unhandled", f"Unhandled error: {', '.join(names)}", position)
+                )
+        for source, sealed, position, whose in self.throw_checks:
+            extra = sorted(source.solved - sealed.declared - {UNKNOWN_ERROR})
+            if not extra:
+                continue
+            listed = ", ".join(extra)
+            if whose is not None:
+                message = f"{whose} can throw {listed}, which isn't in its throws list"
+            else:
+                allowed = " | ".join(sorted(sealed.declared)) or "never"
+                message = f"This function can throw {listed}, but its expected type only allows throws {allowed}"
+            self.diagnostics.append(TypeDiagnostic("unhandled", message, position))
+        for name, position in self.throws_names:
+            if not self._is_error_type(name):
+                self._error(position, f"{name} doesn't implement Error, so it can't be in a throws list")
+        for node, name, position in self.arm_checks:
+            if name == "RuntimeError" or UNKNOWN_ERROR in node.solved or name in node.solved:
+                continue
+            self.diagnostics.append(TypeDiagnostic("warning", f"{name} is never thrown here", position))
+        for position, enclosing in self.unknown_sites:
+            if any(i in self.catch_all for i in enclosing):
+                continue
+            self.diagnostics.append(
+                TypeDiagnostic("implicit", "Can't infer what this throws; annotate it", position)
+            )
 
     # -- the explicit level ------------------------------------------------
 

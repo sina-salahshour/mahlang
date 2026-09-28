@@ -6,7 +6,7 @@ tags: [changelog]
 version: "0.1.0"
 ---
 
-This is the current release. Mah's compiled output stops being
+With this release, Mah's compiled output stops being
 Python-only: `runtime/` is a complete second implementation of the
 `.mahc` bytecode machine, written in Rust with **only the standard
 library** — no crates, matching the rest of the project's "nothing to

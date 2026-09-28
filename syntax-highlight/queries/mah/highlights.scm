@@ -28,6 +28,11 @@
 "from" @keyword
 "defer" @keyword
 "detach" @keyword
+"throw" @keyword
+"try" @keyword
+"catch" @keyword
+"throws" @keyword
+"never" @keyword
 (continue_stmt) @keyword
 (none_expr) @keyword
 (none_pattern) @keyword

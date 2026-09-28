@@ -119,7 +119,9 @@ def compile_to_program(
     # M22: zero cost under "loose" -- the checker never runs at all.
     if check != "loose":
         diagnostics = typecheck.check_program(program, resolver)
-        reportable = typecheck.reportable(diagnostics, check)
+        # M26: a warning-only diagnostic (a `catch` arm for an error that's
+        # never thrown) never fails a build.
+        reportable = [d for d in typecheck.reportable(diagnostics, check) if not typecheck.is_warning(d, check)]
         if reportable:
             raise SyntaxError(_format_type_diagnostics(pp, reportable))
 

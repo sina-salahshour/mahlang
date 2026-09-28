@@ -215,9 +215,9 @@ Designed 2026-09-28: typed, checked, inferred errors (`throw` /
 `try ... catch`) in [`ERRORS.md`](ERRORS.md), then the `std:` standard
 library (json, csv, fs, process, random, math, path, time, async, regex,
 collections, socket, http) in [`STDLIB.md`](STDLIB.md). **M25 landed the
-errors design's syntax + runtime** (both VMs); the static checker's
-error-set inference/checking (M26) is still not implemented. The
-standard library still waits on M26 (its I/O and parsing functions throw
-the errors `ERRORS.md` describes, and want the checker to track them).
+errors design's syntax + runtime** (both VMs), and **M26 the static
+checker's error sets** (inference, `throws` checking, unhandled-error
+diagnostics; `ERRORS.md`'s "M26: what landed" lists what's still open).
+The standard library is next.
 `std:test` and the `mah test` runner ([`MAH_TEST.md`](MAH_TEST.md)) come
 right after errors and `std:` resolution.

@@ -1,6 +1,6 @@
 [package]
 name = "mah-vm"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Native (Rust) runtime for Mah .mahc bytecode -- see docs/RUST_VM.md"
 publish = false

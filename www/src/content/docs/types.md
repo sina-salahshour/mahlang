@@ -64,7 +64,9 @@ check = "loose"
 | `explicit` | `strict`, plus every declaration whose type can't be inferred must be annotated |
 
 A file outside a project is `loose`. The editor (the LSP) shows the
-diagnostics as you type.
+diagnostics as you type. The checker also works out what every function
+can throw and reports errors nothing catches, at the same levels: see
+[Errors](/docs/errors).
 
 ### What it infers
 

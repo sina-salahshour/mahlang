@@ -494,16 +494,22 @@ def main(argv: list[str] | None = None) -> int:
             # using the outer `pp`, computed from the very same file/text.
             check_pp, diagnostics = run_type_check(path=args.file, text=entry_str)
             reportable = typecheck.reportable(diagnostics, check_level)
-            severity = "warning" if check_level == "loose" else "error"
+            counts = {"error": 0, "warning": 0}
             for diag in reportable:
+                severity = "warning" if typecheck.is_warning(diag, check_level) else "error"
+                counts[severity] += 1
                 print(f"{severity}: {format_diagnostic(check_pp, diag)}")
-            count = len(reportable)
-            if count == 0:
+            if not reportable:
                 print("no type errors")
             else:
-                noun = severity if count == 1 else f"{severity}s"
-                print(f"{count} {noun}")
-            if check_level != "loose" and reportable:
+                print(
+                    ", ".join(
+                        f"{count} {severity if count == 1 else severity + 's'}"
+                        for severity, count in counts.items()
+                        if count
+                    )
+                )
+            if counts["error"]:
                 exit_code = 1
     except MahRuntimeError as e:
         _report_runtime_error(e)

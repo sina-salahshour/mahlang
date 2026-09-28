@@ -3,12 +3,14 @@
 Status: **M25 landed 2026-09-28: syntax + runtime, both VMs** (`throw`/
 `try`/`catch`/`throws`, the `Error` trait, the built-in `RuntimeError`
 enum, `Promise.Failed`, bytecode 1.4 — see `docs/MAHC_FORMAT.md`).
-**M26, next: the static checker's error-set inference and "unhandled
-error" diagnostics** (the "Inference"/"Uncaught errors" sections below
-describe that design; nothing in M25 checks a `throws` clause or infers
-an error set yet — see `TYPES.md`). This milestone (M25) lands before the
-standard library (see [`STDLIB.md`](STDLIB.md)), whose I/O and parsing
-functions will report failures by throwing the errors described here.
+**M26 landed 2026-09-28: the static checker's error sets** — inference
+(fixpoint over recursion, generic in callbacks' error sets), `throws`
+clauses on functions and function types (inferred when left out), `try`
+filtering, "unhandled error" / "never thrown here" diagnostics, Promise
+error sets, hover. See "M26: what landed" at the end for the exact scope
+and what's still open. This work lands before the standard library (see
+[`STDLIB.md`](STDLIB.md)), whose I/O and parsing functions will report
+failures by throwing the errors described here.
 
 ## Goals
 
@@ -201,10 +203,10 @@ checked/unchecked split, for the same reason). A catch arm naming
 
 At the top of the program (a module's top-level code, or `main`):
 
-- **Checker (M26, not yet implemented)**: a non-empty error set reaching
-  the top level will be an "unhandled error: `FsError`, `ParseError`"
-  diagnostic: a **warning** in `loose`, an **error** in `strict` and
-  `explicit`.
+- **Checker (M26, landed)**: a non-empty error set reaching the top
+  level is an `Unhandled error: FsError, ParseError` diagnostic at the
+  statement/call/`try` it comes out of: a **warning** in `loose`, an
+  **error** in `strict` and `explicit`.
 - **Runtime (M25, landed)**: the program stops and reports `Uncaught T:
   <message()>` (or a `RuntimeError`'s own `message` field, unwrapped, for
   a VM-raised error), located at the `throw` site exactly like an
@@ -235,10 +237,10 @@ let x = input("decimal: ").to_number()   # warning: unhandled ParseError, EndOfI
 - **`detach` / `.await`**: a detached task that throws settles its
   Promise as `Failed { error }` instead of stopping the program (M25
   landed: `Promise` gained this third variant at the *value* level);
-  `.await` re-throws `error` in the awaiting task. The **type-level**
-  `Promise<T>` → `Promise<T, E>` change (`E` defaulting to `never`) is
-  M26 work — M25's checker still treats a Promise's error as untracked
-  `Unknown`. A detached Promise that's never awaited and failed is
+  `.await` re-throws `error` in the awaiting task. At the type level
+  (M26) a Promise carries the detached expression's error set, and
+  `.await` throws it; there's no written `Promise<T, E>` syntax yet (a
+  written `Promise<T>` has an inferred error set). A detached Promise that's never awaited and failed is
   reported as uncaught when the program finishes (the first one, in fail
   order, if there are several).
 - **Timers** (`std:async`'s `set_timeout`/`set_interval`): the callback's
@@ -285,30 +287,90 @@ whole thing with `MAH_TEST_VM=rust`).
   `deferdepth`/`deferabove` opcodes, the HANDLERS section, the built-in
   `RuntimeError` enum, `Promise.Failed` (`docs/MAHC_FORMAT.md`).
 
-The checker's (M26, not yet implemented) error sets will be erased before
-codegen, like all types; the runtime needs only the handler table and
-type tests (already true today, since M25's checker doesn't compute
-error sets at all yet).
+The checker's (M26) error sets are erased before codegen, like all
+types; the runtime needs only the handler table and type tests
+(`tests/test_typecheck.py`'s codegen-unchanged test covers it).
 
 ## Implementation plan
 
 1. **Syntax. ✅ Landed (M25).** Lexer keywords, parser for `throw`,
    `try/catch`, `try/else`, `throws` annotations, type-test patterns.
    AST, resolver, formatter, LSP (via the `mah-add-feature` skill).
-   Tree-sitter/TextMate grammars are a deliberately deferred follow-up.
+   Tree-sitter/TextMate grammars followed with M26 (`throw_expr`,
+   `try_expr`, `catch_arm`, `type_test_pattern`, `throws_clause`).
 2. **Runtime. ✅ Landed (M25).** `Error` trait and `RuntimeError` in the
    prelude, `throw` opcode, the HANDLERS table, unwinding with `defer`,
    runtime-error sites converted, uncaught-error reporting (no stack
    traces yet), Promise error state. Both VMs.
-3. **Checker (M26, next).** Error sets, fixpoint inference, function types with
-   `throws`, `Promise<T, E>`, generic error parameters in the prelude
-   adapters, unhandled/unreachable diagnostics at each strictness level,
-   hover showing a function's `throws`.
-4. **Docs and templates. ✅ Landed (M25), except the website.**
+3. **Checker. ✅ Landed (M26)**, except as listed below. Error sets,
+   fixpoint inference, function types with `throws`, Promise error sets,
+   unhandled/unreachable diagnostics at each strictness level, hover
+   showing a function's `throws`.
+4. **Docs and templates. ✅ Landed (M25, website with M26).**
    `mah/project/templates/` (language reference, AGENTS.md),
-   `examples/errors.mh`. Website docs (`www/`) are out of scope for M25.
+   `examples/errors.mh`, the website's `/docs/errors` page and the
+   v0.2.0 changelog post.
 
 Tests for each step per `docs/TESTING.md`: parser/formatter round-trips,
 runtime unwinding (nested `try`, re-throw, `defer` order, errors across
 `await`, uncaught in detached tasks), checker inference and diagnostics
 per strictness level.
+
+## M26: what landed
+
+`mah/compiler/types.py` (`ESet`, `solve`) and `mah/compiler/typecheck.py`
+(`_raise`, `_check_throw`, `_check_try`, `_generalize_esets`,
+`_report_errors`); tests in `tests/test_typecheck.py`'s
+`M26ErrorSetTests`.
+
+- **Representation.** Error sets are nodes in one program-wide graph
+  (`ESet`): a node's value is its own error names plus every node it
+  links to, minus that link's exclusions (a `try`'s fully-handled types,
+  or everything for a catch-all). Values are the least fixpoint
+  (`types.solve`), computed once at the end of checking, so recursion and
+  mutual recursion need no special handling. `TFn.throws` is a function
+  type's node; `TCon.throws` a Promise's.
+- **Sources.** `throw e` (e's type name; `RuntimeError` is never added),
+  every call and method call (the callee type's node), `.await` (the
+  Promise's node), and a `defer`red block (its closure's node) raise into
+  the innermost accumulator: the function body's, or a `try` body's /
+  `detach` expression's own. A catch-all arm's binding re-thrown with
+  `throw e` re-throws the `try` body's set. A function value passed where
+  the checker can't follow it (an `Unknown` parameter, an unchecked
+  prelude method such as `map`) counts as throwing its errors at that call.
+- **`throws` clauses.** Written on a function (`fn f() throws A | B`), a
+  method, or a function type (`fn(T) -> U throws E`): the node is
+  *sealed* — callers see exactly the written set, and what flows in (the
+  body, or a closure assigned/passed there) is checked against it. With
+  no clause the set is inferred. A clause naming a type parameter
+  (`throws E` in `fn apply<T, U, E>`) is inferred too. Every listed name
+  must implement `Error`.
+- **Generics.** Like type variables, the error-set variables in a
+  function's signature (a callback parameter's) are quantified at
+  generalization and copied per instance, so `apply(good)` doesn't throw
+  what `apply(bad)` does. The function's own set is flattened in place at
+  that point (down to names plus links to outer sets and those variables).
+- **Diagnostics.** `Unhandled error: A, B` (kind `unhandled`: warning in
+  `loose`, error otherwise) at each top-level site; `'f' can throw X,
+  which isn't in its throws list` / `This function can throw X, but its
+  expected type only allows throws Y` (same kind); `X is never thrown
+  here` for a catch arm (kind `warning`: a warning at every level, never
+  fails a build); `X doesn't implement Error, so it can't be thrown`
+  (mismatch); `Can't infer what this throws; annotate it` at a call to an
+  `Unknown` callee (explicit level only, unless a catch-all encloses it).
+  `typecheck.is_warning` decides the severity for the CLI, driver and LSP.
+- **Hover** shows `throws A | B` after a function's signature.
+
+Still open (not in M26):
+
+- The `explicit`-level rule that every **exported** function with a
+  non-empty set must declare it.
+- The prelude adapters' own error parameters (`Mapped<T, U, E>`): the
+  prelude is still unchecked, so a throwing `map` callback is charged to
+  the `map` call rather than to whatever pulls items.
+- User `Index`/`Iterable`/`Printable` impls that throw (indexing, `for`,
+  `print`'s `to_string`) aren't tracked, and neither are errors thrown
+  from a struct field's closure stored before the field's type is known.
+- Written `Promise<T, E>` syntax, and timers (`std:async` doesn't exist yet).
+- Hover doesn't name error-set variables (`fn apply(f: fn(T) -> U, x: T)
+  -> U`, not `... throws E`).

@@ -176,6 +176,19 @@ module.exports = grammar({
           optional(seq($._type, repeat(seq(",", $._type)))),
           ")",
           optional(seq("->", field("return_type", $._type))),
+          optional($.throws_clause),
+        ),
+      ),
+
+    // M25/M26 (docs/ERRORS.md): `throws A | B` / `throws never` after a
+    // function's (or function type's) return type. `throws`/`never` are
+    // contextual in the real lexer; tree-sitter's keyword extraction only
+    // treats them as keywords right here, so they stay usable as names.
+    throws_clause: ($) =>
+      prec.right(
+        seq(
+          "throws",
+          choice("never", seq($.named_type, repeat(seq("|", $.named_type)))),
         ),
       ),
 
@@ -254,6 +267,7 @@ module.exports = grammar({
         optional($._params),
         ")",
         optional($._return_type),
+        optional($.throws_clause),
         optional(field("body", $.block)),
       ),
 
@@ -286,6 +300,7 @@ module.exports = grammar({
         optional($._params),
         ")",
         optional($._return_type),
+        optional($.throws_clause),
         field("body", $.block),
       ),
 
@@ -356,6 +371,7 @@ module.exports = grammar({
         optional($._params),
         ")",
         optional($._return_type),
+        optional($.throws_clause),
         field("body", $.block),
       ),
 
@@ -368,6 +384,7 @@ module.exports = grammar({
         optional($._params),
         ")",
         optional($._return_type),
+        optional($.throws_clause),
         field("body", $.block),
       ),
 
@@ -388,13 +405,18 @@ module.exports = grammar({
         optional(seq("=", field("default", $.expr))),
       ),
 
+    // Right-associative so a following `else` always belongs to the `if`
+    // (`try if c { a } else { b } else c` -- the dangling-else case M25's
+    // `try ... else` introduced), exactly as in the real parser.
     if_expr: ($) =>
-      seq(
-        "if",
-        field("condition", $.expr),
-        field("then", $.block),
-        repeat($.elif_clause),
-        optional($.else_clause),
+      prec.right(
+        seq(
+          "if",
+          field("condition", $.expr),
+          field("then", $.block),
+          repeat($.elif_clause),
+          optional($.else_clause),
+        ),
       ),
 
     elif_clause: ($) =>
@@ -524,6 +546,8 @@ module.exports = grammar({
         $.cos_call,
         $.input_call,
         $.detach_expr,
+        $.throw_expr,
+        $.try_expr,
         $.sleep_async_call,
         $.paren_expr,
         $.identifier,
@@ -750,6 +774,44 @@ module.exports = grammar({
       prec(PREC.POSTFIX + 1, seq("detach", field("operand", $.expr))),
 
     sleep_async_call: ($) => seq("sleep_async", "(", $.expr, ")"),
+
+    // M25 (docs/ERRORS.md): `throw e` takes the whole expression after it.
+    throw_expr: ($) =>
+      prec.right(PREC.ASSIGN, seq("throw", field("value", $.expr))),
+
+    // `try { ... } catch { arms }`, `try { ... } else fallback`, and
+    // `try expr else fallback`. A block is an `expr` already, so one
+    // `body` field covers all three (a little more permissive than the real
+    // parser, which wants a block before `catch`).
+    try_expr: ($) =>
+      prec.right(
+        PREC.ASSIGN,
+        seq(
+          "try",
+          field("body", $.expr),
+          choice(
+            seq("catch", "{", repeat($.catch_arm), "}"),
+            seq("else", field("fallback", $.expr)),
+          ),
+        ),
+      ),
+
+    // A `match` arm, plus the catch-only type-test pattern.
+    catch_arm: ($) =>
+      seq(
+        field("pattern", choice($.type_test_pattern, $._pattern)),
+        optional(seq("if", field("guard", $.expr))),
+        "=>",
+        field("body", $.block),
+      ),
+
+    // `e: ParseError` / `_: ParseError`: any instance of that type.
+    type_test_pattern: ($) =>
+      seq(
+        field("name", choice($.identifier, $.wildcard_pattern)),
+        ":",
+        field("type", $.identifier),
+      ),
 
     true: ($) => "true",
 

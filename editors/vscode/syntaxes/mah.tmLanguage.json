@@ -10,6 +10,7 @@
     { "include": "#constants" },
     { "include": "#module-keywords" },
     { "include": "#trait-impl-decl" },
+    { "include": "#error-keywords" },
     { "include": "#control-keywords" },
     { "include": "#storage-keywords" },
     { "include": "#struct-enum-decl" },
@@ -73,6 +74,31 @@
         {
           "name": "keyword.control.mah",
           "match": "\\b(if|elif|else|while|for|in|break|continue|return|match|defer|detach)\\b"
+        }
+      ]
+    },
+    "error-keywords": {
+      "comment": "M25/M26 (docs/ERRORS.md): `throw`/`try` are reserved keywords. `catch`, `throws` and `never` are contextual (still usable as names), so they're only keywords where they can be: `catch` right before `{`, and a `throws` clause -- `throws never` or `throws A | B` -- up to the function body/`=`/`,`/`)`.",
+      "patterns": [
+        {
+          "name": "keyword.control.mah",
+          "match": "\\b(throw|try)\\b"
+        },
+        {
+          "name": "keyword.control.mah",
+          "match": "\\bcatch(?=\\s*\\{)"
+        },
+        {
+          "begin": "\\b(throws)\\s+(?=never\\b|[A-Z])",
+          "beginCaptures": { "1": { "name": "keyword.control.mah" } },
+          "end": "(?=[{=,);]|$)",
+          "patterns": [
+            { "name": "keyword.control.mah", "match": "\\bnever\\b" },
+            { "include": "#builtin-types" },
+            { "name": "entity.name.type.mah", "match": "\\b[A-Z][A-Za-z0-9_$]*\\b" },
+            { "name": "keyword.operator.mah", "match": "\\|" },
+            { "include": "#punctuation" }
+          ]
         }
       ]
     },
