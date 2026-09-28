@@ -50,6 +50,23 @@ fn io_write(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::None)
 }
 
+type PromiseRef = Rc<std::cell::RefCell<super::value::PromiseData>>;
+
+fn promise_arg(vm: &Vm, name: &str, v: &Value) -> Result<PromiseRef, RuntimeError> {
+    match v {
+        Value::Promise(p) => Ok(p.clone()),
+        other => Err(RuntimeError::with_kind(
+            format!("{name}: expected a Promise, got {}", super::value::type_name_of(other, &vm.names)),
+            ErrorKind::TypeMismatch,
+        )),
+    }
+}
+
+fn is_pending(p: &PromiseRef) -> bool {
+    let p = p.borrow();
+    p.settled.is_none() && p.failed.is_none()
+}
+
 /// M33 (1.10): `input(prompt)`'s native -- writes the prompt (flushed, no
 /// newline added), then returns a Promise of the next line of standard
 /// input, which fails with an `EndOfInput` struct when there are no more.
@@ -493,5 +510,34 @@ pub fn call_native(vm: &mut Vm, native: NativeFn, args: &[Value]) -> Result<Valu
         NativeFn::RegexFind => regex_find(vm, args),
         NativeFn::RegexFindAll => regex_find_all(vm, args),
         NativeFn::IoReadLine => io_read_line(vm, args),
+        NativeFn::TimeNowMs => {
+            let ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            Ok(Value::Number(Decimal::from_u64(ms)))
+        }
+        NativeFn::TimeMonotonicMs => Ok(Value::Number(Decimal::from_u64(vm.monotonic_ms()))),
+        NativeFn::TimeCancel => {
+            let p = promise_arg(vm, "cancel", &args[0])?;
+            Ok(Value::Bool(vm.cancel_timer(&p)))
+        }
+        NativeFn::PromiseNew => Ok(Value::Promise(super::value::PromiseData::new_pending())),
+        NativeFn::PromiseResolve => {
+            let p = promise_arg(vm, "resolve", &args[0])?;
+            if !is_pending(&p) {
+                return Ok(Value::Bool(false));
+            }
+            vm.resolve_promise(&p, args[1].clone())?;
+            Ok(Value::Bool(true))
+        }
+        NativeFn::PromiseFail => {
+            let p = promise_arg(vm, "fail", &args[0])?;
+            if !is_pending(&p) {
+                return Ok(Value::Bool(false));
+            }
+            vm.fail_promise(&p, args[1].clone())?;
+            Ok(Value::Bool(true))
+        }
     }
 }

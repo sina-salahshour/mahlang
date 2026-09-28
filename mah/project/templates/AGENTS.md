@@ -76,8 +76,8 @@ test with every change, and make sure `mah test` passes.
   "file.mh"` (or `import name from "file"` for namespaced access). Paths are
   relative to the importing file. The standard library is imported the same
   way, as `"std:<name>"`: `std:math`, `std:path`, `std:json`, `std:csv`,
-  `std:random`, `std:collections`, `std:regex`, and `std:test` for tests
-  (see `docs/mah-language.md`).
+  `std:random`, `std:collections`, `std:regex`, `std:time`, `std:async`,
+  and `std:test` for tests (see `docs/mah-language.md`).
 - Model data with `struct`/`enum` + `match`, and give behavior to types with
   `impl` blocks and traits. Implement `Printable` (`fn to_string(self)`) to
   control how a value prints.

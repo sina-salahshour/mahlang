@@ -51,6 +51,13 @@ pub enum NativeFn {
     RegexFindAll,
     /// M33 (1.10): the async `input`.
     IoReadLine,
+    /// M34 (1.11): std:time and std:async.
+    TimeNowMs,
+    TimeMonotonicMs,
+    TimeCancel,
+    PromiseNew,
+    PromiseResolve,
+    PromiseFail,
 }
 
 /// Whether this VM implements a native of that name (any arity) -- for
@@ -88,6 +95,12 @@ fn native_by_name(name: &str) -> Option<(u64, NativeFn)> {
         "regex.find" => Some((3, NativeFn::RegexFind)),
         "regex.find_all" => Some((2, NativeFn::RegexFindAll)),
         "io.read_line" => Some((1, NativeFn::IoReadLine)),
+        "time.now_ms" => Some((0, NativeFn::TimeNowMs)),
+        "time.monotonic_ms" => Some((0, NativeFn::TimeMonotonicMs)),
+        "time.cancel" => Some((1, NativeFn::TimeCancel)),
+        "promise.new" => Some((0, NativeFn::PromiseNew)),
+        "promise.resolve" => Some((2, NativeFn::PromiseResolve)),
+        "promise.fail" => Some((2, NativeFn::PromiseFail)),
         _ => None,
     }
 }

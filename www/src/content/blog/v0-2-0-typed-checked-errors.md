@@ -6,14 +6,14 @@ tags: [changelog]
 version: "0.2.0"
 ---
 
-This release (milestones M22 through M33) adds a static type checker,
+This release (milestones M22 through M34) adds a static type checker,
 errors you can throw, catch, and have checked, the first modules of a
 standard library (math, paths, JSON, CSV, random numbers, collections,
 regular expressions), a test runner, and String methods. Types and error sets cost nothing at run
 time: they're erased before codegen. The bytecode gains 1.4's handler
 table for `try`, 1.5's math natives, 1.7's natives behind JSON and CSV,
-1.8's random number generator, 1.9's regex matcher, and 1.10's
-asynchronous `input`.
+1.8's random number generator, 1.9's regex matcher, 1.10's
+asynchronous `input`, and 1.11's clocks and hand-settled Promises.
 
 ## Errors: `throw`, `try`, `catch`
 
@@ -207,6 +207,33 @@ backreferences), and a pattern outside it is a `RegexError` with its
 position. `find` gives an `Option<Match>`, and `replace_all` takes `$1`
 / `$name` templates or a function. `must_compile` is for fixed patterns.
 The Rust runtime gains its first dependency, the `regex` crate.
+
+## `std:time` and `std:async`
+
+```mah
+import time from "std:time"
+import async from "std:async"
+
+fn job(ms: Number, name: String) -> String {
+    sleep_async(ms)
+    name
+}
+
+print(async.all([detach job(30, "a"), detach job(10, "b")]))        # [a, b]
+print(try async.timeout(detach job(500, "x"), 20) else "too slow")  # too slow
+print(time.format(time.utc(1790597925), "%a %d %b %Y %H:%M"))       # Mon 28 Sep 2026 12:18
+```
+
+- `std:async` has `all`, `race` and `timeout` (which throws
+  `TimeoutError`), and `set_timeout`/`set_interval` with their `clear_`
+  functions. A cleared timer doesn't keep the program running. The type
+  checker sees through them: `all` of `Promise<String>`s is a
+  `Vector<String>`, and it throws what the Promises throw. Timer
+  callbacks must not throw.
+- `std:time` has `now()`, `monotonic()`, UTC `DateTime`s with
+  `format`/`parse` (`%Y-%m-%d %H:%M`...), ISO 8601, and
+  `duration_text`. Times and durations are plain Numbers of seconds.
+  There are no time zones yet.
 
 ## `input` reads a line, and can wait in the background
 

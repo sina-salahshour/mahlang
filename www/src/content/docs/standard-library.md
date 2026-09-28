@@ -23,9 +23,9 @@ and in your editor, hover and go-to-definition work on its functions like
 on your own (showing locations like `std:math#20:9`).
 
 So far there are `std:math`, `std:path`, `std:json`, `std:csv`,
-`std:random`, `std:collections` and `std:regex` (and `std:test`, see
-[Testing](/docs/testing)). The rest of the plan (fs, process, time,
-async, sockets, http) is in `docs/STDLIB.md` in the repository.
+`std:random`, `std:collections`, `std:regex`, `std:time` and `std:async`
+(and `std:test`, see [Testing](/docs/testing)). The rest of the plan
+(fs, process, sockets, http) is in `docs/STDLIB.md` in the repository.
 
 ## `std:math`
 
@@ -306,6 +306,75 @@ let pattern = "(\\d+"
 print(try { regex.compile(pattern) } catch { e: RegexError => { e.message() } })
 # missing ) at position 0 in "(\d+"
 ```
+
+## `std:time`
+
+```mah
+import time from "std:time"
+
+let d = time.utc(1790597925)                           # seconds since 1970, UTC
+print(d)                                               # 2026-09-28T12:18:45Z
+print(time.format(d, "%A %d %B %Y, %H:%M"))            # Monday 28 September 2026, 12:18
+let later = time.utc(d.timestamp() + 36 * 3600)        # times are Numbers of seconds
+print(time.format(later, "%a %H:%M"), time.duration_text(later.timestamp() - d.timestamp()))   # Wed 00:18 1d 12h 0m 0s
+print(try time.parse("2026-02-30", "%Y-%m-%d") else "no such date")                             # no such date
+```
+
+`time.now()` is the current time and `time.monotonic()` the seconds since
+the program started (use it to measure how long something takes). Both,
+and every duration, are Numbers of seconds with milliseconds, so ordinary
+arithmetic works on them.
+
+A `DateTime` has `year`, `month`, `day`, `hour`, `minute`, `second` and
+`millisecond`, plus `timestamp()`, `weekday()` (Monday is 1) and
+`day_of_year()`. Make one with `time.utc(seconds)` or `time.date(year,
+month, day, hour = 0, ...)`. It prints in ISO 8601, which `time.iso` and
+`time.parse_iso` write and read.
+
+| Code | | Code | |
+|---|---|---|---|
+| `%Y` | year, 4 digits | `%M` | minute |
+| `%m` | month, 01–12 | `%S` | second |
+| `%d` | day, 01–31 | `%f` | millisecond, 000–999 |
+| `%H` | hour, 00–23 | `%j` | day of the year |
+| `%B` `%b` | month name, full / 3 letters | `%A` `%a` | weekday name, full / 3 letters |
+
+`parse` and `date` throw `TimeError` for text that doesn't match or an
+impossible date (February 30). Everything is UTC for now: time zones
+aren't supported yet.
+
+## `std:async`
+
+A Promise comes from `detach`. `std:async` combines them, and runs
+timers:
+
+```mah
+import async from "std:async"
+
+fn job(ms: Number, name: String) -> String {
+    sleep_async(ms)
+    name
+}
+
+print(async.all([detach job(30, "a"), detach job(10, "b")]))           # [a, b]
+print(async.race([detach job(30, "slow"), detach job(5, "fast")]))     # fast
+print(try { async.timeout(detach job(500, "x"), 20) } catch { e: TimeoutError => { e.message() } })   # timed out after 20 ms
+
+let ticks = [0]
+let ticker = async.set_interval(fn() { ticks[0] = ticks[0] + 1 }, 10)
+async.set_timeout(fn() { async.clear_interval(ticker) }, 55)
+```
+
+- `all(promises)` gives every value, in order, once all are done, and
+  throws as soon as any fails. `race(promises)` gives whichever settles
+  first. `timeout(promise, ms)` gives the value if it comes in time and
+  throws `TimeoutError` otherwise. The type checker knows each one's
+  result type and what it can throw.
+- These wait like any call; `detach` them to keep going meanwhile.
+- `set_timeout(f, ms)` calls `f` once, and `set_interval(f, ms)` calls it
+  repeatedly until `clear_interval`. An active interval keeps the program
+  running; a cleared timer doesn't. Callbacks can't throw (their type is
+  `fn() throws never`): handle errors inside them.
 
 ## How it's built
 

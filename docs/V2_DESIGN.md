@@ -3164,6 +3164,28 @@ node that resolved to it. Then:
       on both VMs showing timers tick while `input` waits); the old
       assertions about the digit-scanning `input` were updated on purpose.
 
+35. **M34 — `std:time` and `std:async`. ✅ Landed.** `docs/STDLIB.md`
+    Phase 2, plus Phase 0 step 4's cancellable timers; bytecode 1.11
+    (natives only) in `docs/MAHC_FORMAT.md` §4.4/§7. Decisions in
+    `STDLIB.md`.
+
+    - **Natives, both VMs**: `time.now_ms`, `time.monotonic_ms`,
+      `time.cancel` (removes a Promise's pending timer: `timers` filtered
+      in Python, `BinaryHeap::retain` in Rust), `promise.new`,
+      `promise.resolve`, `promise.fail` (settling from inside a task
+      resumes its waiters re-entrantly, like `detach`).
+    - **`mah/std/async.mh`**: `all`, `race`, `timeout` (generic, typed so
+      the checker tracks the inputs' errors), `set_timeout`,
+      `set_interval`, `clear_timeout`, `clear_interval` (`TimerId`;
+      callbacks `fn() throws never`), `TimeoutError`.
+    - **`mah/std/time.mh`**: `now`, `monotonic`, `DateTime` (UTC; `utc`,
+      `date`, `timestamp`, `weekday`, `day_of_year`), `format`/`parse`
+      with strftime-style codes, `iso`/`parse_iso`, `duration_text`,
+      `TimeError`. Times and durations are Numbers of seconds.
+    - Tests: `mah/std/{time,async}.test.mh` (both VMs), `TimeAndAsyncTests`
+      (natives, program lifetime with cleared and active timers, checker
+      types and errors), `vm_diff.py` cases, `examples/timers.mh`.
+
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
 it** (`make test` must stay green) — see `docs/TESTING.md` for where
