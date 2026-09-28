@@ -5,6 +5,8 @@
 - **Highlighting** for errors (Mah v0.2.0): `throw`/`try`, and `catch`,
   `throws` and `never` where they're keywords (`try { } catch {`, a
   `throws A | B` / `throws never` clause); elsewhere they stay plain names.
+- **Completion and hover** know the new String methods (`split`, `trim`,
+  `replace`, `index_of`, ...), `Vector.join`, and their types.
 - **Highlighting** for `test "name" { ... }` blocks in `*.test.mh` files
   (Mah v0.2.0's `mah test`); the outline lists each test.
 - **Highlighting** for `extern fn` (standard library modules), and `sin`/

@@ -82,6 +82,30 @@ fn build_initial_method_table(names: &BuiltinTypeNames) -> HashMap<(Rc<str>, Rc<
     set_inherent(&names.string, "len", NativeMethodKind::StringLen);
     set_inherent(&names.string, "char_at", NativeMethodKind::StringCharAt);
     set_inherent(&names.function, "arity", NativeMethodKind::FunctionArity);
+    // M29 (1.6): the String methods and Vector.join -- docs/STDLIB.md,
+    // mirroring mah/string_methods.py.
+    for (mname, kind) in [
+        ("split", NativeMethodKind::StringSplit),
+        ("trim", NativeMethodKind::StringTrim),
+        ("trim_start", NativeMethodKind::StringTrimStart),
+        ("trim_end", NativeMethodKind::StringTrimEnd),
+        ("pad_start", NativeMethodKind::StringPadStart),
+        ("pad_end", NativeMethodKind::StringPadEnd),
+        ("replace", NativeMethodKind::StringReplace),
+        ("replace_all", NativeMethodKind::StringReplaceAll),
+        ("starts_with", NativeMethodKind::StringStartsWith),
+        ("ends_with", NativeMethodKind::StringEndsWith),
+        ("contains", NativeMethodKind::StringContains),
+        ("index_of", NativeMethodKind::StringIndexOf),
+        ("repeat", NativeMethodKind::StringRepeat),
+        ("to_upper", NativeMethodKind::StringToUpper),
+        ("to_lower", NativeMethodKind::StringToLower),
+        ("lines", NativeMethodKind::StringLines),
+        ("parse_number", NativeMethodKind::StringParseNumber),
+    ] {
+        set_inherent(&names.string, mname, kind);
+    }
+    set_inherent(&names.vector, "join", NativeMethodKind::VectorJoin);
     set_inherent(&names.vector, "len", NativeMethodKind::VectorLen);
     set_inherent(&names.vector, "push", NativeMethodKind::VectorPush);
     set_inherent(&names.vector, "pop", NativeMethodKind::VectorPop);
@@ -218,14 +242,17 @@ pub fn bind_method_call(
             }
         }
         Callable::Native(kind) => {
-            if let Some(opt_name) = kind.optional_name() {
+            let optional = kind.optional_params();
+            if !optional.is_empty() {
                 let arity = kind.required_arity();
                 let mut params: Vec<(Rc<str>, bool)> =
                     (0..arity).map(|i| (Rc::from(format!("#{i}").as_str()), false)).collect();
-                params.push((Rc::from(opt_name), true));
+                params.extend(optional.iter().map(|(name, _)| (Rc::from(*name), true)));
                 let mut bound = bind_params(params.len(), Some(&params), values, kwargs, &label)?;
-                if matches!(bound[arity], Value::Absent) {
-                    bound[arity] = Value::Bool(false); // every optional native param defaults to `false`
+                for (i, (_name, default)) in optional.iter().enumerate() {
+                    if matches!(bound[arity + i], Value::Absent) {
+                        bound[arity + i] = default.value();
+                    }
                 }
                 let mut out = Vec::with_capacity(bound.len() + 1);
                 out.push(recv);
@@ -609,9 +636,32 @@ impl<'p> Vm<'p> {
             }
         };
         match thrown_at {
-            Some(pc) => self.locate(pc, &base),
+            Some(pc) => {
+                let pc = self.report_pc(value, pc);
+                self.locate(pc, &base)
+            }
             None => base,
         }
+    }
+
+    /// M29: where to locate an uncaught error -- its throw site, unless that's
+    /// in the prelude, in which case the innermost enclosing call outside it
+    /// (from the backtrace). Mirrors `code_interpreter.py`'s `report_pc`.
+    fn report_pc(&self, value: &Value, pc: usize) -> usize {
+        let Some(debug) = self.debug else { return pc };
+        let backtrace = match value {
+            Value::Struct(s) => s.borrow().backtrace.clone(),
+            Value::Enum(e) => e.borrow().backtrace.clone(),
+            _ => None,
+        }
+        .unwrap_or_else(|| vec![pc]);
+        for candidate in backtrace {
+            let idx = debug.pcs.partition_point(|&x| x <= candidate);
+            if idx == 0 || debug.file_paths[debug.runs[idx - 1].0].as_ref() != "<prelude>" {
+                return candidate;
+            }
+        }
+        pc
     }
 
     fn op_add(&mut self, a: &Value, b: &Value) -> RResult<Value> {

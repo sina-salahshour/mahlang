@@ -3033,6 +3033,33 @@ node that resolved to it. Then:
       bytecode, every outcome on both VMs, `std:test`, the CLI, LSP),
       `runtime/tests/vm_diff.py` outcome parity, `examples/testing/`.
 
+30. **M29 — String methods. ✅ Landed.** `docs/STDLIB.md` Phase 1's first
+    item; bytecode 1.6 (native methods only) in `docs/MAHC_FORMAT.md`
+    §3/§6.7/§7.
+
+    - **Native methods, both VMs**: String `split`, `trim`/`trim_start`/
+      `trim_end`, `pad_start`/`pad_end`, `replace`/`replace_all`,
+      `starts_with`/`ends_with`/`contains`, `index_of`, `repeat`,
+      `to_upper`/`to_lower`, `lines`, `parse_number`, and `Vector.join`.
+      `mah/string_methods.py` defines every rule; `runtime/src/vm/
+      methods.rs` ports it. Rust native methods gained any number of
+      optional parameters with their own defaults (`OptDefault`).
+    - **Versioning**: `format.NATIVE_METHOD_SINCE_MINOR`; `lower.py`'s
+      `_file_minor` writes 1.6 only when the program's own code (not the
+      prelude's) calls a method by one of those names.
+    - **Prelude**: `NumberParseError`, `trait ToNumber` (`to_number()`),
+      and `impl<T> Option<T>` (`unwrap`, `unwrap_or`, `is_some`,
+      `is_none`).
+    - **Checker**: signatures for every new native method; fully annotated
+      prelude methods are typed from their annotations (so `to_number`
+      throws `NumberParseError`).
+    - **Uncaught errors from inside the prelude** are located at the
+      innermost call outside it, using M28's backtraces (both VMs); one
+      test changed on purpose (`tests/test_iterators.py`).
+    - Tests: `tests/test_string_methods.py` (both VMs), `vm_diff.py` parity
+      for every method and error, bytecode-minor tests,
+      `examples/string_methods.mh`.
+
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
 it** (`make test` must stay green) — see `docs/TESTING.md` for where

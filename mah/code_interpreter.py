@@ -55,6 +55,7 @@ from typing import Any, NamedTuple
 from .bytecode.decode import decode
 from .bytecode.format import MahcFormatError
 from .bytecode.program import Program
+from . import string_methods
 from .natives import NATIVES, NativeContext
 from .test_outcome import TestOutcome
 from .runtime_values import (
@@ -924,6 +925,32 @@ def _execute(linked: LinkedProgram, test_slot: int | None = None, deadline: floa
         NativeMethod(1, lambda s, i: _string_char_at(s, i)),
         True,
     )
+    # M29 (1.6): the String methods and `Vector.join` (docs/STDLIB.md,
+    # mah/string_methods.py -- every rule is defined there).
+    for method_name, native in {
+        "split": NativeMethod(0, string_methods.split, (("sep", NONE_VALUE), ("limit", NONE_VALUE))),
+        "trim": NativeMethod(0, string_methods.trim),
+        "trim_start": NativeMethod(0, string_methods.trim_start),
+        "trim_end": NativeMethod(0, string_methods.trim_end),
+        "pad_start": NativeMethod(1, string_methods.pad_start, (("fill", " "),)),
+        "pad_end": NativeMethod(1, string_methods.pad_end, (("fill", " "),)),
+        "replace": NativeMethod(2, string_methods.replace),
+        "replace_all": NativeMethod(2, string_methods.replace_all),
+        "starts_with": NativeMethod(1, string_methods.starts_with),
+        "ends_with": NativeMethod(1, string_methods.ends_with),
+        "contains": NativeMethod(1, string_methods.contains),
+        "index_of": NativeMethod(1, string_methods.index_of),
+        "repeat": NativeMethod(1, string_methods.repeat),
+        "to_upper": NativeMethod(0, string_methods.to_upper),
+        "to_lower": NativeMethod(0, string_methods.to_lower),
+        "lines": NativeMethod(0, string_methods.lines),
+        "parse_number": NativeMethod(0, string_methods.parse_number),
+    }.items():
+        method_table.setdefault(("String", method_name), {"inherent": None, "traits": {}})["inherent"] = (native, True)
+    method_table.setdefault(("Vector", "join"), {"inherent": None, "traits": {}})["inherent"] = (
+        NativeMethod(0, lambda v, sep: string_methods.join(v, sep, to_str), (("sep", ""),)),
+        True,
+    )
     method_table.setdefault(("Function", "arity"), {"inherent": None, "traits": {}})["inherent"] = (
         NativeMethod(0, lambda fn: Decimal(fn.param_count)),
         True,
@@ -1218,8 +1245,22 @@ def _execute(linked: LinkedProgram, test_slot: int | None = None, deadline: floa
             tname = type_name_of(value)
             m = _uncaught_message(value)
             base = f"Uncaught {tname}" if m is None else f"Uncaught {tname}: {m}"
-        pc = getattr(value, "thrown_at", None)
+        pc = report_pc(value)
         return base if pc is None else locate(pc, base)
+
+    def report_pc(value):
+        """M29: where to locate an uncaught error -- its throw site, unless
+        that's in the prelude (`"x".to_number()` throws from there), in which
+        case the innermost enclosing call outside it, from the backtrace."""
+        pc = getattr(value, "thrown_at", None)
+        debug = linked.debug
+        if pc is None or debug is None:
+            return pc
+        for candidate in getattr(value, "backtrace", None) or [pc]:
+            idx = bisect.bisect_right(debug.pcs, candidate) - 1
+            if idx < 0 or debug.file_paths[debug.runs[idx][0]] != "<prelude>":
+                return candidate
+        return pc
 
     def step_task(task: Task, pending=None):
         """Advance `task` until it finishes (`("done", value)`), genuinely

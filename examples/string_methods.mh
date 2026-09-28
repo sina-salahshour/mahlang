@@ -1,0 +1,36 @@
+# String methods (M29): parse a tiny "key = value" config and report on it.
+
+let config = "
+name = mah
+  version = 0.2.0
+# a comment
+authors = Sina,  Claude
+"
+
+let settings = [:]
+for let line in config.lines() {
+    let text = line.trim()
+    if text == "" | text.starts_with("#") { continue }
+    let parts = text.split("=", 1)
+    settings[parts[0].trim()] = parts[1].trim()
+}
+
+print(settings["name"].to_upper(), "v" + settings["version"])
+
+let authors = settings["authors"].split(",")
+for let author, let i in authors {
+    print((i + 1).to_string().pad_start(2, "0") + ". " + author.trim())
+}
+
+# Numbers from text: `to_number()` throws NumberParseError, `parse_number()`
+# returns none instead.
+let major = try { settings["version"].split(".")[0].to_number() } catch {
+    e: NumberParseError => { 0 }
+}
+print("major version:", major, "next:", major + 1)
+print(try "v2".to_number() else "not a number", "v2".parse_number())
+
+# Searching: index_of returns some(position) or none.
+let name = settings["name"]
+print(name.index_of("h"), name.index_of("z").unwrap_or(0 - 1), name.replace_all("a", "A"))
+print(["a", "b", "c"].join(" -> "))

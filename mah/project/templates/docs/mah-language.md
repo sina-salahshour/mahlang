@@ -38,7 +38,7 @@ let y = {
 | type | literals / how you get one | notes |
 |---|---|---|
 | `Number` | `42`, `3.14`, `-7` | decimal numbers (28 significant digits); `10 / 4` is `2.5` |
-| `String` | `"hi\n"` | escapes `\n \t \" \\`; immutable; `s.len()`, `s.char_at(i)`, `s[i]`, `s[a..b]` (see Vectors and Maps); iterable, see Iterators |
+| `String` | `"hi\n"` | escapes `\n \t \" \\`; immutable; `s.len()`, `s[i]`, `s[a..b]` (see Vectors and Maps), `split`/`trim`/`replace`/... (see String methods); iterable, see Iterators |
 | `Bool` | `true`, `false` | |
 | `Option` | `none`, `some(x)` | Mah's null. `none` is falsy; `some(x)` is always truthy |
 | `Function` | `fn(a) { a }` | first-class closures, captured by reference |
@@ -411,6 +411,36 @@ let s = "héllo"
 print(s[1], s[-1], s[9], s[1..3], s[..=1], s[2..])   # é o none él hé llo
 ```
 
+- **String methods** (all return new Strings; positions count code points,
+  and "whitespace" is any Unicode whitespace):
+
+```mah
+print("a,b,,c".split(","), "  one  two ".split(), "k=v=w".split("=", 1))   # [a, b, , c] [one, two] [k, v=w]
+print("|" + "  hi ".trim() + "|", "7".pad_start(3, "0"), "ab".repeat(2))  # |hi| 007 abab
+print("a-b-c".replace("-", "+"), "a-b-c".replace_all("-", "+"))           # a+b-c a+b+c
+print("hello".starts_with("he"), "hello".contains("ll"), "hello".index_of("l"))  # true true some(2)
+print("Straße".to_upper(), "A\nB\n".lines(), ["x", 1].join(", "))           # STRASSE [A, B] x, 1
+print("42".to_number() + 1, " 7 ".parse_number(), "x".parse_number())     # 43 7 none
+```
+
+| method | |
+|---|---|
+| `split(sep = none, limit = none)` | a Vector of pieces; no `sep`: split on runs of whitespace; `limit` = at most that many splits |
+| `trim()`, `trim_start()`, `trim_end()` | without surrounding whitespace |
+| `pad_start(width, fill = " ")`, `pad_end(...)` | padded with `fill` to `width` characters |
+| `replace(from, to)`, `replace_all(from, to)` | the first / every occurrence replaced |
+| `starts_with(s)`, `ends_with(s)`, `contains(s)` | Bool |
+| `index_of(s)` | `some(position)` or `none` |
+| `repeat(n)`, `to_upper()`, `to_lower()` | |
+| `lines()` | a Vector of lines (`\n` or `\r\n` endings) |
+| `to_number()` | the Number it spells (whitespace allowed); throws `NumberParseError` (`e.text` is the String) |
+| `parse_number()` | the same, but `none` instead of throwing |
+| `char_at(i)` | the character at `i` (an error when out of range; `s[i]` gives `none`) |
+
+Also `v.join(sep = "")` on a Vector (each item's `to_string`), and on
+an Option value such as `index_of`'s result: `unwrap()` (the value; throws
+on `none`), `unwrap_or(default)`, `is_some()`, `is_none()`.
+
 - **Your own types** can support `x[k]` by implementing the `Index` trait
   (`fn index(self, key)`) and `x[k] = v` with `IndexAssign`
   (`fn index_assign(self, key, value)`):
@@ -759,7 +789,8 @@ test "not ready yet" {
   assigning into a String (`s[0] = "x"`: Strings are immutable).
 - `for x in ...` without `let`, C-style `for (i = 0; ...)`, destructuring in
   `for` bindings, labeled `break`/`continue`.
-- String methods other than `len`/`char_at` (no `split`, `replace`, ...).
+- Regular expressions and string formatting/interpolation (use `+`,
+  `pad_start`, and friends).
 - `&&`, `||`, `+=`, `++`, ternary `?:`.
 - Type-checking trait-typed values, bounds, and the prelude's iterator methods (the checker skips these for now); classes/inheritance.
 - Variadic parameters (`*args`, `**kwargs`); only `print` takes any number of arguments.

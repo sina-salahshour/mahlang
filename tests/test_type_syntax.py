@@ -306,14 +306,16 @@ class LspTests(unittest.TestCase):
 class PreprocessorTests(unittest.TestCase):
     def test_prelude_triggers_unchanged(self):
         # M25: the prelude's new `Error` trait (and its `message` method,
-        # both re-implemented for `RuntimeError`) add two triggers.
+        # both re-implemented for `RuntimeError`) add two triggers. M29 adds
+        # `to_number` (and NumberParseError/ToNumber) and the Option helpers.
         self.assertEqual(
             sorted(PRELUDE_TRIGGERS),
             ['Error', 'Filtered', 'FilteredIterator', 'FromRange', 'FromRangeIterator', 'Iterable', 'Iterator',
-             'MapEntry', 'Mapped', 'MappedIterator', 'Range', 'RangeIterator', 'Skipped',
-             'SkippedIterator', 'StringIterator', 'Taken', 'TakenIterator', 'ToRange', 'VectorIterator',
-             '__Iter', '__NoInitial', 'call', 'call_reduce', 'collect', 'entries', 'filter', 'iter',
-             'map', 'message', 'next', 'reduce', 'require_number', 'skip', 'take', 'to_string'],
+             'MapEntry', 'Mapped', 'MappedIterator', 'NumberParseError', 'Range', 'RangeIterator', 'Skipped',
+             'SkippedIterator', 'StringIterator', 'Taken', 'TakenIterator', 'ToNumber', 'ToRange',
+             'VectorIterator', '__Iter', '__NoInitial', 'call', 'call_reduce', 'collect', 'entries', 'filter',
+             'is_none', 'is_some', 'iter', 'map', 'message', 'next', 'reduce', 'require_number', 'skip', 'take',
+             'to_number', 'to_string', 'unwrap', 'unwrap_or'],
         )
 
     def test_generic_exported_fn_imports(self):
