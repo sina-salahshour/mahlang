@@ -1,0 +1,498 @@
+# std:json -- JSON text to and from Mah values (docs/STDLIB.md).
+#
+#   import json from "std:json"
+#   let config = json.parse("{\"name\": \"mah\", \"tags\": [1, 2]}")
+#   config["tags"][1]                   # 2
+#   json.stringify(config)              # {"name":"mah","tags":[1,2]}
+#   json.stringify(config, indent: 2)   # the same over several lines
+#
+# JSON objects become Maps (keys in document order), arrays Vectors, and
+# `null` is `none`. `stringify` also takes structs (as objects of their
+# fields) and enum values: a unit variant is its name ("Empty"), any other
+# is an object with one key, the variant's name, holding its fields
+# ({"Circle": {"r": 2}}); `some(x)` is just `x`.
+#
+# To read JSON into a struct, implement `FromJson` with the helpers below
+# (`field`, `as_number`, ...), which throw `JsonError.Shape` on a mismatch:
+#
+#   impl FromJson for Point {
+#       fn from_json(value) {
+#           Point { x: json.as_number(json.field(value, "x")), y: ... }
+#       }
+#   }
+
+extern fn type_name(value: Unknown) -> String = "value.type_name"
+extern fn fields(value: Unknown) -> Unknown = "value.fields"
+extern fn variant(value: Unknown) -> Unknown = "value.variant"
+extern fn chars(s: String) -> Vector<String> = "string.chars"
+extern fn code_point(c: String) -> Number = "string.code_point"
+extern fn from_code_point(n: Number) -> String = "string.from_code_point"
+
+# `Syntax`: the text isn't JSON; `line` and `column` count from 1.
+# `Shape`: a value doesn't have the shape asked for (`stringify` got
+# something JSON can't hold, or a `FromJson` helper got the wrong type).
+enum JsonError {
+    Syntax { message: String, line: Number, column: Number },
+    Shape { message: String }
+}
+
+impl Error for JsonError {
+    fn message(self) -> String {
+        match self {
+            JsonError.Syntax { message, line, column } => {
+                message + " at line " + line + ", column " + column
+            }
+            JsonError.Shape { message } => { message }
+        }
+    }
+}
+
+# Implemented by types that can be read from a parsed JSON value:
+# `Point.from_json(json.parse(text))`.
+trait FromJson {
+    fn from_json(value: Unknown) -> Self
+}
+
+# -- parse ----------------------------------------------------------------------
+
+# (`&` and `|` evaluate both sides, so guards here are nested `if`s.)
+
+fn is_digit(c: String) -> Bool { c >= "0" & c <= "9" }
+
+fn hex_value(c: String) -> Number {
+    let i = "0123456789abcdef".index_of(c.to_lower())
+    if c.len() != 1 { return 0 - 1 }
+    match i {
+        some(n) => { n }
+        none => { 0 - 1 }
+    }
+}
+
+# How a character appears in a message.
+fn show_char(c: String) -> String {
+    if c == "" { return "end of input" }
+    if code_point(c) < 32 { return "a control character" }
+    "'" + c + "'"
+}
+
+# The text being read, as characters followed by one "" (so reading past
+# the last character gives ""), and the position of the next character.
+struct JsonReader { text: Vector<String>, pos: Number }
+
+impl JsonReader {
+    # The next character, or "" at the end.
+    fn peek(self) -> String { self.text[self.pos] }
+
+    fn fail(self, message: String) -> Unknown throws JsonError {
+        let line = 1
+        let column = 1
+        let i = 0
+        while i < self.pos {
+            if self.text[i] == "\n" {
+                line = line + 1
+                column = 1
+            } else {
+                column = column + 1
+            }
+            i = i + 1
+        }
+        throw JsonError.Syntax { message: message, line: line, column: column }
+    }
+
+    fn skip_space(self) {
+        let t = self.text
+        let i = self.pos
+        while true {
+            let c = t[i]
+            if c != " " & c != "\n" & c != "\t" & c != "\r" { break }
+            i = i + 1
+        }
+        self.pos = i
+    }
+
+    # Consumes `c`, or fails naming what was expected.
+    fn expect(self, c: String, what: String) throws JsonError {
+        if self.peek() != c {
+            self.fail("expected " + what + ", found " + show_char(self.peek()))
+        }
+        self.pos = self.pos + 1
+    }
+
+    fn literal(self, word: String, value: Unknown) -> Unknown throws JsonError {
+        let start = self.pos
+        for let c in word {
+            if self.peek() != c {
+                self.pos = start
+                self.fail("invalid literal, expected " + word)
+            }
+            self.pos = self.pos + 1
+        }
+        value
+    }
+
+    fn value(self) -> Unknown throws JsonError {
+        self.skip_space()
+        let c = self.peek()
+        if c == "{" { return self.object() }
+        if c == "[" { return self.array() }
+        if c == "\"" { return self.string() }
+        if c == "t" { return self.literal("true", true) }
+        if c == "f" { return self.literal("false", false) }
+        if c == "n" { return self.literal("null", none) }
+        if c == "-" | is_digit(c) { return self.number() }
+        self.fail("expected a value, found " + show_char(c))
+    }
+
+    fn object(self) -> Unknown throws JsonError {
+        self.pos = self.pos + 1
+        let out = [:]
+        self.skip_space()
+        if self.peek() == "}" {
+            self.pos = self.pos + 1
+            return out
+        }
+        while true {
+            self.skip_space()
+            if self.peek() != "\"" {
+                self.fail("expected a string key, found " + show_char(self.peek()))
+            }
+            let key = self.string()
+            self.skip_space()
+            self.expect(":", "':'")
+            out[key] = self.value()
+            self.skip_space()
+            if self.peek() == "}" {
+                self.pos = self.pos + 1
+                return out
+            }
+            self.expect(",", "',' or '}'")
+        }
+        out
+    }
+
+    fn array(self) -> Unknown throws JsonError {
+        self.pos = self.pos + 1
+        let out = []
+        self.skip_space()
+        if self.peek() == "]" {
+            self.pos = self.pos + 1
+            return out
+        }
+        while true {
+            out.push(self.value())
+            self.skip_space()
+            if self.peek() == "]" {
+                self.pos = self.pos + 1
+                return out
+            }
+            self.expect(",", "',' or ']'")
+        }
+        out
+    }
+
+    # Four hex digits after `\u`.
+    fn hex4(self) -> Number throws JsonError {
+        let n = 0
+        let i = 0
+        while i < 4 {
+            let d = hex_value(self.peek())
+            if d < 0 { self.fail("expected a hex digit, found " + show_char(self.peek())) }
+            n = n * 16 + d
+            self.pos = self.pos + 1
+            i = i + 1
+        }
+        n
+    }
+
+    fn escape(self) -> String throws JsonError {
+        let c = self.peek()
+        let simple = [
+            "\"": "\"",
+            "\\": "\\",
+            "/": "/",
+            "b": "\u0008",
+            "f": "\u000c",
+            "n": "\n",
+            "r": "\r",
+            "t": "\t"
+        ]
+        if simple.has(c) {
+            self.pos = self.pos + 1
+            return simple[c]
+        }
+        if c != "u" { self.fail("invalid escape " + show_char(c)) }
+        self.pos = self.pos + 1
+        let start = self.pos - 2
+        let n = self.hex4()
+        if n >= 55296 & n < 56320 {
+            # a high surrogate: must be followed by `\uDC00`..`\uDFFF`
+            if self.peek() == "\\" {
+                self.pos = self.pos + 1
+                if self.peek() == "u" {
+                    self.pos = self.pos + 1
+                    let low = self.hex4()
+                    if low >= 56320 & low < 57344 {
+                        return from_code_point(65536 + (n - 55296) * 1024 + (low - 56320))
+                    }
+                }
+            }
+            self.pos = start
+            self.fail("unpaired surrogate in a \\u escape")
+        }
+        if n >= 56320 & n < 57344 {
+            self.pos = start
+            self.fail("unpaired surrogate in a \\u escape")
+        }
+        from_code_point(n)
+    }
+
+    fn string(self) -> String throws JsonError {
+        let t = self.text
+        let i = self.pos + 1
+        let parts = []
+        while true {
+            # a run of plain characters
+            let start = i
+            let c = t[i]
+            while c != "\"" & c != "\\" & c >= " " {
+                i = i + 1
+                c = t[i]
+            }
+            if i > start { parts.push(t[start..i].join()) }
+            self.pos = i
+            if c == "\"" {
+                self.pos = i + 1
+                return parts.join()
+            }
+            if c == "" { self.fail("unterminated string") }
+            if c < " " { self.fail("a control character in a string must be escaped") }
+            self.pos = i + 1
+            parts.push(self.escape())
+            i = self.pos
+        }
+        ""
+    }
+
+    fn digits(self) -> Number {
+        let n = 0
+        while is_digit(self.peek()) {
+            self.pos = self.pos + 1
+            n = n + 1
+        }
+        n
+    }
+
+    fn number(self) -> Number throws JsonError {
+        let start = self.pos
+        if self.peek() == "-" { self.pos = self.pos + 1 }
+        if self.peek() == "0" {
+            self.pos = self.pos + 1
+            if is_digit(self.peek()) { self.fail("a number can't have a leading zero") }
+        } elif self.digits() == 0 {
+            self.fail("expected a digit, found " + show_char(self.peek()))
+        }
+        if self.peek() == "." {
+            self.pos = self.pos + 1
+            if self.digits() == 0 { self.fail("expected a digit, found " + show_char(self.peek())) }
+        }
+        if self.peek() == "e" | self.peek() == "E" {
+            self.pos = self.pos + 1
+            if self.peek() == "+" | self.peek() == "-" { self.pos = self.pos + 1 }
+            if self.digits() == 0 { self.fail("expected a digit, found " + show_char(self.peek())) }
+        }
+        let n = self.text[start..self.pos].join().parse_number()
+        if n == none {
+            self.pos = start
+            self.fail("number out of range")
+        }
+        n
+    }
+}
+
+# The value `text` holds: a Map, Vector, Number, String, Bool or `none`.
+export fn parse(text: String) -> Unknown throws JsonError {
+    let t = chars(text)
+    t.push("")
+    let reader = JsonReader { text: t, pos: 0 }
+    let value = reader.value()
+    reader.skip_space()
+    if reader.peek() != "" {
+        reader.fail("unexpected " + show_char(reader.peek()) + " after the value")
+    }
+    value
+}
+
+# -- stringify ------------------------------------------------------------------
+
+fn hex4(n: Number) -> String {
+    let digits = "0123456789abcdef"
+    let out = ""
+    let i = 0
+    while i < 4 {
+        out = digits[n % 16] + out
+        n = n // 16
+        i = i + 1
+    }
+    out
+}
+
+fn quote(s: String) -> String {
+    let parts = ["\""]
+    for let c in chars(s) {
+        if c == "\"" {
+            parts.push("\\\"")
+        } elif c == "\\" {
+            parts.push("\\\\")
+        } elif c == "\n" {
+            parts.push("\\n")
+        } elif c == "\r" {
+            parts.push("\\r")
+        } elif c == "\t" {
+            parts.push("\\t")
+        } elif code_point(c) < 32 {
+            parts.push("\\u" + hex4(code_point(c)))
+        } else {
+            parts.push(c)
+        }
+    }
+    parts.push("\"")
+    parts.join()
+}
+
+# `"[" items "]"` (or braces), one item per line when indenting.
+fn wrap(
+    open: String,
+    items: Vector<String>,
+    close: String,
+    indent: Number,
+    depth: Number
+) -> String {
+    if items.len() == 0 { return open + close }
+    if indent == 0 { return open + items.join(",") + close }
+    let inner = "\n" + " ".repeat(indent * (depth + 1))
+    open + inner + items.join("," + inner) + "\n" + " ".repeat(indent * depth) + close
+}
+
+# The Vectors, Maps, structs and enum values being written, to catch one
+# that contains itself.
+fn enter(stack: Vector<Unknown>, value: Unknown) throws JsonError {
+    for let outer in stack {
+        if outer == value {
+            throw JsonError.Shape { message: "stringify: a value contains itself" }
+        }
+    }
+    stack.push(value)
+}
+
+fn write(
+    value: Unknown,
+    indent: Number,
+    depth: Number,
+    stack: Vector<Unknown>
+) -> String throws JsonError {
+    let colon = if indent == 0 { ":" } else { ": " }
+    # An object of `entries`, at nesting depth `d`.
+    fn object_text(entries: Map<Unknown, Unknown>, d: Number) -> String throws JsonError {
+        let items = []
+        for let key in entries {
+            items.push(quote("" + key) + colon + write(entries[key], indent, d + 1, stack))
+        }
+        wrap("{", items, "}", indent, d)
+    }
+    let kind = type_name(value)
+    if kind == "None" { return "null" }
+    if kind == "Bool" { return if value { "true" } else { "false" } }
+    if kind == "Number" { return "" + value }
+    if kind == "String" { return quote(value) }
+    if kind == "Vector" {
+        enter(stack, value)
+        let items = []
+        for let item in value {
+            items.push(write(item, indent, depth + 1, stack))
+        }
+        stack.pop()
+        return wrap("[", items, "]", indent, depth)
+    }
+    if kind == "Map" {
+        enter(stack, value)
+        let text = object_text(value, depth)
+        stack.pop()
+        return text
+    }
+    let record = fields(value)
+    if record == none {
+        throw JsonError.Shape { message: "stringify: can't write a " + kind + " as JSON" }
+    }
+    let name = variant(value)
+    if kind == "Option" { return write(record["value"], indent, depth, stack) }
+    enter(stack, value)
+    let text = ""
+    if name == none {
+        text = object_text(record, depth)
+    } elif record.len() == 0 {
+        text = quote(name)
+    } else {
+        let inner = quote(name) + colon + object_text(record, depth + 1)
+        text = wrap("{", [inner], "}", indent, depth)
+    }
+    stack.pop()
+    text
+}
+
+# `value` as JSON text: compact, or with `indent` spaces per level and one
+# item per line. Throws `JsonError.Shape` for a function or other value
+# JSON can't hold, or a value that contains itself.
+export fn stringify(value: Unknown, indent: Number = 0) -> String throws JsonError {
+    if indent != indent // 1 | indent < 0 {
+        throw JsonError.Shape { message: "stringify: indent must be a whole number of at least 0" }
+    }
+    write(value, indent, 0, [])
+}
+
+# -- reading values into your own types -----------------------------------------
+
+fn shape(what: String, expected: String, value: Unknown) -> Unknown throws JsonError {
+    throw JsonError.Shape {
+        message: "expected " + expected + " for " + what + ", got " + type_name(value)
+    }
+}
+
+# `object[name]`; throws unless `object` is a Map that has `name`.
+export fn field(object: Unknown, name: String) -> Unknown throws JsonError {
+    if type_name(object) != "Map" { shape("field '" + name + "'", "an object", object) }
+    if !object.has(name) {
+        throw JsonError.Shape { message: "missing field '" + name + "'" }
+    }
+    object[name]
+}
+
+# `value` itself, if it's a Number; `what` names it in the error.
+export fn as_number(value: Unknown, what: String = "the value") -> Number throws JsonError {
+    if type_name(value) != "Number" { shape(what, "a Number", value) }
+    value
+}
+
+export fn as_string(value: Unknown, what: String = "the value") -> String throws JsonError {
+    if type_name(value) != "String" { shape(what, "a String", value) }
+    value
+}
+
+export fn as_bool(value: Unknown, what: String = "the value") -> Bool throws JsonError {
+    if type_name(value) != "Bool" { shape(what, "a Bool", value) }
+    value
+}
+
+export fn as_vector(value: Unknown, what: String = "the value") -> Vector<
+    Unknown
+> throws JsonError {
+    if type_name(value) != "Vector" { shape(what, "an array", value) }
+    value
+}
+
+export fn as_map(value: Unknown, what: String = "the value") -> Map<
+    String,
+    Unknown
+> throws JsonError {
+    if type_name(value) != "Map" { shape(what, "an object", value) }
+    value
+}

@@ -221,9 +221,10 @@ diagnostics; `ERRORS.md`'s "M26: what landed" lists what's still open).
 **M27 started the standard library**: `std:` imports, `extern fn`,
 native table versioning, and `std:math`; **M28 added `std:test` and
 `mah test`** ([`MAH_TEST.md`](MAH_TEST.md)), and **M29 the String
-methods**. Next, per `STDLIB.md`: the remaining pure modules (`std:path`,
-`std:json`, `std:csv`, ... -- now writable in Mah on top of the String
-methods), and the rest of Phase 0 (handle values, the async scheduler,
-the shared PRNG, `input`), each with Mah-level tests.
+methods**, and **M30 `std:path`, `std:json` and `std:csv`**. Next, per
+`STDLIB.md`: the rest of Phase 0 (handle values, the async scheduler,
+the shared PRNG, `input`) that `std:fs`, `std:process`, `std:random`,
+`std:time` and the rest depend on, plus the remaining pure modules
+(`std:collections`, `std:regex`), each with Mah-level tests.
 `std:test` and the `mah test` runner ([`MAH_TEST.md`](MAH_TEST.md)) come
 right after errors and `std:` resolution.

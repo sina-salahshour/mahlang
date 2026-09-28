@@ -644,7 +644,8 @@ are global across all imported files and need no `export`.
 ## Standard library
 
 Standard library modules are imported as `"std:<name>"`, the same two ways
-as a file. So far there is `std:math`:
+as a file: `std:math`, `std:path`, `std:json`, `std:csv` (and `std:test`,
+below).
 
 ```mah
 import math from "std:math"
@@ -664,6 +665,55 @@ print(try math.log(0) else "undefined")         # undefined
 
 A domain error (`log(0)`, `sqrt(-1)`, `asin(2)`) throws
 `RuntimeError.ArgumentError`. Any other `std:` name is a compile error.
+
+`std:path` is string logic on paths (`/` or `\`, answers use `/`):
+
+```mah
+import path from "std:path"
+print(path.join("src", "main.mh"), path.dirname("a/b/c.txt"))    # src/main.mh a/b
+print(path.basename("a/b.tar.gz"), path.extension("b.tar.gz"))   # b.tar.gz .gz
+print(path.stem("b.tar.gz"), path.normalize("a/./b/../c"))       # b.tar a/c
+print(path.relative("x/a", "x/b"), path.is_absolute("/x"))       # ../b true
+print(path.join_all(["a", "b", "c"]))                            # a/b/c (no variadics)
+```
+
+`std:json`: `parse(text)` gives Maps, Vectors, Numbers, Strings, Bools and
+`none` (typed `Unknown`); `stringify(value, indent = 0)` also writes
+structs (as objects) and enums (`"Unit"` or `{"Variant": {fields}}`). Both
+throw `JsonError` (`.Syntax { message, line, column }` or `.Shape {
+message }`). Read into a struct by implementing `FromJson` with the
+helpers `field`, `as_number`, `as_string`, `as_bool`, `as_vector`, `as_map`:
+
+```mah
+import json from "std:json"
+struct Point { x: Number, y: Number }
+impl FromJson for Point {
+    fn from_json(value) {
+        Point { x: json.as_number(json.field(value, "x")), y: json.as_number(json.field(value, "y")) }
+    }
+}
+let data = try json.parse("{\"x\": 1, \"y\": [true, null]}") else [:]
+print(data["y"][0], try json.stringify(data) else "")         # true {"x":1,"y":[true,null]}
+let p = try Point.from_json(json.parse("{\"x\": 1, \"y\": 2}")) else Point { x: 0, y: 0 }
+let pretty = try json.stringify(p, indent: 2) else ""
+print(p.x + p.y, pretty.lines().len())                          # 3 4
+```
+
+`std:csv` (RFC 4180; every field is a String; throws `CsvError { message,
+line }`):
+
+```mah
+import csv from "std:csv"
+let rows = try csv.parse("a,b\n1,\"x, y\"\n") else []           # Vector<Vector<String>>
+print(rows[1][1])                                               # x, y
+let people = try csv.parse_records("name,age\nal,3\n") else []   # Vector<Map<String, String>>
+let age = try people[0]["age"].to_number() else 0
+print(age + 1)                                                  # 4
+print(try csv.stringify([["a", "b,c"], ["1", ""]]) else "")     # a,"b,c" then 1,
+```
+
+`csv.stringify_records(records, columns = none)` writes Maps with a header
+row, and `FromCsvRow` / `csv.column(row, name)` work like `FromJson`.
 
 ## Errors
 
@@ -794,6 +844,7 @@ test "not ready yet" {
 - `&&`, `||`, `+=`, `++`, ternary `?:`.
 - Type-checking trait-typed values, bounds, and the prelude's iterator methods (the checker skips these for now); classes/inheritance.
 - Variadic parameters (`*args`, `**kwargs`); only `print` takes any number of arguments.
-- File, network, or OS access, JSON, randomness, and every other planned
-  `std:` module besides `std:math` and `std:test`.
+- File, network, or OS access, randomness, and every other planned
+  `std:` module besides `std:math`, `std:path`, `std:json`, `std:csv` and
+  `std:test`.
 - `null`/`nil`/`undefined`: use `none`.

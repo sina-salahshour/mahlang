@@ -91,8 +91,9 @@ class RoundTripTests(unittest.TestCase):
                 # (typed, catchable errors; 3 was M19's Vectors/Maps) --
                 # see docs/MAHC_FORMAT.md #7. M27: or 5, the lowest minor
                 # the program needs, when it uses a 1.5 native (std:math);
-                # M29: 1.6 when it calls a String method.
-                minor = {"std_math.mh": 5, "string_methods.mh": 6}.get(name, 4)
+                # M29: 1.6 when it calls a String method; M30: 1.7 with
+                # std:json/std:csv.
+                minor = {"std_math.mh": 5, "string_methods.mh": 6, "data_formats.mh": 7}.get(name, 4)
                 self.assertEqual(data[:8], b"MAHC\x01\x00" + bytes([minor, 0]))
 
     def test_decoded_bytes_run_the_same_as_the_source(self):
@@ -142,10 +143,10 @@ class LoaderValidationTests(unittest.TestCase):
         self.assertIn("major", str(cm.exception))
 
     def test_unsupported_minor_version(self):
-        # M29: this VM now implements minor version 6, so the smallest
-        # genuinely unsupported minor version is 7.
+        # M30: this VM now implements minor version 7, so the smallest
+        # genuinely unsupported minor version is 8.
         data = bytearray(compile_bytes(text="print(1)"))
-        data[6] = 7
+        data[6] = 8
         with self.assertRaises(MahcFormatError) as cm:
             decode(bytes(data))
         self.assertIn("minor", str(cm.exception))
@@ -158,11 +159,11 @@ class LoaderValidationTests(unittest.TestCase):
         data = compile_bytes(text='import math from "std:math"\nprint(math.tan(1))')
         self.assertIn(b"math.tan", data)
         data = bytearray(data.replace(b"math.tan", b"math.zzz"))
-        data[6] = 7
+        data[6] = 8
         with self.assertRaises(MahcFormatError) as cm:
             decode(bytes(data))
         message = str(cm.exception)
-        self.assertIn("unsupported minor version 7", message)
+        self.assertIn("unsupported minor version 8", message)
         self.assertIn("natives this VM doesn't have ('math.zzz')", message)
 
     def test_minor_is_the_lowest_the_program_needs(self):

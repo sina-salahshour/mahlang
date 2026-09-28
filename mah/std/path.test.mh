@@ -1,0 +1,60 @@
+# Tests for std:path, run by tests/test_stdlib.py (or
+# `mah test --file mah/std/path.test.mh`).
+import "std:test"
+import path from "./path"
+
+test "normalize" {
+    assert_eq(path.normalize("a/./b/../c//d/"), "a/c/d")
+    assert_eq(path.normalize("/../a"), "/a")
+    assert_eq(path.normalize("../a/.."), "..")
+    assert_eq(path.normalize(""), ".")
+    assert_eq(path.normalize("C:\\x\\..\\y"), "C:/y")
+}
+
+test "dirname and basename" {
+    assert_eq(path.dirname("a/b/c.txt"), "a/b")
+    assert_eq(path.dirname("c.txt"), ".")
+    assert_eq(path.dirname("/a"), "/")
+    assert_eq(path.dirname("a/b/"), "a")
+    assert_eq(path.dirname("C:/x"), "C:/")
+    assert_eq(path.dirname("/"), "/")
+    assert_eq(path.basename("a/b/c.txt"), "c.txt")
+    assert_eq(path.basename("a/b/"), "b")
+    assert_eq(path.basename("/"), "")
+    assert_eq(path.basename("C:/"), "")
+}
+
+test "extension and stem" {
+    assert_eq(path.extension("a.tar.gz"), ".gz")
+    assert_eq(path.extension(".bashrc"), "")
+    assert_eq(path.extension("a"), "")
+    assert_eq(path.extension("a."), ".")
+    assert_eq(path.stem("dir/a.tar.gz"), "a.tar")
+    assert_eq(path.stem(".bashrc"), ".bashrc")
+}
+
+test "join" {
+    assert_eq(path.join("src", "main.mh"), "src/main.mh")
+    assert_eq(path.join("src/", "x"), "src/x")
+    assert_eq(path.join("a", "/abs"), "/abs")
+    assert_eq(path.join("", "x"), "x")
+    assert_eq(path.join_all(["a", "b", "c"]), "a/b/c")
+}
+
+test "is_absolute" {
+    assert(path.is_absolute("/x"))
+    assert(path.is_absolute("C:\\x"))
+    assert(!path.is_absolute("x/y"))
+    assert(!path.is_absolute("C:x"))
+    assert(!path.is_absolute(""))
+}
+
+test "relative" {
+    assert_eq(path.relative("x/a", "x/b"), "../b")
+    assert_eq(path.relative("/a/b", "/a/b/c/d"), "c/d")
+    assert_eq(path.relative("/a/b/c", "/a"), "../..")
+    assert_eq(path.relative("a", "a"), ".")
+    # different roots: no relative path
+    assert_eq(path.relative("/a", "b"), "b")
+    assert_eq(path.relative("..", "a"), "a")
+}

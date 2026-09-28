@@ -79,11 +79,13 @@ class StdImportTests(unittest.TestCase):
                 f.write(MATH + "print(math.pi)\n")
             self.assertEqual(run_file(path), "3.141592653589793238462643383\n")
 
-    def test_runtime_errors_in_std_code_are_located_as_std(self):
+    def test_runtime_errors_in_std_code_are_located_at_the_call(self):
+        # M30: like the prelude's (M29), an uncaught error from inside a std
+        # module is located at the program's own call into it.
         out, exc = run_source_and_error(MATH + "print(math.sqrt(0 - 1))")
         self.assertEqual(out, "")
         self.assertIsInstance(exc, MahRuntimeError)
-        self.assertRegex(str(exc), r"^sqrt: argument out of range at position std:math#\d+:\d+$")
+        self.assertEqual(str(exc), "sqrt: argument out of range at position #2:12")
 
 
 class ExternFnTests(unittest.TestCase):
@@ -296,6 +298,76 @@ class StdLspTests(unittest.TestCase):
             self.assertIsNotNone(location)
             self.assertEqual(location["path"], os.path.join(STD_DIR, "math.mh"))
             self.assertEqual(location["range"]["start"]["line"], 17)  # `export fn sqrt`
+
+
+class DataModuleTests(unittest.TestCase):
+    """M30: std:path, std:json and std:csv (their behavior is covered by
+    mah/std/*.test.mh, run on both VMs above), the 1.7 natives behind them,
+    and what the checker and the editor see of them."""
+
+    def test_bytecode_minor(self):
+        from mah.bytecode.decode import decode
+
+        self.assertEqual(decode(compile_bytes(text='import json from "std:json"\nprint(json.parse("1"))')).minor, 7)
+        self.assertEqual(decode(compile_bytes(text='import csv from "std:csv"\nprint(csv.parse("a"))')).minor, 7)
+        # std:path is plain Mah over the 1.6 String methods
+        self.assertEqual(decode(compile_bytes(text='import path from "std:path"\nprint(path.dirname("a/b"))')).minor, 6)
+
+    def test_natives(self):
+        from decimal import Decimal
+
+        from mah.natives import NATIVES
+        from mah.runtime_values import NONE_VALUE, EnumInstance
+
+        def call(name, *args):
+            return NATIVES[name][1](None, list(args))
+
+        self.assertEqual(call("value.type_name", NONE_VALUE), "None")
+        self.assertEqual(call("value.type_name", Decimal(1)), "Number")
+        some = EnumInstance("Option", "some", {"value": Decimal(1)})
+        self.assertEqual(call("value.variant", some), "some")
+        self.assertIs(call("value.variant", NONE_VALUE), NONE_VALUE)
+        self.assertIs(call("value.fields", "x"), NONE_VALUE)
+        self.assertEqual(call("string.chars", "a😀").items, ["a", "😀"])
+        self.assertEqual(call("string.code_point", "😀"), Decimal(0x1F600))
+        self.assertEqual(call("string.from_code_point", Decimal(233)), "é")
+        for name, arg, message in [
+            ("string.code_point", "ab", "code_point: expected one character, got 2"),
+            ("string.from_code_point", Decimal(0xD800), "from_code_point: not a Unicode scalar value"),
+            ("string.from_code_point", Decimal("1.5"), "from_code_point: not a Unicode scalar value"),
+            ("string.chars", Decimal(1), "chars: expected a String, got Number"),
+        ]:
+            with self.subTest(name=name, arg=arg):
+                with self.assertRaises(MahRuntimeError) as cm:
+                    call(name, arg)
+                self.assertEqual(str(cm.exception), message)
+
+    def test_an_uncaught_json_error_is_located_at_the_call(self):
+        _out, exc = run_source_and_error('import json from "std:json"\nlet x = 1\njson.parse("[1,")')
+        self.assertEqual(
+            str(exc), "Uncaught JsonError: expected a value, found end of input at line 1, column 4 at position #3:6"
+        )
+
+    def test_checker_types(self):
+        diagnostics, types = check(
+            'import json from "std:json"\nimport csv from "std:csv"\nimport path from "std:path"\n'
+            'let v = try json.parse("1") else none\nlet rows = try csv.parse("a") else []\n'
+            'let recs = try csv.parse_records("a") else []\nlet d = path.dirname("a/b")'
+        )
+        self.assertEqual([d for d in diagnostics if d[0] not in ("implicit",)], [])
+        got = {k: types[k][-1] for k in ("v", "rows", "recs", "d")}
+        self.assertEqual(
+            got,
+            {"v": "Unknown", "rows": "Vector<Vector<String>>", "recs": "Vector<Map<String, String>>", "d": "String"},
+        )
+        diagnostics, _ = check('import json from "std:json"\nlet v = json.parse("1")')
+        self.assertIn("Unhandled error: JsonError", [d[1] for d in diagnostics if d[0] == "unhandled"])
+
+    def test_completion_lists_the_exports(self):
+        src = 'import json from "std:json"\njson.\n'
+        labels = {i["label"] for i in analysis.get_completions(src, None, 1, 5)}
+        self.assertTrue({"parse", "stringify", "field", "as_number"} <= labels)
+        self.assertFalse({"JsonReader", "quote", "type_name"} & labels)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,104 @@
+# Tests for std:csv, run by tests/test_stdlib.py (or
+# `mah test --file mah/std/csv.test.mh`).
+import "std:test"
+import csv from "./csv"
+
+fn error_of(f: fn() -> Unknown) -> String {
+    assert_throws(f).message()
+}
+
+test "parse" {
+    let rows = csv.parse("a,b\n1,\"x, y\"\n")
+    assert_eq(rows.len(), 2)
+    assert_eq(rows[1][1], "x, y")
+    let q = csv.parse("\"q\"\"uote\",\"multi\r\nline\",\r\n")
+    assert_eq(q[0][0], "q\"uote")
+    assert_eq(q[0][1], "multi\r\nline")
+    assert_eq(q[0][2], "")
+    assert_eq(q[0].len(), 3)
+    assert_eq(csv.parse("x;y", ";")[0][1], "y")
+}
+
+test "blank lines are skipped" {
+    assert_eq(csv.parse("").len(), 0)
+    assert_eq(csv.parse("\n\r\n").len(), 0)
+    let rows = csv.parse("a\n\nb")
+    assert_eq(rows.len(), 2)
+    assert_eq(rows[1][0], "b")
+    # a quoted empty field isn't a blank line
+    assert_eq(csv.parse("\"\"")[0][0], "")
+}
+
+test "parse errors say where" {
+    assert_eq(error_of(fn() { csv.parse("a\n\"b") }), "a quoted field is never closed at line 2")
+    assert_eq(
+        error_of(fn() { csv.parse("a,b\"c") }),
+        "a quote inside an unquoted field (quote the whole field) at line 1"
+    )
+    assert_eq(
+        error_of(fn() { csv.parse("x\n\"y\"z") }),
+        "expected the delimiter or a line break after a closing quote at line 2"
+    )
+    assert_eq(
+        error_of(fn() { csv.parse("a", "||") }),
+        "the delimiter must be one character, got \"||\""
+    )
+    assert_eq(
+        error_of(fn() { csv.parse("a", "\"") }),
+        "the delimiter can't be a quote or a line break"
+    )
+}
+
+test "parse_records" {
+    let people = csv.parse_records("name,age\nal,3\nbo,\"4\"\n")
+    assert_eq(people.len(), 2)
+    assert_eq(people[1]["name"], "bo")
+    assert_eq(people[1]["age"], "4")
+    assert_eq(csv.parse_records("").len(), 0)
+    assert_eq(csv.parse_records("only,a,header").len(), 0)
+    assert_eq(
+        error_of(fn() { csv.parse_records("a,a\n1,2") }),
+        "the header names \"a\" twice at line 1"
+    )
+    assert_eq(
+        error_of(fn() { csv.parse_records("a,b\n1,2\n\n3") }),
+        "this row has 1 field, but the header has 2 fields at line 4"
+    )
+}
+
+test "stringify quotes only what needs it" {
+    let text = csv.stringify([["a", "b,c"], [1, none], ["say \"hi\"", "two\nlines"], [""]])
+    assert_eq(text, "a,\"b,c\"\n1,\n\"say \"\"hi\"\"\",\"two\nlines\"\n\"\"\n")
+    let back = csv.parse(text)
+    assert_eq(back[2][0], "say \"hi\"")
+    assert_eq(back[2][1], "two\nlines")
+    assert_eq(back[3].len(), 1)
+    assert_eq(csv.stringify([["a;b", "c"]], ";"), "\"a;b\";c\n")
+    assert_eq(csv.stringify([]), "")
+}
+
+test "stringify_records" {
+    assert_eq(csv.stringify_records([["name": "al", "age": 3], ["age": 4]]), "name,age\nal,3\n,4\n")
+    assert_eq(csv.stringify_records([["x": 1]], columns: ["x", "y"]), "x,y\n1,\n")
+    assert_eq(csv.stringify_records([]), "")
+    assert_eq(
+        error_of(fn() { csv.stringify_records([["a": 1], ["b": 2]]) }),
+        "record 2 has \"b\", which isn't a column"
+    )
+}
+
+struct Person { name: String, age: Number }
+
+impl FromCsvRow for Person {
+    fn from_csv_row(row) {
+        Person { name: csv.column(row, "name"), age: csv.column(row, "age").to_number() }
+    }
+}
+
+test "FromCsvRow" {
+    let people = csv.parse_records("name,age\nal,3\nbo,4").map(
+        fn(row) { Person.from_csv_row(row) }
+    ).reduce()
+    assert_eq(people[1].age + 1, 5)
+    assert_eq(error_of(fn() { csv.column(["a": "1"], "b") }), "no column named \"b\"")
+}

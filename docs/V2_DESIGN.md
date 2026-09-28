@@ -3060,6 +3060,36 @@ node that resolved to it. Then:
       for every method and error, bytecode-minor tests,
       `examples/string_methods.mh`.
 
+31. **M30 — `std:path`, `std:json`, `std:csv`. ✅ Landed.** The rest of
+    `docs/STDLIB.md` Phase 1's pure modules that need no new value kinds;
+    bytecode 1.7 (natives only) in `docs/MAHC_FORMAT.md` §4.4/§7. Each
+    module's decisions are in `STDLIB.md`.
+
+    - **Modules, in Mah**: `mah/std/path.mh` (plain Mah over the 1.6
+      String methods), `json.mh` (`JsonError` enum, `trait FromJson`,
+      `field`/`as_*` helpers) and `csv.mh` (`CsvError`, `trait
+      FromCsvRow`, `column`). `csv.parse` and `csv.parse_records` are two
+      functions rather than STDLIB's `header` flag, so each has one type.
+    - **1.7 natives, both VMs**: `value.type_name`, `value.fields`,
+      `value.variant` (reflection for `json.stringify`) and `string.chars`,
+      `string.code_point`, `string.from_code_point` (fast character access
+      for the parsers). The parsers work over a `Vector` of characters with
+      a `""` sentinel, and never rely on `&`/`|` short-circuiting (they
+      don't).
+    - **Uncaught errors from inside a std module** are located at the
+      program's own call, like the prelude's since M29. This intentionally
+      changes M27's behavior: `tests/test_stdlib.py`'s
+      `test_runtime_errors_in_std_code_are_located_at_the_call` (it was
+      `..._located_as_std`) now expects `#2:12`, not `std:math#...`.
+    - **Also**: `mah-vm --version` reports `bytecode 1.N`, and `mah build
+      --self-contained` refuses a `mah-vm` too old for the program
+      (`mah/rust_vm.py`); the LSP completes `std:` module names in
+      `import` strings.
+    - Tests: `mah/std/{path,json,csv}.test.mh` (run on both VMs by
+      `tests/test_stdlib.py`), `DataModuleTests` (minors, natives, checker
+      types, completion), `vm_diff.py` parity cases,
+      `examples/data_formats.mh`.
+
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
 it** (`make test` must stay green) — see `docs/TESTING.md` for where

@@ -876,6 +876,11 @@ def run_test_bytes(data: bytes, index: int, timeout: float | None = None) -> Tes
         return TestOutcome("failed", str(exc))
 
 
+def _is_library_path(path: str) -> bool:
+    """The prelude's or a standard library module's DEBUG file path."""
+    return path == "<prelude>" or path.startswith("std:")
+
+
 def _locate_factory(debug: DebugIndex | None):
     if debug is None:
         return lambda pc, message: message
@@ -1250,15 +1255,16 @@ def _execute(linked: LinkedProgram, test_slot: int | None = None, deadline: floa
 
     def report_pc(value):
         """M29: where to locate an uncaught error -- its throw site, unless
-        that's in the prelude (`"x".to_number()` throws from there), in which
-        case the innermost enclosing call outside it, from the backtrace."""
+        that's in the prelude (`"x".to_number()` throws from there) or (M30)
+        a standard library module (`json.parse`), in which case the
+        innermost enclosing call outside them, from the backtrace."""
         pc = getattr(value, "thrown_at", None)
         debug = linked.debug
         if pc is None or debug is None:
             return pc
         for candidate in getattr(value, "backtrace", None) or [pc]:
             idx = bisect.bisect_right(debug.pcs, candidate) - 1
-            if idx < 0 or debug.file_paths[debug.runs[idx][0]] != "<prelude>":
+            if idx < 0 or not _is_library_path(debug.file_paths[debug.runs[idx][0]]):
                 return candidate
         return pc
 

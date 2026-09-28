@@ -2,8 +2,8 @@
 
 Status: **M27 landed 2026-09-28: Phase 0 steps 1, 2 and 5 (`std:`
 resolution, `extern fn`, native table versioning) and `std:math`**, the
-first module; **M29 landed the String methods** (Phase 1's first item).
-The rest is design. Agreed 2026-09-28. Depends on
+first module; **M29 landed the String methods** (Phase 1's first item);
+**M30 landed `std:path`, `std:json` and `std:csv`**. The rest is design. Agreed 2026-09-28. Depends on
 [`ERRORS.md`](ERRORS.md) (every failure below is a thrown, typed error)
 and on the static checker in [`TYPES.md`](TYPES.md).
 
@@ -40,8 +40,9 @@ import "std:math"            # flat import works too
    a compile error: `unknown standard library module 'std:nope'`. The LSP
    resolves go-to-definition and hover into std files. Bundles (`.mahc`)
    compile std code in like any other import. Locations inside a std file
-   read `std:math#20:9` (compile errors, runtime errors, hover), never the
-   install path.
+   read `std:math#20:9` (compile errors, hover), never the install path. An
+   uncaught runtime error from inside a std module is located at the
+   program's own call into it (M30, like the prelude's since M29).
 2. **`extern fn`. ✅ Landed (M27).** Std modules reach natives through
    declarations that only `std:` files (and the prelude) may use; anywhere
    else it's a compile error. `extern` is contextual (`let extern = 1`
@@ -217,6 +218,32 @@ the exact rules; `mah/string_methods.py` is the reference):
   `JsonError` on a shape mismatch. (A `decode(text, Point)` form waits
   for types as runtime values.)
 
+✅ **Landed (M30)**, in `mah/std/json.mh`, with these decisions:
+
+- **`JsonError` is an enum**: `Syntax { message, line, column }` for text
+  that isn't JSON (the message ends "at line L, column C", counting code
+  points from 1), and `Shape { message }` for a value of the wrong shape
+  (`stringify` of a function or of a value that contains itself, or a
+  `FromJson` helper given the wrong type).
+- `parse` is strict RFC 8259: no comments, trailing commas, leading zeros
+  or unescaped control characters; `\u` escapes must pair surrogates. A
+  duplicate key keeps the last value. Objects become Maps in document
+  order. Its type is `Unknown` (the checker has no union types).
+- `stringify` writes compact JSON (`{"a":1}`), or with `indent` spaces per
+  level, one item per line and `": "` after keys. Numbers are written as
+  `print` shows them, which is always plain decimal, so valid JSON. Map
+  keys are written as their text. A struct is an object of its fields;
+  an enum value is its variant's name for a unit variant (`"Empty"`), else
+  `{"Circle": {"r": 2}}` (externally tagged); `some(x)` is `x`.
+- For `FromJson` impls: `field(object, name)` and `as_number`,
+  `as_string`, `as_bool`, `as_vector`, `as_map(value, what = "the
+  value")`, each throwing `JsonError.Shape` ("expected a Number for x, got
+  String", "missing field 'y'").
+- Built on six new 1.7 natives (docs/MAHC_FORMAT.md §4.4): reflection
+  (`value.type_name`, `value.fields`, `value.variant`) and characters
+  (`string.chars`, `string.code_point`, `string.from_code_point`). They're
+  private to std modules (`extern fn`).
+
 ### `std:csv`
 
 - `parse(text, delimiter = ",", header = false)` gives
@@ -225,11 +252,48 @@ the exact rules; `mah/string_methods.py` is the reference):
 - `stringify(rows, delimiter = ",", header = none)`.
 - `trait FromCsvRow { fn from_csv_row(row) -> Self }`, used the same way.
 
+✅ **Landed (M30)**, in `mah/std/csv.mh`, with these decisions:
+
+- **Two functions instead of a `header` flag**, so each has one type:
+  `parse(text, delimiter = ",") -> Vector<Vector<String>>` and
+  `parse_records(text, delimiter = ",") -> Vector<Map<String, String>>`
+  (the first row names the columns; every row must have as many fields,
+  and a name can't repeat). Likewise `stringify(rows, delimiter = ",")`
+  and `stringify_records(records, delimiter = ",", columns = none)`, whose
+  header is `columns` or the first record's keys; a missing column is an
+  empty field, an unknown key an error.
+- **`CsvError { message, line }`**, `line` counting from 1 (0 when it isn't
+  about a line, like a bad delimiter).
+- Lines end with `\n` or `\r\n` (kept as is inside quotes). A blank line
+  is skipped rather than read as a row of one empty field, so a trailing
+  blank line doesn't add a row; `stringify` writes such a row as `""` to
+  keep it. A quote inside an unquoted field, or anything but the delimiter
+  or a line break after a closing quote, is an error rather than guessed
+  at.
+- `stringify` ends every row with `\n`, writes `none` as an empty field and
+  other non-Strings as they print, and quotes only fields holding the
+  delimiter, a quote or a line break.
+- `FromCsvRow.from_csv_row(row: Map<String, String>)`, with a
+  `column(row, name)` helper that throws `CsvError` for a missing column.
+
 ### `std:path`
 
 `join(...)`, `dirname`, `basename`, `extension`, `stem`, `normalize`,
 `is_absolute`, `relative(from, to)`. Pure string logic, POSIX and Windows
 separators.
+
+✅ **Landed (M30)**, in `mah/std/path.mh` (plain Mah over the String
+methods, so bytecode 1.6), with these decisions:
+
+- No variadics yet, so `join(a, b)` takes two parts and `join_all(parts)`
+  a Vector. An absolute second part replaces the first, like Python's
+  `os.path.join`.
+- Input may use `/` or `\` and start with a drive (`C:`); `normalize`
+  and `relative` always answer with `/`. `normalize` never climbs above a
+  root (`/../a` is `/a`) but keeps leading `..` in a relative path.
+- `extension` is from the last `.` of the last segment (`.gz`), and a
+  name that only starts with one (`.bashrc`) has none. `relative` answers
+  `to` itself, normalized, when the two have different roots.
 
 ### `std:collections`
 

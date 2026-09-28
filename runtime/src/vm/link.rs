@@ -34,6 +34,13 @@ pub enum NativeFn {
     MathExp,
     MathLog,
     MathLog10,
+    /// M30 (1.7): reflection and characters, for std:json/std:csv.
+    ValueTypeName,
+    ValueFields,
+    ValueVariant,
+    StringChars,
+    StringCodePoint,
+    StringFromCodePoint,
 }
 
 /// Whether this VM implements a native of that name (any arity) -- for
@@ -58,6 +65,12 @@ fn native_by_name(name: &str) -> Option<(u64, NativeFn)> {
         "math.exp" => Some((1, NativeFn::MathExp)),
         "math.log" => Some((1, NativeFn::MathLog)),
         "math.log10" => Some((1, NativeFn::MathLog10)),
+        "value.type_name" => Some((1, NativeFn::ValueTypeName)),
+        "value.fields" => Some((1, NativeFn::ValueFields)),
+        "value.variant" => Some((1, NativeFn::ValueVariant)),
+        "string.chars" => Some((1, NativeFn::StringChars)),
+        "string.code_point" => Some((1, NativeFn::StringCodePoint)),
+        "string.from_code_point" => Some((1, NativeFn::StringFromCodePoint)),
         _ => None,
     }
 }

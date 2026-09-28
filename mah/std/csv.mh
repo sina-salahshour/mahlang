@@ -1,0 +1,265 @@
+# std:csv -- comma-separated values, RFC 4180 (docs/STDLIB.md).
+#
+#   import csv from "std:csv"
+#   csv.parse("a,b\n1,\"x, y\"\n")           # [[a, b], [1, x, y]]
+#   csv.parse_records("name,age\nal,3\n")    # [[name: al, age: 3]]
+#   csv.stringify([["a", "b"], [1, 2]])      # a,b\n1,2\n
+#
+# A field in double quotes may hold the delimiter, line breaks and `""`
+# (one quote). Lines end with "\n" or "\r\n"; a blank line is skipped, and
+# so is a final line break. Every field is read as a String: convert with
+# `to_number()` and friends. Written text ends each row with "\n" and
+# quotes only the fields that need it.
+#
+# To read rows into your own type, implement `FromCsvRow`:
+#
+#   impl FromCsvRow for Person {
+#       fn from_csv_row(row) {
+#           Person { name: csv.column(row, "name"), age: csv.column(row, "age").to_number() }
+#       }
+#   }
+#   let people = csv.parse_records(text).map(fn(row) { Person.from_csv_row(row) }).reduce()
+
+extern fn chars(s: String) -> Vector<String> = "string.chars"
+
+# What went wrong, and the line it went wrong on (counting from 1; 0 when
+# it isn't about a line, like a bad delimiter).
+struct CsvError { message: String, line: Number }
+
+impl Error for CsvError {
+    fn message(self) -> String {
+        if self.line > 0 { self.message + " at line " + self.line } else { self.message }
+    }
+}
+
+# Implemented by types that can be read from one record of
+# `parse_records`: `Person.from_csv_row(row)`.
+trait FromCsvRow {
+    fn from_csv_row(row: Map<String, String>) -> Self
+}
+
+fn check_delimiter(delimiter: String) throws CsvError {
+    if delimiter.len() != 1 {
+        throw CsvError {
+            message: "the delimiter must be one character, got \"" + delimiter + "\"",
+            line: 0
+        }
+    }
+    if delimiter == "\"" | delimiter == "\n" | delimiter == "\r" {
+        throw CsvError { message: "the delimiter can't be a quote or a line break", line: 0 }
+    }
+}
+
+# The rows of `text`; pushes the line each one starts on to `lines`.
+# (`&` and `|` evaluate both sides; reading past the end gives "" from the
+# sentinel, then `none`, so the lookaheads below are safe.)
+fn read(text: String, delimiter: String, lines: Vector<Number>) -> Vector<
+    Vector<String>
+> throws CsvError {
+    check_delimiter(delimiter)
+    let t = chars(text)
+    t.push("")
+    let rows = []
+    let i = 0
+    let line = 1
+    while t[i] != "" {
+        # a blank line
+        if t[i] == "\n" {
+            i = i + 1
+            line = line + 1
+            continue
+        }
+        if t[i] == "\r" & t[i + 1] == "\n" {
+            i = i + 2
+            line = line + 1
+            continue
+        }
+        lines.push(line)
+        let row = []
+        let more = true
+        while more {
+            if t[i] == "\"" {
+                let start_line = line
+                let parts = []
+                i = i + 1
+                while true {
+                    let c = t[i]
+                    if c == "" {
+                        throw CsvError {
+                            message: "a quoted field is never closed",
+                            line: start_line
+                        }
+                    }
+                    if c == "\"" {
+                        if t[i + 1] != "\"" { break }
+                        i = i + 1
+                    }
+                    if c == "\n" { line = line + 1 }
+                    parts.push(c)
+                    i = i + 1
+                }
+                i = i + 1
+                row.push(parts.join())
+                let after = t[i]
+                let crlf = after == "\r" & t[i + 1] == "\n"
+                if after != delimiter & after != "\n" & after != "" & !crlf {
+                    throw CsvError {
+                        message: "expected the delimiter or a line break after a closing quote",
+                        line: line
+                    }
+                }
+            } else {
+                let start = i
+                let c = t[i]
+                while c != delimiter & c != "\n" & c != "" & !(c == "\r" & t[i + 1] == "\n") {
+                    if c == "\"" {
+                        throw CsvError {
+                            message: "a quote inside an unquoted field (quote the whole field)",
+                            line: line
+                        }
+                    }
+                    i = i + 1
+                    c = t[i]
+                }
+                row.push(t[start..i].join())
+            }
+            if t[i] == delimiter {
+                i = i + 1
+            } else {
+                if t[i] == "\r" { i = i + 1 }
+                if t[i] == "\n" {
+                    i = i + 1
+                    line = line + 1
+                }
+                more = false
+            }
+        }
+        rows.push(row)
+    }
+    rows
+}
+
+# Every row of `text`, each a Vector of its fields.
+export fn parse(text: String, delimiter: String = ",") -> Vector<Vector<String>> throws CsvError {
+    read(text, delimiter, [])
+}
+
+fn fields(n: Number) -> String { if n == 1 { "1 field" } else { "" + n + " fields" } }
+
+# The rows after the first, each a Map from the first row's names to its
+# fields. Every row must have as many fields as the first.
+export fn parse_records(text: String, delimiter: String = ",") -> Vector<
+    Map<String, String>
+> throws CsvError {
+    let lines = []
+    let rows = read(text, delimiter, lines)
+    let out = []
+    if rows.len() == 0 { return out }
+    let names = rows[0]
+    let seen = [:]
+    for let name in names {
+        if seen.has(name) {
+            throw CsvError { message: "the header names \"" + name + "\" twice", line: lines[0] }
+        }
+        seen[name] = true
+    }
+    let r = 1
+    while r < rows.len() {
+        let row = rows[r]
+        if row.len() != names.len() {
+            throw CsvError {
+                message: "this row has " + fields(row.len()) + ", but the header has " + fields(
+                    names.len()
+                ),
+                line: lines[r]
+            }
+        }
+        let record = [:]
+        let k = 0
+        while k < names.len() {
+            record[names[k]] = row[k]
+            k = k + 1
+        }
+        out.push(record)
+        r = r + 1
+    }
+    out
+}
+
+# `row[name]`; throws if the record has no such column.
+export fn column(row: Map<String, String>, name: String) -> String throws CsvError {
+    if !row.has(name) { throw CsvError { message: "no column named \"" + name + "\"", line: 0 } }
+    row[name]
+}
+
+# A value as a field: Strings as they are, `none` as "", anything else as
+# it prints; quoted when it holds the delimiter, a quote or a line break.
+fn field_text(value: Unknown, delimiter: String, alone: Bool) -> String {
+    let text = if value == none { "" } else { "" + value }
+    let quote = text.contains(delimiter) | text.contains("\"") | text.contains(
+        "\n"
+    ) | text.contains("\r")
+    # a row of one empty field would read back as a blank line
+    if alone & text == "" { quote = true }
+    if quote { "\"" + text.replace_all("\"", "\"\"") + "\"" } else { text }
+}
+
+fn row_text(row: Vector<Unknown>, delimiter: String) -> String {
+    let parts = []
+    for let value in row {
+        parts.push(field_text(value, delimiter, row.len() == 1))
+    }
+    parts.join(delimiter) + "\n"
+}
+
+# `rows` as CSV text, each row a Vector of values.
+export fn stringify(
+    rows: Vector<Vector<Unknown>>,
+    delimiter: String = ","
+) -> String throws CsvError {
+    check_delimiter(delimiter)
+    let out = []
+    for let row in rows {
+        out.push(row_text(row, delimiter))
+    }
+    out.join()
+}
+
+# `records` (Maps) as CSV text with a header row: `columns`, or else the
+# first record's keys in order. A record missing a column gets an empty
+# field; one with a key that isn't a column is an error.
+export fn stringify_records(
+    records: Vector<Map<String, Unknown>>,
+    delimiter: String = ",",
+    columns: Unknown = none
+) -> String throws CsvError {
+    check_delimiter(delimiter)
+    let names = columns
+    if names == none {
+        if records.len() == 0 { return "" }
+        names = records[0].keys()
+    }
+    let known = [:]
+    for let name in names {
+        known[name] = true
+    }
+    let out = [row_text(names, delimiter)]
+    let n = 0
+    for let record in records {
+        n = n + 1
+        for let key in record {
+            if !known.has(key) {
+                throw CsvError {
+                    message: "record " + n + " has \"" + key + "\", which isn't a column",
+                    line: 0
+                }
+            }
+        }
+        let row = []
+        for let name in names {
+            row.push(record[name])
+        }
+        out.push(row_text(row, delimiter))
+    }
+    out.join()
+}

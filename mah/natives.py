@@ -19,7 +19,17 @@ import math
 import sys
 from decimal import Decimal
 
-from .runtime_values import MahRuntimeError, NONE_VALUE, PromiseInstance, type_name_of
+from .runtime_values import (
+    NONE_VALUE,
+    EnumInstance,
+    MahRuntimeError,
+    MapValue,
+    PromiseInstance,
+    StructInstance,
+    VectorValue,
+    map_key,
+    type_name_of,
+)
 
 
 class NativeContext:
@@ -114,6 +124,71 @@ def _float_math(name: str, fn):
     return impl
 
 
+# -- M30 (1.7): reflection and characters, for std:json/std:csv ------------
+
+
+def _value_type_name(ctx: NativeContext, args) -> object:
+    """The value's runtime type name, with `none` as "None" (not "Option")."""
+    (value,) = args
+    return "None" if value is NONE_VALUE else type_name_of(value)
+
+
+def _is_record(value) -> bool:
+    # A struct, or an enum value other than none/Promise (whose fields are
+    # VM-internal).
+    if isinstance(value, StructInstance):
+        return True
+    return isinstance(value, EnumInstance) and value is not NONE_VALUE and not isinstance(value, PromiseInstance)
+
+
+def _value_fields(ctx: NativeContext, args) -> object:
+    """A struct's (or enum value's) fields as a new Map, in declaration
+    order; `none` for anything else."""
+    (value,) = args
+    if not _is_record(value):
+        return NONE_VALUE
+    return MapValue({map_key(name): (name, field) for name, field in value.fields.items()})
+
+
+def _value_variant(ctx: NativeContext, args) -> object:
+    """An enum value's variant name; `none` for anything else (none too)."""
+    (value,) = args
+    if isinstance(value, EnumInstance) and _is_record(value):
+        return value.variant
+    return NONE_VALUE
+
+
+def _string_arg(name: str, value) -> str:
+    if not isinstance(value, str):
+        raise MahRuntimeError(f"{name}: expected a String, got {type_name_of(value)}", kind="TypeMismatch")
+    return value
+
+
+def _string_chars(ctx: NativeContext, args) -> object:
+    """The String's characters (code points), as a Vector of Strings."""
+    (value,) = args
+    return VectorValue(list(_string_arg("chars", value)))
+
+
+def _string_code_point(ctx: NativeContext, args) -> object:
+    (value,) = args
+    text = _string_arg("code_point", value)
+    if len(text) != 1:
+        raise MahRuntimeError(f"code_point: expected one character, got {len(text)}", kind="ArgumentError")
+    return Decimal(ord(text))
+
+
+def _string_from_code_point(ctx: NativeContext, args) -> object:
+    (value,) = args
+    if isinstance(value, bool) or not isinstance(value, Decimal):
+        raise MahRuntimeError(
+            f"from_code_point: expected a Number, got {type_name_of(value)}", kind="TypeMismatch"
+        )
+    if value != value.to_integral_value() or not (0 <= value <= 0x10FFFF) or 0xD800 <= value <= 0xDFFF:
+        raise MahRuntimeError("from_code_point: not a Unicode scalar value", kind="ArgumentError")
+    return chr(int(value))
+
+
 def _time_sleep_async(ctx: NativeContext, args) -> object:
     (ms,) = args
     promise = PromiseInstance()
@@ -138,4 +213,11 @@ NATIVES: dict[str, tuple[int, object]] = {
     "math.exp": (1, _float_math("math.exp", math.exp)),
     "math.log": (1, _float_math("math.log", math.log)),
     "math.log10": (1, _float_math("math.log10", math.log10)),
+    # M30 (1.7): for std:json/std:csv.
+    "value.type_name": (1, _value_type_name),
+    "value.fields": (1, _value_fields),
+    "value.variant": (1, _value_variant),
+    "string.chars": (1, _string_chars),
+    "string.code_point": (1, _string_code_point),
+    "string.from_code_point": (1, _string_from_code_point),
 }

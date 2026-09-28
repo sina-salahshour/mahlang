@@ -1,0 +1,55 @@
+# std:csv, std:json and std:path (M30): turn a CSV table into a JSON report.
+
+import csv from "std:csv"
+import json from "std:json"
+import path from "std:path"
+
+let source = "data/scores.csv"
+let text = "name,score,team
+ada,91,red
+bo,78,blue
+\"Chen, Li\",85,red
+"
+
+struct Player { name: String, score: Number, team: String }
+
+impl FromCsvRow for Player {
+    fn from_csv_row(row) {
+        Player {
+            name: csv.column(row, "name"),
+            score: csv.column(row, "score").to_number(),
+            team: csv.column(row, "team")
+        }
+    }
+}
+
+let players = try {
+    csv.parse_records(text).map(fn(row) { Player.from_csv_row(row) }).reduce()
+} catch {
+    e: CsvError => {
+        print("bad CSV:", e.message())
+        []
+    }
+    e: NumberParseError => {
+        print("bad score:", e.message())
+        []
+    }
+}
+
+# the total score per team, in first-seen order
+let teams = [:]
+for let p in players {
+    teams[p.team] = (if teams.has(p.team) { teams[p.team] } else { 0 }) + p.score
+}
+
+let report: Map<String, Unknown> = [:]
+report["source"] = path.basename(source)
+report["players"] = players
+report["teams"] = teams
+let out = path.join(path.dirname(source), path.stem(source) + ".json")
+print("writing", out)
+print(try json.stringify(report, indent: 2) else "")
+
+# and back: JSON text is just Maps and Vectors again
+let back = try json.parse(json.stringify(report)) else [:]
+print(back["players"][2]["name"], "scored", back["players"][2]["score"])
