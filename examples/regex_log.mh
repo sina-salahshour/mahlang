@@ -1,0 +1,34 @@
+# std:regex (M32): pull fields out of log lines, redact, and tally.
+
+import regex from "std:regex"
+
+let log = "2026-09-28 12:01:07 INFO  user=ada ip=10.0.0.7 login ok
+2026-09-28 12:03:44 WARN  user=bo ip=10.0.0.9 password retry 2
+2026-09-28 12:04:02 ERROR user=bo ip=10.0.0.9 locked out (3 failures)
+not a log line
+2026-09-28 12:09:31 INFO  user=chen ip=192.168.1.20 login ok"
+
+let line = regex.must_compile(
+    "^(?<date>\\d{4}-\\d\\d-\\d\\d) (?<time>[\\d:]+) (?<level>[A-Z]+) +user=(?<user>\\w+) ip=(?<ip>[\\d.]+) (?<msg>.*)$",
+    "m"
+)
+
+let counts = [:]
+for let m in line.find_all(log) {
+    let level = m.group("level")
+    counts[level] = (if counts.has(level) { counts[level] } else { 0 }) + 1
+    print(m.group("time"), level.to_lower().pad_end(5), m.group("user").pad_end(5), m.group("msg"))
+}
+print("levels:", counts)
+
+# Redact the last part of every IPv4 address, keeping the rest.
+let ip = regex.must_compile("\\b(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})\\.\\d{1,3}\\b")
+print(ip.replace_all("from 10.0.0.9 and 192.168.1.20", "$1.x"))
+
+# Words, case-insensitively, via a function replacement.
+let word = regex.must_compile("\\bretry\\b|\\blocked\\b", "i")
+print(word.replace_all("Retry, then LOCKED", fn(m) { "<" + m.text.to_upper() + ">" }))
+
+# `must_compile` is for fixed patterns like these; a pattern from outside
+# goes through `compile`, whose RegexError says what's wrong and where.
+print(try { regex.compile("(\\d+") } catch { e: RegexError => { e.message() } })

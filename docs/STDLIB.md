@@ -5,7 +5,8 @@ resolution, `extern fn`, native table versioning) and `std:math`**, the
 first module; **M29 landed the String methods** (Phase 1's first item);
 **M30 landed `std:path`, `std:json` and `std:csv`**; **M31 landed
 `std:random` (with Phase 0 step 6, the shared PRNG) and
-`std:collections`**. The rest is design. Agreed 2026-09-28. Depends on
+`std:collections`**, and **M32 `std:regex`**, completing Phase 1. The
+rest is design. Agreed 2026-09-28. Depends on
 [`ERRORS.md`](ERRORS.md) (every failure below is a thrown, typed error)
 and on the static checker in [`TYPES.md`](TYPES.md).
 
@@ -355,6 +356,41 @@ pattern) with `is_match(s)`, `find(s)`, `find_all(s)`, `captures(s)`,
 `replace(s, with)`, `replace_all(s, with)`, `split(s)`. Rust uses the
 `regex` crate; Python uses `re`, restricted to the syntax both engines
 share, and parity tests cover that subset.
+
+✅ **Landed (M32)**, in `mah/std/regex.mh`, with these decisions:
+
+- **The subset is enforced, not just documented.** `std:regex` parses
+  every pattern in Mah, so a pattern outside the subset is the same
+  `RegexError` (message and code-point position) on every VM, and writes
+  it back out in a canonical form that means the same thing to both
+  engines (docs/MAHC_FORMAT.md §4.4). Two 1.9 natives, `regex.find` and
+  `regex.find_all`, match canonical patterns; compiled patterns are
+  cached per VM, as there are no handle values yet.
+- **ASCII classes.** `\d`, `\w`, `\s` and `\b` are ASCII (`[0-9]`,
+  `[0-9A-Za-z_]`, ...), and the `i` flag folds ASCII letters only: the
+  engines' Unicode tables and case folding differ in places. Literal
+  characters and `.` work on any code point. Flags are `i`, `m`, `s`,
+  passed to `compile`; `$` is the very end of the text (not before a final
+  newline, as in Python).
+- **Left out**: lookaround, backreferences, inline flags, possessive
+  repeats, and repeating (`*`, `+`, `{2}`, ...) a capture group that can
+  match nothing, like `(a|)*`, where the engines capture different things.
+  Each is a compile error naming the construct. Repeat counts are at most
+  1000.
+- **API**: `compile(pattern, flags = "")` throws `RegexError { message,
+  pattern, position }`; `must_compile` is for patterns written into the
+  program and throws `RuntimeError.ArgumentError` instead, which the
+  checker doesn't track (like Go's `MustCompile`). A `Regex` has
+  `is_match`, `find` (`Option<Match>`), `find_all`, `replace`,
+  `replace_all` and `split(s, limit = none)`, and `escape(s)` quotes a
+  literal. There is no separate `captures`: a `Match { text, start, end,
+  groups }` carries its groups, read with `group(n)` or `group(name)`.
+- **Replacements** are expanded in Mah: `$n`, `$name`, `${...}` and `$$`,
+  or a function of the Match. `find_all` steps past an empty match by one
+  character, so `a*` on `"baa"` finds `""`, `"aa"`, `""` on both VMs.
+  Positions count code points.
+- The Rust runtime's first dependency is the `regex` crate, with no
+  default features (Unicode tables only).
 
 ## Phase 2: time and async
 

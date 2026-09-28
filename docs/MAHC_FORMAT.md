@@ -1,4 +1,4 @@
-# The `.mahc` bytecode format (version 1.8)
+# The `.mahc` bytecode format (version 1.9)
 
 `mah build prog.mh` compiles a program (its entry file plus everything it
 imports) into a single `.mahc` file; `mah runc prog.mahc` runs one. This
@@ -64,7 +64,7 @@ sections   (id u8, length varuint, payload bytes(length))*   until end of file
   version whose features it uses. *(1.5)* The reference encoder writes 4
   (every file it produces has 1.4's TYPES layout and HANDLERS section),
   or the highest `(1.x)` marker among the natives the file lists (5 for
-  the `std:math` natives, 7 for the ones behind `std:json`/`std:csv`, 8 for `std:random`'s), so a program that doesn't call newer natives
+  the `std:math` natives, 7 for the ones behind `std:json`/`std:csv`, 8 for `std:random`'s, 9 for `std:regex`'s), so a program that doesn't call newer natives
   still runs on an older VM. *(1.6)* Native methods (§6.7) are called by
   name, so it also writes the minor that added any native method whose
   *name* a `callmethod`/`callmethodkw`/`detachmethod`/`detachmethodkw` in
@@ -195,6 +195,8 @@ Version 1.0 defines:
 | `random.fresh` | 0 | *(1.8)* a new generator state seeded from 64 bits of the operating system's randomness |
 | `random.next` | 1 | *(1.8)* advances the state and returns its next 64-bit output, a whole Number in [0, 2^64) |
 | `random.below` | 2 | *(1.8)* `below(state, n)`: a uniformly distributed whole Number in [0, n), for a whole `n` from 1 to 2^64 |
+| `regex.find` | 3 | *(1.9)* `find(source, text, start)`: the first match of canonical pattern `source` (below) in `text` starting at or after code point `start`, as its spans, or `none` |
+| `regex.find_all` | 2 | *(1.9)* `find_all(source, text)`: every match, left to right, as a Vector of spans |
 
 The `(1.5)` `math.*` natives follow `math.sin`'s rules: each argument
 must be a Number (otherwise a `RuntimeError.TypeMismatch`, message
@@ -235,6 +237,45 @@ a `TypeMismatch`, `seed: expected a Number, got TYPE` (likewise `below`);
 a seed that isn't whole or is 2^64 or more in size is an `ArgumentError`,
 `seed: expected a whole number smaller than 2^64 in size`; a bound out of
 range, `below: expected a whole number from 1 to 2^64`.
+
+The `(1.9)` natives are `std:regex`'s matcher. `std:regex` parses every
+pattern itself (in Mah, so its syntax errors are the same everywhere) and
+hands these natives a **canonical pattern** whose every construct means
+the same thing to the two engines behind the reference VMs, Python's `re`
+and Rust's `regex` crate. Its syntax is the `regex` crate's, restricted
+to:
+- literal characters, with `\ . + * ? ( ) | [ ] { } ^ $ # & - ~` written
+  as `\` plus the character (and no other escapes of literals);
+- `.` (any character but `\n`) and `(?s:.)` (any character);
+- classes `[...]` / `[^...]` of literal characters and ranges `a-b`
+  between Unicode scalar values, with `\ ] [ ^ - & ~` escaped;
+- anchors `^`, `\A`, `\z` (end of text only), `(?m:^)`, `(?m:$)`, and
+  the ASCII word boundaries `(?-u:\b)` and `(?-u:\B)`;
+- groups `( )`, `(?: )` and `(?P<name> )`, alternation `|`, and repeats
+  `* + ? {n} {n,} {n,m}` (n, m at most 1000), each optionally lazy (`?`),
+  never applied twice in a row, nor to a capturing group that can match
+  the empty string when the repeat's maximum is above 1 (the engines
+  capture different things there).
+
+So `\d`, `\w`, `\s`, case-insensitivity and the like are already spelled
+out as classes. A VM matches it with leftmost-first (Perl-style)
+semantics. Python's `re` needs three spellings changed, with the pattern
+compiled under `re.ASCII`: `(?-u:\b)` becomes `\b`, `(?-u:\B)` becomes
+`(?:(?<=\w)(?=\w)|(?<!\w)(?!\w))` (`re`'s own `\B` never matches in an
+empty string), and `\z` becomes `\Z`.
+- **Spans**: a Vector `[start0, end0, start1, end1, ...]`, the whole
+  match then each capture group in order of its `(`, as code-point
+  positions; `none, none` for a group that took no part.
+- **`find_all`'s iteration**: search from position 0; after a match
+  ending at `e`, search again from `e`, or from `e + 1` after an empty
+  match, until no match is found or the position passes the end. A search
+  from a later position still sees the text before it (`^`, `\b`).
+- **Errors**: `source` or `text` not a String is a `TypeMismatch`
+  (`NAME: expected a String, got TYPE`); a `source` the engine can't
+  compile, an `ArgumentError`, `NAME: not a canonical pattern`; a `start`
+  that isn't a whole Number from 0 to the text's length, an
+  `ArgumentError`, `find: start must be a position in the text`. VMs may
+  cache compiled patterns.
 
 **Adding natives** (files, sockets, string utilities, processes, ...) is
 the intended way to grow the platform, e.g. `fs.read`, `fs.write`,
@@ -988,6 +1029,8 @@ message
 - **1.8** added natives only: `random.seed`, `random.fresh`,
   `random.next`, and `random.below` (§4.4), the shared generator behind
   `std:random`.
+- **1.9** added natives only: `regex.find` and `regex.find_all` (§4.4),
+  over `std:regex`'s canonical patterns.
 - Planned growth, for orientation: error-set checking (the static
   checker's `throws` inference and "unhandled error" diagnostics -- M26),
   string utilities, filesystem, networking, and process natives.

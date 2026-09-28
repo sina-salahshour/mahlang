@@ -37,6 +37,9 @@ and std:csv) -- docs/MAHC_FORMAT.md #4.4.
 M31 bumps MINOR to 8: new natives only (`random.seed`/`fresh`/`next`/
 `below`, the shared xoshiro256** generator behind std:random) --
 docs/MAHC_FORMAT.md #4.4.
+
+M32 bumps MINOR to 9: new natives only (`regex.find`/`find_all`, behind
+std:regex) -- docs/MAHC_FORMAT.md #4.4.
 """
 
 from __future__ import annotations
@@ -49,7 +52,7 @@ MAGIC = b"MAHC"
 # `.mahc` extension).
 SHEBANG = b"#!/usr/bin/env -S mah runc\n"
 MAJOR = 1
-MINOR = 8
+MINOR = 9
 
 # -- section ids (docs/MAHC_FORMAT.md #3) -----------------------------------
 SEC_STRINGS = 0x01
@@ -157,6 +160,9 @@ NATIVE_ARITIES = {
     "random.fresh": 0,
     "random.next": 1,
     "random.below": 2,
+    # M32 (1.9): std:regex's matcher.
+    "regex.find": 3,
+    "regex.find_all": 2,
 }
 
 # M16: which minor version introduced each 1.1+ native -- a 1.0 file
@@ -183,6 +189,8 @@ NATIVE_SINCE_MINOR = {
     "random.fresh": 8,
     "random.next": 8,
     "random.below": 8,
+    "regex.find": 9,
+    "regex.find_all": 9,
 }
 
 # M29: native inherent methods added after 1.0, by the minor that added

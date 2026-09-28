@@ -3112,6 +3112,30 @@ node that resolved to it. Then:
       errors, checker types), `vm_diff.py` cases pinning seeded output,
       `examples/random_collections.mh`.
 
+33. **M32 — `std:regex`. ✅ Landed.** The last of `docs/STDLIB.md` Phase
+    1; bytecode 1.9 (natives only) in `docs/MAHC_FORMAT.md` §4.4/§7, which
+    also specifies the canonical pattern form. Decisions in `STDLIB.md`.
+
+    - **`mah/std/regex.mh`** parses patterns (a recursive-descent parser
+      in Mah) into the canonical form: ASCII classes spelled out, `i`
+      expanded into classes, `$` as `\z`, named groups as `(?P<n>...)`,
+      and anything the engines disagree on rejected with a positioned
+      `RegexError`. `Regex`/`Match`, templates, `split`, `escape` and
+      `must_compile` are Mah too.
+    - **Natives, both VMs**: `regex.find(source, text, start)` and
+      `regex.find_all(source, text)`, returning code-point spans with the
+      same iteration rule, over Python's `re` (three spellings rewritten
+      in `mah/natives.py`) and the Rust `regex` crate (the runtime's first
+      dependency; a per-VM cache of compiled patterns in `Vm`).
+    - **Parity was fuzzed**: about 3,700 seeded random patterns over
+      random texts, compared between the VMs, found two disagreements,
+      both now handled: `re`'s `\B` never matching in an empty string
+      (rewritten as lookarounds), and repeated capture groups that can
+      match nothing (rejected). A seeded batch stays in `vm_diff.py`.
+    - Tests: `mah/std/regex.test.mh` (both VMs), `RegexTests` (canonical
+      form, the Python spellings, native errors, checker types),
+      `vm_diff.py` cases, `examples/regex_log.mh`.
+
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
 it** (`make test` must stay green) — see `docs/TESTING.md` for where

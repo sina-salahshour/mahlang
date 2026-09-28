@@ -645,7 +645,7 @@ are global across all imported files and need no `export`.
 
 Standard library modules are imported as `"std:<name>"`, the same two ways
 as a file: `std:math`, `std:path`, `std:json`, `std:csv`, `std:random`,
-`std:collections` (and `std:test`, below).
+`std:collections`, `std:regex` (and `std:test`, below).
 
 ```mah
 import math from "std:math"
@@ -753,6 +753,32 @@ Also: Set `remove`/`intersection`/`difference`/`is_subset`/`equals`
 (`==` compares identity), Deque `front`/`back`/`get(i)`, and
 `PriorityQueue.of(values, key = none)`; for largest first use a negating
 key, `fn(x) { 0 - x }`.
+
+`std:regex`: the same matching on every VM, over a checked subset of the
+usual syntax -- `.` `[a-z]` `[^...]` `\d \w \s` (ASCII) `^ $ \A \z \b`
+`* + ? {n,m}` (lazy with `?`) `(x) (?:x) (?<name>x) a|b`, flags `"i"`
+(ASCII case), `"m"`, `"s"`. No lookaround, backreferences or inline
+flags. Positions count characters. Remember that `\` in a Mah String is
+itself escaped: write `"\\d+"`.
+
+```mah
+import regex from "std:regex"
+let date = regex.must_compile("(?<y>\\d{4})-(?<m>\\d\\d)")   # a fixed pattern
+print(date.is_match("due 2026-09"))                             # true
+let m = date.find("due 2026-09").unwrap()                       # find gives an Option<Match>
+print(m.text, m.start, m.group("y"), m.group(2))                # 2026-09 4 2026 09
+print(date.replace_all("2026-09 2027-01", "$m/$y"))             # 09/2026 01/2027
+print(regex.must_compile("\\s*,\\s*").split("a , b,c"))           # [a, b, c]
+print(date.find_all("2026-09 2027-01").len())                   # 2
+let user_pattern = "(oops"
+print(try { regex.compile(user_pattern) } catch { e: RegexError => { e.message() } })
+# missing ) at position 0 in "(oops" -- compile throws RegexError; use it for patterns from input
+```
+
+Also `replace` (first match only), `replace_all(text, fn(m) { ... })`,
+`split(text, limit)`, `regex.escape(text)` for a literal, and
+`Match.groups`/`end`. A group the pattern lacks (`m.group(9)`) throws
+`RuntimeError.ArgumentError`.
 
 ## Errors
 
@@ -878,12 +904,12 @@ test "not ready yet" {
   assigning into a String (`s[0] = "x"`: Strings are immutable).
 - `for x in ...` without `let`, C-style `for (i = 0; ...)`, destructuring in
   `for` bindings, labeled `break`/`continue`.
-- Regular expressions and string formatting/interpolation (use `+`,
+- String formatting/interpolation (use `+`,
   `pad_start`, and friends).
 - `&&`, `||`, `+=`, `++`, ternary `?:`.
 - Type-checking trait-typed values, bounds, and the prelude's iterator methods (the checker skips these for now); classes/inheritance.
 - Variadic parameters (`*args`, `**kwargs`); only `print` takes any number of arguments.
-- File, network, or OS access, regular expressions, and every other
-  planned `std:` module besides `std:math`, `std:path`, `std:json`,
-  `std:csv`, `std:random`, `std:collections` and `std:test`.
+- File, network, or OS access, and every other planned `std:` module
+  besides `std:math`, `std:path`, `std:json`, `std:csv`, `std:random`,
+  `std:collections`, `std:regex` and `std:test`.
 - `null`/`nil`/`undefined`: use `none`.

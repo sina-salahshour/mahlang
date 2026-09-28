@@ -330,6 +330,102 @@ fn random_below(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
     }
 }
 
+// -- M32 (1.9): std:regex's matcher ---------------------------------------------
+//
+// Patterns arrive in std:regex's canonical form, whose syntax is this
+// crate's (docs/MAHC_FORMAT.md #4.4); spans go back as code-point positions,
+// exactly as `mah/natives.py` computes them.
+
+fn compiled(vm: &mut Vm, name: &str, v: &Value) -> Result<regex::Regex, RuntimeError> {
+    let source = string_arg(vm, name, v)?.clone();
+    if let Some(r) = vm.regex_cache.get(&source) {
+        return Ok(r.clone());
+    }
+    let r = regex::RegexBuilder::new(&source)
+        .size_limit(1 << 28)
+        .nest_limit(1000)
+        .build()
+        .map_err(|_| RuntimeError::with_kind(format!("{name}: not a canonical pattern"), ErrorKind::ArgumentError))?;
+    if vm.regex_cache.len() >= 256 {
+        vm.regex_cache.clear();
+    }
+    vm.regex_cache.insert(source, r.clone());
+    Ok(r)
+}
+
+/// The byte offset of every code point of `text`, then `text.len()`.
+fn char_offsets(text: &str) -> Vec<usize> {
+    let mut out: Vec<usize> = text.char_indices().map(|(i, _)| i).collect();
+    out.push(text.len());
+    out
+}
+
+fn to_char(offsets: &[usize], byte: usize) -> Value {
+    let i = offsets.binary_search(&byte).expect("a match ends on a char boundary");
+    Value::Number(Decimal::from_u64(i as u64))
+}
+
+fn spans(offsets: &[usize], caps: &regex::Captures) -> Value {
+    let mut out = Vec::with_capacity(caps.len() * 2);
+    for g in 0..caps.len() {
+        match caps.get(g) {
+            Some(m) => {
+                out.push(to_char(offsets, m.start()));
+                out.push(to_char(offsets, m.end()));
+            }
+            None => {
+                out.push(Value::None);
+                out.push(Value::None);
+            }
+        }
+    }
+    Value::Vector(Rc::new(std::cell::RefCell::new(out)))
+}
+
+fn regex_find(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
+    let r = compiled(vm, "find", &args[0])?;
+    let text = string_arg(vm, "find", &args[1])?.clone();
+    let offsets = char_offsets(&text);
+    let start = match &args[2] {
+        Value::Number(n) => match n.to_sign_u64() {
+            Some((false, i)) if (i as usize) < offsets.len() => i as usize,
+            _ => usize::MAX,
+        },
+        _ => usize::MAX,
+    };
+    if start == usize::MAX {
+        return Err(RuntimeError::with_kind("find: start must be a position in the text", ErrorKind::ArgumentError));
+    }
+    Ok(match r.captures_at(&text, offsets[start]) {
+        Some(caps) => spans(&offsets, &caps),
+        None => Value::None,
+    })
+}
+
+/// Every match, left to right: after a match ending at `e`, the next search
+/// starts at `e` -- or one code point later after an empty one.
+fn regex_find_all(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
+    let r = compiled(vm, "find_all", &args[0])?;
+    let text = string_arg(vm, "find_all", &args[1])?.clone();
+    let offsets = char_offsets(&text);
+    let mut out = Vec::new();
+    let mut pos = 0usize; // a byte offset, always on a char boundary
+    while pos <= text.len() {
+        let Some(caps) = r.captures_at(&text, pos) else { break };
+        let m = caps.get(0).expect("group 0 always takes part");
+        out.push(spans(&offsets, &caps));
+        pos = if m.start() == m.end() {
+            match text[m.end()..].chars().next() {
+                Some(c) => m.end() + c.len_utf8(),
+                None => break,
+            }
+        } else {
+            m.end()
+        };
+    }
+    Ok(Value::Vector(Rc::new(std::cell::RefCell::new(out))))
+}
+
 fn time_sleep_async(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
     let ms = expect_number(&args[0])?;
     let promise = super::value::PromiseData::new_pending();
@@ -373,5 +469,7 @@ pub fn call_native(vm: &mut Vm, native: NativeFn, args: &[Value]) -> Result<Valu
         NativeFn::RandomFresh => Ok(state_from_seed(fresh_seed())),
         NativeFn::RandomNext => random_next(args),
         NativeFn::RandomBelow => random_below(vm, args),
+        NativeFn::RegexFind => regex_find(vm, args),
+        NativeFn::RegexFindAll => regex_find_all(vm, args),
     }
 }

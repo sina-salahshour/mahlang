@@ -213,8 +213,8 @@ python -m mah check ./examples/structs.mh             # run the static type chec
 `mah format` only ever changes whitespace, and checks that before writing
 (`--check` lists files that would change instead; see `docs/FORMAT.md`).
 
-There's also a native runtime written in Rust (standard library only), with
-the same behavior as the Python VM:
+There's also a native runtime written in Rust (standard library only, plus
+the `regex` crate for `std:regex`), with the same behavior as the Python VM:
 
 ```sh
 make vm                                              # build it (needs cargo)

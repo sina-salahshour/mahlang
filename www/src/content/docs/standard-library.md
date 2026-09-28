@@ -23,9 +23,9 @@ and in your editor, hover and go-to-definition work on its functions like
 on your own (showing locations like `std:math#20:9`).
 
 So far there are `std:math`, `std:path`, `std:json`, `std:csv`,
-`std:random` and `std:collections` (and `std:test`, see
+`std:random`, `std:collections` and `std:regex` (and `std:test`, see
 [Testing](/docs/testing)). The rest of the plan (fs, process, time,
-async, regex, sockets, http) is in `docs/STDLIB.md` in the repository.
+async, sockets, http) is in `docs/STDLIB.md` in the repository.
 
 ## `std:math`
 
@@ -253,6 +253,60 @@ print(tasks.pop(), tasks.pop(), tasks.pop())          # fix test it write docs
   you pass a key function), and equal ones in the order they were pushed.
   For largest first, use a key that negates: `fn(x) { 0 - x }`.
 
+## `std:regex`
+
+```mah
+import regex from "std:regex"
+
+let date = regex.must_compile("(?<y>\\d{4})-(?<m>\\d\\d)")
+let m = date.find("due 2026-09, paid 2026-10").unwrap()
+print(m.text, m.start, m.group("y"))                         # 2026-09 4 2026
+print(date.find_all("due 2026-09, paid 2026-10").len())      # 2
+print(date.replace_all("2026-09 2027-01", "$m/$y"))          # 09/2026 01/2027
+print(regex.must_compile("\\s*,\\s*").split("a , b,c"))        # [a, b, c]
+print(regex.must_compile("cat", "i").replace_all("Cat CAT", fn(m) { m.text.to_lower() }))  # cat cat
+```
+
+Patterns use the familiar syntax, restricted to what every runtime
+matches identically:
+
+| | |
+|---|---|
+| `.` `[abc]` `[^a-z]` | any character but a newline / a class |
+| `\d` `\w` `\s` (and `\D` `\W` `\S`) | ASCII digit, word character (`[0-9A-Za-z_]`), whitespace |
+| `^` `$` `\A` `\z` `\b` `\B` | start, end, word boundary |
+| `*` `+` `?` `{n}` `{n,}` `{n,m}` | repeats (add `?` for lazy); counts up to 1000 |
+| `(x)` `(?:x)` `(?<name>x)` `a\|b` | groups and alternatives |
+| `\.` `\\` `\n` `\t` | escapes: any punctuation after `\` is literal |
+
+Flags go in `compile`'s second argument: `"i"` (ASCII letters match
+either case), `"m"` (`^` and `$` at every line), `"s"` (`.` matches a
+newline too). `$` without `m` is the very end of the text. Lookaround,
+backreferences, and inline flags like `(?i)` aren't supported, and a
+pattern that uses them is an error rather than something that behaves
+differently depending on where it runs. Remember that a Mah String has
+its own escapes, so the pattern `\d+` is written `"\\d+"`.
+
+A `Regex` has `is_match`, `find` (an `Option<Match>`), `find_all`,
+`replace` and `replace_all` (with `$1`, `$name`, `${name}`, `$$`, or a
+function of the Match), and `split(text, limit = none)`. A `Match` has
+`text`, `start`, `end` (positions count characters), and `group(n)` or
+`group(name)`, which gives `none` for a group that didn't take part.
+`regex.escape(text)` makes a pattern that matches `text` literally.
+
+`regex.compile` throws a `RegexError` saying what's wrong and where, so
+use it for patterns that come from outside the program. `must_compile`
+is for patterns written into the program: a mistake there is a bug, so
+it throws a `RuntimeError` the checker doesn't ask you to handle.
+
+```mah
+import regex from "std:regex"
+
+let pattern = "(\\d+"
+print(try { regex.compile(pattern) } catch { e: RegexError => { e.message() } })
+# missing ) at position 0 in "(\d+"
+```
+
 ## How it's built
 
 Each module is a Mah file inside the `mah` package (`mah/std/math.mh`).
@@ -268,7 +322,8 @@ export extern fn tan(x: Number) -> Number = "math.tan"
 `std:csv` are Mah too, over a handful of natives for reading a value's
 type and fields and a String's characters. `std:random`'s generator is a
 small native, specified bit for bit so every runtime computes the same
-numbers.
+numbers. `std:regex` parses each pattern in Mah and hands the runtime a
+form that Python's `re` and Rust's `regex` crate read the same way.
 
 Only standard library modules may use `extern fn`. New natives come with
 a new bytecode minor version, and a compiled program is marked with the

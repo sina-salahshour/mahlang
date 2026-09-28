@@ -397,6 +397,45 @@ d.push_front(0)
 let q = PriorityQueue.of(["pear", "fig", "apple"], fn(w) { w.len() })
 print(s, s.union(Set.of([9])), d, d.pop_back(), q, q.pop(), q.peek())
 """, b""),
+    # M32: std:regex -- the canonical form must match identically on Python's
+    # `re` and Rust's `regex` crate (a seeded batch of random patterns too).
+    ("std_regex", """
+import regex from "std:regex"
+let date = regex.compile("(?<y>\\\\d{4})-(?<m>\\\\d\\\\d)")
+print(date.find_all("2026-09, 2027-10").map(fn(m) { m.group("y") + "/" + m.group(2) }).reduce())
+print(date.replace_all("2026-09", "$m.$y"), regex.compile("\\\\s*;\\\\s*").split("a ; b;c"))
+print(regex.compile("\\\\bé\\\\w*", "i").find_all("é éa aé ÉB").len(), regex.compile("^x|y$", "m").find_all("xy\\nyx\\n").len())
+print(regex.compile("a*").find_all("baaé").map(fn(m) { m.start + "-" + m.end }).reduce(), regex.compile("\\\\B").find_all("").len())
+print(regex.compile("(a)|(b)").find("xb"), regex.compile("[^a-c\\\\d]+?", "i").find_all("xAz9é").map(fn(m) { m.text }).reduce())
+print(try { regex.compile("(?=x)") } catch { e => { e.message() } })
+""", b""),
+    ("std_regex_random", """
+import random from "std:random"
+import regex from "std:regex"
+random.seed(5)
+let pieces = ["(a|b)", "(ab|a)", "((a)|b)", "(?:(a)|bc)", "((ab)+)", "a", "b", "\\\\w", "[^b]", "(?<x>[ac]+?)", "(^a|b)", "(a$|c)", "(\\\\bb)", "é", "\\\\s", "(?:)", "\\\\B"]
+let quants = ["", "", "*", "+", "?", "{2}", "{1,3}", "*?", "+?", "??", "{0,2}", "{2,}?"]
+let alphabet = ["a", "b", "c", " ", "é", "\\n", "A"]
+for let n in 0..60 {
+    let parts = []
+    for let j in 0..random.randint(1, 4) {
+        parts.push(random.choice(pieces) + random.choice(quants))
+    }
+    let r = try regex.compile(parts.join(), random.choice(["", "i", "m", "s"])) else none
+    if r == none { continue }
+    for let k in 0..4 {
+        let t = []
+        for let i in 0..random.randint(0, 8) {
+            t.push(random.choice(alphabet))
+        }
+        print(r.find_all(t.join()).map(fn(m) { m.start + "-" + m.end + ":" + m.groups }).reduce())
+    }
+}
+""", b""),
+    ("std_regex_uncaught", """
+import regex from "std:regex"
+regex.compile("a{5000}")
+""", b""),
     ("std_csv", """
 import csv from "std:csv"
 print(csv.parse("a,\\"b,c\\"\\r\\n\\n\\"q\\"\\"x\\",\\n"), csv.parse_records("n,v\\nx,1\\n"))

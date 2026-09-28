@@ -46,6 +46,9 @@ pub enum NativeFn {
     RandomFresh,
     RandomNext,
     RandomBelow,
+    /// M32 (1.9): std:regex's matcher, over canonical patterns.
+    RegexFind,
+    RegexFindAll,
 }
 
 /// Whether this VM implements a native of that name (any arity) -- for
@@ -80,6 +83,8 @@ fn native_by_name(name: &str) -> Option<(u64, NativeFn)> {
         "random.fresh" => Some((0, NativeFn::RandomFresh)),
         "random.next" => Some((1, NativeFn::RandomNext)),
         "random.below" => Some((2, NativeFn::RandomBelow)),
+        "regex.find" => Some((3, NativeFn::RegexFind)),
+        "regex.find_all" => Some((2, NativeFn::RegexFindAll)),
         _ => None,
     }
 }

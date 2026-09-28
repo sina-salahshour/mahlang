@@ -439,5 +439,64 @@ class RandomAndCollectionsTests(unittest.TestCase):
         )
 
 
+class RegexTests(unittest.TestCase):
+    """M32: std:regex -- behavior is covered by mah/std/regex.test.mh on both
+    VMs; this pins the natives and the canonical form they share."""
+
+    def test_bytecode_minor(self):
+        from mah.bytecode.decode import decode
+
+        src = 'import regex from "std:regex"\nprint(regex.compile("a").is_match("a"))'
+        self.assertEqual(decode(compile_bytes(text=src)).minor, 9)
+
+    def test_canonical_form(self):
+        def source(pattern, flags=""):
+            return run_source(
+                f'import regex from "std:regex"\nprint(regex.compile("{pattern}", "{flags}").source)'
+            ).rstrip("\n")
+
+        self.assertEqual(source("\\\\d\\\\w$"), "[0-9][0-9A-Z_a-z]\\z")
+        self.assertEqual(source("a[b-c]", "i"), "[aA][B-Cb-c]")
+        self.assertEqual(source("^.\\\\b", "ms"), "(?m:^)(?s:.)(?-u:\\b)")
+        self.assertEqual(source("(?<y>x)\\\\.<"), "(?P<y>x)\\.<")
+
+    def test_python_spelling(self):
+        from mah.natives import _PYTHON_NOT_BOUNDARY, _python_pattern
+
+        self.assertEqual(_python_pattern("(?-u:\\b)a\\z"), "\\ba\\Z")
+        self.assertEqual(_python_pattern("(?-u:\\B)"), _PYTHON_NOT_BOUNDARY)
+        # an escaped backslash before a z stays a literal backslash and z
+        self.assertEqual(_python_pattern("\\\\z[\\\\z]"), "\\\\z[\\\\z]")
+
+    def test_native_errors(self):
+        from decimal import Decimal
+
+        from mah.natives import NATIVES
+
+        def call(name, *args):
+            return NATIVES[name][1](None, list(args))
+
+        for name, args, message in [
+            ("regex.find", ["(", "a", Decimal(0)], "find: not a canonical pattern"),
+            ("regex.find", ["a", "a", Decimal(2)], "find: start must be a position in the text"),
+            ("regex.find", ["a", 5, Decimal(0)], "find: expected a String, got Number"),
+            ("regex.find_all", [1, "a"], "find_all: expected a String, got Number"),
+        ]:
+            with self.subTest(name=name, args=args):
+                with self.assertRaises(MahRuntimeError) as cm:
+                    call(name, *args)
+                self.assertEqual(str(cm.exception), message)
+        self.assertEqual([int(x) for x in call("regex.find", "b", "abab", Decimal(2)).items], [3, 4])
+
+    def test_checker_types(self):
+        diagnostics, types = check(
+            'import regex from "std:regex"\nlet q = try regex.compile("(a)") else none\n'
+            'let r = regex.compile("(a)")\nlet m = r.find("a")\nlet all = r.find_all("a")\nlet s = r.split("a")'
+        )
+        self.assertIn("Unhandled error: RegexError", [d[1] for d in diagnostics if d[0] == "unhandled"])
+        got = {k: types[k][-1] for k in ("r", "m", "all", "s")}
+        self.assertEqual(got, {"r": "Regex", "m": "Option<Match>", "all": "Vector<Match>", "s": "Vector<String>"})
+
+
 if __name__ == "__main__":
     unittest.main()
