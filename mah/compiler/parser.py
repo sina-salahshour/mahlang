@@ -43,7 +43,6 @@ from .ast_nodes import (
     Ident,
     IfStmt,
     ImplDecl,
-    InputExpr,
     LetStmt,
     MatchArm,
     MatchStmt,
@@ -118,7 +117,6 @@ _RANGE_END_STARTERS = {
     TokenType.WHILE,
     TokenType.FOR,
     TokenType.FN,
-    TokenType.INPUT,
     TokenType.DETACH,
     TokenType.SLEEP_ASYNC,
     # M25: `try`/`throw` are expressions too, so they're valid range ends
@@ -1683,12 +1681,6 @@ class Parser:
 
         if tok.type is TokenType.FN:
             return self._parse_postfix_from(self._parse_fn_expr())
-
-        if tok.type is TokenType.INPUT:
-            self.advance()
-            self.expect(TokenType.PAREN_OPEN)
-            self.expect(TokenType.PAREN_CLOSE)
-            return self._parse_postfix_from(InputExpr(position=tok.position))
 
         if tok.type is TokenType.DETACH:
             self.advance()

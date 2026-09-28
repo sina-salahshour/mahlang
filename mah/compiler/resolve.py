@@ -203,7 +203,6 @@ from .ast_nodes import (
     Ident,
     IfStmt,
     ImplDecl,
-    InputExpr,
     LetStmt,
     MatchStmt,
     MethodCall,
@@ -250,7 +249,8 @@ _SYSTEM_TRAIT_ARITY = {"Printable": 0, "Index": 2, "IndexAssign": 2}
 
 # M27: built-in functions that are ordinary names, not keywords -- used
 # only when nothing in scope binds the name (`_resolve_builtin_call`).
-_BUILTIN_FNS = frozenset({"sin", "cos"})
+# M33: `input` joined them when it became async (docs/STDLIB.md).
+_BUILTIN_FNS = frozenset({"sin", "cos", "input"})
 
 
 class FrameLevel:
@@ -1876,7 +1876,7 @@ class Resolver:
                 try:
                     self.resolve_expr(expr.callee)
                 except NameError:
-                    # M27: nothing binds `sin`/`cos` here -- the built-in.
+                    # M27: nothing binds `sin`/`cos`/`input` here -- the built-in.
                     self._resolve_builtin_call(expr)
                     return
             else:
@@ -1884,8 +1884,6 @@ class Resolver:
             for arg in expr.args:
                 self.resolve_expr(arg)
             self._resolve_kwargs(expr.kwargs)
-            return
-        if isinstance(expr, InputExpr):
             return
         if isinstance(expr, DetachExpr):
             self.resolve_expr(expr.call)
@@ -2106,10 +2104,19 @@ class Resolver:
         """M27: `sin(x)`/`cos(x)` stopped being lexer keywords (so `std:math`
         can export functions of those names, and `math.sin` parses); an
         unbound call to one is still the built-in, with the same one-
-        positional-argument rule the keyword forms had."""
+        positional-argument rule the keyword forms had. M33: likewise
+        `input(prompt = "")`, with at most one."""
         name = expr.callee.name
         if expr.kwargs:
             raise SyntaxError(f"'{name}' doesn't take keyword arguments at position '{expr.position}'")
+        if name == "input":
+            # M33: `input(prompt = "")`.
+            if len(expr.args) > 1:
+                raise SyntaxError(f"'input' takes at most one argument (the prompt) at position '{expr.position}'")
+            for arg in expr.args:
+                self.resolve_expr(arg)
+            expr.builtin = name
+            return
         if len(expr.args) != 1:
             raise SyntaxError(f"'{name}' can only have one argument at position '{expr.position}'")
         self.resolve_expr(expr.args[0])

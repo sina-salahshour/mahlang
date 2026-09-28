@@ -85,7 +85,7 @@ loosest of all, `&`/`|` share one level, and `%` shares a level with
 | call | meaning |
 |---|---|
 | `print(a, b, ..., sep: " ", end: "\n")` | prints the arguments separated by `sep` (default: a space), then `end` (default: a newline). `print()` prints just a newline |
-| `input()` | reads an integer from stdin (skips non-digits until one) |
+| `input(prompt = "")` | prints `prompt` (no newline), reads one line from stdin and returns it as a String without the newline; throws `EndOfInput` at the end of the input. Use `.to_number()` for a Number. `detach input()` gives a Promise instead (see [Async](/docs/async)) |
 | `sin(x)`, `cos(x)` | radians; the rest of the math is in [`std:math`](/docs/standard-library) |
 | `sleep_async(ms)` | pauses (see [Async](/docs/async)) |
 

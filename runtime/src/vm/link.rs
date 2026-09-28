@@ -49,6 +49,8 @@ pub enum NativeFn {
     /// M32 (1.9): std:regex's matcher, over canonical patterns.
     RegexFind,
     RegexFindAll,
+    /// M33 (1.10): the async `input`.
+    IoReadLine,
 }
 
 /// Whether this VM implements a native of that name (any arity) -- for
@@ -85,6 +87,7 @@ fn native_by_name(name: &str) -> Option<(u64, NativeFn)> {
         "random.below" => Some((2, NativeFn::RandomBelow)),
         "regex.find" => Some((3, NativeFn::RegexFind)),
         "regex.find_all" => Some((2, NativeFn::RegexFindAll)),
+        "io.read_line" => Some((1, NativeFn::IoReadLine)),
         _ => None,
     }
 }

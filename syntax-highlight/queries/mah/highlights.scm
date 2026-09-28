@@ -44,13 +44,12 @@
 
 ; Built-in functions
 "print" @function.builtin
-"input" @function.builtin
 "sleep_async" @function.builtin
 ; M27: `sin`/`cos` are ordinary names now (so `std:math` can export them);
-; a bare call to one is the built-in.
+; a bare call to one is the built-in. M33: so is `input`.
 (call_expr
   function: (identifier) @function.builtin
-  (#any-of? @function.builtin "sin" "cos"))
+  (#any-of? @function.builtin "sin" "cos" "input"))
 
 ; M10 (async): `.await` is not its own grammar rule (an ordinary
 ; `field_access` with field name "await" covers it structurally -- see

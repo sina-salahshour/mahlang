@@ -673,10 +673,6 @@
           "named": true
         },
         {
-          "type": "input_call",
-          "named": true
-        },
-        {
           "type": "map_literal",
           "named": true
         },
@@ -1335,11 +1331,6 @@
         ]
       }
     }
-  },
-  {
-    "type": "input_call",
-    "named": true,
-    "fields": {}
   },
   {
     "type": "keyword_argument",
@@ -2609,10 +2600,6 @@
   },
   {
     "type": "in",
-    "named": false
-  },
-  {
-    "type": "input",
     "named": false
   },
   {

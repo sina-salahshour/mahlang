@@ -6,13 +6,14 @@ tags: [changelog]
 version: "0.2.0"
 ---
 
-This release (milestones M22 through M32) adds a static type checker,
+This release (milestones M22 through M33) adds a static type checker,
 errors you can throw, catch, and have checked, the first modules of a
 standard library (math, paths, JSON, CSV, random numbers, collections,
 regular expressions), a test runner, and String methods. Types and error sets cost nothing at run
 time: they're erased before codegen. The bytecode gains 1.4's handler
 table for `try`, 1.5's math natives, 1.7's natives behind JSON and CSV,
-1.8's random number generator, and 1.9's regex matcher.
+1.8's random number generator, 1.9's regex matcher, and 1.10's
+asynchronous `input`.
 
 ## Errors: `throw`, `try`, `catch`
 
@@ -206,6 +207,32 @@ backreferences), and a pattern outside it is a `RegexError` with its
 position. `find` gives an `Option<Match>`, and `replace_all` takes `$1`
 / `$name` templates or a function. `must_compile` is for fixed patterns.
 The Rust runtime gains its first dependency, the `regex` crate.
+
+## `input` reads a line, and can wait in the background
+
+**Breaking:** `input()` used to scan standard input for digits and return
+a Number. Now `input(prompt = "")` prints the prompt, reads one line, and
+returns it as a String; add `.to_number()` where you need a Number. At
+the end of the input it throws `EndOfInput`, which the checker tracks.
+
+`input` is asynchronous underneath: called plainly it waits for the line,
+and `detach input()` gives a Promise, so timers and other tasks keep
+running while the user types:
+
+```mah
+let answer = detach input("number: ")
+for let i in 0..3 {
+    sleep_async(500)
+    print("still waiting...")
+}
+print(try answer.await.to_number() else 0)
+```
+
+Both runtimes read standard input on a reader thread and settle the
+Promise from their scheduler, which now waits for whichever comes first,
+a timer or a finished read. `input` is also no longer a keyword: a
+function or variable of your own named `input` takes over. Files compiled
+before this change keep their old behavior.
 
 ## `mah test`
 

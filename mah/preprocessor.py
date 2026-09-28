@@ -217,6 +217,9 @@ def _uses_prelude(token_lists: list) -> bool:
             # exclusion is needed the way `PRELUDE_TRIGGERS` names do.
             if tok.kind == "id" and tok.value in ("try", "throw"):
                 return True
+            # M33: `input` can throw the prelude's `EndOfInput`.
+            if tok.kind == "id" and tok.value == "input":
+                return True
         for i in range(len(tokens) - 1):
             a, b = tokens[i], tokens[i + 1]
             if a.kind == "dot" and b.kind == "dot" and b.start == a.end:

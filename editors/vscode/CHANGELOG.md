@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Highlighting**: `input` is no longer a keyword (Mah's `input(prompt)`
+  now returns a String and can be detached); only a bare `input(...)` call
+  is highlighted as the built-in, like `sin`/`cos`. Hover describes the
+  new behavior.
 - **Completion** offers the standard library's modules (`std:math`,
   `std:test`, ...) inside an `import "..."` / `from "..."` string.
 - **Highlighting** for errors (Mah v0.2.0): `throw`/`try`, and `catch`,

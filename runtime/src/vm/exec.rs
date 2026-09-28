@@ -467,6 +467,65 @@ pub struct Vm<'p> {
     failed_promises: Vec<Rc<RefCell<PromiseData>>>,
     /// M32: std:regex's compiled patterns, by canonical source.
     pub regex_cache: HashMap<Rc<str>, regex::Regex>,
+    /// M33 (docs/MAHC_FORMAT.md #6.4): blocking operations in flight.
+    io: IoHub,
+}
+
+/// M33: blocking operations run on worker threads, which only report back
+/// through `done`; the scheduler settles their Promises on the VM's own
+/// thread (Promises aren't `Send`, so they wait in `pending`, by id). The
+/// program keeps running while any is pending. Standard input has one
+/// reader thread, so lines are handed out in the order `input` asked.
+/// Mirrors `code_interpreter.py`'s `_IoHub`.
+struct IoHub {
+    done_tx: std::sync::mpsc::Sender<(u64, Option<String>)>,
+    done_rx: std::sync::mpsc::Receiver<(u64, Option<String>)>,
+    pending: HashMap<u64, Rc<RefCell<PromiseData>>>,
+    next_id: u64,
+    stdin_requests: Option<std::sync::mpsc::Sender<u64>>,
+}
+
+impl IoHub {
+    fn new() -> IoHub {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        IoHub { done_tx, done_rx, pending: HashMap::new(), next_id: 0, stdin_requests: None }
+    }
+
+    fn read_line(&mut self, promise: Rc<RefCell<PromiseData>>) {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.pending.insert(id, promise);
+        let requests = self.stdin_requests.get_or_insert_with(|| {
+            let (tx, rx) = std::sync::mpsc::channel::<u64>();
+            let done = self.done_tx.clone();
+            std::thread::spawn(move || stdin_worker(rx, done));
+            tx
+        });
+        let _ = requests.send(id);
+    }
+}
+
+fn stdin_worker(requests: std::sync::mpsc::Receiver<u64>, done: std::sync::mpsc::Sender<(u64, Option<String>)>) {
+    use std::io::BufRead;
+    // Ends when the VM (the only sender) is dropped.
+    while let Ok(id) = requests.recv() {
+        let mut line = String::new();
+        let got = match io::stdin().lock().read_line(&mut line) {
+            Ok(0) | Err(_) => None,
+            Ok(_) => {
+                if line.ends_with('\n') {
+                    line.pop();
+                    if line.ends_with('\r') {
+                        line.pop();
+                    }
+                }
+                Some(line)
+            }
+        };
+        if done.send((id, got)).is_err() {
+            return;
+        }
+    }
 }
 
 impl<'p> Vm<'p> {
@@ -479,6 +538,12 @@ impl<'p> Vm<'p> {
     pub fn read_stdin_char(&self) -> Option<char> {
         read_stdin_char(&self.stdin)
     }
+    /// M33: settle `promise` with the next line of standard input (or fail
+    /// it with EndOfInput), from the scheduler, later.
+    pub fn read_line(&mut self, promise: Rc<RefCell<PromiseData>>) {
+        self.io.read_line(promise);
+    }
+
     pub fn schedule_timer(&mut self, delay_seconds: f64, promise: Rc<RefCell<PromiseData>>) {
         let secs = if delay_seconds.is_finite() { delay_seconds.max(0.0) } else { 0.0 };
         let wake = Instant::now() + Duration::from_secs_f64(secs);
@@ -1107,6 +1172,50 @@ impl<'p> Vm<'p> {
         }
     }
 
+    fn settle_io(&mut self, (id, line): (u64, Option<String>)) -> RResult<()> {
+        let Some(promise) = self.io.pending.remove(&id) else { return Ok(()) };
+        match line {
+            Some(text) => self.resolve_promise(&promise, Value::Str(Rc::from(text.as_str()))),
+            None => {
+                let error = Value::Struct(Rc::new(RefCell::new(StructData {
+                    type_name: Rc::from("EndOfInput"),
+                    fields: Vec::new(),
+                    thrown_at: None,
+                    backtrace: None,
+                })));
+                self.fail_promise(&promise, error)
+            }
+        }
+    }
+
+    /// M33: handle the next event -- a finished I/O operation, or else the
+    /// next timer, whichever comes first -- waiting for it if need be.
+    /// `false` when there's nothing left that could happen.
+    fn next_event(&mut self) -> RResult<bool> {
+        if let Ok(item) = self.io.done_rx.try_recv() {
+            self.settle_io(item)?;
+            return Ok(true);
+        }
+        if self.io.pending.is_empty() {
+            return self.drain_next_timer();
+        }
+        self.flush_stdout();
+        let got = match self.timers.peek() {
+            Some(t) => {
+                let wait = t.wake.saturating_duration_since(Instant::now());
+                self.io.done_rx.recv_timeout(wait).ok()
+            }
+            None => self.io.done_rx.recv().ok(),
+        };
+        match got {
+            Some(item) => {
+                self.settle_io(item)?;
+                Ok(true)
+            }
+            None => self.drain_next_timer(),
+        }
+    }
+
     fn drain_next_timer(&mut self) -> RResult<bool> {
         let Some(TimerEntry { wake, seq: _, promise }) = self.timers.pop() else { return Ok(false) };
         let now = Instant::now();
@@ -1623,11 +1732,11 @@ impl<'a> Vm<'a> {
                 let p = promise.borrow();
                 p.settled.is_none() && p.failed.is_none()
             };
-            if !pending || !self.drain_next_timer()? {
+            if !pending || !self.next_event()? {
                 break;
             }
         }
-        let leftover = !self.timers.is_empty();
+        let leftover = !self.timers.is_empty() || !self.io.pending.is_empty();
         let (settled, failed) = {
             let p = promise.borrow();
             (p.settled.is_some(), p.failed.clone())
@@ -1715,15 +1824,18 @@ fn run(linked: &LinkedProgram, test_slot: Option<usize>) -> RResult<Option<TestO
         main_task: main_task.clone(),
         failed_promises: Vec::new(),
         regex_cache: HashMap::new(),
+        io: IoHub::new(),
     };
     vm.drive(main_task, None)?;
 
     loop {
+        // M33: the program ends once the main task has finished and no
+        // timer or I/O operation is pending (docs/MAHC_FORMAT.md #6.4).
         let settled = main_promise.borrow().settled.is_some();
-        if settled && vm.timers.is_empty() {
+        if settled && vm.timers.is_empty() && vm.io.pending.is_empty() {
             break;
         }
-        if !vm.drain_next_timer()? {
+        if !vm.next_event()? {
             break;
         }
     }

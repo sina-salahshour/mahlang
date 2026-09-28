@@ -574,7 +574,6 @@ module.exports = grammar({
         $.enum_literal,
         $.some_expr,
         $.none_expr,
-        $.input_call,
         $.detach_expr,
         $.throw_expr,
         $.try_expr,
@@ -781,8 +780,6 @@ module.exports = grammar({
 
     none_expr: ($) => "none",
 
-
-    input_call: ($) => seq("input", "(", ")"),
 
     // `detach <operand>`: any expression can be detached (compiler/
     // parser.py's `_parse_detach` -- a call is detached directly, anything

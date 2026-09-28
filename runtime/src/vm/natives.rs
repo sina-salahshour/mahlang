@@ -50,6 +50,27 @@ fn io_write(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::None)
 }
 
+/// M33 (1.10): `input(prompt)`'s native -- writes the prompt (flushed, no
+/// newline added), then returns a Promise of the next line of standard
+/// input, which fails with an `EndOfInput` struct when there are no more.
+fn io_read_line(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
+    let prompt = match &args[0] {
+        Value::Str(s) => s.clone(),
+        other => {
+            return Err(RuntimeError::with_kind(
+                format!("input: the prompt must be a String, got {}", super::value::type_name_of(other, &vm.names)),
+                ErrorKind::TypeMismatch,
+            ))
+        }
+    };
+    vm.write_stdout(&prompt);
+    vm.flush_stdout();
+    let promise = super::value::PromiseData::new_pending();
+    vm.read_line(promise.clone());
+    Ok(Value::Promise(promise))
+}
+
+/// Pre-1.10 files' `input()`: the digits of the first run of them.
 fn io_input(vm: &mut Vm, _args: &[Value]) -> Result<Value, RuntimeError> {
     vm.flush_stdout();
     let mut raw = String::new();
@@ -471,5 +492,6 @@ pub fn call_native(vm: &mut Vm, native: NativeFn, args: &[Value]) -> Result<Valu
         NativeFn::RandomBelow => random_below(vm, args),
         NativeFn::RegexFind => regex_find(vm, args),
         NativeFn::RegexFindAll => regex_find_all(vm, args),
+        NativeFn::IoReadLine => io_read_line(vm, args),
     }
 }

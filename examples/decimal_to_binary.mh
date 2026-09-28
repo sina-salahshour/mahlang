@@ -14,7 +14,9 @@ fn pow() {
 # pow()
 # print(pow_res)
 
-let x = input()
+# input() gives a String (EndOfInput at the end of the input); to_number()
+# throws NumberParseError if it isn't one -- either way, use 0.
+let x = try input("decimal: ").to_number() else 0
 let res = 0
 let i = 0
 while x {

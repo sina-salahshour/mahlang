@@ -66,7 +66,6 @@ from .ast_nodes import (
     IfStmt,
     ImplDecl,
     Index,
-    InputExpr,
     LetStmt,
     MapLit,
     MatchStmt,
@@ -1335,8 +1334,6 @@ class Checker:
             return self._check_binary(expr)
         if isinstance(expr, Call):
             return self._check_call(expr)
-        if isinstance(expr, InputExpr):
-            return NUMBER
         if isinstance(expr, SleepAsyncExpr):
             self._expect(self._check_expr(expr.arg), NUMBER, expr.arg.position)
             return NONE
@@ -1430,6 +1427,12 @@ class Checker:
         return self._binop(op, lhs, rhs, expr.position)
 
     def _check_call(self, expr: Call):
+        if expr.builtin == "input":
+            # M33: `input(prompt = "") -> String throws EndOfInput`.
+            for arg in expr.args:
+                self._expect(self._check_expr(arg), STRING, arg.position, "in the prompt")
+            self._raise_names({"EndOfInput"}, expr.position)
+            return STRING
         if expr.builtin is not None:
             # M27: the built-in `sin`/`cos` (see resolve.py).
             self._expect(self._check_expr(expr.args[0]), NUMBER, expr.args[0].position)

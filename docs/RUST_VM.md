@@ -83,10 +83,14 @@ matches Python here rather than being "more right". Integers print every
 digit in both VMs (`print(10 ** 5000)`), formatted from the decimal itself
 rather than through Python's `int`, which refuses past 4300 digits.
 
-Known differences, all corner cases: `input()` treats only Unicode `Nd`
-characters as digits (Python's `isdigit` also accepts superscripts etc.,
-which then fail to convert), and the Rust VM has no Python-style recursion
-limit.
+Known differences, all corner cases: the pre-1.10 `io.input` native
+(kept for older files) treats only Unicode `Nd` characters as digits
+(Python's `isdigit` also accepts superscripts etc., which then fail to
+convert), and the Rust VM has no Python-style recursion limit. Since
+1.10 both VMs read standard input for `input()` on a reader thread and
+settle its Promise from the scheduler loop (`IoHub` in
+`runtime/src/vm/exec.rs`, `_IoHub` in `mah/code_interpreter.py`), so a
+detached `input()` waits alongside timers identically.
 
 ## Self-contained executables
 

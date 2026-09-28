@@ -399,3 +399,10 @@ trait Error {
 impl Error for RuntimeError {
     fn message(self) { self.message }
 }
+
+# M33: what `input()` throws when standard input has no more lines.
+struct EndOfInput { }
+
+impl Error for EndOfInput {
+    fn message(self) { "end of input" }
+}

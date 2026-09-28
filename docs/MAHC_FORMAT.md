@@ -1,4 +1,4 @@
-# The `.mahc` bytecode format (version 1.9)
+# The `.mahc` bytecode format (version 1.10)
 
 `mah build prog.mh` compiles a program (its entry file plus everything it
 imports) into a single `.mahc` file; `mah runc prog.mahc` runs one. This
@@ -64,7 +64,7 @@ sections   (id u8, length varuint, payload bytes(length))*   until end of file
   version whose features it uses. *(1.5)* The reference encoder writes 4
   (every file it produces has 1.4's TYPES layout and HANDLERS section),
   or the highest `(1.x)` marker among the natives the file lists (5 for
-  the `std:math` natives, 7 for the ones behind `std:json`/`std:csv`, 8 for `std:random`'s, 9 for `std:regex`'s), so a program that doesn't call newer natives
+  the `std:math` natives, 7 for the ones behind `std:json`/`std:csv`, 8 for `std:random`'s, 9 for `std:regex`'s, 10 for `io.read_line`), so a program that doesn't call newer natives
   still runs on an older VM. *(1.6)* Native methods (§6.7) are called by
   name, so it also writes the minor that added any native method whose
   *name* a `callmethod`/`callmethodkw`/`detachmethod`/`detachmethodkw` in
@@ -173,7 +173,8 @@ Version 1.0 defines:
 |---|---|---|
 | `io.print` | 1 | writes `to_string(v)` (§6.6) followed by `\n` to standard output; returns `none` |
 | `io.write` | 1 | *(1.1)* writes `to_string(v)` (§6.6) to standard output with **no** newline; returns `none` |
-| `io.input` | 0 | reads characters from standard input: skips characters until the first ASCII digit, then consumes digits up to and including the first non-digit (or end of input); returns that Number. End of input before any digit is a runtime error. |
+| `io.input` | 0 | reads characters from standard input: skips characters until the first ASCII digit, then consumes digits up to and including the first non-digit (or end of input); returns that Number. End of input before any digit is a runtime error. *(1.10: no longer emitted, since `input` compiles to `io.read_line`; VMs keep it for older files.)* |
+| `io.read_line` | 1 | *(1.10)* the async `input(prompt)`: writes the prompt (a String, else `RuntimeError.TypeMismatch`, `input: the prompt must be a String, got TYPE`) to standard output with no newline and flushes it, then returns a pending Promise that the scheduler (§6.4) settles with the next line of standard input as a String, without its `\n` or `\r\n`, or fails with an `EndOfInput` struct value (no fields; the prelude's type) when there are no more lines. Lines go to calls in call order. |
 | `math.sin` | 1 | sine of a Number (radians); the result is computed in IEEE-754 double precision and converted to Number via its shortest round-trip decimal text |
 | `math.cos` | 1 | cosine, same rules |
 | `time.sleep_async` | 1 | returns a new pending Promise that the scheduler settles with `none` after the argument's number of milliseconds (§6.4) |
@@ -631,12 +632,21 @@ Single-threaded cooperative scheduling:
   loop) either way.
 - `time.sleep_async(ms)` returns a pending promise and registers a **timer**
   at `now + ms`.
+- *(1.10)* `io.read_line` starts a pending **I/O operation**: the VM does
+  the blocking read off its own thread of execution (the reference VMs use
+  one standard-input reader thread, so lines are handed out in the order
+  they were asked for) and only ever settles the operation's Promise from
+  the scheduler loop, never concurrently with a running task.
 - **Scheduler loop**: after task 0 is first run (it runs until it halts,
   suspends, or -- fatally, §6.8 -- fails), repeat: if task 0 has finished
-  and no timers remain, the program ends; otherwise take the earliest
-  timer (ties: registration order), wait until it's due, and resolve its
-  promise with `none`. So the program ends only once the main code has
-  finished *and* no scheduled work remains. *(1.4)* Once it does, if any
+  and no timers *(1.10)* or I/O operations remain, the program ends;
+  otherwise settle the next event: *(1.10)* an I/O operation that has
+  already completed, if any; else wait until the earliest timer is due
+  (ties: registration order) or, *(1.10)* if one completes sooner, an I/O
+  operation does, whichever comes first, and settle it -- a timer's promise
+  resolves with `none`. So the program ends only once the main code has
+  finished *and* no scheduled work remains: *(1.10)* a detached `input`
+  nobody awaits still keeps the program running until its line arrives. *(1.4)* Once it does, if any
   detached task's Promise failed and was never observed, the program
   still stops with the uncaught-error report (§6.8) for the **first**
   such Promise, in fail order.
@@ -836,7 +846,8 @@ non-empty and meaningless):
 - `IndexOutOfRange`: `char_at` out of range, `index_assign` on a Vector
   index that names no item.
 - `MatchFailed`: `matchfail`.
-- `InputError`: `io.input` errors.
+- `InputError`: `io.input` errors (pre-1.10 files; `io.read_line` fails
+  its Promise with `EndOfInput` instead).
 - `Internal`: everything else, including "cannot suspend ... when called
   implicitly by the runtime", "program counter out of range", and any
   wrapped host-language exception. Both VMs must classify every site
@@ -1031,6 +1042,10 @@ message
   `std:random`.
 - **1.9** added natives only: `regex.find` and `regex.find_all` (§4.4),
   over `std:regex`'s canonical patterns.
+- **1.10** added `io.read_line` (§4.4), the async `input`, and I/O
+  operations in the scheduler loop (§6.4). The compiler stops emitting
+  `io.input` for `input()`, but VMs keep implementing it, so older files
+  run unchanged.
 - Planned growth, for orientation: error-set checking (the static
   checker's `throws` inference and "unhandled error" diagnostics -- M26),
   string utilities, filesystem, networking, and process natives.

@@ -374,8 +374,6 @@ class _Lowerer:
             # of the old one-arg-per-line `print` IR op -- see codegen.py's
             # module docstring/`_gen_print`.
             return Instr("native", (self.intern_native("io.write"), (a1,), None))
-        if op == "input":
-            return Instr("native", (self.intern_native("io.input"), (), a3))
         if op == "sin":
             return Instr("native", (self.intern_native("math.sin"), (a1,), a3))
         if op == "cos":
