@@ -293,6 +293,106 @@ def _random_below(ctx: NativeContext, args) -> object:
             return Decimal(x % bound)
 
 
+# -- M32 (1.9): std:regex's matcher ------------------------------------------
+#
+# std:regex parses every pattern itself (in Mah, so its errors are the same
+# on every VM) into a canonical form in which each construct means the same
+# thing to Python's `re` and Rust's `regex` crate (docs/MAHC_FORMAT.md
+# #4.4). Its syntax is Rust's; `_python_pattern` rewrites the only two
+# spellings `re` doesn't share.
+
+_REGEX_CACHE: dict = {}
+
+
+# `re`'s own `\\B` never matches in an empty string (Rust's does, as there's
+# no word boundary there), so it's spelled out as "both sides alike".
+_PYTHON_NOT_BOUNDARY = "(?:(?<=\\w)(?=\\w)|(?<!\\w)(?!\\w))"
+
+
+def _python_pattern(source: str) -> str:
+    """`(?-u:\\b)` -> `\\b` (ASCII, from `re.ASCII`), `(?-u:\\B)` -> its
+    lookaround definition, and `\\z` -> `\\Z`; everything else is shared."""
+    out = []
+    i = 0
+    while i < len(source):
+        if source.startswith("(?-u:\\b)", i):
+            out.append("\\b")
+            i += 8
+            continue
+        if source.startswith("(?-u:\\B)", i):
+            out.append(_PYTHON_NOT_BOUNDARY)
+            i += 8
+            continue
+        c = source[i]
+        if c == "\\":
+            nxt = source[i + 1]
+            out.append("\\Z" if nxt == "z" else c + nxt)
+            i += 2
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _compiled(name: str, source) -> object:
+    import re
+
+    if not isinstance(source, str):
+        raise MahRuntimeError(f"{name}: expected a String, got {type_name_of(source)}", kind="TypeMismatch")
+    compiled = _REGEX_CACHE.get(source)
+    if compiled is None:
+        try:
+            compiled = re.compile(_python_pattern(source), re.ASCII)
+        except (re.error, IndexError, RecursionError, OverflowError):
+            raise MahRuntimeError(f"{name}: not a canonical pattern", kind="ArgumentError") from None
+        if len(_REGEX_CACHE) >= 256:
+            _REGEX_CACHE.clear()
+        _REGEX_CACHE[source] = compiled
+    return compiled
+
+
+def _spans(m) -> VectorValue:
+    """[start0, end0, start1, end1, ...]: every group's span (`none, none`
+    for one that didn't take part), in code points."""
+    out = []
+    for g in range(m.re.groups + 1):
+        s, e = m.span(g)
+        out.extend((NONE_VALUE, NONE_VALUE) if s < 0 else (Decimal(s), Decimal(e)))
+    return VectorValue(out)
+
+
+def _regex_find(ctx: NativeContext, args) -> object:
+    """The first match starting at or after code point `start` (anchors and
+    `\\b` still see the text before it), as `_spans`, or `none`."""
+    source, text, start = args
+    compiled = _compiled("find", source)
+    if not isinstance(text, str):
+        raise MahRuntimeError(f"find: expected a String, got {type_name_of(text)}", kind="TypeMismatch")
+    pos = _whole(start) if isinstance(start, Decimal) and not isinstance(start, bool) else None
+    if pos is None or not 0 <= pos <= len(text):
+        raise MahRuntimeError("find: start must be a position in the text", kind="ArgumentError")
+    m = compiled.search(text, pos)
+    return NONE_VALUE if m is None else _spans(m)
+
+
+def _regex_find_all(ctx: NativeContext, args) -> object:
+    """Every match, left to right: after a match ending at `e`, the next
+    search starts at `e` -- or at `e + 1` after an empty one."""
+    source, text = args
+    compiled = _compiled("find_all", source)
+    if not isinstance(text, str):
+        raise MahRuntimeError(f"find_all: expected a String, got {type_name_of(text)}", kind="TypeMismatch")
+    out = []
+    pos = 0
+    while pos <= len(text):
+        m = compiled.search(text, pos)
+        if m is None:
+            break
+        out.append(_spans(m))
+        pos = m.end() + 1 if m.end() == m.start() else m.end()
+    return VectorValue(out)
+
+
 def _time_sleep_async(ctx: NativeContext, args) -> object:
     (ms,) = args
     promise = PromiseInstance()
@@ -329,4 +429,7 @@ NATIVES: dict[str, tuple[int, object]] = {
     "random.fresh": (0, _random_fresh),
     "random.next": (1, _random_next),
     "random.below": (2, _random_below),
+    # M32 (1.9): std:regex's matcher.
+    "regex.find": (3, _regex_find),
+    "regex.find_all": (2, _regex_find_all),
 }

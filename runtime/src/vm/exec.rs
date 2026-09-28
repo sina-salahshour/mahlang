@@ -465,6 +465,8 @@ pub struct Vm<'p> {
     /// failed, in fail order -- checked at program end for ones nobody
     /// ever `.await`ed.
     failed_promises: Vec<Rc<RefCell<PromiseData>>>,
+    /// M32: std:regex's compiled patterns, by canonical source.
+    pub regex_cache: HashMap<Rc<str>, regex::Regex>,
 }
 
 impl<'p> Vm<'p> {
@@ -1712,6 +1714,7 @@ fn run(linked: &LinkedProgram, test_slot: Option<usize>) -> RResult<Option<TestO
         to_string_name: Rc::from("to_string"),
         main_task: main_task.clone(),
         failed_promises: Vec::new(),
+        regex_cache: HashMap::new(),
     };
     vm.drive(main_task, None)?;
 

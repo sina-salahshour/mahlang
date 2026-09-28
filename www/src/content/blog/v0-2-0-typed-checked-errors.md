@@ -1,18 +1,18 @@
 ---
 title: "v0.2.0: checked errors, the type checker, a standard library, and mah test"
 date: 2026-09-28
-description: "throw/try/catch with a built-in Error trait and RuntimeError enum on both VMs, a checker that infers what every function throws, the first static type checker with mah check, a standard library with math, path, JSON, CSV, random and collections modules, and a built-in test runner."
+description: "throw/try/catch with a built-in Error trait and RuntimeError enum on both VMs, a checker that infers what every function throws, the first static type checker with mah check, a standard library with math, path, JSON, CSV, random, collections and regex modules, and a built-in test runner."
 tags: [changelog]
 version: "0.2.0"
 ---
 
-This release (milestones M22 through M31) adds a static type checker,
+This release (milestones M22 through M32) adds a static type checker,
 errors you can throw, catch, and have checked, the first modules of a
-standard library (math, paths, JSON, CSV, random numbers, collections), a
-test runner, and String methods. Types and error sets cost nothing at run
+standard library (math, paths, JSON, CSV, random numbers, collections,
+regular expressions), a test runner, and String methods. Types and error sets cost nothing at run
 time: they're erased before codegen. The bytecode gains 1.4's handler
 table for `try`, 1.5's math natives, 1.7's natives behind JSON and CSV,
-and 1.8's random number generator.
+1.8's random number generator, and 1.9's regex matcher.
 
 ## Errors: `throw`, `try`, `catch`
 
@@ -188,6 +188,24 @@ print(seen, queue.pop(), Deque.of([1, 2]).pop_front())   # Set[a, b] 1 1
   `PriorityQueue` (smallest first, optional key function). All three are
   Iterable and generic, so the checker knows a `Set<String>` from a
   `Set<Number>`.
+
+## `std:regex`
+
+```mah
+import regex from "std:regex"
+
+let date = regex.must_compile("(?<y>\\d{4})-(?<m>\\d\\d)")
+print(date.find("due 2026-09").unwrap().group("y"))         # 2026
+print(date.replace_all("2026-09 2027-01", "$m/$y"))         # 09/2026 01/2027
+```
+
+Regular expressions with the usual syntax, matched the same way on both
+VMs: the module checks each pattern against a common subset of Python's
+`re` and Rust's `regex` crate (ASCII `\d`/`\w`/`\s`, no lookaround or
+backreferences), and a pattern outside it is a `RegexError` with its
+position. `find` gives an `Option<Match>`, and `replace_all` takes `$1`
+/ `$name` templates or a function. `must_compile` is for fixed patterns.
+The Rust runtime gains its first dependency, the `regex` crate.
 
 ## `mah test`
 

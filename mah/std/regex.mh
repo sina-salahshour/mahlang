@@ -1,0 +1,878 @@
+# std:regex -- regular expressions (docs/STDLIB.md).
+#
+#   import regex from "std:regex"
+#   let date = regex.must_compile("(?<y>\\d{4})-(?<m>\\d\\d)")
+#   date.is_match("due 2026-09")                      # true
+#   date.find("due 2026-09").unwrap().group("y")      # 2026
+#   date.replace_all("2026-09 2027-01", "$m/$y")      # 09/2026 01/2027
+#
+# `compile` throws RegexError for a bad pattern (one from user input, say);
+# `must_compile` is for patterns written into the program.
+#
+# Every VM matches exactly the same way. The syntax is the common subset of
+# the usual engines, checked here, so a pattern outside it is a RegexError
+# rather than something that behaves differently somewhere:
+#
+#   .  [abc] [^a-z]           any character but \n / a class
+#   \d \w \s \D \W \S         ASCII digit, word ([0-9A-Za-z_]), space
+#   ^ $ \A \z \b \B           start, end (not before a final \n), word boundary
+#   * + ? {n} {n,} {n,m}      repeats (n, m at most 1000), lazy with a
+#                             trailing ?
+#   (x) (?:x) (?<name>x) a|b  groups, alternatives
+#   \. \\ \n \t \r            escapes: any ASCII punctuation is literal
+#
+# Flags: "i" (ASCII letters match either case), "m" (^ and $ also at line
+# starts and ends), "s" (. also matches \n). Not supported: lookaround,
+# backreferences, inline flags. Positions count code points.
+
+extern fn native_find(source: String, text: String, start: Number) -> Unknown = "regex.find"
+extern fn native_find_all(source: String, text: String) -> Vector<
+    Vector<Unknown>
+> = "regex.find_all"
+extern fn type_name(value: Unknown) -> String = "value.type_name"
+extern fn code_point(c: String) -> Number = "string.code_point"
+extern fn from_code_point(n: Number) -> String = "string.from_code_point"
+extern fn chars(s: String) -> Vector<String> = "string.chars"
+
+# A pattern (or flags) that `compile` can't accept: what's wrong, and
+# where (a code-point position in `pattern`). Misusing a compiled Regex --
+# a group it doesn't have, a bad replacement template -- is a
+# RuntimeError.ArgumentError instead, like other programming mistakes.
+struct RegexError { message: String, pattern: String, position: Number }
+
+impl Error for RegexError {
+    fn message(self) -> String {
+        self.message + " at position " + self.position + " in \"" + self.pattern + "\""
+    }
+}
+
+fn argument_error(message: String) -> Unknown {
+    throw RuntimeError.ArgumentError { message: message }
+}
+
+# -- parsing ------------------------------------------------------------------
+#
+# The pattern is parsed and written out again in a canonical form that means
+# the same thing to every engine (docs/MAHC_FORMAT.md #4.4): classes spelled
+# out, case folding expanded, `$` as `\z`. (`&` and `|` evaluate both sides.)
+
+let max_repeat = 1000
+let max_depth = 100
+let punctuation = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
+# Escaped in the canonical form outside / inside a class.
+let meta = "\\.+*?()|[]{}^$#&-~"
+let class_meta = "\\][^-&~"
+
+fn is_digit(c: String) -> Bool { c >= "0" & c <= "9" }
+
+fn is_name_start(c: String) -> Bool {
+    if c == "_" { return true }
+    if c >= "a" & c <= "z" { return true }
+    c >= "A" & c <= "Z"
+}
+
+fn is_name_char(c: String) -> Bool { is_name_start(c) | is_digit(c) }
+
+fn escape_char(c: String, special: String) -> String {
+    if special.contains(c) { "\\" + c } else { c }
+}
+
+# The code-point ranges ([lo, hi] pairs) of \d, \w, \s.
+fn digit_ranges() -> Vector<Number> { [48, 57] }
+
+fn word_ranges() -> Vector<Number> { [48, 57, 65, 90, 95, 95, 97, 122] }
+
+fn space_ranges() -> Vector<Number> { [9, 13, 32, 32] }
+
+# Sorted, merged ranges.
+fn normalize(ranges: Vector<Number>) -> Vector<Number> {
+    let pairs = []
+    let i = 0
+    while i < ranges.len() {
+        pairs.push([ranges[i], ranges[i + 1]])
+        i = i + 2
+    }
+    # insertion sort by start (classes are small)
+    let j = 1
+    while j < pairs.len() {
+        let k = j
+        while k > 0 {
+            if pairs[k - 1][0] <= pairs[k][0] { break }
+            let t = pairs[k]
+            pairs[k] = pairs[k - 1]
+            pairs[k - 1] = t
+            k = k - 1
+        }
+        j = j + 1
+    }
+    let out = []
+    for let p in pairs {
+        let n = out.len()
+        let merged = false
+        if n > 0 {
+            if p[0] <= out[n - 1] + 1 {
+                if p[1] > out[n - 1] { out[n - 1] = p[1] }
+                merged = true
+            }
+        }
+        if !merged {
+            out.push(p[0])
+            out.push(p[1])
+        }
+    }
+    out
+}
+
+fn add_scalar_range(out: Vector<Number>, lo: Number, hi: Number) {
+    # split around 0xD800..0xDFFF
+    if hi < 55296 | lo > 57343 {
+        out.push(lo)
+        out.push(hi)
+        return none
+    }
+    if lo < 55296 {
+        out.push(lo)
+        out.push(55295)
+    }
+    if hi > 57343 {
+        out.push(57344)
+        out.push(hi)
+    }
+}
+
+# Every code point not in `ranges` (sorted and merged), skipping the
+# surrogates, which no String holds.
+fn complement(ranges: Vector<Number>) -> Vector<Number> {
+    let sorted = normalize(ranges)
+    let out = []
+    let next = 0
+    let i = 0
+    while i < sorted.len() {
+        if sorted[i] > next { add_scalar_range(out, next, sorted[i] - 1) }
+        next = sorted[i + 1] + 1
+        i = i + 2
+    }
+    if next <= 1114111 { add_scalar_range(out, next, 1114111) }
+    out
+}
+
+# `ranges` plus the other case of every ASCII letter in them.
+fn fold_ascii(ranges: Vector<Number>) -> Vector<Number> {
+    let out = ranges.copy()
+    let i = 0
+    while i < ranges.len() {
+        let lo = ranges[i]
+        let hi = ranges[i + 1]
+        # lower-case part -> upper, and upper-case part -> lower
+        let a = if lo > 97 { lo } else { 97 }
+        let b = if hi < 122 { hi } else { 122 }
+        if a <= b {
+            out.push(a - 32)
+            out.push(b - 32)
+        }
+        let c = if lo > 65 { lo } else { 65 }
+        let d = if hi < 90 { hi } else { 90 }
+        if c <= d {
+            out.push(c + 32)
+            out.push(d + 32)
+        }
+        i = i + 2
+    }
+    out
+}
+
+fn class_text(ranges: Vector<Number>, negated: Bool) -> String {
+    let parts = [if negated { "[^" } else { "[" }]
+    let sorted = normalize(ranges)
+    let i = 0
+    while i < sorted.len() {
+        let lo = escape_char(from_code_point(sorted[i]), class_meta)
+        if sorted[i] == sorted[i + 1] {
+            parts.push(lo)
+        } else {
+            parts.push(lo + "-" + escape_char(from_code_point(sorted[i + 1]), class_meta))
+        }
+        i = i + 2
+    }
+    parts.push("]")
+    parts.join()
+}
+
+# A parsed piece: its canonical text, whether a repeat may follow it,
+# whether it can match nothing, and whether it holds a capture group.
+struct __RegexAtom { text: String, repeatable: Bool, nullable: Bool, captures: Bool }
+
+struct __RegexParser {
+    pattern: String,
+    text: Vector<String>,
+    pos: Number,
+    fold: Bool,
+    multiline: Bool,
+    dotall: Bool,
+    groups: Number,
+    names: Map<String, Number>,
+    repeat_min: Number,
+    repeat_max: Unknown
+}
+
+impl __RegexParser {
+    fn peek(self) -> String { self.text[self.pos] }
+
+    fn fail(self, message: String, at: Number) -> Unknown throws RegexError {
+        throw RegexError { message: message, pattern: self.pattern, position: at }
+    }
+
+    # alternatives: sequence ("|" sequence)*
+    fn alternation(self, depth: Number) -> __RegexAtom throws RegexError {
+        if depth > max_depth { self.fail("groups nested too deeply", self.pos) }
+        let first = self.sequence(depth)
+        let texts = [first.text]
+        let nullable = first.nullable
+        let captures = first.captures
+        while self.peek() == "|" {
+            self.pos = self.pos + 1
+            let next = self.sequence(depth)
+            texts.push(next.text)
+            if next.nullable { nullable = true }
+            if next.captures { captures = true }
+        }
+        __RegexAtom {
+            text: texts.join("|"),
+            repeatable: true,
+            nullable: nullable,
+            captures: captures
+        }
+    }
+
+    fn sequence(self, depth: Number) -> __RegexAtom throws RegexError {
+        let out = []
+        let nullable = true
+        let captures = false
+        while true {
+            let c = self.peek()
+            if c == "" | c == "|" | c == ")" { break }
+            let at = self.pos
+            let atom = self.atom(depth)
+            let q_at = self.pos
+            let q = self.quantifier()
+            let piece_nullable = atom.nullable
+            if q != "" {
+                if !atom.repeatable { self.fail("nothing to repeat", at) }
+                if "*+?{".contains(self.peek()) & self.peek() != "" {
+                    self.fail("a repeat can't be repeated (group it first)", self.pos)
+                }
+                # engines disagree on what such a group captures
+                let many = self.repeat_max == none
+                if !many { many = self.repeat_max > 1 }
+                if many & atom.nullable & atom.captures {
+                    self.fail(
+                        "a capture group that can match nothing can't be repeated (use (?:...), or make it match something)",
+                        q_at
+                    )
+                }
+                if self.repeat_min == 0 { piece_nullable = true }
+            }
+            if !piece_nullable { nullable = false }
+            if atom.captures { captures = true }
+            out.push(atom.text + q)
+        }
+        __RegexAtom { text: out.join(), repeatable: true, nullable: nullable, captures: captures }
+    }
+
+    fn atom(self, depth: Number) -> __RegexAtom throws RegexError {
+        let c = self.peek()
+        let at = self.pos
+        self.pos = self.pos + 1
+        if c == "." {
+            return __RegexAtom {
+                text: if self.dotall { "(?s:.)" } else { "." },
+                repeatable: true,
+                nullable: false,
+                captures: false
+            }
+        }
+        if c == "^" {
+            return __RegexAtom {
+                text: if self.multiline { "(?m:^)" } else { "^" },
+                repeatable: false,
+                nullable: true,
+                captures: false
+            }
+        }
+        if c == "$" {
+            return __RegexAtom {
+                text: if self.multiline { "(?m:$)" } else { "\\z" },
+                repeatable: false,
+                nullable: true,
+                captures: false
+            }
+        }
+        if c == "[" {
+            return __RegexAtom {
+                text: self.class(at),
+                repeatable: true,
+                nullable: false,
+                captures: false
+            }
+        }
+        if c == "(" { return self.group(at, depth) }
+        if c == "\\" { return self.escape(at) }
+        if "*+?".contains(c) { self.fail("nothing to repeat", at) }
+        if c == "{" { self.fail("a literal { must be escaped (\\{)", at) }
+        if c == "}" { self.fail("a literal } must be escaped (\\})", at) }
+        if c == "]" { self.fail("a literal ] must be escaped (\\])", at) }
+        __RegexAtom { text: self.literal(c), repeatable: true, nullable: false, captures: false }
+    }
+
+    fn literal(self, c: String) -> String {
+        if self.fold {
+            if c.to_lower() != c.to_upper() & code_point(c) < 128 {
+                return "[" + c.to_lower() + c.to_upper() + "]"
+            }
+        }
+        escape_char(c, meta)
+    }
+
+    fn escape(self, at: Number) -> __RegexAtom throws RegexError {
+        let c = self.peek()
+        if c == "" { self.fail("a pattern can't end with \\", at) }
+        self.pos = self.pos + 1
+        if c == "d" {
+            return __RegexAtom {
+                text: class_text(digit_ranges(), false),
+                repeatable: true,
+                nullable: false,
+                captures: false
+            }
+        }
+        if c == "D" {
+            return __RegexAtom {
+                text: class_text(digit_ranges(), true),
+                repeatable: true,
+                nullable: false,
+                captures: false
+            }
+        }
+        if c == "w" {
+            return __RegexAtom {
+                text: class_text(word_ranges(), false),
+                repeatable: true,
+                nullable: false,
+                captures: false
+            }
+        }
+        if c == "W" {
+            return __RegexAtom {
+                text: class_text(word_ranges(), true),
+                repeatable: true,
+                nullable: false,
+                captures: false
+            }
+        }
+        if c == "s" {
+            return __RegexAtom {
+                text: class_text(space_ranges(), false),
+                repeatable: true,
+                nullable: false,
+                captures: false
+            }
+        }
+        if c == "S" {
+            return __RegexAtom {
+                text: class_text(space_ranges(), true),
+                repeatable: true,
+                nullable: false,
+                captures: false
+            }
+        }
+        if c == "b" {
+            return __RegexAtom {
+                text: "(?-u:\\b)",
+                repeatable: false,
+                nullable: true,
+                captures: false
+            }
+        }
+        if c == "B" {
+            return __RegexAtom {
+                text: "(?-u:\\B)",
+                repeatable: false,
+                nullable: true,
+                captures: false
+            }
+        }
+        if c == "A" {
+            return __RegexAtom { text: "\\A", repeatable: false, nullable: true, captures: false }
+        }
+        if c == "z" {
+            return __RegexAtom { text: "\\z", repeatable: false, nullable: true, captures: false }
+        }
+        if c == "n" {
+            return __RegexAtom { text: "\n", repeatable: true, nullable: false, captures: false }
+        }
+        if c == "t" {
+            return __RegexAtom { text: "\t", repeatable: true, nullable: false, captures: false }
+        }
+        if c == "r" {
+            return __RegexAtom { text: "\r", repeatable: true, nullable: false, captures: false }
+        }
+        if is_digit(c) { self.fail("backreferences aren't supported", at) }
+        if punctuation.contains(c) {
+            return __RegexAtom {
+                text: self.literal(c),
+                repeatable: true,
+                nullable: false,
+                captures: false
+            }
+        }
+        self.fail("unknown escape \\" + c, at)
+    }
+
+    # One class member after `\` inside [...]: its ranges.
+    fn class_escape(self, at: Number) -> Vector<Number> throws RegexError {
+        let c = self.peek()
+        if c == "" { self.fail("missing ]", at) }
+        self.pos = self.pos + 1
+        if c == "d" { return digit_ranges() }
+        if c == "D" { return complement(digit_ranges()) }
+        if c == "w" { return word_ranges() }
+        if c == "W" { return complement(word_ranges()) }
+        if c == "s" { return space_ranges() }
+        if c == "S" { return complement(space_ranges()) }
+        if c == "n" { return [10, 10] }
+        if c == "t" { return [9, 9] }
+        if c == "r" { return [13, 13] }
+        if punctuation.contains(c) { return [code_point(c), code_point(c)] }
+        self.fail("unknown escape \\" + c + " in a class", self.pos - 2)
+    }
+
+    fn class(self, start: Number) -> String throws RegexError {
+        let negated = false
+        if self.peek() == "^" {
+            negated = true
+            self.pos = self.pos + 1
+        }
+        let ranges = []
+        let first = true
+        while true {
+            let c = self.peek()
+            let at = self.pos
+            if c == "" { self.fail("missing ]", start) }
+            if c == "]" {
+                if first { self.fail("an empty class (a literal ] must be escaped: [\\]])", at) }
+                self.pos = self.pos + 1
+                break
+            }
+            if c == "[" { self.fail("a literal [ in a class must be escaped (\\[)", at) }
+            first = false
+            self.pos = self.pos + 1
+            let lo = 0
+            if c == "\\" {
+                let got = self.class_escape(at)
+                if got.len() != 2 | got[0] != got[1] {
+                    # \d and friends can't start a range
+                    for let n in got {
+                        ranges.push(n)
+                    }
+                    if self.peek() == "-" & self.text[self.pos + 1] != "]" {
+                        self.fail("a class like \\d can't be part of a range", self.pos)
+                    }
+                    continue
+                }
+                lo = got[0]
+            } else {
+                lo = code_point(c)
+            }
+            let hi = lo
+            # a range, unless the - is last
+            if self.peek() == "-" & self.text[self.pos + 1] != "]" & self.text[self.pos + 1] != "" {
+                let dash = self.pos
+                self.pos = self.pos + 1
+                let d = self.peek()
+                let d_at = self.pos
+                self.pos = self.pos + 1
+                if d == "\\" {
+                    let got = self.class_escape(d_at)
+                    if got.len() != 2 | got[0] != got[1] {
+                        self.fail("a class like \\d can't be part of a range", d_at)
+                    }
+                    hi = got[0]
+                } else {
+                    hi = code_point(d)
+                }
+                if hi < lo { self.fail("a range out of order", dash) }
+            }
+            ranges.push(lo)
+            ranges.push(hi)
+        }
+        if self.fold { ranges = fold_ascii(ranges) }
+        class_text(ranges, negated)
+    }
+
+    fn group(self, start: Number, depth: Number) -> __RegexAtom throws RegexError {
+        let open = "("
+        if self.peek() == "?" {
+            self.pos = self.pos + 1
+            let c = self.peek()
+            if c == ":" {
+                self.pos = self.pos + 1
+                open = "(?:"
+            } elif c == "<" | c == "P" {
+                if c == "P" {
+                    self.pos = self.pos + 1
+                    if self.peek() != "<" { self.fail("expected < after (?P", self.pos) }
+                }
+                self.pos = self.pos + 1
+                let n = self.peek()
+                if n == "=" | n == "!" { self.fail("lookbehind isn't supported", start) }
+                let name_at = self.pos
+                let name = []
+                while is_name_char(self.peek()) {
+                    name.push(self.peek())
+                    self.pos = self.pos + 1
+                }
+                let text = name.join()
+                let valid = self.peek() == ">" & text != ""
+                if valid { valid = is_name_start(text[0]) }
+                if !valid {
+                    self.fail(
+                        "a group name must be letters, digits and _, not starting with a digit",
+                        name_at
+                    )
+                }
+                self.pos = self.pos + 1
+                if self.names.has(text) {
+                    self.fail("the group name " + text + " is used twice", name_at)
+                }
+                self.groups = self.groups + 1
+                self.names[text] = self.groups
+                open = "(?P<" + text + ">"
+            } elif c == "=" | c == "!" {
+                self.fail("lookahead isn't supported", start)
+            } else {
+                self.fail(
+                    "inline flags and other (? groups aren't supported (pass flags to compile)",
+                    start
+                )
+            }
+        } else {
+            self.groups = self.groups + 1
+        }
+        let inner = self.alternation(depth + 1)
+        if self.peek() != ")" { self.fail("missing )", start) }
+        self.pos = self.pos + 1
+        __RegexAtom {
+            text: open + inner.text + ")",
+            repeatable: true,
+            nullable: inner.nullable,
+            captures: inner.captures | open != "(?:"
+        }
+    }
+
+    # A repeat after an atom, canonical, or "".
+    fn quantifier(self) -> String throws RegexError {
+        let c = self.peek()
+        let q = ""
+        if c == "*" | c == "+" | c == "?" {
+            self.pos = self.pos + 1
+            q = c
+            self.repeat_min = if c == "+" { 1 } else { 0 }
+            self.repeat_max = if c == "?" { 1 } else { none }
+        } elif c == "{" {
+            let at = self.pos
+            self.pos = self.pos + 1
+            let lo = self.count(at)
+            let hi = lo
+            let text = "{" + lo
+            if self.peek() == "," {
+                self.pos = self.pos + 1
+                text = text + ","
+                if self.peek() == "}" {
+                    hi = none
+                } else {
+                    hi = self.count(at)
+                    text = text + hi
+                    if hi < lo { self.fail("a repeat's maximum is below its minimum", at) }
+                }
+            }
+            if self.peek() != "}" { self.fail("a repeat must be {n}, {n,} or {n,m}", at) }
+            self.pos = self.pos + 1
+            q = text + "}"
+            self.repeat_min = lo
+            self.repeat_max = hi
+        } else {
+            return ""
+        }
+        if self.peek() == "?" {
+            self.pos = self.pos + 1
+            q = q + "?"
+        }
+        q
+    }
+
+    fn count(self, at: Number) -> Number throws RegexError {
+        let digits = []
+        while is_digit(self.peek()) {
+            digits.push(self.peek())
+            self.pos = self.pos + 1
+        }
+        if digits.len() == 0 { self.fail("a repeat must be {n}, {n,} or {n,m}", at) }
+        let n = digits.join().parse_number()
+        if n > max_repeat { self.fail("a repeat count can be at most " + max_repeat, at) }
+        n
+    }
+}
+
+# -- Regex and Match ----------------------------------------------------------
+
+# A compiled pattern. `source` is its canonical form; `groups` counts the
+# capture groups and `names` numbers the named ones.
+struct Regex {
+    pattern: String,
+    flags: String,
+    source: String,
+    groups: Number,
+    names: Map<String, Number>
+}
+
+# One match: its text and code-point span, and every group's text (`none`
+# for a group that took no part).
+struct Match {
+    text: String,
+    start: Number,
+    end: Number,
+    groups: Vector<Unknown>,
+    names: Map<String, Number>
+}
+
+impl Match {
+    # Group `key` -- a number (0 is the whole match) or a name -- as a
+    # String, or `none` if it took no part. A group the pattern doesn't have
+    # is an ArgumentError.
+    fn group(self, key: Unknown) -> Unknown {
+        let i = key
+        if type_name(key) == "String" {
+            if !self.names.has(key) { argument_error("group: no group named " + key) }
+            i = self.names[key]
+        }
+        if type_name(i) != "Number" {
+            argument_error("group: expected a Number or a String, got " + type_name(i))
+        }
+        if i == 0 { return self.text }
+        if i < 0 | i > self.groups.len() | i != i // 1 { argument_error("group: no group " + i) }
+        self.groups[i - 1]
+    }
+}
+
+impl Printable for Match {
+    fn to_string(self) { "Match(" + self.start + ".." + self.end + ", \"" + self.text + "\")" }
+}
+
+impl Printable for Regex {
+    fn to_string(self) {
+        if self.flags == "" {
+            "Regex(\"" + self.pattern + "\")"
+        } else {
+            "Regex(\"" + self.pattern + "\", \"" + self.flags + "\")"
+        }
+    }
+}
+
+fn make_match(re: Regex, text: String, spans: Vector<Unknown>) -> Match {
+    let groups = []
+    let i = 2
+    while i < spans.len() {
+        groups.push(if spans[i] == none { none } else { text[spans[i]..spans[i + 1]] })
+        i = i + 2
+    }
+    Match {
+        text: text[spans[0]..spans[1]],
+        start: spans[0],
+        end: spans[1],
+        groups: groups,
+        names: re.names
+    }
+}
+
+# A group reference's text as a group number (all digits) or name.
+fn group_key(text: String) -> Unknown {
+    let all_digits = text != ""
+    for let c in text {
+        if !is_digit(c) { all_digits = false }
+    }
+    if all_digits { text.parse_number() } else { text }
+}
+
+# `with` for one match: a function of the Match, or a template where `$n`,
+# `$name`, `${n}` and `${name}` are a group ("" if it took no part) and
+# `$$` is `$`.
+fn expand(m: Match, with: Unknown) -> String {
+    if type_name(with) == "Function" {
+        let out = with(m)
+        return "" + out
+    }
+    let t = chars(with)
+    t.push("")
+    let out = []
+    let i = 0
+    while i < t.len() - 1 {
+        let c = t[i]
+        if c != "$" {
+            out.push(c)
+            i = i + 1
+            continue
+        }
+        let n = t[i + 1]
+        if n == "$" {
+            out.push("$")
+            i = i + 2
+            continue
+        }
+        let key: Unknown = none
+        if n == "{" {
+            let j = i + 2
+            let name = []
+            while t[j] != "}" & t[j] != "" {
+                name.push(t[j])
+                j = j + 1
+            }
+            if t[j] == "" {
+                argument_error("replace: a ${ with no } at position " + i + " in \"" + with + "\"")
+            }
+            key = group_key(name.join())
+            i = j + 1
+        } elif is_name_char(n) {
+            # the longest run of letters, digits and _ (use ${...} to end it)
+            let j = i + 1
+            let name = []
+            while is_name_char(t[j]) {
+                name.push(t[j])
+                j = j + 1
+            }
+            key = group_key(name.join())
+            i = j
+        } else {
+            argument_error(
+                "replace: a $ must be followed by a group, or be $$, at position " + i + " in \"" + with + "\""
+            )
+        }
+        let value = m.group(key)
+        if value != none { out.push(value) }
+    }
+    out.join()
+}
+
+impl Regex {
+    # Whether the pattern matches anywhere in `text`.
+    fn is_match(self, text: String) -> Bool { native_find(self.source, text, 0) != none }
+
+    # The first match, or `none`.
+    fn find(self, text: String) -> Option<Match> {
+        let spans = native_find(self.source, text, 0)
+        if spans == none { none } else { some(make_match(self, text, spans)) }
+    }
+
+    # Every match, left to right. After an empty match the search moves on
+    # one character, so `a*` on "baa" finds "", "aa", "".
+    fn find_all(self, text: String) -> Vector<Match> {
+        let out = []
+        for let spans in native_find_all(self.source, text) {
+            out.push(make_match(self, text, spans))
+        }
+        out
+    }
+
+    # `text` with the first match replaced by `with` (see `expand`).
+    fn replace(self, text: String, with: Unknown) -> String {
+        match self.find(text) {
+            some(m) => { text[..m.start] + expand(m, with) + text[m.end..] }
+            none => { text }
+        }
+    }
+
+    # `text` with every match replaced.
+    fn replace_all(self, text: String, with: Unknown) -> String {
+        let out = []
+        let last = 0
+        for let m in self.find_all(text) {
+            out.push(text[last..m.start])
+            out.push(expand(m, with))
+            last = m.end
+        }
+        out.push(text[last..])
+        out.join()
+    }
+
+    # The pieces of `text` between matches -- at most `limit` + 1 pieces
+    # when `limit` is given.
+    fn split(self, text: String, limit: Unknown = none) -> Vector<String> {
+        let out = []
+        let last = 0
+        for let m in self.find_all(text) {
+            if limit != none { if out.len() >= limit { break } }
+            out.push(text[last..m.start])
+            last = m.end
+        }
+        out.push(text[last..])
+        out
+    }
+}
+
+# `pattern` compiled, with `flags` any of "i", "m", "s". Throws RegexError
+# for a pattern outside the supported syntax.
+export fn compile(pattern: String, flags: String = "") -> Regex throws RegexError {
+    let fold = false
+    let multiline = false
+    let dotall = false
+    let at = 0
+    for let f in flags {
+        if f == "i" {
+            fold = true
+        } elif f == "m" {
+            multiline = true
+        } elif f == "s" {
+            dotall = true
+        } else {
+            throw RegexError {
+                message: "unknown flag " + f + " (flags are i, m, s)",
+                pattern: flags,
+                position: at
+            }
+        }
+        at = at + 1
+    }
+    let t = chars(pattern)
+    t.push("")
+    let p = __RegexParser {
+        pattern: pattern,
+        text: t,
+        pos: 0,
+        fold: fold,
+        multiline: multiline,
+        dotall: dotall,
+        groups: 0,
+        names: [:],
+        repeat_min: 1,
+        repeat_max: 1
+    }
+    let source = p.alternation(0).text
+    if p.peek() == ")" { p.fail("unmatched )", p.pos) }
+    Regex { pattern: pattern, flags: flags, source: source, groups: p.groups, names: p.names }
+}
+
+# `compile` for a pattern written into the program, where a RegexError
+# could only be a bug: that becomes a RuntimeError.ArgumentError, which the
+# checker doesn't ask you to handle (like Go's MustCompile).
+export fn must_compile(pattern: String, flags: String = "") -> Regex {
+    try { compile(pattern, flags) } catch { e: RegexError => { argument_error(e.message()) } }
+}
+
+# `text` with every character that means something in a pattern escaped,
+# so `compile(escape(text))` matches exactly `text`.
+export fn escape(text: String) -> String {
+    let out = []
+    for let c in text {
+        out.push(if punctuation.contains(c) { "\\" + c } else { c })
+    }
+    out.join()
+}

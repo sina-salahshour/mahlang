@@ -5,7 +5,12 @@ edition = "2024"
 description = "Native (Rust) runtime for Mah .mahc bytecode -- see docs/RUST_VM.md"
 publish = false
 
-# Standard library only: no [dependencies], on purpose.
+# A small, vetted set of dependencies (docs/STDLIB.md "Decisions"), each
+# with its reason:
+[dependencies]
+# std:regex's matcher (M32). No default features: Unicode tables only, no
+# SIMD/aho-corasick prefilters, to keep the binary small.
+regex = { version = "1.13", default-features = false, features = ["std", "unicode"] }
 
 [lib]
 name = "mah_vm"

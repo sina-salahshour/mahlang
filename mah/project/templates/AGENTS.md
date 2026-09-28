@@ -4,8 +4,8 @@ A project written in **Mah**, a small dynamically typed language (`.mh`
 files). Mah isn't a mainstream language, so don't guess its syntax from
 Python, JavaScript, or Rust: **read `docs/mah-language.md` before writing or
 changing any Mah code.** It's short and lists exactly what exists (including
-`throw`/`try`/`catch` and the String methods), plus what doesn't (no
-tuples, no regular expressions, ...).
+`throw`/`try`/`catch`, the String methods and the standard library), plus
+what doesn't (no tuples, no string interpolation, ...).
 
 ## Layout
 
@@ -43,7 +43,8 @@ refuses to touch a file with a syntax error.
 A compile error (syntax, undefined name, wrong struct fields) is reported
 before anything runs. A runtime error stops the program and says where it
 happened, `at position #LINE:COL` (or `file.mh#LINE:COL` inside an imported
-file, `std:math#LINE:COL` inside the standard library).
+file; an error from inside the standard library is reported at your call to
+it).
 
 Check your changes with `mah test`. Tests live in `*.test.mh` files next to
 the code they test: `test "name" { ... }` blocks using `assert`/`assert_eq`/
@@ -74,7 +75,9 @@ test with every change, and make sure `mah test` passes.
 - Split code into files with `export fn` / `export let` and `import
   "file.mh"` (or `import name from "file"` for namespaced access). Paths are
   relative to the importing file. The standard library is imported the same
-  way, as `"std:<name>"` (so far only `std:math`; see `docs/mah-language.md`).
+  way, as `"std:<name>"`: `std:math`, `std:path`, `std:json`, `std:csv`,
+  `std:random`, `std:collections`, `std:regex`, and `std:test` for tests
+  (see `docs/mah-language.md`).
 - Model data with `struct`/`enum` + `match`, and give behavior to types with
   `impl` blocks and traits. Implement `Printable` (`fn to_string(self)`) to
   control how a value prints.

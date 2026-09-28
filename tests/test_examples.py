@@ -183,6 +183,22 @@ class ExampleTests(unittest.TestCase):
             'dice: [1, 3, 1]\n'
         )
 
+    def test_regex_log(self):
+        # M32: std:regex -- named groups, flags, templates, a function
+        # replacement, and a RegexError.
+        out = run_file(example_path("regex_log.mh"))
+        self.assertEqual(
+            out,
+            '12:01:07 info  ada   login ok\n'
+            '12:03:44 warn  bo    password retry 2\n'
+            '12:04:02 error bo    locked out (3 failures)\n'
+            '12:09:31 info  chen  login ok\n'
+            'levels: [INFO: 2, WARN: 1, ERROR: 1]\n'
+            'from 10.0.0.x and 192.168.1.x\n'
+            '<RETRY>, then <LOCKED>\n'
+            'missing ) at position 0 in "(\\d+"\n'
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,146 @@
+# Tests for std:regex, run by tests/test_stdlib.py (or
+# `mah test --file mah/std/regex.test.mh`).
+import "std:test"
+import regex from "./regex"
+
+fn texts(ms: Vector<Match>) -> String { ms.map(fn(m) { m.text }).reduce().join("|") }
+
+fn compile_error(pattern: String, flags: String = "") -> String {
+    assert_throws(fn() { regex.compile(pattern, flags) }).message()
+}
+
+test "find and is_match" {
+    let r = regex.compile("b+")
+    assert(r.is_match("abbc"))
+    assert(!r.is_match("ac"))
+    let m = r.find("abbcb").unwrap()
+    assert_eq([m.text, m.start, m.end].join(","), "bb,1,3")
+    assert(r.find("xyz").is_none())
+    # positions count code points
+    let u = regex.compile("本+").find("日本本語").unwrap()
+    assert_eq([u.start, u.end].join(","), "1,3")
+}
+
+test "groups, by number and name" {
+    let date = regex.compile("(?<y>\\d{4})-(?<m>\\d\\d)(-(\\d\\d))?")
+    let m = date.find("on 2026-09!").unwrap()
+    assert_eq(m.group(0), "2026-09")
+    assert_eq(m.group("y"), "2026")
+    assert_eq(m.group(2), "09")
+    assert_eq(m.group(4), none)
+    assert_eq(date.groups, 4)
+    assert_eq(assert_throws(fn() { m.group(5) }).message, "group: no group 5")
+    assert_eq(assert_throws(fn() { m.group("d") }).message, "group: no group named d")
+    assert_eq(regex.compile("(?P<w>\\w+)").find("hi").unwrap().group("w"), "hi")
+}
+
+test "find_all moves past empty matches" {
+    assert_eq(texts(regex.compile("\\d+").find_all("a1b22c333")), "1|22|333")
+    let spans = regex.compile("a*").find_all("baa").map(fn(m) { m.start + "-" + m.end }).reduce()
+    assert_eq(spans.join(" "), "0-0 1-3 3-3")
+    assert_eq(regex.compile("x").find_all("").len(), 0)
+}
+
+test "replace with templates and functions" {
+    let date = regex.compile("(?<y>\\d{4})-(?<m>\\d\\d)")
+    assert_eq(date.replace_all("2026-09 2027-01", "$m/$y"), "09/2026 01/2027")
+    assert_eq(date.replace("2026-09 2027-01", "${m}.${1}$$"), "09.2026$ 2027-01")
+    assert_eq(
+        regex.compile("\\d+").replace_all("a1b22", fn(m) { "<" + m.text.len() + ">" }),
+        "a<1>b<2>"
+    )
+    assert_eq(regex.compile("(a)|b").replace_all("ab", "[$1]"), "[a][]")
+    assert_eq(regex.compile("z").replace("abc", "x"), "abc")
+    assert_eq(
+        assert_throws(fn() { regex.compile("a").replace("a", "$") }).message,
+        "replace: a $ must be followed by a group, or be $$, at position 0 in \"$\""
+    )
+}
+
+test "split" {
+    assert_eq(regex.compile("\\s*,\\s*").split("a , b,c ,d").join("|"), "a|b|c|d")
+    assert_eq(regex.compile(",").split("a,b,c", 1).join("|"), "a|b,c")
+    assert_eq(regex.compile(",").split("").join("|"), "")
+    assert_eq(regex.compile("x*").split("ab").join("|"), "|a|b|")
+}
+
+test "classes and escapes are ASCII" {
+    assert_eq(texts(regex.compile("\\w+").find_all("héllo wörld_1")), "h|llo|w|rld_1")
+    assert_eq(texts(regex.compile("\\d").find_all("1٢3")), "1|3")
+    assert_eq(texts(regex.compile("[^\\d\\s]+").find_all("12 ab 3é4")), "ab|é")
+    assert_eq(texts(regex.compile("[\\-\\]a-]+").find_all("x-]a-y")), "-]a-")
+    assert_eq(texts(regex.compile("\\bcat\\b").find_all("cat concat cat.")), "cat|cat")
+    assert(regex.compile("<\\<>").is_match("<<>"))
+    assert(regex.compile(regex.escape("1+1=2? (yes) [x]")).is_match("1+1=2? (yes) [x]"))
+}
+
+test "flags" {
+    assert_eq(regex.compile("hello", "i").find_all("Hello HELLO hElLo").len(), 3)
+    assert_eq(regex.compile("[a-c]+", "i").find("xxAbCz").unwrap().text, "AbC")
+    # case folding is ASCII only
+    assert(!regex.compile("é", "i").is_match("É"))
+    assert_eq(texts(regex.compile("^\\w+$", "m").find_all("one\ntwo\n")), "one|two")
+    assert(regex.compile("a.b", "s").is_match("a\nb"))
+    assert(!regex.compile("a.b").is_match("a\nb"))
+    # $ is the very end, even before a final newline
+    assert(!regex.compile("x$").is_match("x\n"))
+    assert_eq(compile_error("a", "x"), "unknown flag x (flags are i, m, s) at position 0 in \"x\"")
+}
+
+test "patterns outside the subset are errors" {
+    assert_eq(compile_error("(a"), "missing ) at position 0 in \"(a\"")
+    assert_eq(compile_error("a)"), "unmatched ) at position 1 in \"a)\"")
+    assert_eq(compile_error("*a"), "nothing to repeat at position 0 in \"*a\"")
+    assert_eq(compile_error("^*"), "nothing to repeat at position 0 in \"^*\"")
+    assert_eq(
+        compile_error("a**"),
+        "a repeat can't be repeated (group it first) at position 2 in \"a**\""
+    )
+    assert_eq(
+        compile_error("[]"),
+        "an empty class (a literal ] must be escaped: [\\]]) at position 1 in \"[]\""
+    )
+    assert_eq(compile_error("[z-a]"), "a range out of order at position 2 in \"[z-a]\"")
+    assert_eq(
+        compile_error("a{2,1}"),
+        "a repeat's maximum is below its minimum at position 1 in \"a{2,1}\""
+    )
+    assert_eq(
+        compile_error("a{1001}"),
+        "a repeat count can be at most 1000 at position 1 in \"a{1001}\""
+    )
+    assert_eq(compile_error("a{"), "a repeat must be {n}, {n,} or {n,m} at position 1 in \"a{\"")
+    assert_eq(compile_error("\\1"), "backreferences aren't supported at position 0 in \"\\1\"")
+    assert_eq(compile_error("(?=a)"), "lookahead isn't supported at position 0 in \"(?=a)\"")
+    assert_eq(compile_error("(?<!a)"), "lookbehind isn't supported at position 0 in \"(?<!a)\"")
+    assert_eq(
+        compile_error("(?i)a"),
+        "inline flags and other (? groups aren't supported (pass flags to compile) at position 0 in \"(?i)a\""
+    )
+    assert_eq(compile_error("\\q"), "unknown escape \\q at position 0 in \"\\q\"")
+    assert_eq(
+        compile_error("(?<n>a)(?<n>b)"),
+        "the group name n is used twice at position 10 in \"(?<n>a)(?<n>b)\""
+    )
+    assert_eq(
+        compile_error("[\\d-z]"),
+        "a class like \\d can't be part of a range at position 3 in \"[\\d-z]\""
+    )
+    # engines disagree on what these capture
+    assert_eq(
+        compile_error("(a|)*"),
+        "a capture group that can match nothing can't be repeated (use (?:...), or make it match something) at position 4 in \"(a|)*\""
+    )
+    assert(regex.compile("(?:a|)*").is_match(""))
+    assert(regex.compile("(a|)?").is_match(""))
+}
+
+test "must_compile" {
+    assert(regex.must_compile("a+").is_match("caat"))
+    let e = assert_throws(fn() { regex.must_compile("(") })
+    assert_eq(e.message, "missing ) at position 0 in \"(\"")
+    match e {
+        RuntimeError.ArgumentError { message } => { assert(true) }
+        _ => { fail("not an ArgumentError") }
+    }
+}
