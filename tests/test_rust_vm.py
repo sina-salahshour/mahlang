@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from mah import rust_vm
 from mah.bytecode import bundle
 from mah.bytecode.decode import decode
-from mah.bytecode.format import MahcFormatError
+from mah.bytecode.format import MINOR, MahcFormatError
 from mah.cli.main import main as cli_main
 from mah.runtime_values import MahRuntimeError
 from tests.support import EXAMPLES_DIR, compile_bytes, example_path, run_source
@@ -150,6 +150,61 @@ class BundleTests(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.dir, "prog.mahc")))
 
 
+class VmVersionCheckTests(unittest.TestCase):
+    """`mah build --self-contained` refuses a mah-vm too old for the program
+    (it would only fail with "unsupported minor version" when run)."""
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.dir = self.td.name
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    def _fake_vm(self, version_line):
+        path = os.path.join(self.dir, "mah-vm")
+        with open(path, "w") as f:
+            f.write(f'#!/bin/sh\necho "{version_line}"\n')
+        os.chmod(path, 0o755)
+        return path
+
+    def _build(self, vm, text):
+        src = os.path.join(self.dir, "prog.mh")
+        with open(src, "w") as f:
+            f.write(text)
+        err = io.StringIO()
+        old = os.environ.get("MAH_VM")
+        os.environ["MAH_VM"] = vm
+        try:
+            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                code = cli_main(["build", "--self-contained", src, "-o", os.path.join(self.dir, "prog")])
+        finally:
+            if old is None:
+                del os.environ["MAH_VM"]
+            else:
+                os.environ["MAH_VM"] = old
+        return code, err.getvalue()
+
+    def test_parses_the_bytecode_version(self):
+        vm = self._fake_vm("mah-vm 0.2.0 (x86_64-linux) bytecode 1.6")
+        self.assertEqual(rust_vm.vm_version(vm), ("0.2.0", "x86_64-linux"))
+        self.assertEqual(rust_vm.vm_bytecode_minor(vm), 6)
+        # a mah-vm from before it reported one is trusted with 1.4 only
+        self.assertEqual(rust_vm.vm_bytecode_minor(self._fake_vm("mah-vm 0.1.0 (x86_64-linux)")), 4)
+
+    def test_a_too_old_vm_is_refused(self):
+        vm = self._fake_vm("mah-vm 0.1.0 (x86_64-linux)")
+        code, err = self._build(vm, 'print(" a ".trim())\n')
+        self.assertEqual(code, 2)
+        self.assertIn(f"the Rust runtime at {vm} supports bytecode up to 1.4, but this program needs 1.6", err)
+        self.assertIn("make vm", err)
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "prog")))
+
+    def test_a_new_enough_vm_is_accepted(self):
+        vm = self._fake_vm("mah-vm 0.1.0 (x86_64-linux)")
+        self.assertEqual(self._build(vm, "print(1)\n"), (0, ""))
+
+
 class PowZeroTests(unittest.TestCase):
     def test_zero_to_a_negative_power_is_division_by_zero(self):
         # `decimal` alone would give an unprintable Infinity
@@ -199,6 +254,7 @@ class RustVmTests(unittest.TestCase):
         version, target = rust_vm.vm_version(self.vm)
         self.assertRegex(version, r"^\d+\.\d+\.\d+$")
         self.assertEqual(target, _host_target())
+        self.assertEqual(rust_vm.vm_bytecode_minor(self.vm), MINOR)
 
     def test_every_example_runs_the_same_on_both_vms(self):
         for name in sorted(f for f in os.listdir(EXAMPLES_DIR) if f.endswith(".mh")):

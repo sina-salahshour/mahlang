@@ -4,6 +4,7 @@
 use std::io::Write;
 
 use mah_vm::bundle;
+use mah_vm::decode;
 use mah_vm::vm::{self, VmError};
 
 /// Nested nearly as deep as `code_interpreter.py`'s Python call stack can
@@ -93,7 +94,14 @@ fn load_and_test(path: &str, index: &str) -> i32 {
 fn run_cli(args: Vec<String>) -> i32 {
     match args.as_slice() {
         [flag] if flag == "--version" => {
-            println!("mah-vm {} ({}-{})", env!("CARGO_PKG_VERSION"), std::env::consts::ARCH, std::env::consts::OS);
+            println!(
+                "mah-vm {} ({}-{}) bytecode {}.{}",
+                env!("CARGO_PKG_VERSION"),
+                std::env::consts::ARCH,
+                std::env::consts::OS,
+                decode::MAJOR,
+                decode::MINOR
+            );
             let _ = std::io::stdout().flush();
             0
         }

@@ -431,11 +431,12 @@ def main(argv: list[str] | None = None) -> int:
         try:
             vm_path = rust_vm.find_vm()
             vm_ver, vm_target = rust_vm.vm_version(vm_path)
+            vm_minor = rust_vm.vm_bytecode_minor(vm_path)
         except rust_vm.RustVmNotFound as e:
             print(e, file=sys.stderr)
             return 2
         with open(vm_path, "rb") as f:
-            runtime = (f.read(), vm_ver, vm_target)
+            runtime = (f.read(), vm_ver, vm_target, vm_path, vm_minor)
 
     # M22: `run`/`build` pass this to `compile_to_bytes` so a strict/
     # explicit project's type errors become compile errors; single-file
@@ -528,6 +529,9 @@ def main(argv: list[str] | None = None) -> int:
                 )
             if counts["error"]:
                 exit_code = 1
+    except rust_vm.RustVmNotFound as e:
+        print(e, file=sys.stderr)
+        return 2
     except MahRuntimeError as e:
         _report_runtime_error(e)
         return 1
@@ -554,8 +558,12 @@ def _write_mahc(path: str, data: bytes, runtime: tuple | None = None) -> None:
     """Write a built program as a directly executable file, with the
     execute bits added wherever the read bits are set: SHEBANG then the
     bytecode (so `./prog.mahc` runs it via `mah runc`), or -- with
-    `runtime` = (mah-vm bytes, version, target) -- a self-contained bundle
-    (mah/bytecode/bundle.py) that needs no mah install at all."""
+    `runtime` = (mah-vm bytes, version, target, path, newest minor it
+    loads) -- a self-contained bundle (mah/bytecode/bundle.py) that needs
+    no mah install at all. Raises `RustVmNotFound` when that mah-vm is too
+    old for `data`."""
+    if runtime is not None:
+        rust_vm.check_supports(runtime[3], runtime[4], decode(data).minor)
     with open(path, "wb") as f:
         if runtime is None:
             f.write(SHEBANG)

@@ -46,13 +46,41 @@ def find_vm() -> str:
     raise RustVmNotFound(NOT_FOUND_MESSAGE)
 
 
-def vm_version(vm: str) -> tuple[str, str]:
-    """`(version, target)` from `mah-vm --version` (`mah-vm 0.1.0 (x86_64-linux)`)."""
+def _version_match(vm: str) -> re.Match:
     out = subprocess.run([vm, "--version"], capture_output=True, text=True, check=True).stdout
-    m = re.fullmatch(r"mah-vm (\S+) \((\S+)\)\s*", out)
+    m = re.fullmatch(r"mah-vm (\S+) \((\S+)\)(?: bytecode (\d+)\.(\d+))?\s*", out)
     if m is None:
         raise RustVmNotFound(f"error: unexpected 'mah-vm --version' output: {out.strip()!r}")
+    return m
+
+
+def vm_version(vm: str) -> tuple[str, str]:
+    """`(version, target)` from `mah-vm --version`
+    (`mah-vm 0.2.0 (x86_64-linux) bytecode 1.7`)."""
+    m = _version_match(vm)
     return m.group(1), m.group(2)
+
+
+# What a mah-vm too old to print `bytecode 1.N` in `--version` is trusted
+# to run: the encoder's base minor (docs/MAHC_FORMAT.md #1).
+_UNREPORTED_MINOR = 4
+
+
+def vm_bytecode_minor(vm: str) -> int:
+    """The newest `.mahc` minor version (of major 1) `vm` can load."""
+    m = _version_match(vm)
+    return _UNREPORTED_MINOR if m.group(4) is None else int(m.group(4))
+
+
+def check_supports(vm: str, max_minor: int, needed_minor: int) -> None:
+    """Refuse to bundle bytecode `vm` can't load -- the bundle would only
+    fail with "unsupported minor version" when it runs."""
+    if needed_minor > max_minor:
+        raise RustVmNotFound(
+            f"error: the Rust runtime at {vm} supports bytecode up to 1.{max_minor}, but this "
+            f"program needs 1.{needed_minor}; rebuild it (`make vm`, then `make install-mah` "
+            "if mah is installed) and build again"
+        )
 
 
 def run_file(path: str) -> int:
