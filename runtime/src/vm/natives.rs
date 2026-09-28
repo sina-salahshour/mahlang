@@ -208,6 +208,128 @@ fn string_from_code_point(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeE
     }
 }
 
+// -- M31 (1.8): the shared generator behind std:random ------------------------
+//
+// xoshiro256** seeded through splitmix64, over a state of four 64-bit words
+// kept in a Mah Vector of four whole Numbers -- exactly `mah/natives.py`'s.
+
+fn splitmix64(x: &mut u64) -> u64 {
+    *x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *x;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+fn state_from_seed(seed: u64) -> Value {
+    let mut x = seed;
+    let words: Vec<Value> = (0..4).map(|_| Value::Number(Decimal::from_u64(splitmix64(&mut x)))).collect();
+    Value::Vector(Rc::new(std::cell::RefCell::new(words)))
+}
+
+/// 64 bits from the operating system's randomness: std's `RandomState` is
+/// seeded from it, so hashing nothing with a fresh one gives such bits.
+fn fresh_seed() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    std::collections::hash_map::RandomState::new().build_hasher().finish()
+}
+
+fn number_arg<'a>(vm: &Vm, name: &str, v: &'a Value) -> Result<&'a Decimal, RuntimeError> {
+    match v {
+        Value::Number(n) => Ok(n),
+        other => Err(RuntimeError::with_kind(
+            format!("{name}: expected a Number, got {}", super::value::type_name_of(other, &vm.names)),
+            ErrorKind::TypeMismatch,
+        )),
+    }
+}
+
+fn random_seed(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
+    let n = number_arg(vm, "seed", &args[0])?;
+    match n.to_sign_u64() {
+        Some((false, m)) => Ok(state_from_seed(m)),
+        Some((true, m)) => Ok(state_from_seed(m.wrapping_neg())),
+        None => Err(RuntimeError::with_kind(
+            "seed: expected a whole number smaller than 2^64 in size",
+            ErrorKind::ArgumentError,
+        )),
+    }
+}
+
+type State = Rc<std::cell::RefCell<Vec<Value>>>;
+
+fn read_state(name: &str, v: &Value) -> Result<(State, [u64; 4]), RuntimeError> {
+    let bad = || RuntimeError::with_kind(format!("{name}: not a generator state"), ErrorKind::ArgumentError);
+    let Value::Vector(items) = v else { return Err(bad()) };
+    let mut s = [0u64; 4];
+    {
+        let items = items.borrow();
+        if items.len() != 4 {
+            return Err(bad());
+        }
+        for (i, w) in items.iter().enumerate() {
+            match w {
+                Value::Number(n) => match n.to_sign_u64() {
+                    Some((false, m)) => s[i] = m,
+                    _ => return Err(bad()),
+                },
+                _ => return Err(bad()),
+            }
+        }
+    }
+    if s == [0; 4] {
+        return Err(bad());
+    }
+    Ok((items.clone(), s))
+}
+
+/// xoshiro256**'s next output; advances `s` and writes it back to `state`.
+fn next_word(state: &State, s: &mut [u64; 4]) -> u64 {
+    let result = s[1].wrapping_mul(5).rotate_left(7).wrapping_mul(9);
+    let t = s[1] << 17;
+    s[2] ^= s[0];
+    s[3] ^= s[1];
+    s[1] ^= s[2];
+    s[0] ^= s[3];
+    s[2] ^= t;
+    s[3] = s[3].rotate_left(45);
+    *state.borrow_mut() = s.iter().map(|&w| Value::Number(Decimal::from_u64(w))).collect();
+    result
+}
+
+fn random_next(args: &[Value]) -> Result<Value, RuntimeError> {
+    let (state, mut s) = read_state("next", &args[0])?;
+    Ok(Value::Number(Decimal::from_u64(next_word(&state, &mut s))))
+}
+
+/// A uniform whole Number in [0, n) for a whole `n` in [1, 2^64]: outputs
+/// at or above the largest multiple of `n` are rejected.
+fn random_below(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
+    let (state, mut s) = read_state("below", &args[0])?;
+    let n = number_arg(vm, "below", &args[1])?;
+    let two_64 = Decimal::parse("18446744073709551616").expect("a valid literal");
+    let bound: u128 = if *n == two_64 {
+        1u128 << 64
+    } else {
+        match n.to_sign_u64() {
+            Some((false, m)) if m >= 1 => m as u128,
+            _ => {
+                return Err(RuntimeError::with_kind(
+                    "below: expected a whole number from 1 to 2^64",
+                    ErrorKind::ArgumentError,
+                ))
+            }
+        }
+    };
+    let limit = (1u128 << 64) - (1u128 << 64) % bound;
+    loop {
+        let x = next_word(&state, &mut s) as u128;
+        if x < limit {
+            return Ok(Value::Number(Decimal::from_u64((x % bound) as u64)));
+        }
+    }
+}
+
 fn time_sleep_async(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
     let ms = expect_number(&args[0])?;
     let promise = super::value::PromiseData::new_pending();
@@ -247,5 +369,9 @@ pub fn call_native(vm: &mut Vm, native: NativeFn, args: &[Value]) -> Result<Valu
         NativeFn::StringChars => string_chars(vm, args),
         NativeFn::StringCodePoint => string_code_point(vm, args),
         NativeFn::StringFromCodePoint => string_from_code_point(vm, args),
+        NativeFn::RandomSeed => random_seed(vm, args),
+        NativeFn::RandomFresh => Ok(state_from_seed(fresh_seed())),
+        NativeFn::RandomNext => random_next(args),
+        NativeFn::RandomBelow => random_below(vm, args),
     }
 }

@@ -644,8 +644,8 @@ are global across all imported files and need no `export`.
 ## Standard library
 
 Standard library modules are imported as `"std:<name>"`, the same two ways
-as a file: `std:math`, `std:path`, `std:json`, `std:csv` (and `std:test`,
-below).
+as a file: `std:math`, `std:path`, `std:json`, `std:csv`, `std:random`,
+`std:collections` (and `std:test`, below).
 
 ```mah
 import math from "std:math"
@@ -714,6 +714,45 @@ print(try csv.stringify([["a", "b,c"], ["1", ""]]) else "")     # a,"b,c" then 1
 
 `csv.stringify_records(records, columns = none)` writes Maps with a header
 row, and `FromCsvRow` / `csv.column(row, name)` work like `FromJson`.
+
+`std:random` (the same generator on every VM, so a seeded run is
+repeatable; not for cryptography). Bad arguments throw
+`RuntimeError.ArgumentError`:
+
+```mah
+import random from "std:random"
+random.seed(42)                                  # optional: repeatable from here on
+print(random.randint(1, 6), random.random() < 1)  # 1 true (randint includes both ends)
+let deck = ["A", "K", "Q"]
+random.shuffle(deck)                             # in place; shuffled(v) returns a copy
+print(random.choice(deck) != "", random.sample(deck, 2).len())   # true 2
+let rng = Rng.new(7)                             # an independent generator
+print(rng.uniform(0, 10) < 10)                   # true
+```
+
+`std:collections` has `Set`, `Deque` and `PriorityQueue`, global types
+available once imported (flat is idiomatic). All three are Iterable and
+print like `Set[1, 2]`:
+
+```mah
+import "std:collections"
+let seen = Set.of([3, 1, 3])                     # Set[3, 1]; values must be Map keys
+seen.add(2)
+print(seen.has(1), seen.len(), seen.union(Set.of([9])))   # true 3 Set[3, 1, 2, 9]
+let q = Deque.new()                              # O(1) at both ends
+q.push_back(1)
+q.push_front(0)
+print(q.pop_front(), q.pop_back(), q.pop_back())  # 0 1 none (none when empty)
+let pq = PriorityQueue.new(fn(word) { word.len() })   # smallest key first; ties in push order
+pq.push("pear")
+pq.push("fig")
+print(pq.pop(), pq.peek(), pq.len())             # fig pear 1
+```
+
+Also: Set `remove`/`intersection`/`difference`/`is_subset`/`equals`
+(`==` compares identity), Deque `front`/`back`/`get(i)`, and
+`PriorityQueue.of(values, key = none)`; for largest first use a negating
+key, `fn(x) { 0 - x }`.
 
 ## Errors
 
@@ -834,7 +873,7 @@ test "not ready yet" {
 
 ## Not available (don't use these)
 
-- Tuples, sets, assigning to a slice (`v[1..3] = ...`),
+- Tuples, built-in sets (use `std:collections`' `Set`), assigning to a slice (`v[1..3] = ...`),
   `collect` (use `reduce()`), `for_each`/`count`, Vector `insert`/`remove`/`sort`/`contains`,
   assigning into a String (`s[0] = "x"`: Strings are immutable).
 - `for x in ...` without `let`, C-style `for (i = 0; ...)`, destructuring in
@@ -844,7 +883,7 @@ test "not ready yet" {
 - `&&`, `||`, `+=`, `++`, ternary `?:`.
 - Type-checking trait-typed values, bounds, and the prelude's iterator methods (the checker skips these for now); classes/inheritance.
 - Variadic parameters (`*args`, `**kwargs`); only `print` takes any number of arguments.
-- File, network, or OS access, randomness, and every other planned
-  `std:` module besides `std:math`, `std:path`, `std:json`, `std:csv` and
-  `std:test`.
+- File, network, or OS access, regular expressions, and every other
+  planned `std:` module besides `std:math`, `std:path`, `std:json`,
+  `std:csv`, `std:random`, `std:collections` and `std:test`.
 - `null`/`nil`/`undefined`: use `none`.

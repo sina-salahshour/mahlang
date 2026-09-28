@@ -1,0 +1,125 @@
+# std:random -- pseudo-random numbers (docs/STDLIB.md).
+#
+#   import random from "std:random"
+#   random.randint(1, 6)                 # a die roll
+#   random.choice(["a", "b", "c"])
+#   random.seed(42)                      # the same sequence from here on
+#
+#   let rng = Rng.new(7)                 # an independent generator
+#   rng.random()                         # a Number in [0, 1)
+#
+# Every VM uses the same generator (xoshiro256**, seeded through
+# splitmix64), so a seeded sequence is the same wherever the program runs.
+# Unseeded, the module's generator starts from the operating system's
+# randomness. Not for cryptography.
+
+extern fn seed_state(seed: Number) -> Vector<Number> = "random.seed"
+extern fn fresh_state() -> Vector<Number> = "random.fresh"
+extern fn next_word(state: Vector<Number>) -> Number = "random.next"
+extern fn below(state: Vector<Number>, n: Number) -> Number = "random.below"
+
+fn argument_error(message: String) -> Unknown {
+    throw RuntimeError.ArgumentError { message: message }
+}
+
+fn is_whole(n: Number) -> Bool { n == n // 1 }
+
+# A generator. `state` is its four 64-bit words; leave it alone.
+struct Rng { state: Vector<Number> }
+
+impl Rng {
+    # A generator seeded with the whole Number `seed` (any size below
+    # 2^64), or from the operating system's randomness when it's `none`.
+    fn new(seed: Unknown = none) -> Rng {
+        if seed == none { Rng { state: fresh_state() } } else { Rng { state: seed_state(seed) } }
+    }
+
+    # A Number in [0, 1): a multiple of 2^-53, as precise as a double.
+    fn random(self) -> Number {
+        (next_word(self.state) // 2048) / 9007199254740992
+    }
+
+    # A Number in [lo, hi).
+    fn uniform(self, lo: Number, hi: Number) -> Number {
+        lo + (hi - lo) * self.random()
+    }
+
+    # A whole Number from `lo` to `hi`, both included, every one equally
+    # likely.
+    fn randint(self, lo: Number, hi: Number) -> Number {
+        if !is_whole(lo) | !is_whole(hi) {
+            argument_error("randint: lo and hi must be whole numbers, got " + lo + " and " + hi)
+        }
+        if lo > hi { argument_error("randint: lo must be at most hi, got " + lo + " and " + hi) }
+        lo + below(self.state, hi - lo + 1)
+    }
+
+    # One of `items`, each equally likely.
+    fn choice<T>(self, items: Vector<T>) -> T {
+        if items.len() == 0 { argument_error("choice: the Vector is empty") }
+        items[below(self.state, items.len())]
+    }
+
+    # Puts `items` in a random order, in place (Fisher-Yates).
+    fn shuffle<T>(self, items: Vector<T>) {
+        let i = items.len() - 1
+        while i > 0 {
+            let j = below(self.state, i + 1)
+            let item = items[i]
+            items[i] = items[j]
+            items[j] = item
+            i = i - 1
+        }
+    }
+
+    # A new Vector of `items` in a random order.
+    fn shuffled<T>(self, items: Vector<T>) -> Vector<T> {
+        let out = items.copy()
+        self.shuffle(out)
+        out
+    }
+
+    # `k` of `items`, all at different positions, in random order.
+    fn sample<T>(self, items: Vector<T>, k: Number) -> Vector<T> {
+        if !is_whole(k) | k < 0 | k > items.len() {
+            argument_error(
+                "sample: k must be a whole number from 0 to " + items.len() + ", got " + k
+            )
+        }
+        let pool = items.copy()
+        let out = []
+        let n = pool.len()
+        while out.len() < k {
+            # swap a random one of the rest into place, then take it
+            let i = out.len()
+            let j = i + below(self.state, n - i)
+            let item = pool[j]
+            pool[j] = pool[i]
+            pool[i] = item
+            out.push(item)
+        }
+        out
+    }
+}
+
+let generator = Rng.new()
+
+# Seeds the module's generator: the functions below then give the same
+# sequence every run.
+export fn seed(n: Number) {
+    generator.state = seed_state(n)
+}
+
+export fn random() -> Number { generator.random() }
+
+export fn uniform(lo: Number, hi: Number) -> Number { generator.uniform(lo, hi) }
+
+export fn randint(lo: Number, hi: Number) -> Number { generator.randint(lo, hi) }
+
+export fn choice<T>(items: Vector<T>) -> T { generator.choice(items) }
+
+export fn shuffle<T>(items: Vector<T>) { generator.shuffle(items) }
+
+export fn shuffled<T>(items: Vector<T>) -> Vector<T> { generator.shuffled(items) }
+
+export fn sample<T>(items: Vector<T>, k: Number) -> Vector<T> { generator.sample(items, k) }

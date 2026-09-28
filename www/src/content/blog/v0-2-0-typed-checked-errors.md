@@ -1,17 +1,18 @@
 ---
 title: "v0.2.0: checked errors, the type checker, a standard library, and mah test"
 date: 2026-09-28
-description: "throw/try/catch with a built-in Error trait and RuntimeError enum on both VMs, a checker that infers what every function throws, the first static type checker with mah check, a standard library with math, path, JSON and CSV modules, and a built-in test runner."
+description: "throw/try/catch with a built-in Error trait and RuntimeError enum on both VMs, a checker that infers what every function throws, the first static type checker with mah check, a standard library with math, path, JSON, CSV, random and collections modules, and a built-in test runner."
 tags: [changelog]
 version: "0.2.0"
 ---
 
-This release (milestones M22 through M30) adds a static type checker,
+This release (milestones M22 through M31) adds a static type checker,
 errors you can throw, catch, and have checked, the first modules of a
-standard library (math, paths, JSON, CSV), a test runner, and String
-methods. Types and error sets cost nothing at run time: they're
-erased before codegen. The bytecode gains 1.4's handler table for `try`
-1.5's math natives, and 1.7's natives behind JSON and CSV.
+standard library (math, paths, JSON, CSV, random numbers, collections), a
+test runner, and String methods. Types and error sets cost nothing at run
+time: they're erased before codegen. The bytecode gains 1.4's handler
+table for `try`, 1.5's math natives, 1.7's natives behind JSON and CSV,
+and 1.8's random number generator.
 
 ## Errors: `throw`, `try`, `catch`
 
@@ -165,6 +166,28 @@ print(rows[0]["name"], rows[0]["age"])                      # al 3
   at your call to it, as prelude errors already were.
 
 See [Standard library](/docs/standard-library).
+
+## `std:random` and `std:collections`
+
+```mah
+import random from "std:random"
+import "std:collections"
+
+random.seed(42)
+print(random.random(), random.randint(1, 6))       # 0.08386297105988216316063699196 1
+let seen = Set.of(["a", "b", "a"])
+let queue = PriorityQueue.of([5, 1, 3])
+print(seen, queue.pop(), Deque.of([1, 2]).pop_front())   # Set[a, b] 1 1
+```
+
+- `std:random` has `random`, `uniform`, `randint`, `choice`, `shuffle`,
+  `shuffled`, `sample`, `seed`, and independent `Rng.new(seed)`
+  generators. Both VMs use the same generator (xoshiro256**), so a seeded
+  program prints the same numbers on either one.
+- `std:collections` has `Set`, `Deque` (O(1) at both ends) and
+  `PriorityQueue` (smallest first, optional key function). All three are
+  Iterable and generic, so the checker knows a `Set<String>` from a
+  `Set<Number>`.
 
 ## `mah test`
 

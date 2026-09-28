@@ -1,0 +1,306 @@
+# std:collections -- Set, Deque and PriorityQueue (docs/STDLIB.md).
+#
+#   import "std:collections"
+#   let seen = Set.of([1, 2, 2, 3])        # Set[1, 2, 3]
+#   let q = Deque.new()                    # both ends in O(1)
+#   let tasks = PriorityQueue.new()        # smallest first
+#
+# Plain Mah over Map and Vector. Each is Iterable, so `for` and
+# map/filter/reduce work on it, and prints like the built-in collections.
+# The types are global names, like every struct: importing the module (flat
+# or namespaced) is what makes them available.
+
+# -- Set ----------------------------------------------------------------------
+
+# Distinct values, in the order they were first added. Values must be
+# usable as Map keys: Strings, Numbers or Bools.
+struct Set<T> { items: Map<T, Bool> }
+
+impl<T> Set<T> {
+    fn new() -> Set<T> { Set { items: [:] } }
+
+    # A Set of the distinct values in `values`.
+    fn of(values: Vector<T>) -> Set<T> {
+        let out = Set { items: [:] }
+        for let x in values {
+            out.items[x] = true
+        }
+        out
+    }
+
+    fn len(self) -> Number { self.items.len() }
+
+    fn is_empty(self) -> Bool { self.items.len() == 0 }
+
+    fn has(self, x: T) -> Bool { self.items.has(x) }
+
+    fn add(self, x: T) { self.items[x] = true }
+
+    # Whether `x` was there.
+    fn remove(self, x: T) -> Bool {
+        if !self.items.has(x) { return false }
+        self.items.remove(x)
+        true
+    }
+
+    fn clear(self) { self.items = [:] }
+
+    fn copy(self) -> Set<T> { Set { items: self.items.copy() } }
+
+    fn to_vector(self) -> Vector<T> { self.items.keys() }
+
+    # Every value in either Set.
+    fn union(self, other: Set<T>) -> Set<T> {
+        let out = self.copy()
+        for let x in other.items {
+            out.items[x] = true
+        }
+        out
+    }
+
+    # The values in both Sets.
+    fn intersection(self, other: Set<T>) -> Set<T> {
+        let out = Set { items: [:] }
+        for let x in self.items {
+            if other.items.has(x) { out.items[x] = true }
+        }
+        out
+    }
+
+    # The values in this Set but not in `other`.
+    fn difference(self, other: Set<T>) -> Set<T> {
+        let out = Set { items: [:] }
+        for let x in self.items {
+            if !other.items.has(x) { out.items[x] = true }
+        }
+        out
+    }
+
+    # Whether every value of this Set is in `other`.
+    fn is_subset(self, other: Set<T>) -> Bool {
+        for let x in self.items {
+            if !other.items.has(x) { return false }
+        }
+        true
+    }
+
+    # The same values (in any order).
+    fn equals(self, other: Set<T>) -> Bool {
+        self.items.len() == other.items.len() & self.is_subset(other)
+    }
+}
+
+impl<T> Iterable<T> for Set<T> {
+    fn iter(self) { self.items.keys().iter() }
+}
+
+impl<T> Printable for Set<T> {
+    fn to_string(self) { "Set" + self.items.keys() }
+}
+
+# -- Deque --------------------------------------------------------------------
+
+# A double-ended queue: push and pop at both ends in constant time. Items
+# live at keys `head` to `tail - 1` of a Map.
+struct Deque<T> { items: Map<Number, T>, head: Number, tail: Number }
+
+impl<T> Deque<T> {
+    fn new() -> Deque<T> { Deque { items: [:], head: 0, tail: 0 } }
+
+    # A Deque of `values`, front to back.
+    fn of(values: Vector<T>) -> Deque<T> {
+        let out = Deque { items: [:], head: 0, tail: 0 }
+        for let x in values {
+            out.push_back(x)
+        }
+        out
+    }
+
+    fn len(self) -> Number { self.tail - self.head }
+
+    fn is_empty(self) -> Bool { self.tail == self.head }
+
+    fn push_back(self, x: T) {
+        self.items[self.tail] = x
+        self.tail = self.tail + 1
+    }
+
+    fn push_front(self, x: T) {
+        self.head = self.head - 1
+        self.items[self.head] = x
+    }
+
+    # The last item, removed -- or `none` when empty (like Vector.pop).
+    fn pop_back(self) -> T {
+        if self.tail == self.head { return none }
+        self.tail = self.tail - 1
+        self.items.remove(self.tail)
+    }
+
+    # The first item, removed -- or `none` when empty.
+    fn pop_front(self) -> T {
+        if self.tail == self.head { return none }
+        let x = self.items.remove(self.head)
+        self.head = self.head + 1
+        x
+    }
+
+    # The first / last item, or `none` when empty.
+    fn front(self) -> T { self.items[self.head] }
+
+    fn back(self) -> T { self.items[self.tail - 1] }
+
+    # The item `i` places from the front (from the back for a negative
+    # `i`, like a Vector index), or `none` out of range.
+    fn get(self, i: Number) -> T {
+        let at = if i < 0 { self.tail + i } else { self.head + i }
+        if at < self.head | at >= self.tail { return none }
+        self.items[at]
+    }
+
+    fn clear(self) {
+        self.items = [:]
+        self.head = 0
+        self.tail = 0
+    }
+
+    # The items, front to back.
+    fn to_vector(self) -> Vector<T> {
+        let out = []
+        let i = self.head
+        while i < self.tail {
+            out.push(self.items[i])
+            i = i + 1
+        }
+        out
+    }
+}
+
+struct __DequeIterator<T> { deque: Deque<T>, index: Number }
+
+impl<T> Iterable<T> for Deque<T> {
+    fn iter(self) { __DequeIterator { deque: self, index: 0 } }
+}
+
+impl<T> Iterator<T> for __DequeIterator<T> {
+    fn next(self) {
+        if self.index >= self.deque.len() { return none }
+        let x = self.deque.get(self.index)
+        self.index = self.index + 1
+        some(x)
+    }
+}
+
+impl<T> Printable for Deque<T> {
+    fn to_string(self) { "Deque" + self.to_vector() }
+}
+
+# -- PriorityQueue ------------------------------------------------------------
+
+# One queued item: its priority, and when it was pushed (which breaks ties).
+struct __PqEntry<T> { priority: Unknown, order: Number, value: T }
+
+fn entry_before(a: __PqEntry<Unknown>, b: __PqEntry<Unknown>) -> Bool {
+    if a.priority < b.priority { return true }
+    if a.priority > b.priority { return false }
+    a.order < b.order
+}
+
+# Items out smallest first: by `key(item)` when a key function is given,
+# else by the items themselves, compared with `<` (so Numbers or Strings).
+# Equal ones come out in the order they went in. For largest first, give
+# a key that negates: `PriorityQueue.new(fn(x) { 0 - x })`. A binary heap.
+struct PriorityQueue<T> { heap: Vector<__PqEntry<T>>, key: Unknown, pushed: Number }
+
+impl<T> PriorityQueue<T> {
+    fn new(key: Unknown = none) -> PriorityQueue<T> {
+        PriorityQueue { heap: [], key: key, pushed: 0 }
+    }
+
+    # A queue holding `values`.
+    fn of(values: Vector<T>, key: Unknown = none) -> PriorityQueue<T> {
+        let out = PriorityQueue { heap: [], key: key, pushed: 0 }
+        for let x in values {
+            out.push(x)
+        }
+        out
+    }
+
+    fn len(self) -> Number { self.heap.len() }
+
+    fn is_empty(self) -> Bool { self.heap.len() == 0 }
+
+    fn push(self, x: T) {
+        let priority = if self.key == none { x } else { self.key(x) }
+        let heap = self.heap
+        heap.push(__PqEntry { priority: priority, order: self.pushed, value: x })
+        self.pushed = self.pushed + 1
+        # sift up
+        let i = heap.len() - 1
+        while i > 0 {
+            let parent = (i - 1) // 2
+            if !entry_before(heap[i], heap[parent]) { break }
+            let e = heap[i]
+            heap[i] = heap[parent]
+            heap[parent] = e
+            i = parent
+        }
+    }
+
+    # The smallest item, removed -- or `none` when empty.
+    fn pop(self) -> T {
+        let heap = self.heap
+        if heap.len() == 0 { return none }
+        let top = heap[0]
+        let last = heap.pop()
+        if heap.len() > 0 {
+            heap[0] = last
+            # sift down
+            let i = 0
+            let n = heap.len()
+            while true {
+                let left = 2 * i + 1
+                let right = left + 1
+                let smallest = i
+                if left < n {
+                    if entry_before(heap[left], heap[smallest]) { smallest = left }
+                }
+                if right < n {
+                    if entry_before(heap[right], heap[smallest]) { smallest = right }
+                }
+                if smallest == i { break }
+                let e = heap[i]
+                heap[i] = heap[smallest]
+                heap[smallest] = e
+                i = smallest
+            }
+        }
+        top.value
+    }
+
+    # The smallest item, left in place -- or `none` when empty.
+    fn peek(self) -> T {
+        if self.heap.len() == 0 { return none }
+        self.heap[0].value
+    }
+
+    fn clear(self) { self.heap = [] }
+
+    # The items, smallest first (the queue is unchanged).
+    fn to_vector(self) -> Vector<T> {
+        let copy = PriorityQueue { heap: self.heap.copy(), key: self.key, pushed: self.pushed }
+        let out = []
+        while copy.heap.len() > 0 {
+            out.push(copy.pop())
+        }
+        out
+    }
+}
+
+impl<T> Iterable<T> for PriorityQueue<T> {
+    fn iter(self) { self.to_vector().iter() }
+}
+
+impl<T> Printable for PriorityQueue<T> {
+    fn to_string(self) { "PriorityQueue" + self.to_vector() }
+}

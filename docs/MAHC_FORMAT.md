@@ -1,4 +1,4 @@
-# The `.mahc` bytecode format (version 1.7)
+# The `.mahc` bytecode format (version 1.8)
 
 `mah build prog.mh` compiles a program (its entry file plus everything it
 imports) into a single `.mahc` file; `mah runc prog.mahc` runs one. This
@@ -64,7 +64,7 @@ sections   (id u8, length varuint, payload bytes(length))*   until end of file
   version whose features it uses. *(1.5)* The reference encoder writes 4
   (every file it produces has 1.4's TYPES layout and HANDLERS section),
   or the highest `(1.x)` marker among the natives the file lists (5 for
-  the `std:math` natives, 7 for the ones behind `std:json`/`std:csv`), so a program that doesn't call newer natives
+  the `std:math` natives, 7 for the ones behind `std:json`/`std:csv`, 8 for `std:random`'s), so a program that doesn't call newer natives
   still runs on an older VM. *(1.6)* Native methods (§6.7) are called by
   name, so it also writes the minor that added any native method whose
   *name* a `callmethod`/`callmethodkw`/`detachmethod`/`detachmethodkw` in
@@ -191,6 +191,10 @@ Version 1.0 defines:
 | `string.chars` | 1 | *(1.7)* a new Vector of the String's code points, each a one-code-point String |
 | `string.code_point` | 1 | *(1.7)* the code point of a one-code-point String, as a Number |
 | `string.from_code_point` | 1 | *(1.7)* the one-code-point String for a Unicode scalar value (a whole Number in 0–0x10FFFF, not 0xD800–0xDFFF) |
+| `random.seed` | 1 | *(1.8)* a new generator state (below) from a whole Number seed with \|seed\| < 2^64, a negative one taken modulo 2^64 |
+| `random.fresh` | 0 | *(1.8)* a new generator state seeded from 64 bits of the operating system's randomness |
+| `random.next` | 1 | *(1.8)* advances the state and returns its next 64-bit output, a whole Number in [0, 2^64) |
+| `random.below` | 2 | *(1.8)* `below(state, n)`: a uniformly distributed whole Number in [0, n), for a whole `n` from 1 to 2^64 |
 
 The `(1.5)` `math.*` natives follow `math.sin`'s rules: each argument
 must be a Number (otherwise a `RuntimeError.TypeMismatch`, message
@@ -210,6 +214,27 @@ that isn't exactly one code point is an `ArgumentError`, `code_point:
 expected one character, got N`; `from_code_point` of anything but a
 Unicode scalar value is an `ArgumentError`, `from_code_point: not a
 Unicode scalar value`. The `value.*` natives accept any value.
+
+The `(1.8)` natives are `std:random`'s generator, the same on every VM so
+a seeded sequence is too. A **generator state** is a Vector of four whole
+Numbers in [0, 2^64), not all zero: the four 64-bit words `s0..s3` of
+xoshiro256** (Blackman and Vigna). `random.next` and `random.below`
+replace the Vector's items with the advanced state in place.
+- Seeding: `x` = the seed modulo 2^64; each word in turn is the next
+  splitmix64 output: `x += 0x9E3779B97F4A7C15; z = x; z = (z ^ (z >> 30))
+  * 0xBF58476D1CE4E5B9; z = (z ^ (z >> 27)) * 0x94D049BB133111EB; word =
+  z ^ (z >> 31)` (all arithmetic modulo 2^64).
+- One step: `out = rotl(s1 * 5, 7) * 9; t = s1 << 17; s2 ^= s0; s3 ^= s1;
+  s1 ^= s2; s0 ^= s3; s2 ^= t; s3 = rotl(s3, 45)`.
+- `below(state, n)`: steps until `out < 2^64 - (2^64 mod n)`, then returns
+  `out mod n` (so every value is equally likely).
+
+Errors: a state that isn't one is an `ArgumentError`, `NAME: not a
+generator state` (NAME `next` or `below`); a non-Number seed or bound is
+a `TypeMismatch`, `seed: expected a Number, got TYPE` (likewise `below`);
+a seed that isn't whole or is 2^64 or more in size is an `ArgumentError`,
+`seed: expected a whole number smaller than 2^64 in size`; a bound out of
+range, `below: expected a whole number from 1 to 2^64`.
 
 **Adding natives** (files, sockets, string utilities, processes, ...) is
 the intended way to grow the platform, e.g. `fs.read`, `fs.write`,
@@ -960,6 +985,9 @@ message
   `value.variant`, `string.chars`, `string.code_point`, and
   `string.from_code_point` (§4.4), behind the standard library's
   `std:json` and `std:csv`.
+- **1.8** added natives only: `random.seed`, `random.fresh`,
+  `random.next`, and `random.below` (§4.4), the shared generator behind
+  `std:random`.
 - Planned growth, for orientation: error-set checking (the static
   checker's `throws` inference and "unhandled error" diagnostics -- M26),
   string utilities, filesystem, networking, and process natives.

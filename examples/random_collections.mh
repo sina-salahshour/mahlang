@@ -1,0 +1,43 @@
+# std:random and std:collections (M31): deal cards, then run a tiny
+# simulation of a print queue.
+
+import random from "std:random"
+import "std:collections"
+
+# Seeded, so every run (and both VMs) deals the same hands.
+let rng = Rng.new(2024)
+
+let deck = []
+for let suit in ["S", "H", "D", "C"] {
+    for let rank in ["A", "K", "Q", "J", "10"] {
+        deck.push(rank + suit)
+    }
+}
+rng.shuffle(deck)
+let hand = deck[0..5]
+print("hand:", hand)
+
+let suits = Set.of(hand.map(fn(card) { card[card.len() - 1] }).reduce())
+print("suits in hand:", suits, "flush?", suits.len() == 1)
+
+# Jobs arrive with a random priority (1 = urgent); the queue prints the
+# most urgent first (ties in arrival order), and a Deque keeps the log's
+# last 3 lines.
+struct Job { name: String, priority: Number }
+
+let jobs = PriorityQueue.new(fn(job) { job.priority })
+for let name in ["report", "photo", "memo", "invoice", "map"] {
+    jobs.push(Job { name: name, priority: rng.randint(1, 3) })
+}
+print("print order:", jobs.map(fn(job) { job.name + "/" + job.priority }).reduce())
+let recent = Deque.new()
+while !jobs.is_empty() {
+    let job = jobs.pop()
+    recent.push_back(job.name)
+    if recent.len() > 3 { recent.pop_front() }
+}
+print("last printed:", recent)
+
+# The module-level functions share one generator; seed it for repeatable runs.
+random.seed(7)
+print("dice:", [random.randint(1, 6), random.randint(1, 6), random.randint(1, 6)])

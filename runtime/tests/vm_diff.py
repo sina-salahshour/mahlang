@@ -369,6 +369,34 @@ import json from "std:json"
 let u: Unknown = 5
 json.parse(u)
 """, b""),
+    # M31: std:random's shared generator (seeded output must match exactly)
+    # and std:collections.
+    ("std_random", """
+import random from "std:random"
+random.seed(2024)
+print(random.random(), random.uniform(0 - 1, 1), random.randint(1, 1000000), random.randint(0, 18446744073709551615))
+let v = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+random.shuffle(v)
+print(v, random.sample(v, 4), random.choice(["a", "b", "c"]), random.shuffled(["a", "b", "c", "d"]))
+let r = Rng.new(0 - 12345)
+print(r.random(), r.randint(0 - 3, 3), Rng.new(18446744073709551615).random())
+print(try { random.randint(3, 1) } catch { e => { e.message } })
+print(try { random.seed(1.5) } catch { e => { e.message } })
+print(try { Rng { state: [1, 2, 3] }.random() } catch { e => { e.message } })
+""", b""),
+    ("std_random_uncaught", """
+import random from "std:random"
+random.choice([])
+""", b""),
+    ("std_collections", """
+import "std:collections"
+let s = Set.of([3, 1, 3])
+s.add(2)
+let d = Deque.of([1, 2])
+d.push_front(0)
+let q = PriorityQueue.of(["pear", "fig", "apple"], fn(w) { w.len() })
+print(s, s.union(Set.of([9])), d, d.pop_back(), q, q.pop(), q.peek())
+""", b""),
     ("std_csv", """
 import csv from "std:csv"
 print(csv.parse("a,\\"b,c\\"\\r\\n\\n\\"q\\"\\"x\\",\\n"), csv.parse_records("n,v\\nx,1\\n"))

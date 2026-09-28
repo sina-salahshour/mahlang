@@ -33,6 +33,10 @@ methods and `Vector.join` (docs/MAHC_FORMAT.md #6.7, NATIVE_METHOD_SINCE_MINOR).
 M30 bumps MINOR to 7: new natives only (`value.type_name`/`fields`/
 `variant`, `string.chars`/`code_point`/`from_code_point`, behind std:json
 and std:csv) -- docs/MAHC_FORMAT.md #4.4.
+
+M31 bumps MINOR to 8: new natives only (`random.seed`/`fresh`/`next`/
+`below`, the shared xoshiro256** generator behind std:random) --
+docs/MAHC_FORMAT.md #4.4.
 """
 
 from __future__ import annotations
@@ -45,7 +49,7 @@ MAGIC = b"MAHC"
 # `.mahc` extension).
 SHEBANG = b"#!/usr/bin/env -S mah runc\n"
 MAJOR = 1
-MINOR = 7
+MINOR = 8
 
 # -- section ids (docs/MAHC_FORMAT.md #3) -----------------------------------
 SEC_STRINGS = 0x01
@@ -148,6 +152,11 @@ NATIVE_ARITIES = {
     "string.chars": 1,
     "string.code_point": 1,
     "string.from_code_point": 1,
+    # M31 (1.8): the shared generator, for std:random.
+    "random.seed": 1,
+    "random.fresh": 0,
+    "random.next": 1,
+    "random.below": 2,
 }
 
 # M16: which minor version introduced each 1.1+ native -- a 1.0 file
@@ -170,6 +179,10 @@ NATIVE_SINCE_MINOR = {
     "string.chars": 7,
     "string.code_point": 7,
     "string.from_code_point": 7,
+    "random.seed": 8,
+    "random.fresh": 8,
+    "random.next": 8,
+    "random.below": 8,
 }
 
 # M29: native inherent methods added after 1.0, by the minor that added

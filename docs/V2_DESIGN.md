@@ -3090,6 +3090,28 @@ node that resolved to it. Then:
       types, completion), `vm_diff.py` parity cases,
       `examples/data_formats.mh`.
 
+32. **M31 — `std:random` and `std:collections`. ✅ Landed.** The rest of
+    `docs/STDLIB.md` Phase 1 except `std:regex` (which needs the `regex`
+    crate), plus Phase 0 step 6. Bytecode 1.8 (natives only) in
+    `docs/MAHC_FORMAT.md` §4.4/§7; each module's decisions are in
+    `STDLIB.md`.
+
+    - **The shared generator, both VMs**: xoshiro256** seeded through
+      splitmix64, as `random.seed`, `random.fresh`, `random.next` and
+      `random.below` over a state Vector of four 64-bit Numbers (checked
+      against the algorithms' reference outputs; `Decimal::from_u64` and
+      `to_sign_u64` added on the Rust side).
+    - **`mah/std/random.mh`**: `struct Rng` with `random`, `uniform`,
+      `randint`, `choice`, `shuffle`, `shuffled`, `sample`, plus
+      module-level functions over one OS-seeded generator and `seed(n)`.
+    - **`mah/std/collections.mh`**: `Set`, `Deque` and `PriorityQueue`,
+      plain Mah (1.4 bytecode), each `Iterable` and `Printable`, typed
+      generically so the checker infers `Set<Number>` etc.
+    - Tests: `mah/std/{random,collections}.test.mh` (both VMs),
+      `RandomAndCollectionsTests` (minors, reference vectors, native
+      errors, checker types), `vm_diff.py` cases pinning seeded output,
+      `examples/random_collections.mh`.
+
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
 it** (`make test` must stay green) — see `docs/TESTING.md` for where
