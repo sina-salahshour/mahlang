@@ -1,0 +1,55 @@
+# std:fs (M35): build a tiny project tree, then report on it -- reading
+# whole files, line by line, and a few at once.
+
+import fs from "std:fs"
+import path from "std:path"
+
+# Everything happens in a fresh temporary directory, removed at the end.
+let root = try fs.temp_dir() else "."
+defer {
+    try fs.remove(root, recursive: true) else none
+}
+
+fn setup(root: String) throws FsError {
+    fs.mkdir(path.join(root, "src/util"), parents: true)
+    fs.write_text(path.join(root, "src/main.mh"), "import \"util/math\"\nprint(square(4))\n")
+    fs.write_text(path.join(root, "src/util/math.mh"), "export fn square(n) { n * n }\n")
+    fs.write_text(path.join(root, "README.md"), "# demo\n\nA tiny project.\n")
+    let log = fs.open(path.join(root, "build.log"), "w")
+    defer log.close()
+    for let step in ["compile", "link", "done"] {
+        log.write(step + "\n")
+    }
+}
+
+try { setup(root) } catch {
+    e: FsError => { print("setup failed:", e.message()) }
+}
+
+# Every .mh file, with its line count, read concurrently.
+let sources = fs.glob(path.join(root, "**/*.mh"))
+let reads = sources.map(fn(p) { detach fs.read_text(p) }).reduce()
+for let p, let i in sources {
+    let text = try reads[i].await else ""
+    print(path.relative(root, p), "-", text.lines().len(), "line(s)")
+}
+
+# A file a line at a time.
+let log = try fs.open(path.join(root, "build.log")) else none
+if log != none {
+    for let line in log.lines() {
+        print("log:", line)
+    }
+    try log.close() else none
+}
+
+# Directory listings are sorted; info tells a file from a directory.
+for let name in try fs.list_dir(root) else [] {
+    let kind = try fs.info(path.join(root, name)).kind else "?"
+    print(name, kind)
+}
+
+# Errors say what went wrong, and where.
+print(try { fs.read_text(path.join(root, "missing.txt")) } catch {
+    e: FsError => { e.kind + ": " + e.description }
+})

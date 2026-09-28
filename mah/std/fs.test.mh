@@ -1,0 +1,198 @@
+# Tests for std:fs, run by tests/test_stdlib.py (or
+# `mah test --file mah/std/fs.test.mh`). Each test works in a fresh
+# temporary directory, removed at the end.
+import "std:test"
+import fs from "./fs"
+
+fn scratch() -> String { fs.temp_dir() }
+
+fn error_of(f: fn() -> Unknown) -> String {
+    let e = assert_throws(f)
+    match e {
+        FsError { kind, op, path, description } => { kind + " " + op + ": " + description }
+        _ => { "not an FsError: " + e.message() }
+    }
+}
+
+test "whole files" {
+    let dir = scratch()
+    defer fs.remove(dir, recursive: true)
+    let p = dir + "/a.txt"
+    fs.write_text(p, "one\ntwo\r\n")
+    fs.append_text(p, "héllo")
+    assert_eq(fs.read_text(p), "one\ntwo\r\nhéllo")
+    fs.write_text(p, "replaced")
+    assert_eq(fs.read_text(p), "replaced")
+    fs.append_text(dir + "/new.txt", "x")
+    assert_eq(fs.read_text(dir + "/new.txt"), "x")
+    fs.write_text(dir + "/empty.txt", "")
+    assert_eq(fs.read_text(dir + "/empty.txt"), "")
+}
+
+test "info, exists, is_file, is_dir" {
+    let dir = scratch()
+    defer fs.remove(dir, recursive: true)
+    let p = dir + "/a.txt"
+    fs.write_text(p, "12345é")
+    let i = fs.info(p)
+    assert_eq([i.kind, i.size].join(" "), "file 7")
+    assert(i.modified > 1700000000)
+    assert_eq(fs.info(dir).kind, "dir")
+    assert(fs.exists(p))
+    assert(fs.is_file(p))
+    assert(!fs.is_dir(p))
+    assert(fs.is_dir(dir))
+    assert(!fs.exists(dir + "/nope"))
+    assert(!fs.is_file(dir + "/nope"))
+}
+
+test "directories" {
+    let dir = scratch()
+    defer fs.remove(dir, recursive: true)
+    fs.mkdir(dir + "/b")
+    fs.mkdir(dir + "/a/x/y", parents: true)
+    fs.mkdir(dir + "/a/x", parents: true)
+    fs.write_text(dir + "/c.txt", "")
+    assert_eq(fs.list_dir(dir).join(","), "a,b,c.txt")
+    fs.remove(dir + "/b")
+    fs.remove(dir + "/c.txt")
+    fs.remove(dir + "/a", recursive: true)
+    assert_eq(fs.list_dir(dir).len(), 0)
+}
+
+test "rename and copy" {
+    let dir = scratch()
+    defer fs.remove(dir, recursive: true)
+    fs.write_text(dir + "/a", "data")
+    fs.copy(dir + "/a", dir + "/b")
+    fs.rename(dir + "/a", dir + "/c")
+    assert_eq(fs.list_dir(dir).join(","), "b,c")
+    assert_eq(fs.read_text(dir + "/b") + fs.read_text(dir + "/c"), "datadata")
+    fs.write_text(dir + "/d", "new")
+    fs.rename(dir + "/d", dir + "/c")
+    assert_eq(fs.read_text(dir + "/c"), "new")
+}
+
+test "errors" {
+    let dir = scratch()
+    defer fs.remove(dir, recursive: true)
+    fs.write_text(dir + "/f", "x")
+    fs.mkdir(dir + "/d")
+    fs.write_text(dir + "/d/inner", "x")
+    assert_eq(
+        error_of(fn() { fs.read_text(dir + "/missing") }),
+        "not_found read_text: no such file or directory"
+    )
+    assert_eq(
+        error_of(fn() { fs.read_text(dir + "/d") }),
+        "is_a_directory read_text: is a directory"
+    )
+    assert_eq(error_of(fn() { fs.mkdir(dir + "/d") }), "already_exists mkdir: already exists")
+    assert_eq(
+        error_of(fn() { fs.mkdir(dir + "/no/such") }),
+        "not_found mkdir: no such file or directory"
+    )
+    assert_eq(
+        error_of(fn() { fs.remove(dir + "/d") }),
+        "directory_not_empty remove: directory not empty"
+    )
+    assert_eq(
+        error_of(fn() { fs.list_dir(dir + "/f") }),
+        "not_a_directory list_dir: not a directory"
+    )
+    assert_eq(
+        error_of(fn() { fs.copy(dir + "/d", dir + "/e") }),
+        "is_a_directory copy: is a directory"
+    )
+    assert_eq(
+        error_of(fn() { fs.write_text(dir + "/f/x", "") }),
+        "not_a_directory write_text: not a directory"
+    )
+    let e = assert_throws(fn() { fs.read_text(dir + "/missing") })
+    assert_eq(e.message(), "read_text: no such file or directory: " + dir + "/missing")
+}
+
+test "non-ASCII text round-trips" {
+    let dir = scratch()
+    defer fs.remove(dir, recursive: true)
+    fs.write_text(dir + "/u", "ÿ日本")
+    assert_eq(fs.read_text(dir + "/u"), "ÿ日本")
+}
+
+test "open files" {
+    let dir = scratch()
+    defer fs.remove(dir, recursive: true)
+    let p = dir + "/lines.txt"
+    let w = fs.open(p, "w")
+    w.write("first\r\n")
+    w.write("second\nthird")
+    w.close()
+    let a = fs.open(p, "a")
+    a.write("\nfourth\n")
+    a.close()
+    let f = fs.open(p)
+    assert_eq("" + f, "File(\"" + p + "\", \"r\")")
+    assert_eq(f.read_line(), "first")
+    let rest = []
+    for let line in f.lines() {
+        rest.push(line)
+    }
+    assert_eq(rest.join("|"), "second|third|fourth")
+    assert_eq(f.read_line(), none)
+    f.close()
+    f.close()
+    assert_eq(error_of(fn() { f.read_line() }), "closed read_line: the file is closed")
+    let g = fs.open(p)
+    defer g.close()
+    assert_eq(g.read_all().len(), 27)
+    assert_eq(error_of(fn() { g.write("x") }), "other write: the file isn't open for writing")
+    assert_eq(
+        error_of(fn() { fs.open(dir + "/missing") }),
+        "not_found open: no such file or directory"
+    )
+    assert_eq(error_of(fn() { fs.open(dir) }), "is_a_directory open: is a directory")
+    assert_eq(
+        assert_throws(fn() { fs.open(p, "x") }).message,
+        "open: mode must be \"r\", \"w\" or \"a\", got \"x\""
+    )
+}
+
+test "glob" {
+    let dir = scratch()
+    defer fs.remove(dir, recursive: true)
+    fs.mkdir(dir + "/src/lib/deep", parents: true)
+    for let name in [
+        "src/main.mh",
+        "src/lib/a.mh",
+        "src/lib/b.txt",
+        "src/lib/deep/c.mh",
+        "src/.hidden.mh",
+        "top.mh",
+        "top2.mh"
+    ] {
+        fs.write_text(dir + "/" + name, "")
+    }
+    let rel = fn(pattern: String) -> String {
+        fs.glob(dir + "/" + pattern).map(fn(p) { p[dir.len() + 1..] }).reduce().join(" ")
+    }
+    assert_eq(rel("*.mh"), "top.mh top2.mh")
+    assert_eq(rel("top?.mh"), "top2.mh")
+    assert_eq(rel("src/**/*.mh"), "src/lib/a.mh src/lib/deep/c.mh src/main.mh")
+    assert_eq(rel("**/*.txt"), "src/lib/b.txt")
+    assert_eq(rel("src/.*"), "src/.hidden.mh")
+    assert_eq(rel("src/lib/[ab].*"), "src/lib/a.mh src/lib/b.txt")
+    assert_eq(rel("src/lib/[!a]*"), "src/lib/b.txt src/lib/deep")
+    assert_eq(rel("nothing*"), "")
+    assert_eq(rel("src/main.mh"), "src/main.mh")
+}
+
+test "detached reads run alongside timers" {
+    let dir = scratch()
+    defer fs.remove(dir, recursive: true)
+    fs.write_text(dir + "/a", "A")
+    fs.write_text(dir + "/b", "B")
+    let pa = detach fs.read_text(dir + "/a")
+    let pb = detach fs.read_text(dir + "/b")
+    sleep_async(5)
+    assert_eq(pa.await + pb.await, "AB")
+}

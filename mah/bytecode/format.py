@@ -49,6 +49,9 @@ scheduler -- docs/MAHC_FORMAT.md #4.4/#6.4. The compiler stops emitting
 M34 bumps MINOR to 11: new natives only (`time.now_ms`/`monotonic_ms`/
 `cancel`, `promise.new`/`resolve`/`fail`, behind std:time and std:async)
 -- docs/MAHC_FORMAT.md #4.4.
+
+M35 bumps MINOR to 12: new natives only (`fs.*`, behind std:fs; open files
+are ids in the VM's handle table) -- docs/MAHC_FORMAT.md #4.4.
 """
 
 from __future__ import annotations
@@ -61,7 +64,7 @@ MAGIC = b"MAHC"
 # `.mahc` extension).
 SHEBANG = b"#!/usr/bin/env -S mah runc\n"
 MAJOR = 1
-MINOR = 11
+MINOR = 12
 
 # -- section ids (docs/MAHC_FORMAT.md #3) -----------------------------------
 SEC_STRINGS = 0x01
@@ -181,6 +184,22 @@ NATIVE_ARITIES = {
     "promise.new": 0,
     "promise.resolve": 2,
     "promise.fail": 2,
+    # M35 (1.12): std:fs.
+    "fs.read_text": 1,
+    "fs.write_text": 2,
+    "fs.append_text": 2,
+    "fs.info": 1,
+    "fs.list_dir": 1,
+    "fs.mkdir": 2,
+    "fs.remove": 2,
+    "fs.rename": 2,
+    "fs.copy": 2,
+    "fs.temp_dir": 0,
+    "fs.open": 2,
+    "fs.read_line": 1,
+    "fs.read_all": 1,
+    "fs.write": 2,
+    "fs.close": 1,
 }
 
 # M16: which minor version introduced each 1.1+ native -- a 1.0 file
@@ -216,6 +235,21 @@ NATIVE_SINCE_MINOR = {
     "promise.new": 11,
     "promise.resolve": 11,
     "promise.fail": 11,
+    "fs.read_text": 12,
+    "fs.write_text": 12,
+    "fs.append_text": 12,
+    "fs.info": 12,
+    "fs.list_dir": 12,
+    "fs.mkdir": 12,
+    "fs.remove": 12,
+    "fs.rename": 12,
+    "fs.copy": 12,
+    "fs.temp_dir": 12,
+    "fs.open": 12,
+    "fs.read_line": 12,
+    "fs.read_all": 12,
+    "fs.write": 12,
+    "fs.close": 12,
 }
 
 # M29: native inherent methods added after 1.0, by the minor that added

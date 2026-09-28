@@ -597,5 +597,73 @@ def none_like():
     return NONE_VALUE
 
 
+class FsTests(unittest.TestCase):
+    """M35: std:fs -- behavior is covered by mah/std/fs.test.mh on both VMs;
+    this covers what Mah can't set up itself (bytes that aren't UTF-8,
+    unreadable files), the natives' argument errors, and the checker."""
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.dir = self.td.name
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    def _fs(self, body: str) -> str:
+        return run_source('import fs from "std:fs"\n' + body)
+
+    def test_bytecode_minor(self):
+        from mah.bytecode.decode import decode
+
+        self.assertEqual(decode(compile_bytes(text='import fs from "std:fs"\nprint(fs.exists("x"))')).minor, 12)
+
+    def test_invalid_utf8(self):
+        path = os.path.join(self.dir, "bad.txt")
+        with open(path, "wb") as f:
+            f.write(b"ok\nbad \xff\n")
+        src = (
+            f'print(try {{ fs.read_text("{path}") }} catch {{ e: FsError => {{ e.kind + " " + e.description }} }})\n'
+            f'let f = fs.open("{path}")\nprint(f.read_line())\n'
+            'print(try { f.read_line() } catch { e: FsError => { e.kind } })\n'
+        )
+        self.assertEqual(self._fs(src), "invalid_utf8 not valid UTF-8 text\nok\ninvalid_utf8\n")
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root can read anything")
+    def test_permission_denied(self):
+        path = os.path.join(self.dir, "secret.txt")
+        with open(path, "w") as f:
+            f.write("x")
+        os.chmod(path, 0)
+        src = f'print(try {{ fs.read_text("{path}") }} catch {{ e: FsError => {{ e.kind }} }})\n'
+        self.assertEqual(self._fs(src), "permission_denied\n")
+
+    def test_bytes_are_written_exactly(self):
+        path = os.path.join(self.dir, "out.txt")
+        self._fs(f'fs.write_text("{path}", "a\\r\\nb\\né")\n')
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(), "a\r\nb\né".encode("utf-8"))
+
+    def test_argument_errors(self):
+        for body, message in [
+            ('let u: Unknown = 1\nfs.read_text(u)', "read_text: path must be a String, got Number"),
+            ('let u: Unknown = 1\nfs.write_text("x", u)', "write_text: text must be a String, got Number"),
+            ('fs.open("x", "rw")', 'open: mode must be "r", "w" or "a", got "rw"'),
+        ]:
+            with self.subTest(body=body):
+                _out, exc = run_source_and_error('import fs from "std:fs"\n' + body)
+                self.assertIsInstance(exc, MahRuntimeError)
+                self.assertIn(message, str(exc))
+
+    def test_checker(self):
+        diagnostics, types = check(
+            'import fs from "std:fs"\nlet t = try fs.read_text("x") else ""\nlet e = fs.exists("x")\n'
+            'let names = try fs.list_dir(".") else []\nlet f = try fs.open("x") else none\nlet g = fs.glob("*.mh")\n'
+            'let i = try fs.info("x") else none\nlet u = fs.read_text("x")\n'
+        )
+        got = {k: types[k][-1] for k in ("t", "e", "names", "g")}
+        self.assertEqual(got, {"t": "String", "e": "Bool", "names": "Vector<String>", "g": "Vector<String>"})
+        self.assertEqual([d[1] for d in diagnostics if d[0] == "unhandled"], ["Unhandled error: FsError"])
+
+
 if __name__ == "__main__":
     unittest.main()

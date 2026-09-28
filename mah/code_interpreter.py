@@ -911,9 +911,31 @@ class _IoHub:
     out in the order `input` asked for them."""
 
     def __init__(self):
-        self.done: queue.Queue = queue.Queue()  # (promise, line or None at end of input)
+        # (promise, "line", the line or None at end of input) from the stdin
+        # reader, or (promise, "value", a Mah value) from a job (M35)
+        self.done: queue.Queue = queue.Queue()
         self.pending = 0
         self._stdin_requests: queue.Queue | None = None
+        # M35 (std:fs): open files by id -- the VM's handle table.
+        self.files: dict = {}
+        self._next_file = 1
+
+    def submit(self, promise, job) -> None:
+        """M35: run `job()` on a worker thread; its result (a Mah value
+        built from plain data, never touching VM state) settles `promise`."""
+        self.pending += 1
+        done = self.done
+
+        def run():
+            done.put((promise, "value", job()))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def add_file(self, f) -> int:
+        file_id = self._next_file
+        self._next_file += 1
+        self.files[file_id] = f
+        return file_id
 
     def read_line(self, promise) -> None:
         self.pending += 1
@@ -935,17 +957,23 @@ class _IoHub:
             except (OSError, ValueError):
                 line = ""
             if line == "":
-                done.put((promise, None))
+                done.put((promise, "line", None))
                 continue
             if line.endswith("\n"):
                 line = line[:-1]
                 if line.endswith("\r"):
                     line = line[:-1]
-            done.put((promise, line))
+            done.put((promise, "line", line))
 
     def close(self) -> None:
         if self._stdin_requests is not None:
             self._stdin_requests.put(None)
+        for f in self.files.values():
+            try:
+                f.close()
+            except OSError:
+                pass
+        self.files.clear()
 
 
 def _execute(linked: LinkedProgram, test_slot: int | None = None, deadline: float | None = None):
@@ -1058,6 +1086,7 @@ def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, dead
         schedule_timer=lambda secs, p: schedule_timer(secs, p),
         read_line=lambda p: io.read_line(p),
         cancel_timer=lambda p: cancel_timer(p),
+        io=io,
     )
 
     def enter_closure(task: Task, closure: Closure, arg_values: list) -> None:
@@ -1177,12 +1206,14 @@ def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, dead
         return True
 
     def settle_io(item) -> None:
-        promise, line = item
+        promise, what, payload = item
         io.pending -= 1
-        if line is None:
+        if what == "value":
+            promise.resolve(payload)
+        elif payload is None:
             promise.fail(StructInstance("EndOfInput", {}))
         else:
-            promise.resolve(line)
+            promise.resolve(payload)
 
     def next_event() -> bool:
         """M33: handle the next event -- a finished I/O operation, or else

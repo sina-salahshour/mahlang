@@ -481,6 +481,26 @@ async.clear_timeout(async.set_timeout(fn() { log.push("never") }, 10))
 sleep_async(50)
 print(log)
 """, b""),
+    # M35: std:fs -- results and error kinds (never the temporary path).
+    ("std_fs", """
+import fs from "std:fs"
+let dir = fs.temp_dir()
+fs.write_text(dir + "/a.txt", "one\\r\\ntwo\\n")
+fs.mkdir(dir + "/sub/deep", parents: true)
+fs.write_text(dir + "/sub/deep/x.mh", "é")
+fs.copy(dir + "/a.txt", dir + "/sub/b.txt")
+let f = fs.open(dir + "/a.txt")
+print(f.read_line(), f.lines().reduce(), f.read_line())
+f.close()
+print(fs.list_dir(dir), fs.info(dir + "/sub/deep/x.mh").size, fs.is_dir(dir + "/sub"), fs.exists(dir + "/zz"))
+print(fs.glob(dir + "/**/*.*").map(fn(p) { p[dir.len()..] }).reduce())
+for let path in [dir + "/zz", dir + "/sub", dir + "/a.txt/x"] {
+    print(try { fs.read_text(path) } catch { e: FsError => { e.kind + " " + e.op + ": " + e.description } })
+}
+print(try { fs.remove(dir + "/sub") } catch { e: FsError => { e.kind } }, try { f.read_line() } catch { e: FsError => { e.kind } })
+fs.remove(dir, recursive: true)
+print(fs.exists(dir))
+""", b""),
     ("std_csv", """
 import csv from "std:csv"
 print(csv.parse("a,\\"b,c\\"\\r\\n\\n\\"q\\"\\"x\\",\\n"), csv.parse_records("n,v\\nx,1\\n"))

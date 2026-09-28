@@ -33,9 +33,9 @@ from .runtime_values import (
 
 
 class NativeContext:
-    __slots__ = ("_to_string", "_schedule_timer", "_read_line", "_cancel_timer", "_started")
+    __slots__ = ("_to_string", "_schedule_timer", "_read_line", "_cancel_timer", "_started", "io")
 
-    def __init__(self, to_string, schedule_timer, read_line=None, cancel_timer=None):
+    def __init__(self, to_string, schedule_timer, read_line=None, cancel_timer=None, io=None):
         import time
 
         self._to_string = to_string
@@ -43,6 +43,9 @@ class NativeContext:
         self._read_line = read_line
         self._cancel_timer = cancel_timer
         self._started = time.monotonic()
+        # M35: code_interpreter's `_IoHub` -- `submit(promise, job)` and the
+        # open-file table (mah/fs_natives.py).
+        self.io = io
 
     def to_string(self, value) -> str:
         return self._to_string(value)
@@ -534,3 +537,8 @@ NATIVES: dict[str, tuple[int, object]] = {
     "promise.resolve": (2, _promise_resolve),
     "promise.fail": (2, _promise_fail),
 }
+
+# M35 (1.12): std:fs -- mah/fs_natives.py.
+from .fs_natives import NATIVES as _FS_NATIVES  # noqa: E402
+
+NATIVES.update(_FS_NATIVES)

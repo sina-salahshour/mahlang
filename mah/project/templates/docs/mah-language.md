@@ -657,8 +657,8 @@ are global across all imported files and need no `export`.
 
 Standard library modules are imported as `"std:<name>"`, the same two ways
 as a file: `std:math`, `std:path`, `std:json`, `std:csv`, `std:random`,
-`std:collections`, `std:regex`, `std:time`, `std:async` (and `std:test`,
-below).
+`std:collections`, `std:regex`, `std:time`, `std:async`, `std:fs` (and
+`std:test`, below).
 
 ```mah
 import math from "std:math"
@@ -831,6 +831,37 @@ print(count[0] > 0)                              # true
 `set_timeout(f, ms)` / `clear_timeout(id)` likewise. Timer callbacks are
 `fn() throws never`: handle errors inside them.
 
+`std:fs`: files and directories. Every function waits like a call (`detach`
+one to run it alongside other work) and throws `FsError { kind, op, path,
+description }`, `kind` being `"not_found"`, `"permission_denied"`,
+`"already_exists"`, `"is_a_directory"`, `"not_a_directory"`,
+`"directory_not_empty"`, `"invalid_utf8"`, `"closed"` or `"other"`. Text
+is UTF-8, exactly as written (no newline changes):
+
+```mah
+import fs from "std:fs"
+try {
+    let dir = fs.temp_dir()                      # a fresh temporary directory
+    defer fs.remove(dir, recursive: true)
+    let p = dir + "/notes.txt"
+    fs.write_text(p, "one\ntwo\n")               # also append_text; read_text gives it all back
+    print(fs.exists(p), fs.is_file(p), fs.is_dir(dir))   # true true true
+    let f = fs.open(p)                           # mode "r" (default), "w" or "a"
+    defer f.close()
+    for let line in f.lines() { print(line) }   # one, then two (lines() reads lazily)
+    print(fs.list_dir(dir))                      # [notes.txt] (sorted names)
+    print(fs.glob(dir + "/*.txt").len())         # 1 (* ? [abc], and ** across directories)
+    fs.read_text(dir + "/nope")
+} catch {
+    e: FsError => { print(e.kind) }              # not_found
+}
+```
+
+Also `info(path)` (`FileInfo { kind, size, modified }`), `mkdir(path,
+parents = false)`, `remove(path, recursive = false)`, `rename(from, to)`,
+`copy(from, to)`, and a File's `read_line()` (`none` at the end),
+`read_all()` and `write(text)`.
+
 ## Errors
 
 `throw` raises a value -- any struct/enum that `impl`s the built-in `Error`
@@ -960,8 +991,8 @@ test "not ready yet" {
 - `&&`, `||`, `+=`, `++`, ternary `?:`.
 - Type-checking trait-typed values, bounds, and the prelude's iterator methods (the checker skips these for now); classes/inheritance.
 - Variadic parameters (`*args`, `**kwargs`); only `print` takes any number of arguments.
-- File, network, or OS access, and every other planned `std:` module
-  besides `std:math`, `std:path`, `std:json`, `std:csv`, `std:random`,
-  `std:collections`, `std:regex`, `std:time`, `std:async` and `std:test`.
-  Time zones (`std:time` is UTC only).
+- Network or process access, binary file data, and every other planned
+  `std:` module besides `std:math`, `std:path`, `std:json`, `std:csv`,
+  `std:random`, `std:collections`, `std:regex`, `std:time`, `std:async`,
+  `std:fs` and `std:test`. Time zones (`std:time` is UTC only).
 - `null`/`nil`/`undefined`: use `none`.

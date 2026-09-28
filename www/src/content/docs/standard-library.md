@@ -23,9 +23,10 @@ and in your editor, hover and go-to-definition work on its functions like
 on your own (showing locations like `std:math#20:9`).
 
 So far there are `std:math`, `std:path`, `std:json`, `std:csv`,
-`std:random`, `std:collections`, `std:regex`, `std:time` and `std:async`
-(and `std:test`, see [Testing](/docs/testing)). The rest of the plan
-(fs, process, sockets, http) is in `docs/STDLIB.md` in the repository.
+`std:random`, `std:collections`, `std:regex`, `std:time`, `std:async`
+and `std:fs` (and `std:test`, see [Testing](/docs/testing)). The rest of
+the plan (process, sockets, http) is in `docs/STDLIB.md` in the
+repository.
 
 ## `std:math`
 
@@ -376,6 +377,52 @@ async.set_timeout(fn() { async.clear_interval(ticker) }, 55)
   running; a cleared timer doesn't. Callbacks can't throw (their type is
   `fn() throws never`): handle errors inside them.
 
+## `std:fs`
+
+Files and directories. Every function waits like any call, but the work
+happens off your program's thread, so `detach fs.read_text(path)` lets
+other tasks and timers run meanwhile.
+
+```mah
+import fs from "std:fs"
+
+try {
+    let dir = fs.temp_dir()                     # a fresh temporary directory
+    defer fs.remove(dir, recursive: true)
+    fs.write_text(dir + "/todo.txt", "buy milk\nwalk dog\n")
+    fs.append_text(dir + "/todo.txt", "call mom\n")
+    let f = fs.open(dir + "/todo.txt")
+    defer f.close()
+    for let line, let i in f.lines() {
+        print(i + 1, line)                      # 1 buy milk, 2 walk dog, 3 call mom
+    }
+    print(fs.list_dir(dir), fs.info(dir + "/todo.txt").size)   # [todo.txt] 27
+    fs.read_text(dir + "/missing.txt")
+} catch {
+    e: FsError => { print(e.kind, "-", e.message()) }       # not_found - read_text: no such file ...
+}
+```
+
+| Function | |
+|---|---|
+| `read_text(path)`, `write_text(path, text)`, `append_text(path, text)` | a whole file at once |
+| `exists`, `is_file`, `is_dir(path)` | Bools, never throwing |
+| `info(path)` | `FileInfo { kind, size, modified }`: "file", "dir" or "other"; bytes; seconds since 1970 |
+| `list_dir(path)` | the names in a directory, sorted |
+| `mkdir(path, parents = false)` | `parents` also makes missing directories above it |
+| `remove(path, recursive = false)` | a file or an empty directory, or with `recursive` a whole tree |
+| `rename(from, to)`, `copy(from, to)` | replacing a file at `to` |
+| `glob(pattern)` | matching paths, sorted: `*`, `?`, `[abc]` in a name, `**` across directories |
+| `temp_dir()` | a new, empty temporary directory |
+| `open(path, mode = "r")` | a `File` (mode "r", "w" or "a") with `read_line()` (`none` at the end), `lines()`, `read_all()`, `write(text)` and `close()` |
+
+Errors are an `FsError` whose `kind` is `"not_found"`,
+`"permission_denied"`, `"already_exists"`, `"is_a_directory"`,
+`"not_a_directory"`, `"directory_not_empty"`, `"invalid_utf8"`,
+`"closed"` (using a closed File) or `"other"`, plus the `op`, `path`, and
+a `description`. Text is UTF-8, read and written exactly: no newline
+conversion. Binary data waits for a future `Bytes` type.
+
 ## How it's built
 
 Each module is a Mah file inside the `mah` package (`mah/std/math.mh`).
@@ -391,7 +438,9 @@ export extern fn tan(x: Number) -> Number = "math.tan"
 `std:csv` are Mah too, over a handful of natives for reading a value's
 type and fields and a String's characters. `std:random`'s generator is a
 small native, specified bit for bit so every runtime computes the same
-numbers. `std:regex` parses each pattern in Mah and hands the runtime a
+numbers. `std:fs` hands its work to a thread and settles a Promise
+when it's done; an open file is an id in a table, wrapped in a `File`
+struct. `std:regex` parses each pattern in Mah and hands the runtime a
 form that Python's `re` and Rust's `regex` crate read the same way.
 
 Only standard library modules may use `extern fn`. New natives come with

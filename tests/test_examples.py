@@ -214,6 +214,22 @@ class ExampleTests(unittest.TestCase):
             'no such date\n'
         )
 
+    def test_files(self):
+        # M35: std:fs in a temporary directory it removes again.
+        out = run_file(example_path("files.mh"))
+        self.assertEqual(
+            out,
+            'src/main.mh - 2 line(s)\n'
+            'src/util/math.mh - 1 line(s)\n'
+            'log: compile\n'
+            'log: link\n'
+            'log: done\n'
+            'README.md file\n'
+            'build.log file\n'
+            'src dir\n'
+            'not_found: no such file or directory\n'
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
