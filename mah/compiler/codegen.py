@@ -190,6 +190,7 @@ statement list, so a top-level `defer` runs at program end.
 
 from __future__ import annotations
 
+import dataclasses
 from decimal import Decimal
 
 from .ast_nodes import (
@@ -232,12 +233,42 @@ from .ast_nodes import (
     StructDecl,
     StructLit,
     StructPat,
+    ThrowExpr,
     TraitDecl,
+    TryExpr,
+    TypePat,
     Unary,
     WhileStmt,
     WildcardPat,
 )
 from ..runtime_values import NONE_VALUE
+
+
+def _contains_direct_defer(node) -> bool:
+    """M25 (docs/MAHC_FORMAT.md #5.5): whether `node` (a function body's
+    `Block`, or the top-level program's `list[Stmt]`) contains a
+    `DeferStmt` anywhere in its own code -- any nesting depth of `if`/
+    `while`/`for`/`match`/`try`/blocks, but never descending into a
+    nested `FnExpr`'s own body (that function's defers are its own
+    concern, handled by its own, independent compilation of
+    `Codegen._gen_fn_expr`). Generic dataclass-field walk, mirroring
+    `compiler/typecheck.py`'s `_walk` but stopping at `FnExpr`."""
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        if isinstance(n, (list, tuple)):
+            stack.extend(n)
+            continue
+        if isinstance(n, DeferStmt):
+            return True
+        if isinstance(n, FnExpr):
+            continue
+        if dataclasses.is_dataclass(n) and not isinstance(n, type):
+            for f in dataclasses.fields(n):
+                value = getattr(n, f.name)
+                if isinstance(value, (list, tuple)) or dataclasses.is_dataclass(value):
+                    stack.append(value)
+    return False
 
 # M12: was a hard 400-instruction program-size limit before M12; now just a
 # sanity ceiling far beyond any real program, guarding against a genuine
@@ -268,6 +299,13 @@ class CodeBuffer:
         # emit -- set by `Codegen.gen_stmt`/`gen_expr`/`_gen_pattern_check`
         # on entry (see those methods), read here on every normal emit.
         self.current_pos = None
+        # M25 (docs/MAHC_FORMAT.md #4.8/#5.3): (start, end, handler, slot)
+        # tuples, appended in innermost-first order as each `try`/DRAIN/
+        # function-defer region closes -- see `Codegen._close_region`/
+        # `_emit_handler_entries`. `lower.py` copies this list straight
+        # into the HANDLERS section (addresses need no remapping, exactly
+        # like jump targets -- see that module's docstring).
+        self.handlers: list = []
 
     def emit(self, code, address: int | None = None) -> int:
         if address is None:
@@ -295,6 +333,14 @@ class Codegen:
         # The FnExprs currently being compiled, innermost last -- see
         # `_reject_in_detached`.
         self._fn_stack: list = []
+        # M25 (docs/MAHC_FORMAT.md #5.3): open regions of the function (or
+        # top-level program) currently being compiled -- a stack (regions
+        # always close in exactly the reverse order they opened, since
+        # every open/close pair is scoped to one Python call's own control
+        # flow). Each region is `{"segments": [...], "cur_start": int |
+        # None}` -- see `_open_region`/`_close_region`/`_pause_regions`/
+        # `_resume_regions`.
+        self._open_regions: list = []
         # M14: the source position (a combined-text offset) attributed to
         # whatever gets emitted next -- see `gen_stmt`/`gen_expr`/
         # `_gen_pattern_check` and `CodeBuffer.current_pos`/`positions`.
@@ -326,6 +372,26 @@ class Codegen:
                     self.buf.emit(
                         ("defmethod", (0, slot), (stmt.type_name, stmt.trait_name, name, is_method), None)
                     )
+        # M25 (docs/MAHC_FORMAT.md #5.5): the top-level program gets the
+        # same implicit F-region a function with `defer` anywhere in its
+        # own body gets -- wraps EVERYTHING below (the M9 push/drain,
+        # every top-level statement, the halt sentinel), so an error
+        # unwinding through the program's own scopes still runs their
+        # deferred blocks. `_contains_direct_defer` (deep, stops at nested
+        # `FnExpr`s) is a different question from `has_defer` below (M9's
+        # own, shallow, PER-BLOCK "does this exact block directly contain
+        # one" check) -- a top-level `if`/`while`/etc. containing a
+        # `defer` needs no top-level `deferpush`/drain of its OWN (that's
+        # the `if`/`while` block's own concern, M9), but the program-wide
+        # F-region still must exist so unwinding through it drains that
+        # block's own already-open scope correctly.
+        program_has_defer = _contains_direct_defer(stmts)
+        f_region = f_saved = None
+        if program_has_defer:
+            f_saved = self._temp()
+            self.buf.emit(("deferdepth", None, None, f_saved))
+            f_region = self._open_region()
+
         # M9: the top-level statement list is treated exactly like a
         # block's own `stmts` -- push/drain a defer scope only when a
         # top-level `defer` is directly present, so a top-level defer
@@ -340,6 +406,18 @@ class Codegen:
             self._emit_defer_unwind(1)
             self._defer_depth -= 1
         self.buf.emit((None, None, None, None))
+
+        if program_has_defer:
+            # F_HANDLER: placed after the halt sentinel (docs/MAHC_FORMAT.md
+            # #5.5) -- reached only by unwinding (never fallthrough, since
+            # `halt` already ended the task's normal execution above it).
+            segments = self._close_region(f_region)
+            f_handler = self.buf.code_pointer
+            err_f = self._temp()
+            self._gen_drain(f_saved, err_f)
+            self.buf.emit(("throw", err_f, None, None))
+            self._emit_handler_entries(segments, f_handler, err_f[1])
+
         self.buf.global_slot_count = self.frame_stack[-1].next_slot
         return self.buf
 
@@ -458,6 +536,65 @@ class Codegen:
         end_target = self.buf.code_pointer
         self.buf.emit(("jmpf", has_more, None, end_target), address=jmpf_placeholder)
         self.buf.emit(("deferscopepop", None, None, None))
+
+    # -- M25: regions / handler table (docs/MAHC_FORMAT.md #4.8/#5.3) -----
+
+    def _open_region(self) -> dict:
+        region = {"segments": [], "cur_start": self.buf.code_pointer}
+        self._open_regions.append(region)
+        return region
+
+    def _close_region(self, region: dict) -> list:
+        """Finalize `region`'s last open segment and pop it off
+        `self._open_regions` -- returns its finished segment list. Does
+        NOT touch `self.buf.handlers` yet: the handler pc for a `try`'s
+        own region isn't known until after its body compiles (the `jmp`
+        past the handler comes first) -- see `_gen_try_into`/`_gen_drain`,
+        which call `_emit_handler_entries` themselves once it is."""
+        assert self._open_regions[-1] is region, "regions must close in LIFO order"
+        self._open_regions.pop()
+        if region["cur_start"] is not None and region["cur_start"] != self.buf.code_pointer:
+            region["segments"].append((region["cur_start"], self.buf.code_pointer))
+        return region["segments"]
+
+    def _emit_handler_entries(self, segments: list, handler: int, slot: int) -> None:
+        for start, end in segments:
+            self.buf.handlers.append((start, end, handler, slot))
+
+    def _pause_regions(self) -> None:
+        """M25: called right before anything of a NESTED function's own
+        code is emitted -- close the current segment of every region open
+        in the ENCLOSING function (dropping empty ones), without popping
+        them (they're still open, just paused across the nested function's
+        code -- `_gen_fn_expr` gives the nested function its own, empty
+        `_open_regions` list and restores/`_resume_regions`s this one once
+        the nested function's code, including its `closure` instruction,
+        is fully emitted)."""
+        for region in self._open_regions:
+            if region["cur_start"] is not None and region["cur_start"] != self.buf.code_pointer:
+                region["segments"].append((region["cur_start"], self.buf.code_pointer))
+            region["cur_start"] = None
+
+    def _resume_regions(self) -> None:
+        for region in self._open_regions:
+            region["cur_start"] = self.buf.code_pointer
+
+    def _gen_drain(self, saved, err) -> None:
+        """docs/MAHC_FORMAT.md #5.4: run deferred blocks down to `saved`'s
+        depth. Self-protecting (region D, handler = its own start): a
+        deferred block that itself throws replaces `err` and draining
+        continues with the remaining blocks (the later error wins)."""
+        drain_start = self.buf.code_pointer
+        region = self._open_region()
+        cond = self._temp()
+        self.buf.emit(("deferabove", saved, None, cond))
+        jmpf_placeholder = self.buf.emit((None, None, None, None))
+        self._emit_drain_one_defer_scope()
+        self.buf.emit(("jmp", None, None, drain_start))
+        drain_end = self.buf.code_pointer
+        self.buf.emit(("jmpf", cond, None, drain_end), address=jmpf_placeholder)
+        segments = self._close_region(region)
+        self._emit_handler_entries(segments, drain_start, err[1])
 
     def _gen_block_into(self, block: Block, dest) -> None:
         """Like gen_block, but always writes the block's value (defaulting
@@ -629,6 +766,50 @@ class Codegen:
         for addr in end_jumps:
             self.buf.emit(("jmp", None, None, end_target), address=addr)
 
+    def _gen_try_into(self, expr: TryExpr, dest) -> None:
+        """docs/MAHC_FORMAT.md #5.2: `saved`/`err` are temps; the body's
+        own region R covers exactly the protected span (`expr.body`).
+        Once it closes, the handler's own pc is known, so its entries can
+        be emitted immediately (before compiling the handler's own code,
+        which may itself open further regions -- DRAIN's region D, or a
+        nested `try`'s own R -- all of which close, and emit THEIR
+        entries, before this call returns, giving the required innermost-
+        first order in `self.buf.handlers`)."""
+        saved = self._temp()
+        self.buf.emit(("deferdepth", None, None, saved))
+        err = self._temp()
+        region = self._open_region()
+        if isinstance(expr.body, Block):
+            self._gen_block_into(expr.body, dest)
+        else:
+            body_addr = self.gen_expr(expr.body)
+            self.buf.emit(("=", body_addr, None, dest))
+        segments = self._close_region(region)
+        end_jumps = [self.buf.emit((None, None, None, None))]
+        handler_target = self.buf.code_pointer
+        self._emit_handler_entries(segments, handler_target, err[1])
+        self._gen_drain(saved, err)
+        if expr.fallback is not None:
+            fallback_addr = self.gen_expr(expr.fallback)
+            self.buf.emit(("=", fallback_addr, None, dest))
+        else:
+            for arm in expr.arms:
+                failure_jumps = []  # list[(cond_addr, placeholder_addr)]
+                self._gen_pattern_check(arm.pattern, err, failure_jumps)
+                if arm.guard is not None:
+                    guard_addr = self.gen_expr(arm.guard)
+                    failure_jumps.append((guard_addr, self.buf.emit((None, None, None, None))))
+                self._gen_block_into(arm.body, dest)
+                end_jumps.append(self.buf.emit((None, None, None, None)))
+                next_arm_target = self.buf.code_pointer
+                for cond_addr, placeholder in failure_jumps:
+                    self.buf.emit(("jmpf", cond_addr, None, next_arm_target), address=placeholder)
+            # No arm matched -- re-throw the (possibly DRAIN-replaced) error.
+            self.buf.emit(("throw", err, None, None))
+        end_target = self.buf.code_pointer
+        for addr in end_jumps:
+            self.buf.emit(("jmp", None, None, end_target), address=addr)
+
     def _gen_pattern_check(self, pattern, value_addr, failure_jumps: list) -> None:
         """Emit checks for `pattern` against the value at `value_addr`,
         appending `(cond_addr, placeholder_addr)` to `failure_jumps` for
@@ -690,6 +871,16 @@ class Codegen:
                 field_addr = self._temp()
                 self.buf.emit(("getfield", value_addr, field_name, field_addr))
                 self._gen_pattern_check(sub_pattern, field_addr, failure_jumps)
+            return
+        if isinstance(pattern, TypePat):
+            # M25 (docs/MAHC_FORMAT.md #5.6/#6.3): `matchtype` -- like the
+            # struct/enum case above but with no fields to recurse into.
+            cond = self._temp()
+            self.buf.emit(("matchtype", value_addr, pattern.type_name, cond))
+            placeholder = self.buf.emit((None, None, None, None))
+            failure_jumps.append((cond, placeholder))
+            if pattern.address is not None:
+                self.buf.emit(("=", value_addr, None, (0, pattern.address)))
             return
         raise AssertionError(f"unhandled pattern node {pattern!r}")
 
@@ -936,9 +1127,29 @@ class Codegen:
             dest = self._temp()
             self._gen_block_into(expr, dest)
             return dest
+        if isinstance(expr, ThrowExpr):
+            # docs/MAHC_FORMAT.md #5.1: never actually reached -- the
+            # returned temp is never written; a never-written slot reads
+            # as `none` (#6.1) if anything downstream somehow did read it.
+            value_addr = self.gen_expr(expr.value)
+            self.buf.emit(("throw", value_addr, None, None))
+            return self._temp()
+        if isinstance(expr, TryExpr):
+            dest = self._temp()
+            self._gen_try_into(expr, dest)
+            return dest
         raise AssertionError(f"unhandled expression node {expr!r}")
 
     def _gen_fn_expr(self, fn: FnExpr) -> tuple:
+        # M25 (docs/MAHC_FORMAT.md #5.3): pause every region open in the
+        # ENCLOSING function before anything of this nested one is
+        # emitted -- give this function its own, empty region stack (a
+        # handler range must never cover a nested function's body, since
+        # "pc range -> same frame" is what makes a handler entry sound
+        # without frames knowing their own function).
+        self._pause_regions()
+        saved_open_regions = self._open_regions
+        self._open_regions = []
         skip_placeholder = self.buf.emit((None, None, None, None))
         code_address = self.buf.code_pointer
         self.frame_stack.append(fn.frame_level)
@@ -967,6 +1178,17 @@ class Codegen:
         # "used outside a loop" error.
         saved_while_stack = self._while_stack
         self._while_stack = []
+        # M25 (docs/MAHC_FORMAT.md #5.5): this function gets an implicit
+        # F-region wrapping its ENTIRE body (default-parameter prologue
+        # included) iff it contains a `defer` anywhere in its own code --
+        # zero extra instructions otherwise, so a defer-free function's
+        # bytecode is byte-for-byte unchanged.
+        fn_has_defer = _contains_direct_defer(fn.body)
+        f_region = f_saved = None
+        if fn_has_defer:
+            f_saved = self._temp()
+            self.buf.emit(("deferdepth", None, None, f_saved))
+            f_region = self._open_region()
         # M16: prologue -- for each parameter with a default, right after
         # entering the function and before the body: emit a placeholder
         # `jmpset`, compute the default expression and move it into the
@@ -995,12 +1217,25 @@ class Codegen:
             tail_addr = self._temp()
             self.buf.emit(("ld", NONE_VALUE, None, tail_addr))
         self.buf.emit(("ret", tail_addr, None, None))
+        if fn_has_defer:
+            # F_HANDLER: after the final `ret`, before the skip-jump target
+            # -- still part of this function's own code (jumped over by
+            # `skip_placeholder`'s backpatch below, reached only by
+            # unwinding).
+            segments = self._close_region(f_region)
+            f_handler = self.buf.code_pointer
+            err_f = self._temp()
+            self._gen_drain(f_saved, err_f)
+            self.buf.emit(("throw", err_f, None, None))
+            self._emit_handler_entries(segments, f_handler, err_f[1])
         self._while_stack = saved_while_stack
         self._defer_depth = saved_defer_depth
         self._fn_depth -= 1
         self._fn_stack.pop()
         slot_count = self.frame_stack.pop().next_slot
         self.buf.emit(("jmp", None, None, self.buf.code_pointer), address=skip_placeholder)
+        self._open_regions = saved_open_regions
+        self._resume_regions()
         dest = self._temp()
         # M16: closure metadata gains the parameter names and per-parameter
         # has-default flags (parallel tuples) -- lower.py's PARAMS section

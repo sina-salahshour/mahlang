@@ -121,21 +121,45 @@ class _Lowerer:
     # -- TYPES ---------------------------------------------------------
 
     def build_types(self) -> None:
-        next_idx = 2
+        # M25 (docs/MAHC_FORMAT.md #4.1): a minor-4 file's built-ins are
+        # Option (0), Promise (1, now with `Failed`), RuntimeError (2) --
+        # user types start at 3. `lower()` always writes the CURRENT
+        # `MINOR` (4), so this is unconditional (no older-minor output
+        # mode exists). Pre-seeded into resolver.enum_decls with the exact
+        # same variant order as format.BUILTIN_TYPES_V4 (asserted here,
+        # once, rather than trusted silently -- see this module's
+        # docstring).
+        assert list(self.resolver.enum_decls["Option"].items()) == [("none", []), ("some", ["value"])]
+        assert list(self.resolver.enum_decls["Promise"].items()) == [
+            ("Pending", []),
+            ("Settled", ["value"]),
+            ("Failed", ["error"]),
+        ]
+        assert list(self.resolver.enum_decls["RuntimeError"].items()) == [
+            (name, ["message"])
+            for name in (
+                "DivisionByZero",
+                "TypeMismatch",
+                "NoSuchField",
+                "NoSuchMethod",
+                "ArgumentError",
+                "IndexOutOfRange",
+                "MatchFailed",
+                "InputError",
+                "Internal",
+            )
+        ]
+        self.enum_index["Option"] = 0
+        self.enum_index["Promise"] = 1
+        self.enum_index["RuntimeError"] = 2
+        skip = ("Option", "Promise", "RuntimeError")
+        next_idx = 3
         for name, fields in self.resolver.struct_decls.items():
             self.struct_index[name] = next_idx
             next_idx += 1
             self.types.append(TypeDecl(0, self.intern_str(name), [self.intern_str(f) for f in fields], None))
-        # Option/Promise are pre-seeded into resolver.enum_decls with the
-        # exact same variant order as format.BUILTIN_TYPES (asserted here,
-        # once, rather than trusted silently -- see this module's
-        # docstring and docs/MAHC_FORMAT.md #4.3).
-        assert list(self.resolver.enum_decls["Option"].items()) == [("none", []), ("some", ["value"])]
-        assert list(self.resolver.enum_decls["Promise"].items()) == [("Pending", []), ("Settled", ["value"])]
-        self.enum_index["Option"] = 0
-        self.enum_index["Promise"] = 1
         for name, variants in self.resolver.enum_decls.items():
-            if name in ("Option", "Promise"):
+            if name in skip:
                 continue
             self.enum_index[name] = next_idx
             next_idx += 1
@@ -147,6 +171,17 @@ class _Lowerer:
 
     def _variant_index(self, type_name: str, variant_name: str) -> int:
         return list(self.resolver.enum_decls[type_name].keys()).index(variant_name)
+
+    def _type_index(self, type_name: str) -> int:
+        """M25: the TYPES-section index for a `matchtype` -- `type_name`
+        names either a struct or an enum (a `TypePat`'s target, validated
+        by compiler/resolve.py against both namespaces). A struct and an
+        enum may share a name (docs/MAHC_FORMAT.md #4.3); struct wins,
+        exactly like compiler/resolve.py's own `type_position_index`
+        registration for a `TypePat` does."""
+        if type_name in self.struct_index:
+            return self.struct_index[type_name]
+        return self.enum_index[type_name]
 
     # -- FUNCTIONS / CODE ------------------------------------------------
 
@@ -170,14 +205,17 @@ class _Lowerer:
         return idx
 
     def lower_code(self) -> None:
-        n = len(self.buf.code)
+        # M25: the single `halt` sentinel `Codegen.generate` emits is no
+        # longer guaranteed to be the LAST instruction -- a top-level
+        # `defer` gets an implicit F_HANDLER (docs/MAHC_FORMAT.md #5.5)
+        # emitted right after it, reached only by unwinding, never by
+        # fallthrough. Every unpatched `(None, None, None, None)`
+        # placeholder that survives to here is `halt`, wherever it sits;
+        # every OTHER placeholder (jumps, `jmpset`) is backpatched by
+        # codegen before this ever runs.
         out = []
-        for i, instr in enumerate(self.buf.code):
+        for instr in self.buf.code:
             if instr == (None, None, None, None):
-                if i != n - 1:
-                    raise AssertionError(
-                        f"unpatched placeholder instruction at index {i} (only valid as the last instruction)"
-                    )
                 out.append(Instr("halt", ()))
                 continue
             out.append(self._lower_one(instr))
@@ -310,6 +348,8 @@ class _Lowerer:
         if op == "matchrange":
             lo, hi, inclusive = a2
             return Instr("matchrange", (a1, lo, hi, bool(inclusive), a3))
+        if op == "matchtype":
+            return Instr("matchtype", (a1, self._type_index(a2), a3))
         if op == "deferpush":
             return Instr("deferpush", ())
         if op == "deferadd":
@@ -320,6 +360,12 @@ class _Lowerer:
             return Instr("deferpop", (a3,))
         if op == "deferscopepop":
             return Instr("deferscopepop", ())
+        if op == "deferdepth":
+            return Instr("deferdepth", (a3,))
+        if op == "deferabove":
+            return Instr("deferabove", (a1, a3))
+        if op == "throw":
+            return Instr("throw", (a1,))
         if op == "print":
             return Instr("native", (self.intern_native("io.print"), (a1,), None))
         if op == "write":
@@ -397,4 +443,5 @@ def lower(buf, resolver, pp, target: str = "debug") -> Program:
         code=lowerer.code,
         debug=debug,
         minor=MINOR,
+        handlers=list(buf.handlers),
     )

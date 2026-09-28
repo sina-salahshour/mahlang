@@ -11,7 +11,7 @@ use std::rc::Rc;
 
 use crate::decimal::Decimal;
 
-use super::error::{RResult, RuntimeError};
+use super::error::{ErrorKind, RResult, RuntimeError};
 use super::value::{
     map_key, type_name_of, BuiltinTypeNames, EnumData, MapData, MapKey, MapRef, StructData,
     Value, VectorRef,
@@ -64,9 +64,12 @@ pub fn format_value(val: &Value, recurse: &mut dyn FnMut(&Value) -> RResult<Stri
         }
         Value::Promise(p) => {
             let b = p.borrow();
-            match &b.settled {
-                Some(v) => format!("Promise.Settled {{ value: {} }}", recurse(v)?),
-                None => "Promise.Pending".to_string(),
+            if let Some(v) = &b.settled {
+                format!("Promise.Settled {{ value: {} }}", recurse(v)?)
+            } else if let Some(e) = &b.failed {
+                format!("Promise.Failed {{ error: {} }}", recurse(e)?)
+            } else {
+                "Promise.Pending".to_string()
             }
         }
         Value::Vector(v) => {
@@ -100,14 +103,17 @@ pub fn format_value(val: &Value, recurse: &mut dyn FnMut(&Value) -> RResult<Stri
 pub fn string_char_at(s: &str, i: &Value, names: &BuiltinTypeNames) -> RResult<Value> {
     let n = match i {
         Value::Number(n) => n,
-        other => return Err(RuntimeError::new(format!("char_at index must be a Number, got {}", type_name_of(other, names)))),
+        other => return Err(RuntimeError::with_kind(
+            format!("char_at index must be a Number, got {}", type_name_of(other, names)),
+            ErrorKind::TypeMismatch,
+        )),
     };
     let len = s.chars().count();
     if !n.is_integer() || n.is_negative() || n.to_i64().map(|v| v as usize >= len).unwrap_or(true) {
-        return Err(RuntimeError::new(format!(
-            "char_at index {} is out of range for a String of length {len}",
-            n.format()
-        )));
+        return Err(RuntimeError::with_kind(
+            format!("char_at index {} is out of range for a String of length {len}", n.format()),
+            ErrorKind::IndexOutOfRange,
+        ));
     }
     let idx = n.to_i64().unwrap() as usize;
     Ok(Value::Str(Rc::from(s.chars().nth(idx).unwrap().to_string().as_str())))
@@ -120,10 +126,10 @@ fn seq_position(n: usize, i: &Value, type_label: &str, names: &BuiltinTypeNames)
     let num = match i {
         Value::Number(num) => num,
         other => {
-            return Err(RuntimeError::new(format!(
-                "{type_label} index must be a Number, got {}",
-                type_name_of(other, names)
-            )))
+            return Err(RuntimeError::with_kind(
+                format!("{type_label} index must be a Number, got {}", type_name_of(other, names)),
+                ErrorKind::TypeMismatch,
+            ))
         }
     };
     if !num.is_integer() {
@@ -152,15 +158,19 @@ fn is_range(v: &Value) -> Option<Rc<RefCell<StructData>>> {
 fn slice_bound(v: &Value, type_label: &str, names: &BuiltinTypeNames) -> RResult<i64> {
     match v {
         Value::Number(n) if n.is_integer() => n.to_i64().ok_or_else(|| {
-            RuntimeError::new(format!("{type_label} slice bounds must be integer Numbers, got {}", n.format()))
+            RuntimeError::with_kind(
+                format!("{type_label} slice bounds must be integer Numbers, got {}", n.format()),
+                ErrorKind::TypeMismatch,
+            )
         }),
-        Value::Number(n) => {
-            Err(RuntimeError::new(format!("{type_label} slice bounds must be integer Numbers, got {}", n.format())))
-        }
-        other => Err(RuntimeError::new(format!(
-            "{type_label} slice bounds must be integer Numbers, got {}",
-            type_name_of(other, names)
-        ))),
+        Value::Number(n) => Err(RuntimeError::with_kind(
+            format!("{type_label} slice bounds must be integer Numbers, got {}", n.format()),
+            ErrorKind::TypeMismatch,
+        )),
+        other => Err(RuntimeError::with_kind(
+            format!("{type_label} slice bounds must be integer Numbers, got {}", type_name_of(other, names)),
+            ErrorKind::TypeMismatch,
+        )),
     }
 }
 
@@ -209,8 +219,9 @@ pub fn vector_index(vec: &VectorRef, i: &Value, names: &BuiltinTypeNames) -> RRe
 
 pub fn vector_index_assign(vec: &VectorRef, i: &Value, value: Value, names: &BuiltinTypeNames) -> RResult<Value> {
     if is_range(i).is_some() {
-        return Err(RuntimeError::new(
+        return Err(RuntimeError::with_kind(
             "Can't assign to a Vector slice (v[a..b] = ...); assign items one at a time",
+            ErrorKind::TypeMismatch,
         ));
     }
     let len = vec.borrow().len();
@@ -224,9 +235,10 @@ pub fn vector_index_assign(vec: &VectorRef, i: &Value, value: Value, names: &Bui
                 Value::Number(n) => n.format(),
                 other => type_name_of(other, names).to_string(),
             };
-            Err(RuntimeError::new(format!(
-                "Vector index {shown} is out of range for a Vector of length {len} (use push to add items)"
-            )))
+            Err(RuntimeError::with_kind(
+                format!("Vector index {shown} is out of range for a Vector of length {len} (use push to add items)"),
+                ErrorKind::IndexOutOfRange,
+            ))
         }
     }
 }
@@ -251,7 +263,10 @@ pub fn string_index(s: &str, i: &Value, names: &BuiltinTypeNames) -> RResult<Val
 
 pub fn map_key_of(key: &Value, names: &BuiltinTypeNames) -> RResult<MapKey> {
     map_key(key).ok_or_else(|| {
-        RuntimeError::new(format!("Map keys must be a String, Number, or Bool, got {}", type_name_of(key, names)))
+        RuntimeError::with_kind(
+            format!("Map keys must be a String, Number, or Bool, got {}", type_name_of(key, names)),
+            ErrorKind::TypeMismatch,
+        )
     })
 }
 
@@ -322,7 +337,7 @@ pub fn deep_copy(value: &Value, memo: &mut HashMap<usize, Value>) -> Value {
                 return existing.clone();
             }
             let type_name = s.borrow().type_name.clone();
-            let out = Rc::new(RefCell::new(StructData { type_name, fields: Vec::new() }));
+            let out = Rc::new(RefCell::new(StructData { type_name, fields: Vec::new(), thrown_at: None }));
             memo.insert(key, Value::Struct(out.clone()));
             let copied: Vec<(Rc<str>, Value)> =
                 s.borrow().fields.iter().map(|(n, v)| (n.clone(), deep_copy(v, memo))).collect();
@@ -336,7 +351,7 @@ pub fn deep_copy(value: &Value, memo: &mut HashMap<usize, Value>) -> Value {
             }
             let type_name = e.borrow().type_name.clone();
             let variant = e.borrow().variant.clone();
-            let out = Rc::new(RefCell::new(EnumData { type_name, variant, fields: Vec::new() }));
+            let out = Rc::new(RefCell::new(EnumData { type_name, variant, fields: Vec::new(), thrown_at: None }));
             memo.insert(key, Value::Enum(out.clone()));
             let copied: Vec<(Rc<str>, Value)> =
                 e.borrow().fields.iter().map(|(n, v)| (n.clone(), deep_copy(v, memo))).collect();

@@ -100,6 +100,17 @@ def run_file(path: str, stdin: str = "") -> str:
     return _run(compile_bytes(path=path), stdin)
 
 
+def run_source_and_error(text: str, stdin: str = ""):
+    """M25 (docs/ERRORS.md): like `run_source`, but for a program expected
+    to end with an UNCAUGHT error -- returns `(everything printed before
+    it, the raised exception, or None if the program actually finished
+    normally)`. Needed because `run_source`/`_run` has no way to hand
+    back anything once the underlying run raises -- an M25 uncaught-error
+    test typically wants both (e.g. spec test #10: stdout up to the
+    error, then the error's own message)."""
+    return _run_capturing(compile_bytes(text=text), stdin)
+
+
 def _run(data: bytes, stdin: str) -> str:
     if os.environ.get("MAH_TEST_VM") == "rust":
         return _run_rust(data, stdin)
@@ -117,11 +128,39 @@ def _run(data: bytes, stdin: str) -> str:
     return out.getvalue()
 
 
+def _run_capturing(data: bytes, stdin: str):
+    """Like `_run`, but returns `(stdout_so_far, exception_or_None)`
+    instead of raising -- see `run_source_and_error`."""
+    if os.environ.get("MAH_TEST_VM") == "rust":
+        return _run_rust_capturing(data, stdin)
+    out = io.StringIO()
+    old_stdin = sys.stdin
+    sys.stdin = io.StringIO(stdin)
+    try:
+        with contextlib.redirect_stdout(out):
+            try:
+                run_bytes(data)
+            except Exception as exc:  # noqa: BLE001
+                return out.getvalue(), exc
+        return out.getvalue(), None
+    finally:
+        sys.stdin = old_stdin
+
+
 def _run_rust(data: bytes, stdin: str) -> str:
     """`_run` on the native Rust VM (`MAH_TEST_VM=rust`, `make test-rust`):
     runs the program through `mah-vm` and turns its exit status back into
     the exceptions the Python VM raises, so every test that goes through
     `run_source`/`run_file` checks the Rust VM's behavior too."""
+    stdout, exc = _run_rust_capturing(data, stdin)
+    if exc is not None:
+        raise exc
+    return stdout
+
+
+def _run_rust_capturing(data: bytes, stdin: str):
+    """Like `_run_rust`, but returns `(stdout, exception_or_None)` instead
+    of raising -- see `_run_capturing`/`run_source_and_error`."""
     import subprocess
     import tempfile
 
@@ -136,14 +175,15 @@ def _run_rust(data: bytes, stdin: str) -> str:
         result = subprocess.run([find_vm(), "run", path], input=stdin.encode(), capture_output=True)
     finally:
         os.unlink(path)
+    stdout = result.stdout.decode()
     stderr = result.stderr.decode()
     if result.returncode == 1 and stderr.startswith("RuntimeError: "):
-        raise MahRuntimeError(stderr[len("RuntimeError: "):].rstrip("\n"))
+        return stdout, MahRuntimeError(stderr[len("RuntimeError: "):].rstrip("\n"))
     if result.returncode == 2 and stderr.startswith("error: invalid .mahc file: "):
-        raise MahcFormatError(stderr[len("error: invalid .mahc file: "):].rstrip("\n"))
+        return stdout, MahcFormatError(stderr[len("error: invalid .mahc file: "):].rstrip("\n"))
     if result.returncode != 0:
-        raise AssertionError(f"mah-vm exited {result.returncode}: {stderr}")
-    return result.stdout.decode()
+        return stdout, AssertionError(f"mah-vm exited {result.returncode}: {stderr}")
+    return stdout, None
 
 
 def example_path(name: str) -> str:

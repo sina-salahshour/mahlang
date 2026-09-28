@@ -25,10 +25,12 @@ from .format import (
     OPCODES_BY_CODE,
     REQUIRED_SECTIONS,
     REQUIRED_SECTIONS_V1,
+    REQUIRED_SECTIONS_V4,
     SEC_CODE,
     SEC_CONSTANTS,
     SEC_DEBUG,
     SEC_FUNCTIONS,
+    SEC_HANDLERS,
     SEC_NATIVES,
     SEC_PARAMS,
     SEC_STRINGS,
@@ -39,7 +41,7 @@ from .format import (
     TAG_NONE,
     TAG_STR,
     TAG_TRUE,
-    BUILTIN_TYPES,
+    builtin_types_for,
     MahcFormatError,
 )
 from . import bundle
@@ -101,7 +103,12 @@ def _read_sections(r: _Reader, minor: int) -> tuple[dict, bytes | None]:
     section and not itself a known required id, so it's rejected by the
     existing "unknown required section" branch below with no special-casing
     needed."""
-    required = REQUIRED_SECTIONS_V1 if minor >= 1 else REQUIRED_SECTIONS
+    if minor >= 4:
+        required = REQUIRED_SECTIONS_V4
+    elif minor >= 1:
+        required = REQUIRED_SECTIONS_V1
+    else:
+        required = REQUIRED_SECTIONS
     payloads: dict[int, bytes] = {}
     debug_payload: bytes | None = None
     expect_idx = 0
@@ -277,20 +284,25 @@ def _parse_params(payload: bytes, functions: list, nstrings: int) -> list:
 
 def _type_variants(t_index: int, ctx: dict):
     """The `[(variant_name_idx_or_str, fields), ...]` list for type index
-    `t_index` -- built-in (0/1) or user (>=2, `ctx["types"]`). Returns
-    `None` if `t_index` doesn't name an enum (kind 1) type at all."""
-    if t_index in (0, 1):
-        return BUILTIN_TYPES[t_index][1]
-    decl = ctx["types"][t_index - 2]
+    `t_index` -- built-in (`< len(ctx["builtin_types"])`) or user (the rest,
+    `ctx["types"]`). Returns `None` if `t_index` doesn't name an enum
+    (kind 1) type at all. M25: how many built-in types there are (and
+    where user types start numbering from) depends on the file's minor
+    version -- see `format.builtin_types_for`."""
+    builtin = ctx["builtin_types"]
+    if t_index < len(builtin):
+        return builtin[t_index][1]
+    decl = ctx["types"][t_index - len(builtin)]
     return decl.variants if decl.kind == 1 else None
 
 
 def _type_fields(t_index: int, ctx: dict):
     """The declared field-name list for STRUCT type index `t_index`, or
     `None` if it doesn't name a struct (kind 0) type."""
-    if t_index in (0, 1):
-        return None  # Option/Promise are enums, never a struct target
-    decl = ctx["types"][t_index - 2]
+    builtin = ctx["builtin_types"]
+    if t_index < len(builtin):
+        return None  # every built-in type (Option/Promise/RuntimeError) is an enum
+    decl = ctx["types"][t_index - len(builtin)]
     return decl.fields if decl.kind == 0 else None
 
 
@@ -343,7 +355,7 @@ def _decode_operand(pr: _Reader, kind: str, ctx: dict):
         return f
     if kind == "T":
         t = pr.varuint()
-        if t >= 2 + ctx["ntypes"]:
+        if t >= len(ctx["builtin_types"]) + ctx["ntypes"]:
             raise MahcFormatError(f"type index {t} out of range")
         return t
     if kind == "N":
@@ -491,6 +503,31 @@ def _validate_kwnames(op: str, args: tuple, ctx: dict, i: int) -> None:
         seen.add(text)
 
 
+def _parse_handlers(payload: bytes, ncode: int) -> list:
+    """M25 (1.4, docs/MAHC_FORMAT.md #4.8): HANDLERS section, required iff
+    minor >= 4. `ncode` (the CODE section's own instruction count, already
+    known since CODE -- id 0x06 -- decodes before HANDLERS -- id 0x08 --
+    in section-id order) lets every range/target be validated immediately,
+    the same way jump targets are validated in `_parse_code`."""
+    pr = _Reader(payload)
+    count = pr.varuint()
+    handlers = []
+    for _ in range(count):
+        start = pr.varuint()
+        end = pr.varuint()
+        handler = pr.varuint()
+        slot = pr.varuint()
+        if not (start < end <= ncode):
+            raise MahcFormatError(
+                f"HANDLERS: invalid range [{start}, {end}) for {ncode} instruction(s)"
+            )
+        if handler >= ncode:
+            raise MahcFormatError(f"HANDLERS: handler {handler} out of range for {ncode} instruction(s)")
+        handlers.append((start, end, handler, slot))
+    _check_consumed(pr, "HANDLERS")
+    return handlers
+
+
 def _parse_debug(payload: bytes, nstrings: int) -> DebugInfo:
     pr = _Reader(payload)
     nfiles = pr.varuint()
@@ -561,9 +598,16 @@ def decode(data: bytes) -> Program:
         "nnatives": len(natives),
         "natives": natives,
         "minor": minor,
+        "builtin_types": builtin_types_for(minor),
     }
     code = _parse_code(payloads[SEC_CODE], ctx)
 
+    handlers = []
+    if minor >= 4:
+        # M25: HANDLERS is required from minor 4 -- `_read_sections` already
+        # guarantees `payloads[SEC_HANDLERS]` exists whenever we get here.
+        handlers = _parse_handlers(payloads[SEC_HANDLERS], len(code))
+
     debug = _parse_debug(debug_payload, len(strings)) if debug_payload is not None else None
 
-    return Program(strings, constants, types, natives, functions, code, debug, minor=minor)
+    return Program(strings, constants, types, natives, functions, code, debug, minor=minor, handlers=handlers)

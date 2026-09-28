@@ -484,7 +484,7 @@ class BytecodeTests(unittest.TestCase):
         ops = [instr.op for instr in program.code]
         self.assertIn("vector", ops)
         self.assertIn("map", ops)
-        self.assertEqual(program.minor, 3)
+        self.assertEqual(program.minor, 4)  # M25: the encoder always writes the current minor
         self.assertEqual(decode(encode(program)), program)
 
     def test_prelude_only_when_needed(self):

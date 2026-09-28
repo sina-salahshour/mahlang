@@ -122,6 +122,11 @@ class FnType:
     params: list  # list[TypeExpr]
     ret: Optional[object]
     position: int  # the `fn` token
+    # M25 (syntax only -- see docs/ERRORS.md): this fn type's `throws`
+    # clause, after the optional `-> type`. `None` = no clause (M26
+    # checker treats this as "unknown, not tracked" like today), `[]` =
+    # `throws never`, otherwise a list[TypeExpr]. Ignored until M26.
+    throws: Optional[list] = field(default=None, repr=False)
 
 
 @dataclass
@@ -522,6 +527,10 @@ class FnExpr:
     param_types: list = field(default_factory=list, repr=False)
     # M21: this fn's `-> type` annotation, or `None` when absent.
     return_type: Optional[object] = field(default=None, repr=False)
+    # M25 (syntax only -- see docs/ERRORS.md): this fn's `throws` clause,
+    # after the optional `-> type`. Same `None`/`[]`/list[TypeExpr]
+    # meaning as `FnType.throws` above. Ignored until M26.
+    throws: Optional[list] = field(default=None, repr=False)
 
 
 @dataclass
@@ -576,6 +585,11 @@ class MethodDecl:
     type_params: list = field(default_factory=list, repr=False)
     param_types: list = field(default_factory=list, repr=False)
     return_type: Optional[object] = field(default=None, repr=False)
+    # M25 (syntax only -- see docs/ERRORS.md): same meaning as
+    # `FnExpr.throws` -- when `fn` is not `None`, its `.throws` is set to
+    # this exact same object (mirroring `type_params`/`param_types`/
+    # `return_type` above).
+    throws: Optional[list] = field(default=None, repr=False)
 
     @property
     def is_method(self) -> bool:
@@ -779,3 +793,55 @@ class MatchStmt:
     scrutinee: object  # Expr
     arms: list  # list[MatchArm]
     position: int
+
+
+# -- M25: errors (throw/try/catch, throws clauses) -----------------------
+#
+# See docs/ERRORS.md for the full design and docs/MAHC_FORMAT.md's #4.4/
+# #6.8 for the runtime side. `throw`/`try` are reserved keywords (M25
+# lexer); `catch`/`throws`/`never` stay ordinary `ID` tokens, matched by
+# `literal` in the parser, so they remain usable as identifiers elsewhere.
+
+
+@dataclass
+class ThrowExpr:
+    """`throw e` -- an expression of type Never (M25 typecheck.py), so it
+    fits anywhere an expression can: `let n = if ok { x } else { throw E {} }`."""
+
+    value: object  # Expr
+    position: int  # the `throw` token
+
+
+@dataclass
+class TryExpr:
+    """`try { } catch { arms }` (catch form: `arms` non-empty, `fallback`
+    None), `try { } else fallback` / `try body else fallback` (else forms:
+    `arms` is `[]`, `fallback` is the Expr). `body` is a `Block` for the
+    first two forms and any `Expr` for the third (see the parser's
+    `_parse_try`)."""
+
+    body: object  # Block (catch form / block-else form) or Expr (expr-else form)
+    arms: list  # list[MatchArm]; [] in the else form
+    fallback: Optional[object]  # Expr in the else form, else None
+    position: int  # the `try` token
+    # set by the parser: the `catch`/`else` token's position -- used only
+    # for LSP hover so far (no codegen/resolve dependency).
+    handler_position: Optional[int] = field(default=None, repr=False)
+
+
+@dataclass
+class TypePat:
+    """M25: a catch-arm-only pattern, `name: Type` / `_: Type` -- matches
+    when the scrutinee's runtime type is `Type` (any variant, for an
+    enum), binding it to `name` (unless it's `_`). Legal only as the
+    top-level pattern of a `catch` arm (see the parser's `_parse_pattern`,
+    `allow_type_test` flag) -- an `ID :` anywhere else in a pattern keeps
+    today's (pre-M25) behavior, whatever error that already is."""
+
+    name: Optional[str]  # None for `_: T`
+    type_name: str
+    position: int  # the name (or `_`) token
+    type_position: Optional[int] = field(default=None, repr=False)
+    # set by Resolver: the slot number this binding's value is stored
+    # into (None for `_`) -- exactly like `BindPat.address`.
+    address: Optional[int] = field(default=None, repr=False)

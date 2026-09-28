@@ -6,7 +6,7 @@
 
 use crate::decimal::Decimal;
 
-use super::error::RuntimeError;
+use super::error::{ErrorKind, RuntimeError};
 use super::exec::Vm;
 use super::link::NativeFn;
 use super::value::Value;
@@ -56,7 +56,7 @@ fn io_input(vm: &mut Vm, _args: &[Value]) -> Result<Value, RuntimeError> {
         match vm.read_stdin_char() {
             None => {
                 if !started {
-                    return Err(RuntimeError::new("input: end of input"));
+                    return Err(RuntimeError::with_kind("input: end of input", ErrorKind::InputError));
                 }
                 break;
             }
@@ -76,7 +76,7 @@ fn io_input(vm: &mut Vm, _args: &[Value]) -> Result<Value, RuntimeError> {
     }
     match Decimal::parse(&raw) {
         Some(d) => Ok(Value::Number(d)),
-        None => Err(RuntimeError::new(format!("input: could not parse '{raw}' as a Number"))),
+        None => Err(RuntimeError::with_kind(format!("input: could not parse '{raw}' as a Number"), ErrorKind::InputError)),
     }
 }
 

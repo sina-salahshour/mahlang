@@ -7,16 +7,35 @@ use std::io::{self, Read, Stdin, Stdout, Write};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use crate::decode::{Addr, BinOp};
+use crate::decimal::Decimal;
+use crate::decode::{Addr, BinOp, HandlerEntry};
 
-use super::error::{RResult, RuntimeError};
-use super::link::{LinkedInstr, LinkedProgram, TypeInfo};
+use super::error::{ErrorKind, RResult, RuntimeError};
+use super::link::{LinkedInstr, LinkedProgram, TypeInfo, TypeKind};
 use super::methods::{self, call_native_method, NativeMethodKind};
 use super::natives;
 use super::value::{
     self, is_number, map_key, truthy, type_name_of, values_equal, BuiltinTypeNames, ClosureData, Continuation,
     EnumData, FrameRef, MapData, PromiseData, StructData, TaskRef, Value,
 };
+
+/// M25 (docs/MAHC_FORMAT.md #6.3): `matchtype` -- any variant matches, for
+/// an enum, so this is `matchstruct`/`matchenum` minus the variant check.
+/// `Value::None`/`Value::Promise` need their own arms since they aren't
+/// `Value::Enum` in this VM's representation (unlike the Python VM, where
+/// every enum-shaped value -- including `none` and every Promise -- IS an
+/// `EnumInstance`).
+fn matches_type(val: &Value, ty: &TypeInfo) -> bool {
+    match &ty.kind {
+        TypeKind::Struct(_) => matches!(val, Value::Struct(s) if s.borrow().type_name.as_ref() == ty.name.as_ref()),
+        TypeKind::Enum(_) => match val {
+            Value::Enum(e) => e.borrow().type_name.as_ref() == ty.name.as_ref(),
+            Value::None => ty.name.as_ref() == "Option",
+            Value::Promise(_) => ty.name.as_ref() == "Promise",
+            _ => false,
+        },
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Method table
@@ -119,14 +138,18 @@ pub fn bind_params(
     let has_any_default = params.is_some_and(|ps| ps.iter().any(|(_, d)| *d));
     if kwargs.is_empty() && !has_any_default {
         if m != n {
-            return Err(RuntimeError::new(format!(
-                "Argument Count is invalid. {label} accepts {n} arguments but {m} was given"
-            )));
+            return Err(RuntimeError::with_kind(
+                format!("Argument Count is invalid. {label} accepts {n} arguments but {m} was given"),
+                ErrorKind::ArgumentError,
+            ));
         }
         return Ok(values);
     }
     if m > n {
-        return Err(RuntimeError::new(format!("{label} takes at most {n} positional arguments but {m} were given")));
+        return Err(RuntimeError::with_kind(
+            format!("{label} takes at most {n} positional arguments but {m} were given"),
+            ErrorKind::ArgumentError,
+        ));
     }
     let mut bound: Vec<Value> = values;
     let mut bound_flags: Vec<bool> = vec![true; bound.len()];
@@ -138,10 +161,18 @@ pub fn bind_params(
     };
     for (k, w) in kwargs {
         match name_to_index.get(k.as_ref()) {
-            None => return Err(RuntimeError::new(format!("{label} got an unexpected keyword argument '{k}'"))),
+            None => {
+                return Err(RuntimeError::with_kind(
+                    format!("{label} got an unexpected keyword argument '{k}'"),
+                    ErrorKind::ArgumentError,
+                ))
+            }
             Some(&idx) => {
                 if bound_flags[idx] {
-                    return Err(RuntimeError::new(format!("{label} got multiple values for argument '{k}'")));
+                    return Err(RuntimeError::with_kind(
+                        format!("{label} got multiple values for argument '{k}'"),
+                        ErrorKind::ArgumentError,
+                    ));
                 }
                 bound[idx] = w;
                 bound_flags[idx] = true;
@@ -155,7 +186,10 @@ pub fn bind_params(
         let has_default = params.is_some_and(|ps| ps[i].1);
         if !has_default {
             let pname = params.map(|ps| ps[i].0.to_string()).unwrap_or_else(|| format!("#{i}"));
-            return Err(RuntimeError::new(format!("{label} is missing required argument '{pname}'")));
+            return Err(RuntimeError::with_kind(
+                format!("{label} is missing required argument '{pname}'"),
+                ErrorKind::ArgumentError,
+            ));
         }
     }
     Ok(bound)
@@ -199,17 +233,20 @@ pub fn bind_method_call(
                 Ok(out)
             } else {
                 if !kwargs.is_empty() {
-                    return Err(RuntimeError::new(format!(
-                        "{label} got an unexpected keyword argument '{}'",
-                        kwargs[0].0
-                    )));
+                    return Err(RuntimeError::with_kind(
+                        format!("{label} got an unexpected keyword argument '{}'", kwargs[0].0),
+                        ErrorKind::ArgumentError,
+                    ));
                 }
                 let arity = kind.required_arity();
                 if values.len() != arity {
-                    return Err(RuntimeError::new(format!(
-                        "Argument Count is invalid. {label} accepts {arity} arguments but {} was given",
-                        values.len()
-                    )));
+                    return Err(RuntimeError::with_kind(
+                        format!(
+                            "Argument Count is invalid. {label} accepts {arity} arguments but {} was given",
+                            values.len()
+                        ),
+                        ErrorKind::ArgumentError,
+                    ));
                 }
                 let mut out = Vec::with_capacity(values.len() + 1);
                 out.push(recv);
@@ -233,6 +270,10 @@ fn struct_or_enum_field(recv: &Value, name: &str) -> Option<Value> {
         }
         _ => None,
     }
+}
+
+fn no_such_field(type_name: &str, field: &str) -> RuntimeError {
+    RuntimeError::with_kind(format!("'{type_name}' has no field '{field}'"), ErrorKind::NoSuchField)
 }
 
 fn binop_symbol(op: &BinOp) -> &'static str {
@@ -367,11 +408,19 @@ fn read_stdin_char(stdin: &Stdin) -> Option<char> {
 pub enum StepControl {
     Done(Value),
     Suspended,
+    /// M25 (docs/MAHC_FORMAT.md #4.6): an error uncaught anywhere in this
+    /// task -- its return stack ran out with no handler found. `drive`
+    /// decides what this means for the task (main: fatal; detached: fail
+    /// its Promise).
+    Failed(Value),
 }
 
 pub struct Vm<'p> {
     code: &'p [LinkedInstr],
     types: &'p [TypeInfo],
+    /// M25 (docs/MAHC_FORMAT.md #4.8): `(start, end, handler, slot)`, in
+    /// section order (innermost-first) -- see `find_handler`/`unwind`.
+    handlers: &'p [HandlerEntry],
     debug: Option<&'p super::link::DebugIndex>,
     pub names: BuiltinTypeNames,
     method_table: HashMap<(Rc<str>, Rc<str>), MethodEntry>,
@@ -381,6 +430,14 @@ pub struct Vm<'p> {
     stdout: io::BufWriter<Stdout>,
     stdin: Stdin,
     to_string_name: Rc<str>,
+    /// M25: identifies the main task for `drive`'s "is this task the main
+    /// one" check (`Rc::ptr_eq`) -- the main task's own failure is always
+    /// fatal, never settles a Promise.
+    main_task: TaskRef,
+    /// M25 (docs/MAHC_FORMAT.md #4.6): every detached task's Promise that
+    /// failed, in fail order -- checked at program end for ones nobody
+    /// ever `.await`ed.
+    failed_promises: Vec<Rc<RefCell<PromiseData>>>,
 }
 
 impl<'p> Vm<'p> {
@@ -418,6 +475,136 @@ impl<'p> Vm<'p> {
         }
     }
 
+    // -- M25: throw/catch (docs/MAHC_FORMAT.md #4.4/#4.6) -----------------
+
+    /// The first handler entry (in section order -- innermost first) whose
+    /// `[start, end)` range contains `pc`, or `None`. A linear scan is fine
+    /// (no performance work on handler lookup is in scope for M25).
+    fn find_handler(&self, pc: usize) -> Option<(usize, u64)> {
+        self.handlers.iter().find(|h| h.start <= pc && pc < h.end).map(|h| (h.handler, h.slot))
+    }
+
+    /// docs/MAHC_FORMAT.md #4.4's throw/unwind algorithm. `pc` is the
+    /// instruction that's throwing `value` (in `task`'s CURRENT frame --
+    /// the caller is responsible for `task`'s current frame already being
+    /// the right one when this is first called). Returns `true` (a handler
+    /// was found; `task`'s pc/frame are already set to resume there) or
+    /// `false` (uncaught in `task`).
+    fn unwind(&mut self, task: &TaskRef, value: Value, mut pc: usize) -> RResult<bool> {
+        match &value {
+            Value::Struct(s) => {
+                let mut b = s.borrow_mut();
+                if b.thrown_at.is_none() {
+                    b.thrown_at = Some(pc);
+                }
+            }
+            Value::Enum(e) => {
+                let mut b = e.borrow_mut();
+                if b.thrown_at.is_none() {
+                    b.thrown_at = Some(pc);
+                }
+            }
+            _ => {}
+        }
+        loop {
+            if let Some((handler, slot)) = self.find_handler(pc) {
+                let frame = task.borrow().current_frame.clone();
+                value::write_addr(&frame, (0, slot), value)?;
+                task.borrow_mut().pc = handler;
+                return Ok(true);
+            }
+            let popped = task.borrow_mut().return_stack.pop();
+            match popped {
+                Some((ret_pc, ret_frame)) => {
+                    task.borrow_mut().current_frame = ret_frame;
+                    pc = ret_pc - 1; // the call instruction that's still unwinding
+                }
+                None => return Ok(false),
+            }
+        }
+    }
+
+    /// `throw` (docs/MAHC_FORMAT.md #4.4/#6): whether `v`'s type has an
+    /// `Error`-trait target for method `message` in the method table.
+    fn implements_error(&self, v: &Value) -> bool {
+        let tname = type_name_of(v, &self.names);
+        // A RuntimeError always implements Error (see the Python VM's
+        // `_implements_error`): its impl is in the prelude, which may not
+        // be included, yet an implicit defer handler re-throws it.
+        if tname.as_ref() == "RuntimeError" {
+            return true;
+        }
+        self.method_table.get(&(tname, Rc::from("message"))).is_some_and(|e| e.traits.contains_key("Error"))
+    }
+
+    /// Build a `RuntimeError` enum value (docs/MAHC_FORMAT.md #4.1) from a
+    /// classified VM error -- `field message = exactly today's message
+    /// text (no location)`.
+    fn make_runtime_error_value(&self, kind: ErrorKind, message: &str) -> Value {
+        Value::Enum(Rc::new(RefCell::new(EnumData {
+            type_name: Rc::from("RuntimeError"),
+            variant: Rc::from(kind.variant_name()),
+            fields: vec![(Rc::from("message"), Value::Str(Rc::from(message)))],
+            thrown_at: None,
+        })))
+    }
+
+    /// docs/MAHC_FORMAT.md #4.6: the `<m>` in `Uncaught T: <m>` -- call
+    /// `value`'s `Error.message` synchronously; fall back to
+    /// `Vm::to_str(value)` if that throws, suspends, or returns a non-
+    /// String; `None` (caller falls back to the bare `Uncaught T`) if that
+    /// fails too.
+    fn uncaught_message(&mut self, value: &Value) -> Option<String> {
+        let tname = type_name_of(value, &self.names);
+        let target = self
+            .method_table
+            .get(&(tname, Rc::from("message")))
+            .and_then(|e| e.traits.get("Error"))
+            .map(|(c, _)| c.clone());
+        if let Some(Callable::Closure(c)) = target {
+            if let Ok(Value::Str(s)) = self.invoke_sync(&c, vec![value.clone()], "message") {
+                return Some(s.to_string());
+            }
+        }
+        self.to_str(value).ok()
+    }
+
+    /// docs/MAHC_FORMAT.md #4.6's uncaught-error report text: a
+    /// `RuntimeError` value's own `message` field, or `Uncaught T: <m>` for
+    /// any other error type -- located at `thrown_at`, exactly like an
+    /// ordinary runtime error's `at position ...` suffix (none in a
+    /// release build, via `locate`).
+    fn uncaught_report(&mut self, value: &Value) -> String {
+        let (base, thrown_at) = match value {
+            Value::Enum(e) if e.borrow().type_name.as_ref() == "RuntimeError" => {
+                let b = e.borrow();
+                let msg = match b.get("message") {
+                    Some(Value::Str(s)) => s.to_string(),
+                    _ => String::new(),
+                };
+                (msg, b.thrown_at)
+            }
+            _ => {
+                let tname = type_name_of(value, &self.names);
+                let m = self.uncaught_message(value);
+                let base = match m {
+                    Some(m) => format!("Uncaught {tname}: {m}"),
+                    None => format!("Uncaught {tname}"),
+                };
+                let thrown_at = match value {
+                    Value::Struct(s) => s.borrow().thrown_at,
+                    Value::Enum(e) => e.borrow().thrown_at,
+                    _ => None,
+                };
+                (base, thrown_at)
+            }
+        };
+        match thrown_at {
+            Some(pc) => self.locate(pc, &base),
+            None => base,
+        }
+    }
+
     fn op_add(&mut self, a: &Value, b: &Value) -> RResult<Value> {
         if matches!(a, Value::Str(_)) || matches!(b, Value::Str(_)) {
             let sa = self.to_str(a)?;
@@ -427,11 +614,10 @@ impl<'p> Vm<'p> {
         if let (Value::Number(x), Value::Number(y)) = (a, b) {
             return x.add(y).map(Value::Number).map_err(|e| RuntimeError::new(e.message()));
         }
-        Err(RuntimeError::new(format!(
-            "Cannot apply '+' to {} and {}",
-            type_name_of(a, &self.names),
-            type_name_of(b, &self.names)
-        )))
+        Err(RuntimeError::with_kind(
+            format!("Cannot apply '+' to {} and {}", type_name_of(a, &self.names), type_name_of(b, &self.names)),
+            ErrorKind::TypeMismatch,
+        ))
     }
 
     fn op_mul(&self, a: &Value, b: &Value) -> RResult<Value> {
@@ -439,47 +625,49 @@ impl<'p> Vm<'p> {
             (Value::Number(x), Value::Number(y)) => x.mul(y).map(Value::Number).map_err(|e| RuntimeError::new(e.message())),
             (Value::Str(s), Value::Number(n)) if n.is_integer() => Ok(repeat_str(s, n)),
             (Value::Number(n), Value::Str(s)) if n.is_integer() => Ok(repeat_str(s, n)),
-            _ => Err(RuntimeError::new(format!(
-                "Cannot apply '*' to {} and {}",
-                type_name_of(a, &self.names),
-                type_name_of(b, &self.names)
-            ))),
+            _ => Err(RuntimeError::with_kind(
+                format!("Cannot apply '*' to {} and {}", type_name_of(a, &self.names), type_name_of(b, &self.names)),
+                ErrorKind::TypeMismatch,
+            )),
         }
     }
 
     fn numeric_binop(&self, op: &BinOp, a: &Value, b: &Value) -> RResult<Value> {
         let (Value::Number(x), Value::Number(y)) = (a, b) else {
-            return Err(RuntimeError::new(format!(
-                "Cannot apply '{}' to {} and {}",
-                binop_symbol(op),
-                type_name_of(a, &self.names),
-                type_name_of(b, &self.names)
-            )));
+            return Err(RuntimeError::with_kind(
+                format!(
+                    "Cannot apply '{}' to {} and {}",
+                    binop_symbol(op),
+                    type_name_of(a, &self.names),
+                    type_name_of(b, &self.names)
+                ),
+                ErrorKind::TypeMismatch,
+            ));
         };
         match op {
             BinOp::Sub => x.sub(y).map(Value::Number).map_err(|e| RuntimeError::new(e.message())),
             BinOp::Div => {
                 if y.is_zero() {
-                    return Err(RuntimeError::new("Division by zero"));
+                    return Err(RuntimeError::with_kind("Division by zero", ErrorKind::DivisionByZero));
                 }
                 x.div(y).map(Value::Number).map_err(|e| RuntimeError::new(e.message()))
             }
             BinOp::Idiv => {
                 if y.is_zero() {
-                    return Err(RuntimeError::new("Division by zero"));
+                    return Err(RuntimeError::with_kind("Division by zero", ErrorKind::DivisionByZero));
                 }
                 x.idiv(y).map(Value::Number).map_err(|e| RuntimeError::new(e.message()))
             }
             BinOp::Mod => {
                 if y.is_zero() {
-                    return Err(RuntimeError::new("Division by zero"));
+                    return Err(RuntimeError::with_kind("Division by zero", ErrorKind::DivisionByZero));
                 }
                 x.rem(y).map(Value::Number).map_err(|e| RuntimeError::new(e.message()))
             }
             BinOp::Pow => {
                 // Deliberate deviation matching the Python VM: 0 ** (negative) is Division by zero.
                 if x.is_zero() && y.is_negative() {
-                    return Err(RuntimeError::new("Division by zero"));
+                    return Err(RuntimeError::with_kind("Division by zero", ErrorKind::DivisionByZero));
                 }
                 x.pow(y).map(Value::Number).map_err(|e| RuntimeError::new(e.message()))
             }
@@ -496,50 +684,53 @@ impl<'p> Vm<'p> {
                 BinOp::Ge => value_cmp_le(b, a),
                 _ => unreachable!(),
             })),
-            _ => Err(RuntimeError::new(format!(
-                "Cannot compare {} and {} with '{}'",
-                type_name_of(a, &self.names),
-                type_name_of(b, &self.names),
-                binop_symbol(op)
-            ))),
+            _ => Err(RuntimeError::with_kind(
+                format!(
+                    "Cannot compare {} and {} with '{}'",
+                    type_name_of(a, &self.names),
+                    type_name_of(b, &self.names),
+                    binop_symbol(op)
+                ),
+                ErrorKind::TypeMismatch,
+            )),
         }
     }
 
     fn getfield(&self, obj: &Value, field: &str) -> RResult<Value> {
         match obj {
-            Value::None => Err(RuntimeError::new(format!("'Option' has no field '{field}'"))),
+            Value::None => Err(no_such_field("Option", field)),
             Value::Struct(s) => {
                 let b = s.borrow();
-                b.get(field).cloned().ok_or_else(|| RuntimeError::new(format!("'{}' has no field '{field}'", b.type_name)))
+                b.get(field).cloned().ok_or_else(|| no_such_field(&b.type_name, field))
             }
             Value::Enum(e) => {
                 let b = e.borrow();
-                b.get(field).cloned().ok_or_else(|| RuntimeError::new(format!("'{}' has no field '{field}'", b.type_name)))
+                b.get(field).cloned().ok_or_else(|| no_such_field(&b.type_name, field))
             }
             Value::Promise(p) => {
                 let b = p.borrow();
-                if field == "value" {
-                    b.settled.clone().ok_or_else(|| RuntimeError::new("'Promise' has no field 'value'"))
-                } else {
-                    Err(RuntimeError::new(format!("'Promise' has no field '{field}'")))
+                match field {
+                    "value" => b.settled.clone().ok_or_else(|| no_such_field("Promise", field)),
+                    "error" => b.failed.clone().ok_or_else(|| no_such_field("Promise", field)),
+                    _ => Err(no_such_field("Promise", field)),
                 }
             }
-            other => Err(RuntimeError::new(format!(
-                "Tried to access field '{field}' on a non-struct value ({})",
-                type_name_of(other, &self.names)
-            ))),
+            other => Err(RuntimeError::with_kind(
+                format!("Tried to access field '{field}' on a non-struct value ({})", type_name_of(other, &self.names)),
+                ErrorKind::TypeMismatch,
+            )),
         }
     }
 
     fn setfield(&self, obj: &Value, field: &str, value: Value) -> RResult<()> {
         match obj {
-            Value::None => Err(RuntimeError::new(format!("'Option' has no field '{field}'"))),
+            Value::None => Err(no_such_field("Option", field)),
             Value::Struct(s) => {
                 let mut b = s.borrow_mut();
                 if b.set(field, value) {
                     Ok(())
                 } else {
-                    Err(RuntimeError::new(format!("'{}' has no field '{field}'", b.type_name)))
+                    Err(no_such_field(&b.type_name, field))
                 }
             }
             Value::Enum(e) => {
@@ -547,7 +738,7 @@ impl<'p> Vm<'p> {
                 if b.set(field, value) {
                     Ok(())
                 } else {
-                    Err(RuntimeError::new(format!("'{}' has no field '{field}'", b.type_name)))
+                    Err(no_such_field(&b.type_name, field))
                 }
             }
             Value::Promise(p) => {
@@ -555,14 +746,17 @@ impl<'p> Vm<'p> {
                 if field == "value" && b.settled.is_some() {
                     b.settled = Some(value);
                     Ok(())
+                } else if field == "error" && b.failed.is_some() {
+                    b.failed = Some(value);
+                    Ok(())
                 } else {
-                    Err(RuntimeError::new(format!("'Promise' has no field '{field}'")))
+                    Err(no_such_field("Promise", field))
                 }
             }
-            other => Err(RuntimeError::new(format!(
-                "Tried to access field '{field}' on a non-struct value ({})",
-                type_name_of(other, &self.names)
-            ))),
+            other => Err(RuntimeError::with_kind(
+                format!("Tried to access field '{field}' on a non-struct value ({})", type_name_of(other, &self.names)),
+                ErrorKind::TypeMismatch,
+            )),
         }
     }
 
@@ -580,7 +774,16 @@ impl<'p> Vm<'p> {
             }
         } else if ty.name.as_ref() == "Promise" {
             match val {
-                Value::Promise(p) => (vname.as_ref() == "Settled") == p.borrow().settled.is_some(),
+                // M25: Promise gains `Failed { error }` -- three variants now.
+                Value::Promise(p) => {
+                    let b = p.borrow();
+                    match vname.as_ref() {
+                        "Pending" => b.settled.is_none() && b.failed.is_none(),
+                        "Settled" => b.settled.is_some(),
+                        "Failed" => b.failed.is_some(),
+                        _ => false,
+                    }
+                }
                 Value::Enum(e) => {
                     let b = e.borrow();
                     b.type_name.as_ref() == "Promise" && b.variant.as_ref() == vname.as_ref()
@@ -611,36 +814,43 @@ impl<'p> Vm<'p> {
                 target = e.traits.values().next();
             } else if e.traits.len() > 1 {
                 let names_list: Vec<String> = e.traits.keys().map(|k| format!("'{k}'")).collect();
-                return Err(RuntimeError::new(format!(
-                    "Method '{name}' on '{tname}' is ambiguous: provided by traits [{}]; call it as 'Trait.{name}(value, ...)'",
-                    names_list.join(", ")
-                )));
+                return Err(RuntimeError::with_kind(
+                    format!(
+                        "Method '{name}' on '{tname}' is ambiguous: provided by traits [{}]; call it as 'Trait.{name}(value, ...)'",
+                        names_list.join(", ")
+                    ),
+                    ErrorKind::NoSuchMethod,
+                ));
             }
         }
         if trait_.is_none() && target.as_ref().map(|(_, is_method)| !is_method).unwrap_or(true) {
             if let Some(field_val) = struct_or_enum_field(recv, name) {
                 return match field_val {
                     Value::Function(c) => Ok((Callable::Closure(c), false)),
-                    other => Err(RuntimeError::new(format!(
-                        "Field '{name}' of '{tname}' is not a function (it holds a {})",
-                        type_name_of(&other, &self.names)
-                    ))),
+                    other => Err(RuntimeError::with_kind(
+                        format!("Field '{name}' of '{tname}' is not a function (it holds a {})", type_name_of(&other, &self.names)),
+                        ErrorKind::NoSuchMethod,
+                    )),
                 };
             }
         }
         match target {
             None => {
                 if let Some(t) = trait_ {
-                    Err(RuntimeError::new(format!("'{tname}' does not implement trait '{t}' (no method '{name}')")))
+                    Err(RuntimeError::with_kind(
+                        format!("'{tname}' does not implement trait '{t}' (no method '{name}')"),
+                        ErrorKind::NoSuchMethod,
+                    ))
                 } else {
-                    Err(RuntimeError::new(format!("'{tname}' has no method '{name}'")))
+                    Err(RuntimeError::with_kind(format!("'{tname}' has no method '{name}'"), ErrorKind::NoSuchMethod))
                 }
             }
             Some((callable, is_method)) => {
                 if !is_method {
-                    return Err(RuntimeError::new(format!(
-                        "'{name}' is a static function of '{tname}', not a method; call it as '{tname}.{name}(...)'"
-                    )));
+                    return Err(RuntimeError::with_kind(
+                        format!("'{name}' is a static function of '{tname}', not a method; call it as '{tname}.{name}(...)'"),
+                        ErrorKind::NoSuchMethod,
+                    ));
                 }
                 Ok((callable.clone(), true))
             }
@@ -659,10 +869,13 @@ impl<'p> Vm<'p> {
                 let result = self.invoke_sync(&c, vec![val.clone()], "to_string")?;
                 match result {
                     Value::Str(s) => Ok(s.to_string()),
-                    other => Err(RuntimeError::new(format!(
-                        "Printable.to_string for '{tname}' must return a String, got {}",
-                        type_name_of(&other, &self.names)
-                    ))),
+                    other => Err(RuntimeError::with_kind(
+                        format!(
+                            "Printable.to_string for '{tname}' must return a String, got {}",
+                            type_name_of(&other, &self.names)
+                        ),
+                        ErrorKind::TypeMismatch,
+                    )),
                 }
             }
             _ => methods::format_value(val, &mut |v| self.to_str(v)),
@@ -683,11 +896,16 @@ impl<'p> Vm<'p> {
             }
         }
         let sub_task = value::new_task(closure.func.entry, frame, None);
-        match self.step_task(&sub_task)? {
+        match self.step_task(&sub_task, None)? {
             StepControl::Done(v) => Ok(v),
             StepControl::Suspended => Err(RuntimeError::new(format!(
                 "'{label}' cannot suspend (it awaited a pending Promise) when called implicitly by the runtime"
             ))),
+            // M25 (docs/MAHC_FORMAT.md #4.6): the sub-task's error is thrown
+            // in the CALLING task, at the instruction that invoked it, so it
+            // can be caught there -- the enclosing `step_task`'s own error
+            // handling (via `RuntimeError::thrown_value`) does exactly that.
+            StepControl::Failed(value) => Err(RuntimeError::thrown_value(value)),
         }
     }
 
@@ -717,12 +935,12 @@ impl<'p> Vm<'p> {
         }
         let promise = PromiseData::new_pending();
         let new_task = value::new_task(closure.func.entry, new_frame, Some(promise.clone()));
-        self.drive(new_task)?;
+        self.drive(new_task, None)?;
         Ok(promise)
     }
 
     fn resolve_promise(&mut self, p: &Rc<RefCell<PromiseData>>, value: Value) -> RResult<()> {
-        if p.borrow().settled.is_some() {
+        if p.borrow().settled.is_some() || p.borrow().failed.is_some() {
             return Ok(());
         }
         p.borrow_mut().settled = Some(value.clone());
@@ -731,13 +949,33 @@ impl<'p> Vm<'p> {
             let frame = cb.task.borrow().current_frame.clone();
             value::write_addr(&frame, cb.dest, value.clone())?;
             cb.task.borrow_mut().pc = cb.resume_pc;
-            self.drive(cb.task.clone())?;
+            self.drive(cb.task.clone(), None)?;
         }
         Ok(())
     }
 
-    fn drive(&mut self, task: TaskRef) -> RResult<()> {
-        match self.step_task(&task)? {
+    /// M25 (docs/MAHC_FORMAT.md #4.6): settle `p` with a failure -- does
+    /// nothing if it's already settled or failed. Each waiting task
+    /// resumes by throwing `error` at its own `.await` instruction
+    /// (`resume_pc - 1`).
+    fn fail_promise(&mut self, p: &Rc<RefCell<PromiseData>>, error: Value) -> RResult<()> {
+        if p.borrow().settled.is_some() || p.borrow().failed.is_some() {
+            return Ok(());
+        }
+        p.borrow_mut().failed = Some(error.clone());
+        let callbacks = std::mem::take(&mut p.borrow_mut().callbacks);
+        for cb in callbacks {
+            let resume_pc = cb.resume_pc;
+            self.drive(cb.task.clone(), Some((error.clone(), resume_pc - 1)))?;
+        }
+        Ok(())
+    }
+
+    /// M25: `pending` resumes a task that suspended awaiting a Promise
+    /// which has since failed -- unwind with it before the normal step
+    /// loop, exactly like `step_task`'s own error handling.
+    fn drive(&mut self, task: TaskRef, pending: Option<(Value, usize)>) -> RResult<()> {
+        match self.step_task(&task, pending)? {
             StepControl::Done(v) => {
                 let watching = task.borrow().watching_promise.clone();
                 if let Some(p) = watching {
@@ -745,23 +983,63 @@ impl<'p> Vm<'p> {
                 }
             }
             StepControl::Suspended => {}
+            StepControl::Failed(value) => {
+                if Rc::ptr_eq(&task, &self.main_task) {
+                    // Fatal: stops the whole program immediately, exactly
+                    // like an uncaught runtime error always has (pending
+                    // timers are abandoned) -- docs/MAHC_FORMAT.md #4.6.
+                    let report = self.uncaught_report(&value);
+                    let mut err = RuntimeError::new(report);
+                    err.located = true;
+                    return Err(err);
+                }
+                let watching = task.borrow().watching_promise.clone();
+                if let Some(p) = watching {
+                    self.fail_promise(&p, value)?;
+                    self.failed_promises.push(p);
+                }
+            }
         }
         Ok(())
     }
 
-    fn step_task(&mut self, task: &TaskRef) -> RResult<StepControl> {
+    /// Advance `task` until it finishes (`StepControl::Done`), genuinely
+    /// suspends (`StepControl::Suspended`), or fails with an error
+    /// uncaught anywhere in `task` (`StepControl::Failed` -- docs/
+    /// MAHC_FORMAT.md #4.6). Every runtime error (a classified
+    /// `RuntimeError`, an explicit `throw` via `RuntimeError::thrown_value`,
+    /// or any other failure) is turned into a `RuntimeError` value (or, for
+    /// a thrown one, the Mah value itself) and unwound within `task`
+    /// exactly like docs/MAHC_FORMAT.md #4.4 describes; only when `task`'s
+    /// own return stack runs out with no handler found does this return
+    /// `StepControl::Failed` rather than looping again.
+    fn step_task(&mut self, task: &TaskRef, pending: Option<(Value, usize)>) -> RResult<StepControl> {
+        if let Some((value, pc)) = pending {
+            if !self.unwind(task, value.clone(), pc)? {
+                return Ok(StepControl::Failed(value));
+            }
+        }
         loop {
             let current_pc = task.borrow().pc;
             task.borrow_mut().pc = current_pc + 1;
             match self.exec_one(task, current_pc) {
                 Ok(Some(outcome)) => return Ok(outcome),
                 Ok(None) => continue,
-                Err(mut e) => {
-                    if !e.located {
-                        e.message = self.locate(current_pc, &e.message);
-                        e.located = true;
+                Err(e) => {
+                    if e.located {
+                        // A fatal, already-reported error bubbling out (see
+                        // `drive`) -- never caught/unwound, just re-raised
+                        // untouched past this step loop too.
+                        return Err(e);
                     }
-                    return Err(e);
+                    let value = match e.thrown {
+                        Some(v) => v,
+                        None => self.make_runtime_error_value(e.kind, &e.message),
+                    };
+                    if self.unwind(task, value.clone(), current_pc)? {
+                        continue;
+                    }
+                    return Ok(StepControl::Failed(value));
                 }
             }
         }
@@ -824,7 +1102,10 @@ impl<'p> Vm<'p> {
             LinkedInstr::Neg { a, dest } => {
                 let v = rd(*a)?;
                 let Value::Number(n) = &v else {
-                    return Err(RuntimeError::new(format!("Cannot negate {}", type_name_of(&v, &self.names))));
+                    return Err(RuntimeError::with_kind(
+                        format!("Cannot negate {}", type_name_of(&v, &self.names)),
+                        ErrorKind::TypeMismatch,
+                    ));
                 };
                 let r = n.neg().map_err(|e| RuntimeError::new(e.message()))?;
                 wr!(*dest, Value::Number(r));
@@ -839,10 +1120,10 @@ impl<'p> Vm<'p> {
             LinkedInstr::Call { callee, args } => {
                 let closure_val = rd(*callee)?;
                 let Value::Function(c) = &closure_val else {
-                    return Err(RuntimeError::new(format!(
-                        "Tried to call a non-function value ({})",
-                        type_name_of(&closure_val, &self.names)
-                    )));
+                    return Err(RuntimeError::with_kind(
+                        format!("Tried to call a non-function value ({})", type_name_of(&closure_val, &self.names)),
+                        ErrorKind::TypeMismatch,
+                    ));
                 };
                 let label = match &c.func.name {
                     Some(n) => format!("'{n}'"),
@@ -856,10 +1137,10 @@ impl<'p> Vm<'p> {
             LinkedInstr::CallKw { callee, args, kwnames } => {
                 let closure_val = rd(*callee)?;
                 let Value::Function(c) = &closure_val else {
-                    return Err(RuntimeError::new(format!(
-                        "Tried to call a non-function value ({})",
-                        type_name_of(&closure_val, &self.names)
-                    )));
+                    return Err(RuntimeError::with_kind(
+                        format!("Tried to call a non-function value ({})", type_name_of(&closure_val, &self.names)),
+                        ErrorKind::TypeMismatch,
+                    ));
                 };
                 let label = match &c.func.name {
                     Some(n) => format!("'{n}'"),
@@ -942,10 +1223,10 @@ impl<'p> Vm<'p> {
             LinkedInstr::Detach { callee, args, dest } => {
                 let closure_val = rd(*callee)?;
                 let Value::Function(c) = &closure_val else {
-                    return Err(RuntimeError::new(format!(
-                        "Tried to detach a non-function value ({})",
-                        type_name_of(&closure_val, &self.names)
-                    )));
+                    return Err(RuntimeError::with_kind(
+                        format!("Tried to detach a non-function value ({})", type_name_of(&closure_val, &self.names)),
+                        ErrorKind::TypeMismatch,
+                    ));
                 };
                 let label = match &c.func.name {
                     Some(n) => format!("'{n}'"),
@@ -960,10 +1241,10 @@ impl<'p> Vm<'p> {
             LinkedInstr::DetachKw { callee, args, kwnames, dest } => {
                 let closure_val = rd(*callee)?;
                 let Value::Function(c) = &closure_val else {
-                    return Err(RuntimeError::new(format!(
-                        "Tried to detach a non-function value ({})",
-                        type_name_of(&closure_val, &self.names)
-                    )));
+                    return Err(RuntimeError::with_kind(
+                        format!("Tried to detach a non-function value ({})", type_name_of(&closure_val, &self.names)),
+                        ErrorKind::TypeMismatch,
+                    ));
                 };
                 let label = match &c.func.name {
                     Some(n) => format!("'{n}'"),
@@ -1020,15 +1301,22 @@ impl<'p> Vm<'p> {
             LinkedInstr::Await { promise, dest } => {
                 let pv = rd(*promise)?;
                 let Value::Promise(p) = &pv else {
-                    return Err(RuntimeError::new(format!(
-                        "'.await' used on a non-Promise value ({})",
-                        type_name_of(&pv, &self.names)
-                    )));
+                    return Err(RuntimeError::with_kind(
+                        format!("'.await' used on a non-Promise value ({})", type_name_of(&pv, &self.names)),
+                        ErrorKind::TypeMismatch,
+                    ));
                 };
+                // M25 (docs/MAHC_FORMAT.md #4.6): observed regardless of
+                // state -- settled, still pending, or already failed.
+                p.borrow_mut().observed = true;
                 let settled = p.borrow().settled.clone();
-                match settled {
-                    Some(v) => wr!(*dest, v),
-                    None => {
+                let failed = p.borrow().failed.clone();
+                match (settled, failed) {
+                    (Some(v), _) => wr!(*dest, v),
+                    // Throw at the await instruction itself -- `current_pc`
+                    // in the enclosing `step_task` is exactly that.
+                    (None, Some(e)) => return Err(RuntimeError::thrown_value(e)),
+                    (None, None) => {
                         let resume_pc = task.borrow().pc;
                         p.borrow_mut().callbacks.push(Continuation { task: task.clone(), dest: *dest, resume_pc });
                         return Ok(Some(StepControl::Suspended));
@@ -1043,7 +1331,7 @@ impl<'p> Vm<'p> {
                     fields.push((fname.clone(), rd(*addr)?));
                 }
                 let type_name = ty.name.clone();
-                wr!(*dest, Value::Struct(Rc::new(RefCell::new(StructData { type_name, fields }))));
+                wr!(*dest, Value::Struct(Rc::new(RefCell::new(StructData { type_name, fields, thrown_at: None }))));
             }
             LinkedInstr::Enum { type_idx, variant, values, dest } => {
                 let ty = &self.types[*type_idx];
@@ -1061,7 +1349,15 @@ impl<'p> Vm<'p> {
                     }
                     let type_name = ty.name.clone();
                     let variant_name = vname.clone();
-                    wr!(*dest, Value::Enum(Rc::new(RefCell::new(EnumData { type_name, variant: variant_name, fields }))));
+                    wr!(
+                        *dest,
+                        Value::Enum(Rc::new(RefCell::new(EnumData {
+                            type_name,
+                            variant: variant_name,
+                            fields,
+                            thrown_at: None,
+                        })))
+                    );
                 }
             }
             LinkedInstr::GetField { obj, field, dest } => {
@@ -1085,7 +1381,9 @@ impl<'p> Vm<'p> {
                 let m = self.matchenum(&v, &self.types[*type_idx], *variant);
                 wr!(*dest, Value::Bool(m));
             }
-            LinkedInstr::MatchFail => return Err(RuntimeError::new("No pattern in 'match' matched the value")),
+            LinkedInstr::MatchFail => {
+                return Err(RuntimeError::with_kind("No pattern in 'match' matched the value", ErrorKind::MatchFailed))
+            }
             LinkedInstr::MatchRange { value, lo, hi, inclusive, dest } => {
                 let v = rd(*value)?;
                 let lov = match lo {
@@ -1109,10 +1407,10 @@ impl<'p> Vm<'p> {
                     let k = rd(chunk[0])?;
                     let v = rd(chunk[1])?;
                     let mk = map_key(&k).ok_or_else(|| {
-                        RuntimeError::new(format!(
-                            "Map keys must be a String, Number, or Bool, got {}",
-                            type_name_of(&k, &self.names)
-                        ))
+                        RuntimeError::with_kind(
+                            format!("Map keys must be a String, Number, or Bool, got {}", type_name_of(&k, &self.names)),
+                            ErrorKind::TypeMismatch,
+                        )
                     })?;
                     m.borrow_mut().index_assign(mk, k, v);
                 }
@@ -1139,6 +1437,37 @@ impl<'p> Vm<'p> {
             }
             LinkedInstr::DeferScopePop => {
                 task.borrow_mut().defer_stack.pop();
+            }
+            LinkedInstr::MatchType { value, type_idx, dest } => {
+                let v = rd(*value)?;
+                let ty = &self.types[*type_idx];
+                wr!(*dest, Value::Bool(matches_type(&v, ty)));
+            }
+            LinkedInstr::DeferDepth { dest } => {
+                let depth = task.borrow().defer_stack.len() as i64;
+                wr!(*dest, Value::Number(Decimal::from_i64(depth)));
+            }
+            LinkedInstr::DeferAbove { depth, dest } => {
+                let d = rd(*depth)?;
+                let cur = task.borrow().defer_stack.len() as i64;
+                let above = match &d {
+                    Value::Number(n) => &Decimal::from_i64(cur) > n,
+                    _ => unreachable!("deferabove's depth operand is always a Number (codegen-emitted)"),
+                };
+                wr!(*dest, Value::Bool(above));
+            }
+            LinkedInstr::Throw { value } => {
+                let v = rd(*value)?;
+                let v = if self.implements_error(&v) {
+                    v
+                } else {
+                    let tname = type_name_of(&v, &self.names);
+                    self.make_runtime_error_value(
+                        ErrorKind::TypeMismatch,
+                        &format!("Cannot throw a value of type '{tname}': it does not implement Error"),
+                    )
+                };
+                return Err(RuntimeError::thrown_value(v));
             }
             LinkedInstr::Native { native, args, dest } => {
                 let vals: Vec<Value> = args.iter().map(|a| rd(*a)).collect::<RResult<_>>()?;
@@ -1167,9 +1496,17 @@ fn repeat_str(s: &Rc<str>, n: &crate::decimal::Decimal) -> Value {
 pub fn execute(linked: &LinkedProgram) -> RResult<()> {
     let names = BuiltinTypeNames::new();
     let method_table = build_initial_method_table(&names);
+    if linked.functions.is_empty() {
+        return Err(RuntimeError::new("FUNCTIONS section must declare at least one function"));
+    }
+    let main_fn = &linked.functions[0];
+    let main_frame = value::new_frame(main_fn.slot_count, None);
+    let main_promise = PromiseData::new_pending();
+    let main_task = value::new_task(main_fn.entry, main_frame, Some(main_promise.clone()));
     let mut vm = Vm {
         code: &linked.code,
         types: &linked.types,
+        handlers: &linked.handlers,
         debug: linked.debug.as_ref(),
         names,
         method_table,
@@ -1179,15 +1516,10 @@ pub fn execute(linked: &LinkedProgram) -> RResult<()> {
         stdout: io::BufWriter::new(io::stdout()),
         stdin: io::stdin(),
         to_string_name: Rc::from("to_string"),
+        main_task: main_task.clone(),
+        failed_promises: Vec::new(),
     };
-    if linked.functions.is_empty() {
-        return Err(RuntimeError::new("FUNCTIONS section must declare at least one function"));
-    }
-    let main_fn = &linked.functions[0];
-    let main_frame = value::new_frame(main_fn.slot_count, None);
-    let main_promise = PromiseData::new_pending();
-    let main_task = value::new_task(main_fn.entry, main_frame, Some(main_promise.clone()));
-    vm.drive(main_task)?;
+    vm.drive(main_task, None)?;
 
     loop {
         let settled = main_promise.borrow().settled.is_some();
@@ -1198,6 +1530,21 @@ pub fn execute(linked: &LinkedProgram) -> RResult<()> {
             break;
         }
     }
+
+    // M25 (docs/MAHC_FORMAT.md #4.6): once the program would otherwise end
+    // normally, report the FIRST never-observed failed detached-task
+    // Promise (in fail order) as an uncaught error, if there is one.
+    for p in &vm.failed_promises {
+        let observed = p.borrow().observed;
+        if !observed {
+            let error = p.borrow().failed.clone().expect("recorded in failed_promises, so it must be Failed");
+            let report = vm.uncaught_report(&error);
+            let mut err = RuntimeError::new(report);
+            err.located = true;
+            return Err(err);
+        }
+    }
+
     vm.flush_stdout();
     Ok(())
 }

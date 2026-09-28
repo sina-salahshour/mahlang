@@ -57,6 +57,12 @@ KEYWORD_TOKENS = {
     TokenType.IMPL,
     TokenType.FOR,
     TokenType.IN,
+    # M25 (docs/ERRORS.md): `try`/`throw` are real lexer keywords -- the
+    # contextual ones (`catch`, `throws`) stay ID tokens and are handled
+    # positionally by `_is_error_contextual_keyword`, like `import`/
+    # `export` already are by `_is_soft_keyword`.
+    TokenType.TRY,
+    TokenType.THROW,
 }
 
 BUILTIN_TOKENS = {
@@ -149,6 +155,30 @@ KEYWORD_DOCS = {
     "```mah\nfor let v, let i in 10..13 {\n\tprint(i, v)\n}\n```",
     "in": "Separates a `for` loop's bindings from what it iterates.\n\n"
     "```mah\nfor let c in \"abc\" { print(c) }\n```",
+    # M25 (docs/ERRORS.md): typed, catchable errors.
+    "throw": "Throw a value (any struct/enum implementing `Error`) as an "
+    "error -- an expression of type `Never`, so it fits anywhere an "
+    "expression can, and unwinds to the nearest enclosing `try` whose "
+    "`catch` arms (or `RuntimeError`) match it, or up to the task root.\n\n"
+    "```mah\nthrow MyError { message: \"bad\" }\n```",
+    "try": "Run a block/expression and catch anything it throws. "
+    "`try { ... } catch { arms }`'s arms are `match` arms (plus the "
+    "`name: Type`/`_: Type` type-test pattern); an unmatched error is "
+    "re-thrown. `try EXPR else FALLBACK` catches everything and evaluates "
+    "to `FALLBACK`.\n\n"
+    "```mah\nlet text = try {\n\trisky()\n} catch {\n\te: ParseError => { \"?\" }\n}\n"
+    "let n = try s.to_number() else 0\n```",
+    "catch": "Introduces a `try` block's error-handling arms (`match`-arm "
+    "syntax, plus type-test patterns `name: Type`/`_: Type`). An error "
+    "no arm matches is re-thrown automatically. Contextual -- still usable "
+    "as an ordinary identifier elsewhere.\n\n"
+    "```mah\ntry { risky() } catch {\n\tMyError.Kind => { 0 }\n\te: OtherError => { 1 }\n\t_ => { 2 }\n}\n```",
+    "throws": "Declares the error type(s) a function can throw "
+    "(`throws never` for none) -- optional, and not yet checked (see "
+    "docs/ERRORS.md). Contextual -- still usable as an ordinary "
+    "identifier elsewhere.\n\n"
+    "```mah\nfn load(path: String) -> Config throws FsError | JsonError { ... }\n"
+    "fn pure(x: Number) -> Number throws never { x }\n```",
 }
 
 BUILTIN_DOCS = {
@@ -363,6 +393,37 @@ def _is_await_field(token: Token, tokens: list[Token]) -> bool:
     if pos is None or pos == 0:
         return False
     return tokens[pos - 1].type == TokenType.DOT
+
+
+def _is_error_contextual_keyword(token: Token, tokens: list[Token]) -> bool:
+    """M25 (docs/ERRORS.md): `catch`/`throws` stay ordinary `ID` tokens
+    (`let catch = 1` must keep working), so hover recognizes them
+    positionally, mirroring `_is_soft_keyword`/`_is_await_field` above.
+
+    `catch` counts right after a `}` (a `try` block's own closing brace --
+    the grammar never allows anything else immediately before it). `throws`
+    counts after a parameter list's closing `)`, optionally with a
+    `-> type` in between (walk back over the return type's own tokens --
+    `ID`/`.`/`,`/`<`/`>`/`->` -- looking for the `)` they must lead back to)."""
+    if token.type != TokenType.ID or token.literal not in ("catch", "throws"):
+        return False
+    pos = next((i for i, t in enumerate(tokens) if t.position == token.position), None)
+    if pos is None or pos == 0:
+        return False
+    prev = tokens[pos - 1]
+    if token.literal == "catch":
+        return prev.type is TokenType.BRACE_CLOSE
+    i = pos - 1
+    while i >= 0 and tokens[i].type in (
+        TokenType.ID,
+        TokenType.DOT,
+        TokenType.COMMA,
+        TokenType.LT,
+        TokenType.GT,
+        TokenType.ARROW,
+    ):
+        i -= 1
+    return i >= 0 and tokens[i].type is TokenType.PAREN_CLOSE
 
 
 def _is_soft_keyword(token: Token, tokens: list[Token]) -> bool:
@@ -1317,6 +1378,8 @@ def get_hover(text: str, line: int, character: int, path: Optional[str] = None) 
     elif token.type in BUILTIN_TOKENS:
         value = f"**builtin** `{token.literal}`\n\n" + BUILTIN_DOCS.get(token.literal, "")
     elif token.type is TokenType.ID and _is_soft_keyword(token, tokens):
+        value = f"**keyword** `{token.literal}`\n\n" + KEYWORD_DOCS.get(token.literal, "")
+    elif token.type is TokenType.ID and _is_error_contextual_keyword(token, tokens):
         value = f"**keyword** `{token.literal}`\n\n" + KEYWORD_DOCS.get(token.literal, "")
     elif token.type is TokenType.ID and _is_await_field(token, tokens):
         value = f"**keyword** `.{token.literal}`\n\n" + KEYWORD_DOCS.get(token.literal, "")

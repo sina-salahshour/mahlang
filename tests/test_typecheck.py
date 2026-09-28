@@ -581,6 +581,38 @@ class PatternTests(_Base):
         self.assertTypes('let r = match 3 { 1 => { "one" } _ => { "many" } }', r="String")
 
 
+class M25ErrorCheckerTests(_Base):
+    """M25 (docs/ERRORS.md): minimal checker support for `throw`/`try`/
+    `catch`/`throws` -- no error-set inference/checking (M26); just no
+    diagnostics for the new expressions used where a type is expected."""
+
+    def test_try_catch_used_as_a_typed_let_value(self):
+        self.assertClean(
+            "enum E { A }\nimpl Error for E {}\nlet x: Number = try { 1 } catch { _ => { 2 } }"
+        )
+
+    def test_throw_in_an_if_else_branch_used_as_a_typed_let_value(self):
+        self.assertClean(
+            "enum E { A }\nimpl Error for E {}\nlet y: Number = if true { 1 } else { throw E.A }"
+        )
+
+    def test_throw_has_type_never(self):
+        self.assertTypes(
+            "enum E { A }\nimpl Error for E {}\nfn f() -> Number { if true { 1 } else { throw E.A } }",
+            f="fn() -> Number",
+        )
+
+    def test_type_test_arm_binds_the_named_type(self):
+        self.assertTypes(
+            "struct Oops { code: Number }\nimpl Error for Oops {}\n"
+            "let r = try { 1 } catch { e: Oops => { e.code } }",
+            r="Number",
+        )
+
+    def test_try_else_joins_body_and_fallback(self):
+        self.assertClean("let n: Number = try 1 / 0 else 0")
+
+
 class ExplicitLevelTests(_Base):
     def test_generalized_parameters_are_fine(self):
         diagnostics, _ = check("fn id(x) { x }")

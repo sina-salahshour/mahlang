@@ -25,7 +25,12 @@ code_interpreter.py.
 from decimal import Decimal
 
 # M12: names of the built-in types, as seen by `impl` and method dispatch.
-BUILTIN_TYPE_NAMES = ("Number", "String", "Bool", "Function", "Option", "Promise", "Vector", "Map")
+# M25 adds `RuntimeError` (docs/ERRORS.md, docs/MAHC_FORMAT.md #4.1) --
+# pre-seeded into the resolver's `enum_decls` (compiler/resolve.py) exactly
+# like `Option`/`Promise`, so it gets the native `Printable.to_string` any
+# other built-in type gets (docs/MAHC_FORMAT.md #6.7) and users can't
+# redeclare it (the same rule as redeclaring `Option`).
+BUILTIN_TYPE_NAMES = ("Number", "String", "Bool", "Function", "Option", "Promise", "Vector", "Map", "RuntimeError")
 
 # M12: system traits -- trait name -> {method name -> parameter names}.
 # User types opt in with a normal `impl`. M19 adds `Index` (`x[k]`) and
@@ -75,13 +80,20 @@ class Closure:
 class StructInstance:
     """A heap object for a `struct` value (see docs/V2_DESIGN.md's M2
     milestone) -- reference semantics, same as Frame/Closure: a Mah struct
-    variable holds a reference to this object, never a copy."""
+    variable holds a reference to this object, never a copy.
 
-    __slots__ = ("type_name", "fields")
+    M25 (docs/ERRORS.md, docs/MAHC_FORMAT.md #4.4): `thrown_at` is a
+    VM-internal field, never visible to Mah code -- the pc a `throw` of
+    this value first happened at (unset stays `None`), used only to
+    locate an uncaught error; re-throwing (including automatically, when
+    no catch arm matches) keeps the original."""
+
+    __slots__ = ("type_name", "fields", "thrown_at")
 
     def __init__(self, type_name, fields):
         self.type_name = type_name
         self.fields = fields  # dict[str, Any]
+        self.thrown_at = None
 
 
 class VectorValue:
@@ -126,12 +138,14 @@ class EnumInstance:
     the same representation rather than a bespoke class -- see NONE_VALUE
     below."""
 
-    __slots__ = ("type_name", "variant", "fields")
+    __slots__ = ("type_name", "variant", "fields", "thrown_at")
 
     def __init__(self, type_name, variant, fields):
         self.type_name = type_name
         self.variant = variant
         self.fields = fields  # dict[str, Any]
+        # M25: see StructInstance.thrown_at's docstring above.
+        self.thrown_at = None
 
     def __repr__(self):
         return f"EnumInstance({self.type_name!r}, {self.variant!r}, {self.fields!r})"
@@ -158,34 +172,51 @@ class PromiseInstance(EnumInstance):
     machinery every other enum already gets, for free -- see
     docs/NEXT_PHASES.md's "Async" section (M10).
 
-    Only two variants: a Promise never rejects -- a scheduled operation
-    that fails just raises a fatal Mah runtime error immediately, the same
-    as any other error today, rather than needing a third "Rejected"
-    variant here.
+    M25 (docs/ERRORS.md, docs/MAHC_FORMAT.md #4.6): gains a third variant,
+    `Failed { error }` -- a detached task that throws settles its Promise
+    this way instead of stopping the program. `observed` (never a real
+    enum field, like `callbacks` below) is set the first time any task
+    `.await`s this Promise (settled, pending, or already failed) -- used
+    at program end to find failed Promises nobody ever looked at
+    (docs/MAHC_FORMAT.md #4.6's "uncaught at a task root" rules).
 
     `callbacks` is the one piece that ISN'T a normal enum field: purely
     interpreter-internal scheduling bookkeeping (never visible in
     `.fields`, never touched by ordinary Mah code), holding the callbacks
-    to run -- synchronously -- once this promise settles. Resolving a
+    to run -- synchronously -- once this promise settles or fails.
+    Callbacks receive an `(ok, value)` pair: `ok` true for `resolve`,
+    false for `fail` (`value` is the error then). Resolving/failing a
     Promise mutates `variant`/`fields` in place, exactly like any other
     enum's fields can already be mutated via `setfield` -- every reference
     to this same heap object (Mah's usual reference semantics) sees the
-    transition from Pending to Settled."""
+    transition from Pending to Settled/Failed."""
 
-    __slots__ = ("callbacks",)
+    __slots__ = ("callbacks", "observed")
 
     def __init__(self):
         super().__init__(type_name="Promise", variant="Pending", fields={})
-        self.callbacks = []  # list[Callable[[Any], None]], run synchronously on resolve
+        self.callbacks = []  # list[Callable[[bool, Any], None]], run synchronously on settle/fail
+        self.observed = False
 
     def resolve(self, value):
-        if self.variant == "Settled":
+        if self.variant in ("Settled", "Failed"):
             return
         self.variant = "Settled"
         self.fields = {"value": value}
         callbacks, self.callbacks = self.callbacks, []
         for callback in callbacks:
-            callback(value)
+            callback(True, value)
+
+    def fail(self, error):
+        """M25: settle this Promise with a failure -- does nothing if it's
+        already settled or failed (docs/MAHC_FORMAT.md #4.6)."""
+        if self.variant in ("Settled", "Failed"):
+            return
+        self.variant = "Failed"
+        self.fields = {"error": error}
+        callbacks, self.callbacks = self.callbacks, []
+        for callback in callbacks:
+            callback(False, error)
 
 
 class Task:
@@ -235,9 +266,33 @@ class MahRuntimeError(Exception):
     ...` suffix, or decided no location is available) exists purely so an
     error raised deep inside a nested task (`invoke_sync`/`detach`'s own,
     independent step loop) gets exactly one location suffix, not one per
-    step loop it passes through on its way back up."""
+    step loop it passes through on its way back up.
+
+    M25 (docs/ERRORS.md, docs/MAHC_FORMAT.md #4.5): `kind` says which
+    `RuntimeError` enum variant this becomes once it's turned into a
+    throwable Mah value (`step_task` in `code_interpreter.py`) -- every
+    raise site across the VM passes its own kind; sites nobody has
+    classified default to `"Internal"`."""
 
     located: bool = False
+
+    def __init__(self, message: str, kind: str = "Internal"):
+        super().__init__(message)
+        self.kind = kind
+
+
+class MahThrow(Exception):
+    """M25: a Mah *value* being thrown across a Python call boundary --
+    `code_interpreter.py`'s `_exec`'s `throw` handler, `await` of a Failed
+    Promise, and `invoke_sync` when the sub-task it drove failed. Always
+    caught again by the nearest enclosing `step_task` loop (which turns it
+    into ordinary unwinding within that task) -- it never escapes
+    `run_program` itself; an error uncaught at a task root is reported via
+    `MahRuntimeError` instead (docs/MAHC_FORMAT.md #4.6)."""
+
+    def __init__(self, value):
+        super().__init__(value)
+        self.value = value
 
 
 def type_name_of(value) -> str:

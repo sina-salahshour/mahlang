@@ -15,7 +15,7 @@ use std::fmt;
 
 pub const MAGIC: &[u8; 4] = b"MAHC";
 pub const MAJOR: u16 = 1;
-pub const MINOR: u16 = 3;
+pub const MINOR: u16 = 4;
 
 const SEC_STRINGS: u8 = 0x01;
 const SEC_CONSTANTS: u8 = 0x02;
@@ -24,6 +24,8 @@ const SEC_NATIVES: u8 = 0x04;
 const SEC_FUNCTIONS: u8 = 0x05;
 const SEC_CODE: u8 = 0x06;
 const SEC_PARAMS: u8 = 0x07;
+/// M25 (1.4, docs/MAHC_FORMAT.md #4.8): required iff minor >= 4.
+const SEC_HANDLERS: u8 = 0x08;
 const SEC_DEBUG: u8 = 0x80;
 
 const REQUIRED_SECTIONS: &[u8] = &[
@@ -42,6 +44,43 @@ const REQUIRED_SECTIONS_V1: &[u8] = &[
     SEC_FUNCTIONS,
     SEC_CODE,
     SEC_PARAMS,
+];
+const REQUIRED_SECTIONS_V4: &[u8] = &[
+    SEC_STRINGS,
+    SEC_CONSTANTS,
+    SEC_TYPES,
+    SEC_NATIVES,
+    SEC_FUNCTIONS,
+    SEC_CODE,
+    SEC_PARAMS,
+    SEC_HANDLERS,
+];
+
+/// M25 (docs/MAHC_FORMAT.md #4.1): how many built-in TYPES-section-index-0..
+/// entries a file of this minor version has (and where user types start
+/// numbering from) -- 2 (Option, Promise) below minor 4, 3 (+RuntimeError)
+/// from minor 4.
+fn builtin_type_count(minor: u16) -> usize {
+    if minor >= 4 {
+        3
+    } else {
+        2
+    }
+}
+
+/// M25: the fixed field-name list for each `RuntimeError` variant, in
+/// declaration order -- mirrors `mah/bytecode/format.py`'s
+/// `BUILTIN_TYPES_V4` and `compiler/resolve.py`'s pre-seeded `enum_decls`.
+pub const RUNTIME_ERROR_VARIANTS: &[&str] = &[
+    "DivisionByZero",
+    "TypeMismatch",
+    "NoSuchField",
+    "NoSuchMethod",
+    "ArgumentError",
+    "IndexOutOfRange",
+    "MatchFailed",
+    "InputError",
+    "Internal",
 ];
 
 const TAG_NONE: u8 = 0;
@@ -224,7 +263,26 @@ pub enum RawInstr {
     DeferPeek { dest: Addr },
     DeferPop { dest: Addr },
     DeferScopePop,
+    /// M25 (1.4)
+    MatchType { value: Addr, type_idx: usize, dest: Addr },
+    /// M25 (1.4)
+    DeferDepth { dest: Addr },
+    /// M25 (1.4)
+    DeferAbove { depth: Addr, dest: Addr },
+    /// M25 (1.4)
+    Throw { value: Addr },
     Native { native: usize, args: Vec<Addr>, dest: Option<Addr> },
+}
+
+/// M25 (docs/MAHC_FORMAT.md #4.8): one HANDLERS entry -- `[start, end)`
+/// covers instructions whose throw unwinds to `handler` in the same frame,
+/// writing the thrown value into frame-0 slot `slot`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HandlerEntry {
+    pub start: usize,
+    pub end: usize,
+    pub handler: usize,
+    pub slot: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -245,6 +303,8 @@ pub struct Program {
     pub code: Vec<RawInstr>,
     pub debug: Option<DebugInfo>,
     pub minor: u16,
+    /// M25 (1.4, docs/MAHC_FORMAT.md #4.8): always empty for minor < 4.
+    pub handlers: Vec<HandlerEntry>,
 }
 
 // ---------------------------------------------------------------------------
@@ -342,7 +402,13 @@ struct Sections {
 }
 
 fn read_sections(r: &mut Reader, minor: u16) -> FResult<Sections> {
-    let required: &[u8] = if minor >= 1 { REQUIRED_SECTIONS_V1 } else { REQUIRED_SECTIONS };
+    let required: &[u8] = if minor >= 4 {
+        REQUIRED_SECTIONS_V4
+    } else if minor >= 1 {
+        REQUIRED_SECTIONS_V1
+    } else {
+        REQUIRED_SECTIONS
+    };
     let mut payloads = std::collections::HashMap::new();
     let mut debug_payload: Option<Vec<u8>> = None;
     let mut expect_idx = 0usize;
@@ -573,10 +639,15 @@ struct CodeCtx<'a> {
     nnatives: usize,
     natives: &'a [NativeRef],
     minor: u16,
+    /// M25: `builtin_type_count(minor)` -- how many built-in TYPES-index-0..
+    /// entries precede the user types in `types`.
+    builtin_types: usize,
 }
 
 /// The `(variant_name_idx, field_indices)` list for enum type index
-/// `t_index` (0/1 built in, or >=2 user), or `None` if it isn't an enum.
+/// `t_index` (built in, or user -- `>= ctx.builtin_types`), or `None` if it
+/// isn't an enum. M25: `RuntimeError` (index 2, minor >= 4) is a built-in
+/// enum too, every variant with exactly one field (`message`).
 fn type_variants<'a>(t_index: usize, ctx: &'a CodeCtx) -> Option<Vec<(usize, usize)>> {
     // returns (variant "index" placeholder unused, nfields) pairs -- callers
     // only need nfields per variant plus the variant count.
@@ -584,9 +655,16 @@ fn type_variants<'a>(t_index: usize, ctx: &'a CodeCtx) -> Option<Vec<(usize, usi
         return Some(vec![(0, 0), (0, 1)]); // Option: none(0), some(1)
     }
     if t_index == 1 {
+        if ctx.minor >= 4 {
+            return Some(vec![(0, 0), (0, 1), (0, 1)]); // Promise: Pending, Settled, Failed
+        }
         return Some(vec![(0, 0), (0, 1)]); // Promise: Pending(0), Settled(1)
     }
-    let decl = ctx.types.get(t_index - 2)?;
+    if t_index == 2 && ctx.minor >= 4 {
+        // RuntimeError: every variant has exactly one field (`message`).
+        return Some(vec![(0, 1); crate::decode::RUNTIME_ERROR_VARIANTS.len()]);
+    }
+    let decl = ctx.types.get(t_index - ctx.builtin_types)?;
     match &decl.body {
         TypeBody::Enum(variants) => Some(variants.iter().map(|(_n, f)| (0, f.len())).collect()),
         TypeBody::Struct(_) => None,
@@ -594,10 +672,10 @@ fn type_variants<'a>(t_index: usize, ctx: &'a CodeCtx) -> Option<Vec<(usize, usi
 }
 
 fn type_field_count(t_index: usize, ctx: &CodeCtx) -> Option<usize> {
-    if t_index == 0 || t_index == 1 {
-        return None; // Option/Promise are enums, never a struct target
+    if t_index < ctx.builtin_types {
+        return None; // every built-in type (Option/Promise/RuntimeError) is an enum
     }
-    let decl = ctx.types.get(t_index - 2)?;
+    let decl = ctx.types.get(t_index - ctx.builtin_types)?;
     match &decl.body {
         TypeBody::Struct(fields) => Some(fields.len()),
         TypeBody::Enum(_) => None,
@@ -672,7 +750,7 @@ fn decode_f(pr: &mut Reader, ctx: &CodeCtx) -> FResult<usize> {
 
 fn decode_t(pr: &mut Reader, ctx: &CodeCtx) -> FResult<usize> {
     let t = pr.varuint()? as usize;
-    if t >= 2 + ctx.ntypes {
+    if t >= ctx.builtin_types + ctx.ntypes {
         return err(format!("type index {t} out of range"));
     }
     Ok(t)
@@ -744,12 +822,16 @@ fn opcode_info(op: u8) -> Option<(&'static str, Option<u16>)> {
         0x37 => ("matchrange", Some(2)),
         0x38 => ("vector", Some(3)),
         0x39 => ("map", Some(3)),
+        0x3A => ("matchtype", Some(4)),
         0x40 => ("deferpush", None),
         0x41 => ("deferadd", None),
         0x42 => ("deferpeek", None),
         0x43 => ("deferpop", None),
         0x44 => ("deferscopepop", None),
+        0x45 => ("deferdepth", Some(4)),
+        0x46 => ("deferabove", Some(4)),
         0x50 => ("native", None),
+        0x60 => ("throw", Some(4)),
         _ => return None,
     })
 }
@@ -943,6 +1025,15 @@ fn decode_one_instr(name: &str, pr: &mut Reader, ctx: &CodeCtx, _i: u64) -> FRes
         "deferpeek" => RawInstr::DeferPeek { dest: decode_addr(pr)? },
         "deferpop" => RawInstr::DeferPop { dest: decode_addr(pr)? },
         "deferscopepop" => RawInstr::DeferScopePop,
+        "matchtype" => {
+            let value = decode_addr(pr)?;
+            let type_idx = decode_t(pr, ctx)?;
+            let dest = decode_addr(pr)?;
+            RawInstr::MatchType { value, type_idx, dest }
+        }
+        "deferdepth" => RawInstr::DeferDepth { dest: decode_addr(pr)? },
+        "deferabove" => RawInstr::DeferAbove { depth: decode_addr(pr)?, dest: decode_addr(pr)? },
+        "throw" => RawInstr::Throw { value: decode_addr(pr)? },
         "native" => {
             let native = decode_x(pr, ctx)?;
             let args = decode_addr_list(pr)?;
@@ -1074,6 +1165,31 @@ fn validate_kwnames(op: &str, nargs: usize, kwnames: &[usize], ctx: &CodeCtx, i:
     Ok(())
 }
 
+/// M25 (docs/MAHC_FORMAT.md #4.8): HANDLERS section, required iff minor >=
+/// 4. `ncode` (already known: CODE, id 0x06, decodes before HANDLERS, id
+/// 0x08, in section-id order) lets every range/target be validated
+/// immediately, like jump targets in `parse_code`.
+fn parse_handlers(payload: &[u8], ncode: usize) -> FResult<Vec<HandlerEntry>> {
+    let mut pr = Reader::new(payload);
+    let count = pr.varuint()?;
+    let mut handlers = Vec::new();
+    for _ in 0..count {
+        let start = pr.varuint()? as usize;
+        let end = pr.varuint()? as usize;
+        let handler = pr.varuint()? as usize;
+        let slot = pr.varuint()?;
+        if !(start < end && end <= ncode) {
+            return err(format!("HANDLERS: invalid range [{start}, {end}) for {ncode} instruction(s)"));
+        }
+        if handler >= ncode {
+            return err(format!("HANDLERS: handler {handler} out of range for {ncode} instruction(s)"));
+        }
+        handlers.push(HandlerEntry { start, end, handler, slot });
+    }
+    check_consumed(&pr, "HANDLERS")?;
+    Ok(handlers)
+}
+
 fn parse_debug(payload: &[u8], nstrings: usize) -> FResult<DebugInfo> {
     let mut pr = Reader::new(payload);
     let nfiles = pr.varuint()?;
@@ -1155,15 +1271,18 @@ pub fn decode(data: &[u8]) -> FResult<Program> {
         nnatives: natives.len(),
         natives: &natives,
         minor,
+        builtin_types: builtin_type_count(minor),
     };
     let code = parse_code(get(SEC_CODE), &ctx)?;
+
+    let handlers = if minor >= 4 { parse_handlers(get(SEC_HANDLERS), code.len())? } else { Vec::new() };
 
     let debug = match &sections.debug_payload {
         Some(p) => Some(parse_debug(p, strings.len())?),
         None => None,
     };
 
-    Ok(Program { strings, constants, types, natives, functions, code, debug, minor })
+    Ok(Program { strings, constants, types, natives, functions, code, debug, minor, handlers })
 }
 
 #[cfg(test)]
@@ -1194,6 +1313,10 @@ mod tests {
             // increasing id, i.e. PARAMS 0x07 comes right after CODE 0x06).
             push_section(&mut out, 0x07, &[0]);
         }
+        if minor >= 4 {
+            // HANDLERS: count 0 (M25, 0x08, right after PARAMS).
+            push_section(&mut out, 0x08, &[0]);
+        }
         out
     }
 
@@ -1219,11 +1342,12 @@ mod tests {
 
     #[test]
     fn decodes_minimal_file() {
-        let data = minimal_file(3);
+        let data = minimal_file(4);
         let program = decode(&data).expect("should decode");
         assert_eq!(program.functions.len(), 1);
         assert_eq!(program.code.len(), 1);
         assert_eq!(program.code[0], RawInstr::Halt);
+        assert!(program.handlers.is_empty());
     }
 
     #[test]
@@ -1275,7 +1399,7 @@ mod tests {
         data.extend_from_slice(&1u16.to_le_bytes());
         data.extend_from_slice(&99u16.to_le_bytes());
         let e = decode(&data).unwrap_err();
-        assert_eq!(e.0, "unsupported minor version 99 (this VM supports up to minor version 3)");
+        assert_eq!(e.0, "unsupported minor version 99 (this VM supports up to minor version 4)");
     }
 
     #[test]

@@ -14,6 +14,7 @@ from __future__ import annotations
 import codecs
 import re
 from decimal import Decimal
+from typing import Optional
 
 from .ast_nodes import (
     AssignStmt,
@@ -60,7 +61,10 @@ from .ast_nodes import (
     StructDecl,
     StructLit,
     StructPat,
+    ThrowExpr,
     TraitDecl,
+    TryExpr,
+    TypePat,
     Unary,
     WhileStmt,
     WildcardPat,
@@ -119,6 +123,10 @@ _RANGE_END_STARTERS = {
     TokenType.INPUT,
     TokenType.DETACH,
     TokenType.SLEEP_ASYNC,
+    # M25: `try`/`throw` are expressions too, so they're valid range ends
+    # exactly like `if`/`match`/`detach` above.
+    TokenType.TRY,
+    TokenType.THROW,
 }
 _ADDITIVE_OPS = {
     TokenType.ADD: "+",
@@ -172,6 +180,10 @@ _SYNC_TOKENS = _STATEMENT_LEADING | {
     TokenType.MATCH,
     TokenType.WHILE,
     TokenType.FOR,
+    # M25: `try`/`throw` flow through the expression path like `match`
+    # (see `_parse_primary`), so they're recovery points too.
+    TokenType.TRY,
+    TokenType.THROW,
 }
 
 
@@ -324,6 +336,16 @@ class Parser:
                         FieldAccess,
                         MethodCall,
                     ),
+                ) or (
+                    # M25: only the catch form (`try { } catch { }`) is
+                    # block-shaped (ends in the catch-arms' own `}`) --
+                    # both `else` forms end in an arbitrary fallback
+                    # expression, so they need a semicolon like any other
+                    # expression statement (`throw x` does too, and needs
+                    # no special-casing here: it simply isn't one of the
+                    # exempted shapes, so it falls straight through to the
+                    # ordinary "needs a semicolon" handling below).
+                    isinstance(expr, TryExpr) and expr.fallback is None
                 ):
                     # Block-shaped (if/match/bare block): no semicolon required
                     # when not last (Rust's rule). Call/anonymous-FnExpr are
@@ -684,8 +706,11 @@ class Parser:
         self.expect(TokenType.BRACE_CLOSE)
         return MatchStmt(scrutinee=scrutinee, arms=arms, position=match_tok.position)
 
-    def _parse_match_arm(self) -> MatchArm:
-        pattern = self._parse_pattern()
+    def _parse_match_arm(self, allow_type_test: bool = False) -> MatchArm:
+        """M25: `allow_type_test` is set only by `_parse_try`'s catch-arm
+        loop -- a `match` arm's own top-level pattern never allows a
+        type-test (only a `catch` arm's does, see `_parse_pattern`)."""
+        pattern = self._parse_pattern(allow_type_test=allow_type_test)
         guard = None
         if self.current.type is TokenType.IF:
             # `pattern if cond => { ... }`: the arm only matches when the
@@ -698,6 +723,80 @@ class Parser:
         body = self.parse_block()
         return MatchArm(pattern=pattern, body=body, position=arrow_tok.position, guard=guard)
 
+    # -- M25: throw / try / catch (see docs/ERRORS.md) -------------------
+
+    def _parse_try(self, try_tok: Token) -> TryExpr:
+        """`try` is already consumed (`try_tok` is its token). Three forms
+        (docs/ERRORS.md, spec grammar):
+        - `try { body } catch { arms }`
+        - `try { body } else fallback`
+        - `try expr else fallback`            (expr not starting with `{`)
+        `catch`/`else` here: `else` is the ordinary ELSE token (shared with
+        `if`/`elif`); `catch` is contextual (stays an ID, matched by
+        `literal`, so `let catch = 1` still works elsewhere)."""
+        if self.current.type is TokenType.BRACE_OPEN:
+            body = self.parse_block()
+            if self.current.type is TokenType.ID and self.current.literal == "catch":
+                catch_tok = self.advance()
+                self.expect(TokenType.BRACE_OPEN)
+                arms = []
+                while self.current.type is not TokenType.BRACE_CLOSE:
+                    arms.append(self._parse_match_arm(allow_type_test=True))
+                self.expect(TokenType.BRACE_CLOSE)
+                return TryExpr(
+                    body=body,
+                    arms=arms,
+                    fallback=None,
+                    position=try_tok.position,
+                    handler_position=catch_tok.position,
+                )
+            if self.current.type is TokenType.ELSE:
+                else_tok = self.advance()
+                fallback = self.parse_expr()
+                return TryExpr(
+                    body=body,
+                    arms=[],
+                    fallback=fallback,
+                    position=try_tok.position,
+                    handler_position=else_tok.position,
+                )
+            raise SyntaxError(
+                f"expected 'catch' or 'else' after the 'try' block at position '{self.current.position}'"
+            )
+        # `try expr else fallback` -- reaching here means the current token
+        # isn't `{`, so `parse_expr()` can't accidentally swallow a
+        # trailing catch/else block form; the grammar's "expr not starting
+        # with '{'" restriction holds automatically.
+        body = self.parse_expr()
+        else_tok = self.expect(TokenType.ELSE)
+        fallback = self.parse_expr()
+        return TryExpr(
+            body=body,
+            arms=[],
+            fallback=fallback,
+            position=try_tok.position,
+            handler_position=else_tok.position,
+        )
+
+    def _parse_throws_clause(self) -> Optional[list]:
+        """M25: `throws_clause := "throws" ( "never" | type { "|" type } )`,
+        accepted (and stored -- ignored until M26's checker) after a
+        parameter list's optional `-> type`, in `fn` expressions/decls,
+        method decls, and `fn(...)` types. `throws` is contextual (stays
+        an ID token). Returns `None` (no clause), `[]` (`throws never`),
+        or a list of parsed types."""
+        if not (self.current.type is TokenType.ID and self.current.literal == "throws"):
+            return None
+        self.advance()  # `throws`
+        if self.current.type is TokenType.ID and self.current.literal == "never":
+            self.advance()
+            return []
+        throws = [self._parse_type()]
+        while self.current.type is TokenType.OR:
+            self.advance()
+            throws.append(self._parse_type())
+        return throws
+
     # -- patterns ------------------------------------------------------
     #
     # Pattern parsing is a completely separate grammar from expressions --
@@ -707,8 +806,33 @@ class Parser:
     # always means "struct pattern," unconditionally, no suppression flag
     # needed here.
 
-    def _parse_pattern(self):
+    def _parse_pattern(self, allow_type_test: bool = False):
         tok = self.current
+
+        # M25: `name: Type` / `_: Type` (a "type-test" pattern) is legal
+        # only as the *top-level* pattern of a catch arm (see
+        # `_parse_match_arm`'s `allow_type_test` parameter) -- checked
+        # before anything else in this function since it's the only
+        # pattern kind that starts like a plain `BindPat`/`WildcardPat`
+        # (an `ID`) but takes a different path on what follows. Anywhere
+        # else, an `ID :` in a pattern falls through to the ordinary `ID`
+        # branch below, keeping today's (pre-M25) behavior unchanged --
+        # `BindPat`, then whatever error the caller gives on the stray
+        # `:` it left unconsumed.
+        if (
+            allow_type_test
+            and tok.type is TokenType.ID
+            and self.lexer.peek_token().type is TokenType.COLON
+        ):
+            self.advance()  # the name (or `_`) token
+            self.advance()  # COLON
+            type_tok = self.expect(TokenType.ID)
+            return TypePat(
+                name=None if tok.literal == "_" else tok.literal,
+                type_name=type_tok.literal,
+                position=tok.position,
+                type_position=type_tok.position,
+            )
 
         if tok.type is TokenType.NONE:
             self.advance()
@@ -1059,7 +1183,8 @@ class Parser:
             if self.current.type is TokenType.ARROW:
                 self.advance()
                 ret = self._parse_type()
-            return FnType(params=params, ret=ret, position=fn_tok.position)
+            throws = self._parse_throws_clause()
+            return FnType(params=params, ret=ret, position=fn_tok.position, throws=throws)
         if self.current.type is TokenType.PAREN_OPEN:
             self.advance()
             inner = self._parse_type()
@@ -1128,6 +1253,7 @@ class Parser:
         if self.current.type is TokenType.ARROW:
             self.advance()
             return_type = self._parse_type()
+        throws = self._parse_throws_clause()
         body = self.parse_block()
         return FnExpr(
             name=name,
@@ -1140,6 +1266,7 @@ class Parser:
             type_params=type_params,
             param_types=param_types,
             return_type=return_type,
+            throws=throws,
         )
 
     # -- M12: trait / impl / method decls ---------------------------------
@@ -1219,6 +1346,7 @@ class Parser:
         if self.current.type is TokenType.ARROW:
             self.advance()
             return_type = self._parse_type()
+        throws = self._parse_throws_clause()
         if self.current.type is TokenType.BRACE_OPEN:
             body = self.parse_block()
             fn = FnExpr(
@@ -1232,6 +1360,7 @@ class Parser:
                 type_params=type_params,
                 param_types=param_types,
                 return_type=return_type,
+                throws=throws,
             )
         elif require_body:
             raise SyntaxError(
@@ -1251,6 +1380,7 @@ class Parser:
             type_params=type_params,
             param_types=param_types,
             return_type=return_type,
+            throws=throws,
         )
 
     # -- expressions (precedence chain, lowest to highest binding) --------
@@ -1415,6 +1545,19 @@ class Parser:
 
         if tok.type is TokenType.MATCH:
             return self._parse_postfix_from(self._parse_match())
+
+        if tok.type is TokenType.TRY:
+            self.advance()
+            return self._parse_postfix_from(self._parse_try(tok))
+
+        if tok.type is TokenType.THROW:
+            # M25: `throw`'s operand is a full `parse_expr()`, which already
+            # handles any postfix chain on it (`throw e.foo()`) -- the
+            # `ThrowExpr` node itself is never postfixed (nothing sensible
+            # could follow a Never-typed expression).
+            self.advance()
+            value = self.parse_expr()
+            return ThrowExpr(value=value, position=tok.position)
 
         if tok.type is TokenType.WHILE:
             return self._parse_postfix_from(self._parse_while())

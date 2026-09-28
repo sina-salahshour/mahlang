@@ -161,6 +161,39 @@ class GoldenTests(unittest.TestCase):
         self.assertEqual(format_source(""), "")
         self.assertEqual(format_source("\n\n# just this\n\n"), "# just this\n")
 
+    def test_throw(self):
+        self.check("throw   E.B\n", "throw E.B\n")
+
+    def test_try_catch_with_type_test_and_guard(self):
+        self.check(
+            'let x = try {\nrisky()\n} catch {\nE.A => { 1 }\ne: ParseError if retries > 0 => { 2 }\n_ => { 3 }\n}\n',
+            "let x = try {\n    risky()\n} catch {\n    E.A => { 1 }\n    e: ParseError if retries > 0 => { 2 }\n    _ => { 3 }\n}\n",
+        )
+
+    def test_try_else_shorthand_and_block_form(self):
+        self.check("let y = try   parse(s)   else 0\n", "let y = try parse(s) else 0\n")
+        self.check(
+            "let z = try {\nrisky()\n} else 9\n",
+            "let z = try {\n    risky()\n} else 9\n",
+        )
+
+    def test_throws_clause_on_fn_and_fn_type(self):
+        self.check(
+            "fn f(x: Number) -> Number throws E | ParseError { x }\n",
+            "fn f(x: Number) -> Number throws E | ParseError { x }\n",
+        )
+        self.check("fn g() throws never { }\n", "fn g() throws never { }\n")
+        self.check(
+            "let h: fn(Number) -> String throws E = k\n",
+            "let h: fn(Number) -> String throws E = k\n",
+        )
+
+    def test_catch_and_throws_still_format_as_plain_identifiers(self):
+        self.check(
+            "let catch=1\nlet throws=2\nlet never=3\nprint(catch+throws+never)\n",
+            "let catch = 1\nlet throws = 2\nlet never = 3\nprint(catch + throws + never)\n",
+        )
+
 
 class CorpusTests(unittest.TestCase):
     def test_every_source_formats_verifies_and_is_idempotent(self):

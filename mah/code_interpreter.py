@@ -62,6 +62,7 @@ from .runtime_values import (
     EnumInstance,
     Frame,
     MahRuntimeError,
+    MahThrow,
     MapValue,
     NONE_VALUE,
     PromiseInstance,
@@ -138,19 +139,22 @@ def _bind_params(param_count: int, params, values: list, kwargs: list, label: st
         # no keyword arguments and no defaulted parameters -- existing
         # tests assert this exact string.
         if m != n:
-            raise MahRuntimeError(f"Argument Count is invalid. {label} accepts {n} arguments but {m} was given")
+            raise MahRuntimeError(
+                f"Argument Count is invalid. {label} accepts {n} arguments but {m} was given",
+                kind="ArgumentError",
+            )
         return list(values)
     if m > n:
-        raise MahRuntimeError(f"{label} takes at most {n} positional arguments but {m} were given")
+        raise MahRuntimeError(f"{label} takes at most {n} positional arguments but {m} were given", kind="ArgumentError")
     bound: list = list(values) + [ABSENT] * (n - m)
     bound_flags = [True] * m + [False] * (n - m)
     name_to_index = {pname: i for i, (pname, _has_default) in enumerate(params)} if params else {}
     for k, w in kwargs:
         idx = name_to_index.get(k)
         if idx is None:
-            raise MahRuntimeError(f"{label} got an unexpected keyword argument '{k}'")
+            raise MahRuntimeError(f"{label} got an unexpected keyword argument '{k}'", kind="ArgumentError")
         if bound_flags[idx]:
-            raise MahRuntimeError(f"{label} got multiple values for argument '{k}'")
+            raise MahRuntimeError(f"{label} got multiple values for argument '{k}'", kind="ArgumentError")
         bound[idx] = w
         bound_flags[idx] = True
     for i in range(n):
@@ -159,7 +163,7 @@ def _bind_params(param_count: int, params, values: list, kwargs: list, label: st
         has_default = params[i][1] if params else False
         if not has_default:
             pname = params[i][0] if params else f"#{i}"
-            raise MahRuntimeError(f"{label} is missing required argument '{pname}'")
+            raise MahRuntimeError(f"{label} is missing required argument '{pname}'", kind="ArgumentError")
     return bound
 
 
@@ -196,11 +200,12 @@ def _bind_method_call(recv, fn, include_self: bool, name: str, values: list, kwa
                 bound[fn.arity + i] = default
         return [recv] + bound
     if kwargs:
-        raise MahRuntimeError(f"{label} got an unexpected keyword argument '{kwargs[0][0]}'")
+        raise MahRuntimeError(f"{label} got an unexpected keyword argument '{kwargs[0][0]}'", kind="ArgumentError")
     arity = fn.arity if isinstance(fn, NativeMethod) else 0
     if len(values) != arity:
         raise MahRuntimeError(
-            f"Argument Count is invalid. {label} accepts {arity} arguments but {len(values)} was given"
+            f"Argument Count is invalid. {label} accepts {arity} arguments but {len(values)} was given",
+            kind="ArgumentError",
         )
     return [recv] + list(values)
 
@@ -253,6 +258,9 @@ class LinkedProgram(NamedTuple):
     functions: list        # FunctionInfo aligned to function index
     code: list              # directly-executable instruction tuples
     debug: DebugIndex | None
+    # M25 (docs/MAHC_FORMAT.md #4.8): (start, end, handler, slot) tuples, in
+    # section order (innermost-first) -- see `step_task`'s `_unwind`.
+    handlers: list
 
 
 def _convert_const(const, strings: list) -> Any:
@@ -272,11 +280,40 @@ def _convert_const(const, strings: list) -> Any:
     raise AssertionError(f"unknown constant tag {tag}")
 
 
-def _build_types(type_decls: list, strings: list) -> list:
-    infos = [
-        TypeInfo(1, "Option", None, [("none", []), ("some", ["value"])]),
-        TypeInfo(1, "Promise", None, [("Pending", []), ("Settled", ["value"])]),
-    ]
+def _build_types(type_decls: list, strings: list, minor: int) -> list:
+    if minor >= 4:
+        # M25 (docs/MAHC_FORMAT.md #4.1): `Promise` gains `Failed { error }`,
+        # and a new built-in enum `RuntimeError` (index 2) is pre-seeded --
+        # user types are numbered from 3. Variant order matches
+        # compiler/resolve.py's pre-seeded `enum_decls` exactly.
+        infos = [
+            TypeInfo(1, "Option", None, [("none", []), ("some", ["value"])]),
+            TypeInfo(1, "Promise", None, [("Pending", []), ("Settled", ["value"]), ("Failed", ["error"])]),
+            TypeInfo(
+                1,
+                "RuntimeError",
+                None,
+                [
+                    (name, ["message"])
+                    for name in (
+                        "DivisionByZero",
+                        "TypeMismatch",
+                        "NoSuchField",
+                        "NoSuchMethod",
+                        "ArgumentError",
+                        "IndexOutOfRange",
+                        "MatchFailed",
+                        "InputError",
+                        "Internal",
+                    )
+                ],
+            ),
+        ]
+    else:
+        infos = [
+            TypeInfo(1, "Option", None, [("none", []), ("some", ["value"])]),
+            TypeInfo(1, "Promise", None, [("Pending", []), ("Settled", ["value"])]),
+        ]
     for t in type_decls:
         name = strings[t.name]
         if t.kind == 0:
@@ -407,6 +444,9 @@ def _link_instr(instr, strings: list, constants: list, types: list, natives: lis
     if op == "matchrange":
         value, lo, hi, inclusive, dest = a
         return ("matchrange", value, lo, hi, inclusive, dest)
+    if op == "matchtype":
+        value, t_idx, dest = a
+        return ("matchtype", value, types[t_idx], dest)
     if op == "matchfail":
         return ("matchfail",)
     if op == "deferpush":
@@ -419,6 +459,12 @@ def _link_instr(instr, strings: list, constants: list, types: list, natives: lis
         return ("deferpop", a[0])
     if op == "deferscopepop":
         return ("deferscopepop",)
+    if op == "deferdepth":
+        return ("deferdepth", a[0])
+    if op == "deferabove":
+        return ("deferabove", a[0], a[1])
+    if op == "throw":
+        return ("throw", a[0])
     if op == "native":
         native_idx, args, dest = a
         _name, _arity, impl = natives[native_idx]
@@ -436,7 +482,7 @@ def _link_debug(debug, strings: list) -> DebugIndex:
 def _link(program: Program) -> LinkedProgram:
     strings = program.strings
     constants = [_convert_const(c, strings) for c in program.constants]
-    types = _build_types(program.types, strings)
+    types = _build_types(program.types, strings, program.minor)
     natives = _validate_natives(program.natives, strings)
     functions = [
         FunctionInfo(
@@ -452,7 +498,7 @@ def _link(program: Program) -> LinkedProgram:
     ]
     code = [_link_instr(instr, strings, constants, types, natives, functions) for instr in program.code]
     debug = _link_debug(program.debug, strings) if program.debug is not None else None
-    return LinkedProgram(constants, types, natives, functions, code, debug)
+    return LinkedProgram(constants, types, natives, functions, code, debug, list(program.handlers))
 
 
 # ---------------------------------------------------------------------------
@@ -538,9 +584,12 @@ def _string_char_at(s: str, i: Any) -> str:
     points, one per index (Python `str` indexing already is code-point
     based) -- `0 <= i < len(s)`, `i` an integer Number."""
     if not _is_number(i):
-        raise MahRuntimeError(f"char_at index must be a Number, got {type_name_of(i)}")
+        raise MahRuntimeError(f"char_at index must be a Number, got {type_name_of(i)}", kind="TypeMismatch")
     if i != i.to_integral_value() or i < 0 or i >= len(s):
-        raise MahRuntimeError(f"char_at index {_format_number(i)} is out of range for a String of length {len(s)}")
+        raise MahRuntimeError(
+            f"char_at index {_format_number(i)} is out of range for a String of length {len(s)}",
+            kind="IndexOutOfRange",
+        )
     return s[int(i)]
 
 
@@ -553,7 +602,7 @@ def _seq_position(n: int, i: Any, type_label: str) -> int | None:
     item. A non-Number index is a runtime error rather than `None`: it's
     always a bug."""
     if not _is_number(i):
-        raise MahRuntimeError(f"{type_label} index must be a Number, got {type_name_of(i)}")
+        raise MahRuntimeError(f"{type_label} index must be a Number, got {type_name_of(i)}", kind="TypeMismatch")
     if i != i.to_integral_value():
         return None
     pos = int(i)
@@ -580,7 +629,7 @@ def _is_range(v: Any) -> bool:
 def _slice_bound(v: Any, type_label: str) -> int:
     if not _is_number(v) or v != v.to_integral_value():
         shown = _format_number(v) if _is_number(v) else type_name_of(v)
-        raise MahRuntimeError(f"{type_label} slice bounds must be integer Numbers, got {shown}")
+        raise MahRuntimeError(f"{type_label} slice bounds must be integer Numbers, got {shown}", kind="TypeMismatch")
     return int(v)
 
 
@@ -628,12 +677,15 @@ def _string_index(s: str, i: Any) -> Any:
 
 def _vector_index_assign(vec: VectorValue, i: Any, value: Any) -> Any:
     if _is_range(i):
-        raise MahRuntimeError("Can't assign to a Vector slice (v[a..b] = ...); assign items one at a time")
+        raise MahRuntimeError(
+            "Can't assign to a Vector slice (v[a..b] = ...); assign items one at a time", kind="TypeMismatch"
+        )
     pos = _vector_position(vec, i)
     if pos is None:
         raise MahRuntimeError(
             f"Vector index {_format_number(i)} is out of range for a Vector of length {len(vec.items)} "
-            f"(use push to add items)"
+            f"(use push to add items)",
+            kind="IndexOutOfRange",
         )
     vec.items[pos] = value
     return NONE_VALUE
@@ -704,7 +756,7 @@ def _collection_copy(value: Any, deep: Any) -> Any:
 def _map_key_of(key: Any) -> tuple:
     k = map_key(key)
     if k is None:
-        raise MahRuntimeError(f"Map keys must be a String, Number, or Bool, got {type_name_of(key)}")
+        raise MahRuntimeError(f"Map keys must be a String, Number, or Bool, got {type_name_of(key)}", kind="TypeMismatch")
     return k
 
 
@@ -905,24 +957,29 @@ def _execute(linked: LinkedProgram) -> None:
             elif len(entry["traits"]) > 1:
                 raise MahRuntimeError(
                     f"Method '{name}' on '{tname}' is ambiguous: provided by traits "
-                    f"{sorted(entry['traits'])}; call it as 'Trait.{name}(value, ...)'"
+                    f"{sorted(entry['traits'])}; call it as 'Trait.{name}(value, ...)'",
+                    kind="NoSuchMethod",
                 )
         if trait is None and (target is None or not target[1]):
             if isinstance(recv, (StructInstance, EnumInstance)) and name in recv.fields:
                 value = recv.fields[name]
                 if not isinstance(value, Closure):
                     raise MahRuntimeError(
-                        f"Field '{name}' of '{tname}' is not a function (it holds a {type_name_of(value)})"
+                        f"Field '{name}' of '{tname}' is not a function (it holds a {type_name_of(value)})",
+                        kind="NoSuchMethod",
                     )
                 return value, False
         if target is None:
             if trait is not None:
-                raise MahRuntimeError(f"'{tname}' does not implement trait '{trait}' (no method '{name}')")
-            raise MahRuntimeError(f"'{tname}' has no method '{name}'")
+                raise MahRuntimeError(
+                    f"'{tname}' does not implement trait '{trait}' (no method '{name}')", kind="NoSuchMethod"
+                )
+            raise MahRuntimeError(f"'{tname}' has no method '{name}'", kind="NoSuchMethod")
         fn, is_method = target
         if not is_method:
             raise MahRuntimeError(
-                f"'{name}' is a static function of '{tname}', not a method; call it as '{tname}.{name}(...)'"
+                f"'{name}' is a static function of '{tname}', not a method; call it as '{tname}.{name}(...)'",
+                kind="NoSuchMethod",
             )
         return fn, True
 
@@ -947,6 +1004,12 @@ def _execute(linked: LinkedProgram) -> None:
             raise MahRuntimeError(
                 f"'{label}' cannot suspend (it awaited a pending Promise) when called implicitly by the runtime"
             )
+        if status == "failed":
+            # M25 (docs/MAHC_FORMAT.md #4.6): the sub-task's error is thrown
+            # in the CALLING task, at the instruction that invoked it, so
+            # it can be caught there -- the enclosing `step_task`'s own
+            # `except MahThrow` does exactly that.
+            raise MahThrow(value)
         return value
 
     def to_str(val) -> str:
@@ -957,7 +1020,8 @@ def _execute(linked: LinkedProgram) -> None:
             if not isinstance(result, str):
                 raise MahRuntimeError(
                     f"Printable.to_string for '{type_name_of(val)}' must return a String, got "
-                    f"{type_name_of(result)}"
+                    f"{type_name_of(result)}",
+                    kind="TypeMismatch",
                 )
             return result
         return _format_value(val, to_str)
@@ -980,7 +1044,7 @@ def _execute(linked: LinkedProgram) -> None:
             return to_str(a) + to_str(b)
         if _is_number(a) and _is_number(b):
             return a + b
-        raise MahRuntimeError(f"Cannot apply '+' to {type_name_of(a)} and {type_name_of(b)}")
+        raise MahRuntimeError(f"Cannot apply '+' to {type_name_of(a)} and {type_name_of(b)}", kind="TypeMismatch")
 
     def _op_mul(a, b):
         if _is_number(a) and _is_number(b):
@@ -991,30 +1055,33 @@ def _execute(linked: LinkedProgram) -> None:
         if isinstance(b, str) and _is_number(a) and a == a.to_integral_value():
             n = int(a)
             return b * n if n > 0 else ""
-        raise MahRuntimeError(f"Cannot apply '*' to {type_name_of(a)} and {type_name_of(b)}")
+        raise MahRuntimeError(f"Cannot apply '*' to {type_name_of(a)} and {type_name_of(b)}", kind="TypeMismatch")
 
     def _numeric_binop(op: str, a, b):
         if not (_is_number(a) and _is_number(b)):
-            raise MahRuntimeError(f"Cannot apply '{_BINOP_SYMBOLS[op]}' to {type_name_of(a)} and {type_name_of(b)}")
+            raise MahRuntimeError(
+                f"Cannot apply '{_BINOP_SYMBOLS[op]}' to {type_name_of(a)} and {type_name_of(b)}",
+                kind="TypeMismatch",
+            )
         if op == "sub":
             return a - b
         if op == "div":
             if b == 0:
-                raise MahRuntimeError("Division by zero")
+                raise MahRuntimeError("Division by zero", kind="DivisionByZero")
             return a / b
         if op == "idiv":
             if b == 0:
-                raise MahRuntimeError("Division by zero")
+                raise MahRuntimeError("Division by zero", kind="DivisionByZero")
             return a // b
         if op == "mod":
             if b == 0:
-                raise MahRuntimeError("Division by zero")
+                raise MahRuntimeError("Division by zero", kind="DivisionByZero")
             return a % b
         if op == "pow":
             if a == 0 and b < 0:
                 # `decimal` would return Infinity here (untrapped), which
                 # Mah has no representation for
-                raise MahRuntimeError("Division by zero")
+                raise MahRuntimeError("Division by zero", kind="DivisionByZero")
             return a**b
         raise AssertionError(op)
 
@@ -1027,39 +1094,151 @@ def _execute(linked: LinkedProgram) -> None:
             if op == "le":
                 return a <= b
             return a >= b  # "ge"
-        raise MahRuntimeError(f"Cannot compare {type_name_of(a)} and {type_name_of(b)} with '{_BINOP_SYMBOLS[op]}'")
+        raise MahRuntimeError(
+            f"Cannot compare {type_name_of(a)} and {type_name_of(b)} with '{_BINOP_SYMBOLS[op]}'", kind="TypeMismatch"
+        )
 
-    def step_task(task: Task):
-        """Advance `task` until it finishes (`("done", value)`) or genuinely
+    def find_handler(pc: int):
+        """M25 (docs/MAHC_FORMAT.md #4.4): the first handler entry (in
+        section order -- innermost first) whose `[start, end)` range
+        contains `pc`, or `None`. A linear scan is fine (no performance
+        work on handler lookup is in scope for M25)."""
+        for start, end, handler, slot in linked.handlers:
+            if start <= pc < end:
+                return handler, slot
+        return None
+
+    def unwind(task: Task, value, pc: int) -> bool:
+        """docs/MAHC_FORMAT.md #4.4's throw/unwind algorithm. `pc` is the
+        instruction that's throwing `value` (in `task`'s CURRENT frame --
+        the caller is responsible for `task.current_frame` already being
+        the right one when this is first called). Returns `True` (a
+        handler was found; `task.pc`/`task.current_frame` are already set
+        to resume there) or `False` (uncaught in `task`: its return stack
+        ran out with no handler covering any frame)."""
+        if isinstance(value, (StructInstance, EnumInstance)) and value.thrown_at is None:
+            value.thrown_at = pc
+        while True:
+            found = find_handler(pc)
+            if found is not None:
+                handler, slot = found
+                _write(task.current_frame, (0, slot), value)
+                task.pc = handler
+                return True
+            if not task.return_stack:
+                return False
+            pc, task.current_frame = task.return_stack.pop()
+            pc -= 1  # the call instruction that's still unwinding
+
+    def _implements_error(v) -> bool:
+        """docs/MAHC_FORMAT.md #4.6's `throw` opcode: whether `v`'s type has
+        an `Error`-trait target for method `message` in the method table.
+        A `RuntimeError` always does: it's built in, and its `Error` impl
+        lives in the prelude, which a program without `try`/`throw` doesn't
+        include -- yet an implicit defer handler still re-throws it."""
+        if type_name_of(v) == "RuntimeError":
+            return True
+        entry = method_table.get((type_name_of(v), "message"))
+        return entry is not None and entry["traits"].get("Error") is not None
+
+    def _matches_type(val, type_info) -> bool:
+        """`matchtype` (docs/MAHC_FORMAT.md #6.3): any variant matches, for
+        an enum -- so this is exactly the same "instance of this type"
+        check `matchstruct`/`matchenum` already do, minus the variant
+        check."""
+        if type_info.kind == 0:
+            return isinstance(val, StructInstance) and val.type_name == type_info.name
+        return isinstance(val, EnumInstance) and val.type_name == type_info.name
+
+    def _uncaught_message(value) -> str | None:
+        """docs/MAHC_FORMAT.md #4.6: the `<m>` in `Uncaught T: <m>` -- call
+        `value`'s `Error.message` synchronously; fall back to
+        `to_str(value)` if that throws, suspends, or returns a non-String;
+        `None` (caller falls back to the bare `Uncaught T`) if that fails
+        too."""
+        entry = method_table.get((type_name_of(value), "message"))
+        target = entry["traits"].get("Error") if entry else None
+        if target is not None and isinstance(target[0], Closure):
+            try:
+                result = invoke_sync(target[0], [value], "message")
+            except Exception:  # noqa: BLE001 -- any failure falls back to to_string
+                result = None
+            if isinstance(result, str):
+                return result
+        try:
+            return to_str(value)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def uncaught_report(value) -> str:
+        """docs/MAHC_FORMAT.md #4.6's uncaught-error report text: a
+        `RuntimeError` value's own `message` field, or `Uncaught T: <m>`
+        for any other error type -- located at `thrown_at`, exactly like
+        an ordinary runtime error's `at position ...` suffix (none in a
+        release build, via `locate`)."""
+        if isinstance(value, EnumInstance) and value.type_name == "RuntimeError":
+            base = value.fields.get("message", "")
+        else:
+            tname = type_name_of(value)
+            m = _uncaught_message(value)
+            base = f"Uncaught {tname}" if m is None else f"Uncaught {tname}: {m}"
+        pc = getattr(value, "thrown_at", None)
+        return base if pc is None else locate(pc, base)
+
+    def step_task(task: Task, pending=None):
+        """Advance `task` until it finishes (`("done", value)`), genuinely
         suspends (`("suspended", None)`, having already arranged for
-        `drive` to be called again once whatever it awaited resolves).
-        Reentrant: `invoke_sync`/`spawn_detached` call this again, for a
-        brand new `Task`, while an outer call is still on the Python stack.
+        `drive` to be called again once whatever it awaited resolves), or
+        fails with an error uncaught anywhere in `task` (`("failed",
+        value)` -- docs/MAHC_FORMAT.md #4.6). Reentrant: `invoke_sync`/
+        `spawn_detached` call this again, for a brand new `Task`, while an
+        outer call is still on the Python stack.
 
-        Wraps any exception raised while executing the instruction most
-        recently fetched (`current_pc`) into a located `MahRuntimeError`,
-        exactly once -- an exception that already passed through some
-        OTHER `step_task` call (its own nested step loop, e.g. inside
-        `invoke_sync`) is already marked `.located` and passes through
-        here untouched, so a nested failure gets exactly one location
-        suffix, not one per step loop it unwinds through."""
+        M25: `pending=(value, pc)` resumes a task that suspended awaiting a
+        Promise which has since failed -- unwind with it before the normal
+        fetch-execute loop even starts (the await instruction's own "throw"
+        never actually re-executes).
+
+        Every runtime error (a `MahRuntimeError` from any raise site, an
+        explicit `throw` via `MahThrow`, or any other Python exception --
+        treated as `RuntimeError.Internal`, wrapping a host-language
+        failure) is turned into a `RuntimeError` value (or, for `MahThrow`,
+        the thrown Mah value itself) and unwound within `task` exactly like
+        docs/MAHC_FORMAT.md #4.4 describes; only when `task`'s own return
+        stack runs out with no handler found does this function return
+        `("failed", value)` rather than looping again -- the caller
+        (`drive`) decides what an uncaught failure means for that task (the
+        main task: fatal; a detached task: fail its Promise)."""
         nonlocal return_register
+        if pending is not None:
+            value, pc = pending
+            if not unwind(task, value, pc):
+                return "failed", value
         while True:
             current_pc = task.pc
             instr = code[current_pc]
             task.pc = current_pc + 1
             try:
                 result = _exec(task, instr)
+            except MahThrow as thrown:
+                if not unwind(task, thrown.value, current_pc):
+                    return "failed", thrown.value
+                continue
             except MahRuntimeError as exc:
                 if exc.located:
+                    # A fatal, already-reported error bubbling out (see
+                    # `drive`) -- never caught/unwound, just re-raised
+                    # untouched past this step loop too.
                     raise
-                new_exc = MahRuntimeError(locate(current_pc, str(exc)))
-                new_exc.located = True
-                raise new_exc from None
+                value = EnumInstance("RuntimeError", exc.kind, {"message": str(exc)})
+                if not unwind(task, value, current_pc):
+                    return "failed", value
+                continue
             except Exception as exc:  # noqa: BLE001 -- wrap any non-Mah Python exception too
-                new_exc = MahRuntimeError(locate(current_pc, str(exc)))
-                new_exc.located = True
-                raise new_exc from None
+                value = EnumInstance("RuntimeError", "Internal", {"message": str(exc)})
+                if not unwind(task, value, current_pc):
+                    return "failed", value
+                continue
             if result is not None:
                 return result
 
@@ -1097,7 +1276,7 @@ def _execute(linked: LinkedProgram) -> None:
             case ("neg", a_addr, dest):
                 v = _read(frame, a_addr)
                 if not _is_number(v):
-                    raise MahRuntimeError(f"Cannot negate {type_name_of(v)}")
+                    raise MahRuntimeError(f"Cannot negate {type_name_of(v)}", kind="TypeMismatch")
                 _write(frame, dest, -v)
             case ("not", a_addr, dest):
                 _write(frame, dest, bool(not truthy(_read(frame, a_addr))))
@@ -1117,7 +1296,7 @@ def _execute(linked: LinkedProgram) -> None:
             case ("call", callee_addr, arg_addrs):
                 closure = _read(frame, callee_addr)
                 if not isinstance(closure, Closure):
-                    raise MahRuntimeError(f"Tried to call a non-function value ({type_name_of(closure)})")
+                    raise MahRuntimeError(f"Tried to call a non-function value ({type_name_of(closure)})", kind="TypeMismatch")
                 label = f"'{closure.name}'" if closure.name else "function"
                 values = [_read(frame, a) for a in arg_addrs]
                 bound = _bind_params(closure.param_count, closure.params, values, [], label)
@@ -1125,7 +1304,7 @@ def _execute(linked: LinkedProgram) -> None:
             case ("callkw", callee_addr, arg_addrs, kwnames):
                 closure = _read(frame, callee_addr)
                 if not isinstance(closure, Closure):
-                    raise MahRuntimeError(f"Tried to call a non-function value ({type_name_of(closure)})")
+                    raise MahRuntimeError(f"Tried to call a non-function value ({type_name_of(closure)})", kind="TypeMismatch")
                 label = f"'{closure.name}'" if closure.name else "function"
                 npos = len(arg_addrs) - len(kwnames)
                 values = [_read(frame, a) for a in arg_addrs[:npos]]
@@ -1145,7 +1324,7 @@ def _execute(linked: LinkedProgram) -> None:
             case ("detach", callee_addr, arg_addrs, dest):
                 closure = _read(frame, callee_addr)
                 if not isinstance(closure, Closure):
-                    raise MahRuntimeError(f"Tried to detach a non-function value ({type_name_of(closure)})")
+                    raise MahRuntimeError(f"Tried to detach a non-function value ({type_name_of(closure)})", kind="TypeMismatch")
                 label = f"'{closure.name}'" if closure.name else "function"
                 values = [_read(frame, a) for a in arg_addrs]
                 bound = _bind_params(closure.param_count, closure.params, values, [], label)
@@ -1153,7 +1332,7 @@ def _execute(linked: LinkedProgram) -> None:
             case ("detachkw", callee_addr, arg_addrs, kwnames, dest):
                 closure = _read(frame, callee_addr)
                 if not isinstance(closure, Closure):
-                    raise MahRuntimeError(f"Tried to detach a non-function value ({type_name_of(closure)})")
+                    raise MahRuntimeError(f"Tried to detach a non-function value ({type_name_of(closure)})", kind="TypeMismatch")
                 label = f"'{closure.name}'" if closure.name else "function"
                 npos = len(arg_addrs) - len(kwnames)
                 values = [_read(frame, a) for a in arg_addrs[:npos]]
@@ -1163,16 +1342,30 @@ def _execute(linked: LinkedProgram) -> None:
             case ("await", promise_addr, dest):
                 value = _read(frame, promise_addr)
                 if not isinstance(value, PromiseInstance):
-                    raise MahRuntimeError(f"'.await' used on a non-Promise value ({type_name_of(value)})")
+                    raise MahRuntimeError(f"'.await' used on a non-Promise value ({type_name_of(value)})", kind="TypeMismatch")
+                # M25 (docs/MAHC_FORMAT.md #4.6): observed regardless of
+                # variant -- settled, still pending, or already failed.
+                value.observed = True
                 if value.variant == "Settled":
                     _write(frame, dest, value.fields["value"])
+                elif value.variant == "Failed":
+                    # Throw at the await instruction itself -- `current_pc`
+                    # in the enclosing `step_task` is exactly that.
+                    raise MahThrow(value.fields["error"])
                 else:
                     resume_pc = task.pc
 
-                    def _resume(resolved_value, task=task, dest=dest, resume_pc=resume_pc):
-                        _write(task.current_frame, dest, resolved_value)
-                        task.pc = resume_pc
-                        drive(task)
+                    def _resume(ok, resolved_value, task=task, dest=dest, resume_pc=resume_pc):
+                        if ok:
+                            _write(task.current_frame, dest, resolved_value)
+                            task.pc = resume_pc
+                            drive(task)
+                        else:
+                            # M25: throw `resolved_value` (the error) at the
+                            # await instruction (`resume_pc - 1`) in the
+                            # task's own frame -- it's still current since
+                            # nothing else ran in `task` while suspended.
+                            drive(task, pending=(resolved_value, resume_pc - 1))
 
                     value.callbacks.append(_resume)
                     return "suspended", None
@@ -1196,16 +1389,16 @@ def _execute(linked: LinkedProgram) -> None:
             case ("getfield", obj_addr, field_name, dest):
                 obj = _read(frame, obj_addr)
                 if not isinstance(obj, (StructInstance, EnumInstance)):
-                    raise MahRuntimeError(f"Tried to access field '{field_name}' on a non-struct value ({type_name_of(obj)})")
+                    raise MahRuntimeError(f"Tried to access field '{field_name}' on a non-struct value ({type_name_of(obj)})", kind="TypeMismatch")
                 if field_name not in obj.fields:
-                    raise MahRuntimeError(f"'{obj.type_name}' has no field '{field_name}'")
+                    raise MahRuntimeError(f"'{obj.type_name}' has no field '{field_name}'", kind="NoSuchField")
                 _write(frame, dest, obj.fields[field_name])
             case ("setfield", obj_addr, field_name, src_addr):
                 obj = _read(frame, obj_addr)
                 if not isinstance(obj, (StructInstance, EnumInstance)):
-                    raise MahRuntimeError(f"Tried to access field '{field_name}' on a non-struct value ({type_name_of(obj)})")
+                    raise MahRuntimeError(f"Tried to access field '{field_name}' on a non-struct value ({type_name_of(obj)})", kind="TypeMismatch")
                 if field_name not in obj.fields:
-                    raise MahRuntimeError(f"'{obj.type_name}' has no field '{field_name}'")
+                    raise MahRuntimeError(f"'{obj.type_name}' has no field '{field_name}'", kind="NoSuchField")
                 obj.fields[field_name] = _read(frame, src_addr)
             case ("matchstruct", value_addr, type_info, dest):
                 val = _read(frame, value_addr)
@@ -1222,8 +1415,10 @@ def _execute(linked: LinkedProgram) -> None:
                 lo = _read(frame, lo_addr) if lo_addr is not None else None
                 hi = _read(frame, hi_addr) if hi_addr is not None else None
                 _write(frame, dest, _matchrange(val, lo, hi, inclusive))
+            case ("matchtype", value_addr, type_info, dest):
+                _write(frame, dest, _matches_type(_read(frame, value_addr), type_info))
             case ("matchfail",):
-                raise MahRuntimeError("No pattern in 'match' matched the value")
+                raise MahRuntimeError("No pattern in 'match' matched the value", kind="MatchFailed")
             case ("deferpush",):
                 task.defer_stack.append([])
             case ("deferadd", closure_addr):
@@ -1234,6 +1429,24 @@ def _execute(linked: LinkedProgram) -> None:
                 _write(frame, dest, task.defer_stack[-1].pop())
             case ("deferscopepop",):
                 task.defer_stack.pop()
+            case ("deferdepth", dest):
+                _write(frame, dest, Decimal(len(task.defer_stack)))
+            case ("deferabove", depth_addr, dest):
+                _write(frame, dest, len(task.defer_stack) > _read(frame, depth_addr))
+            case ("throw", value_addr):
+                v = _read(frame, value_addr)
+                if not _implements_error(v):
+                    v = EnumInstance(
+                        "RuntimeError",
+                        "TypeMismatch",
+                        {
+                            "message": (
+                                f"Cannot throw a value of type '{type_name_of(v)}': "
+                                f"it does not implement Error"
+                            )
+                        },
+                    )
+                raise MahThrow(v)
             case ("defmethod", closure_addr, type_name, trait, name, is_method):
                 closure = _read(frame, closure_addr)
                 entry = method_table.setdefault((type_name, name), {"inherent": None, "traits": {}})
@@ -1296,10 +1509,29 @@ def _execute(linked: LinkedProgram) -> None:
                 raise AssertionError(f"invalid linked instruction {other!r}")
         return None
 
-    def drive(task: Task) -> None:
-        status, value = step_task(task)
-        if status == "done" and task.watching_promise is not None:
-            task.watching_promise.resolve(value)
+    # M25 (docs/MAHC_FORMAT.md #4.6): every detached task's Promise that
+    # failed, in fail order -- checked at program end for ones nobody ever
+    # `.await`ed (see the loop after the scheduler below).
+    failed_promises: list = []
+
+    def drive(task: Task, pending=None) -> None:
+        status, value = step_task(task, pending)
+        if status == "done":
+            if task.watching_promise is not None:
+                task.watching_promise.resolve(value)
+        elif status == "failed":
+            if task is main_task:
+                # Fatal: stops the whole program immediately, exactly like
+                # an uncaught runtime error always has (pending timers are
+                # abandoned) -- docs/MAHC_FORMAT.md #4.6.
+                new_exc = MahRuntimeError(uncaught_report(value))
+                new_exc.located = True
+                raise new_exc
+            if task.watching_promise is not None:
+                task.watching_promise.fail(value)
+                failed_promises.append(task.watching_promise)
+        # status == "suspended": nothing to do here, a continuation is
+        # already registered (the `await` case, or a timer).
 
     if not linked.functions:
         raise MahcFormatError("FUNCTIONS section must declare at least one function")
@@ -1312,3 +1544,12 @@ def _execute(linked: LinkedProgram) -> None:
     while main_promise.variant != "Settled" or timers:
         if not drain_next_timer():
             break
+
+    # M25 (docs/MAHC_FORMAT.md #4.6): once the program would otherwise end
+    # normally, report the FIRST never-observed failed detached-task
+    # Promise (in fail order) as an uncaught error, if there is one.
+    for promise in failed_promises:
+        if not promise.observed:
+            new_exc = MahRuntimeError(uncaught_report(promise.fields["error"]))
+            new_exc.located = True
+            raise new_exc

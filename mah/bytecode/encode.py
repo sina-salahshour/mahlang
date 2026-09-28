@@ -14,6 +14,7 @@ from .format import (
     SEC_CONSTANTS,
     SEC_DEBUG,
     SEC_FUNCTIONS,
+    SEC_HANDLERS,
     SEC_NATIVES,
     SEC_PARAMS,
     SEC_STRINGS,
@@ -159,6 +160,16 @@ def encode(program: Program) -> bytes:
                 payload += _str_index(name_idx)
                 payload += _u8(1 if has_default else 0)
         out += _section(SEC_PARAMS, bytes(payload))
+
+    # HANDLERS (0x08, required from minor 4 -- docs/MAHC_FORMAT.md #4.8)
+    if program.minor >= 4:
+        payload = bytearray(write_varuint(len(program.handlers)))
+        for start, end, handler, slot in program.handlers:
+            payload += write_varuint(start)
+            payload += write_varuint(end)
+            payload += write_varuint(handler)
+            payload += write_varuint(slot)
+        out += _section(SEC_HANDLERS, bytes(payload))
 
     # DEBUG (optional; only present for a debug-target build)
     if program.debug is not None:

@@ -613,9 +613,54 @@ are global across all imported files and need no `export`.
 
 ## Errors
 
-There's no exception handling yet. A runtime error (calling a missing
-method, a type mismatch like `1 + true`, division by zero, a `match` with
-no matching arm) stops the program with a message and source location.
+`throw` raises a value -- any struct/enum that `impl`s the built-in `Error`
+trait -- as an error; it unwinds to the nearest enclosing `try` (or up to the
+program itself). `try { ... } catch { arms }`'s arms are `match` arms, plus
+one new pattern kind, `name: Type`/`_: Type` ("type-test"), which matches
+any instance of that type. An arm that doesn't match re-throws the error to
+whatever encloses this `try`. `try EXPR else FALLBACK` catches everything
+and evaluates to `FALLBACK`.
+
+```mah
+enum ParseError { Empty, BadDigit }
+impl Error for ParseError {
+    fn message(self) {
+        match self {
+            ParseError.Empty => { "empty input" }
+            ParseError.BadDigit => { "not a digit" }
+        }
+    }
+}
+
+fn first_digit(s) {
+    if s.len() == 0 { throw ParseError.Empty }
+    let c = s.char_at(0)
+    if c < "0" | c > "9" { throw ParseError.BadDigit }
+    c
+}
+
+fn safe_first_digit(s) {
+    try { first_digit(s) } catch { ParseError.Empty => { "was empty" } }   # BadDigit: re-thrown
+}
+
+let a = try { safe_first_digit("x") } catch { e: ParseError => { "other: " + e.message() } }
+let b = try first_digit("x") else "?"          # try/else shorthand
+print(a, b)                                    # other: not a digit ?
+print(try { 1 / 0 } catch { e: RuntimeError => { e.message } })   # Division by zero
+
+fn load(s: String) -> String throws ParseError { s }   # `throws`: documentation, not checked yet
+```
+
+Every VM-raised failure (division by zero, a bad method call, an
+out-of-range index, a `match` with no matching arm, ...) is a value of the
+built-in `RuntimeError` enum -- catchable the same way as any other error
+(`RuntimeError.DivisionByZero { message } =>`, or a type-test `e:
+RuntimeError =>`). `Error`'s default `message()` is the value's own
+`to_string()`; override it (as above) for a nicer message. `defer`red
+blocks still run, in order, while an error unwinds past them. A function's
+signature may declare what it can throw with `throws` (as above; `throws
+never` declares none) -- purely documentation for now, not yet checked. An
+error nothing catches stops the program with a message and source location.
 Compile errors (syntax, undefined names, wrong struct fields) are reported
 before anything runs.
 
@@ -628,7 +673,8 @@ before anything runs.
   `for` bindings, labeled `break`/`continue`.
 - String methods other than `len`/`char_at` (no `split`, `replace`, ...).
 - `&&`, `||`, `+=`, `++`, ternary `?:`.
-- Type-checking trait-typed values, bounds, and the prelude's iterator methods (the checker skips these for now); classes/inheritance, exceptions/`try`.
+- Type-checking trait-typed values, bounds, and the prelude's iterator methods (the checker skips these for now); classes/inheritance.
+- Checking `throws` clauses or inferring a function's error set ("unhandled error" diagnostics) -- `try`/`throw`/`catch` themselves work at runtime; see Errors.
 - Variadic parameters (`*args`, `**kwargs`); only `print` takes any number of arguments.
 - File, network, or OS access (planned as future built-ins).
 - `null`/`nil`/`undefined`: use `none`.

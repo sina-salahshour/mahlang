@@ -208,3 +208,16 @@ explicit patterns, always single-file (structs/enums can't be exported/
 imported across files at all). Field-*access* rename (`p.x`) remains
 deliberately refused, unsound without a real type system -- still waits
 on `docs/NEXT_PHASES.md`'s own "The type system" section above.
+
+## Errors and the standard library
+
+Designed 2026-09-28: typed, checked, inferred errors (`throw` /
+`try ... catch`) in [`ERRORS.md`](ERRORS.md), then the `std:` standard
+library (json, csv, fs, process, random, math, path, time, async, regex,
+collections, socket, http) in [`STDLIB.md`](STDLIB.md). **M25 landed the
+errors design's syntax + runtime** (both VMs); the static checker's
+error-set inference/checking (M26) is still not implemented. The
+standard library still waits on M26 (its I/O and parsing functions throw
+the errors `ERRORS.md` describes, and want the checker to track them).
+`std:test` and the `mah test` runner ([`MAH_TEST.md`](MAH_TEST.md)) come
+right after errors and `std:` resolution.

@@ -17,6 +17,12 @@ like any user program.
 M19 bumps MINOR to 3: Vectors and Maps -- the `vector`/`map` opcodes, the
 built-in types `Vector`/`Map`, their native inherent methods, and the
 `Index`/`IndexAssign` system traits (docs/MAHC_FORMAT.md #6.7/#6.9).
+
+M25 bumps MINOR to 4: typed, catchable errors (docs/ERRORS.md). New
+built-in type `RuntimeError` (index 2; user types now numbered from 3),
+`Promise` gains a `Failed { error }` variant, the new opcodes `matchtype`/
+`deferdepth`/`deferabove`/`throw`, and a new required section HANDLERS
+(`0x08`, required iff minor >= 4) -- docs/MAHC_FORMAT.md #4.1/#4.3/#4.6/#4.8.
 """
 
 from __future__ import annotations
@@ -29,7 +35,7 @@ MAGIC = b"MAHC"
 # `.mahc` extension).
 SHEBANG = b"#!/usr/bin/env -S mah runc\n"
 MAJOR = 1
-MINOR = 3
+MINOR = 4
 
 # -- section ids (docs/MAHC_FORMAT.md #3) -----------------------------------
 SEC_STRINGS = 0x01
@@ -39,6 +45,7 @@ SEC_NATIVES = 0x04
 SEC_FUNCTIONS = 0x05
 SEC_CODE = 0x06
 SEC_PARAMS = 0x07  # M16 (1.1): required iff minor >= 1 -- docs/MAHC_FORMAT.md #4.5a
+SEC_HANDLERS = 0x08  # M25 (1.4): required iff minor >= 4 -- docs/MAHC_FORMAT.md #4.8
 SEC_DEBUG = 0x80
 
 REQUIRED_SECTIONS = (SEC_STRINGS, SEC_CONSTANTS, SEC_TYPES, SEC_NATIVES, SEC_FUNCTIONS, SEC_CODE)
@@ -46,6 +53,8 @@ REQUIRED_SECTIONS = (SEC_STRINGS, SEC_CONSTANTS, SEC_TYPES, SEC_NATIVES, SEC_FUN
 # see decode.py's `_read_sections`, which picks between this and
 # `REQUIRED_SECTIONS` once it has read the file's own minor version.
 REQUIRED_SECTIONS_V1 = REQUIRED_SECTIONS + (SEC_PARAMS,)
+# M25: HANDLERS joins the required-section list only for minor >= 4 files.
+REQUIRED_SECTIONS_V4 = REQUIRED_SECTIONS_V1 + (SEC_HANDLERS,)
 
 # -- constant tags (docs/MAHC_FORMAT.md #4.2) -------------------------------
 TAG_NONE = 0
@@ -71,6 +80,38 @@ BUILTIN_TYPES = (
     ("Option", (("none", ()), ("some", ("value",)))),
     ("Promise", (("Pending", ()), ("Settled", ("value",)))),
 )
+# M25 (1.4, docs/MAHC_FORMAT.md #4.1): `Promise` gains a `Failed { error }`
+# variant, and a new built-in enum `RuntimeError` (index 2) is added --
+# user types are numbered from 3 in minor >= 4 files (still 2 in older
+# ones). Variant order matches compiler/resolve.py's pre-seeded
+# `enum_decls`/typecheck.py's `_register_types` exactly (asserted in
+# `bytecode/lower.py`'s `build_types`).
+BUILTIN_TYPES_V4 = (
+    ("Option", (("none", ()), ("some", ("value",)))),
+    ("Promise", (("Pending", ()), ("Settled", ("value",)), ("Failed", ("error",)))),
+    (
+        "RuntimeError",
+        (
+            ("DivisionByZero", ("message",)),
+            ("TypeMismatch", ("message",)),
+            ("NoSuchField", ("message",)),
+            ("NoSuchMethod", ("message",)),
+            ("ArgumentError", ("message",)),
+            ("IndexOutOfRange", ("message",)),
+            ("MatchFailed", ("message",)),
+            ("InputError", ("message",)),
+            ("Internal", ("message",)),
+        ),
+    ),
+)
+
+
+def builtin_types_for(minor: int) -> tuple:
+    """The built-in TYPES-section-index-0.. entries a file of this minor
+    version uses -- see `BUILTIN_TYPES_V4`'s docstring. Both VMs and every
+    encoder/decoder/disassembler go through this rather than picking
+    between the two tuples themselves."""
+    return BUILTIN_TYPES_V4 if minor >= 4 else BUILTIN_TYPES
 
 # -- natives (docs/MAHC_FORMAT.md #4.4) -------------------------------------
 NATIVE_ARITIES = {
@@ -141,12 +182,16 @@ OPCODES: dict[str, tuple[int, tuple[str, ...]]] = {
     "matchrange": (0x37, ("A", "A?", "A?", "B", "A")),  # M17 (1.2)
     "vector": (0x38, ("A*", "A")),  # M19 (1.3)
     "map": (0x39, ("A*", "A")),  # M19 (1.3)
+    "matchtype": (0x3A, ("A", "T", "A")),  # M25 (1.4)
     "deferpush": (0x40, ()),
     "deferadd": (0x41, ("A",)),
     "deferpeek": (0x42, ("A",)),
     "deferpop": (0x43, ("A",)),
     "deferscopepop": (0x44, ()),
+    "deferdepth": (0x45, ("A",)),  # M25 (1.4)
+    "deferabove": (0x46, ("A", "A")),  # M25 (1.4)
     "native": (0x50, ("X", "A*", "A?")),
+    "throw": (0x60, ("A",)),  # M25 (1.4)
 }
 
 OPCODES_BY_CODE: dict[int, tuple[str, tuple[str, ...]]] = {
@@ -168,4 +213,8 @@ OPCODE_SINCE_MINOR: dict[str, int] = {
     "matchrange": 2,
     "vector": 3,
     "map": 3,
+    "matchtype": 4,
+    "deferdepth": 4,
+    "deferabove": 4,
+    "throw": 4,
 }

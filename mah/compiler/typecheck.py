@@ -81,7 +81,10 @@ from .ast_nodes import (
     StructDecl,
     StructLit,
     StructPat,
+    ThrowExpr,
     TraitDecl,
+    TryExpr,
+    TypePat,
     Unary,
     VectorLit,
     WhileStmt,
@@ -515,8 +518,35 @@ class Checker:
         self.enums["Option"] = option
         t = TParam("T")
         promise = _TypeInfo("Promise", [t])
-        promise.variants = {"Pending": {}, "Settled": {"value": t}}
+        # M25 (docs/ERRORS.md, docs/MAHC_FORMAT.md #4.1): `Promise` gains a
+        # third variant, `Failed { error }`. The checker doesn't track
+        # error types at all yet (M26 is the error-set checker) -- `error`
+        # is Unknown/unchecked, exactly like every `RuntimeError` value is
+        # never tracked.
+        promise.variants = {"Pending": {}, "Settled": {"value": t}, "Failed": {"error": _unchecked()}}
         self.enums["Promise"] = promise
+
+        # M25: the built-in `RuntimeError` enum -- pre-seeded here exactly
+        # like `Option`/`Promise` above, since (unlike a user struct/enum)
+        # it has no `EnumDecl` AST node for `_register_types`'s own walk,
+        # below, to find. Every variant has one field, `message: String`
+        # (see compiler/resolve.py's matching pre-seed of `enum_decls`).
+        runtime_error = _TypeInfo("RuntimeError", [])
+        runtime_error.variants = {
+            name: {"message": STRING}
+            for name in (
+                "DivisionByZero",
+                "TypeMismatch",
+                "NoSuchField",
+                "NoSuchMethod",
+                "ArgumentError",
+                "IndexOutOfRange",
+                "MatchFailed",
+                "InputError",
+                "Internal",
+            )
+        }
+        self.enums["RuntimeError"] = runtime_error
 
         decls = [n for n in _walk(program) if isinstance(n, (StructDecl, EnumDecl))]
         # Create every type first so field annotations can name any of them.
@@ -1161,6 +1191,12 @@ class Checker:
             return TCon("Map", [key, value])
         if isinstance(expr, Index):
             return self._check_index(expr)
+        if isinstance(expr, ThrowExpr):
+            # M25 (docs/ERRORS.md): `throw e` never produces a value.
+            self._check_expr(expr.value)
+            return NEVER
+        if isinstance(expr, TryExpr):
+            return self._check_try(expr, hint, used)
         if isinstance(expr, ErrorNode):
             return _unchecked()
         return _unchecked()
@@ -1440,6 +1476,31 @@ class Checker:
             return NEVER if types and all(is_con(prune(t), "Never") for t in types) else NONE
         return self._join(types, expr.position)
 
+    def _check_try(self, expr: TryExpr, hint, used: bool):
+        """M25 (docs/ERRORS.md; minimal -- error-set checking is M26): catch
+        form -> check the body and each arm like `_check_match` (a
+        `TypePat`'s scrutinee type is the implicit Unknown, unchecked --
+        the value's real runtime type test happens at runtime, not here).
+        Else form -> join the body and the fallback, exactly like
+        `try/else` sugars to `try { E } catch { _ => { F } }`."""
+        body_type = (
+            self._check_block(expr.body, hint)
+            if isinstance(expr.body, Block)
+            else self._check_expr(expr.body, hint)
+        )
+        types = [body_type]
+        if expr.fallback is not None:
+            types.append(self._check_expr(expr.fallback, hint))
+        else:
+            for arm in expr.arms:
+                self._check_pattern(arm.pattern, _unchecked())
+                if arm.guard is not None:
+                    self._check_expr(arm.guard)
+                types.append(self._check_block(arm.body, hint))
+        if not used:
+            return NEVER if types and all(is_con(prune(t), "Never") for t in types) else NONE
+        return self._join(types, expr.position)
+
     def _loops(self) -> list:
         return self.fn_stack[-1].loops if self.fn_stack else self.main_loops
 
@@ -1552,6 +1613,16 @@ class Checker:
             mapping = dict(zip(info.params, instance.args))
             for name, sub in pattern.fields:
                 self._check_pattern(sub, subst(fields.get(name, _unchecked()), mapping))
+            return
+        if isinstance(pattern, TypePat):
+            # M25: binds `name` to the named type's instance type (not
+            # unified against `t` -- a catch arm's scrutinee type is the
+            # implicit Unknown, see `_check_try`).
+            if pattern.name is None:
+                return
+            info = self.structs.get(pattern.type_name) or self.enums.get(pattern.type_name)
+            instance = TCon(pattern.type_name, info.fresh_args(self.level)) if info is not None else _unchecked()
+            self._declare(self._sym(pattern.position), instance, pattern.position, f"'{pattern.name}'")
             return
 
     # -- the explicit level ------------------------------------------------

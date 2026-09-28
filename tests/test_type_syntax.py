@@ -305,13 +305,15 @@ class LspTests(unittest.TestCase):
 
 class PreprocessorTests(unittest.TestCase):
     def test_prelude_triggers_unchanged(self):
+        # M25: the prelude's new `Error` trait (and its `message` method,
+        # both re-implemented for `RuntimeError`) add two triggers.
         self.assertEqual(
             sorted(PRELUDE_TRIGGERS),
-            ['Filtered', 'FilteredIterator', 'FromRange', 'FromRangeIterator', 'Iterable', 'Iterator',
+            ['Error', 'Filtered', 'FilteredIterator', 'FromRange', 'FromRangeIterator', 'Iterable', 'Iterator',
              'MapEntry', 'Mapped', 'MappedIterator', 'Range', 'RangeIterator', 'Skipped',
              'SkippedIterator', 'StringIterator', 'Taken', 'TakenIterator', 'ToRange', 'VectorIterator',
              '__Iter', '__NoInitial', 'call', 'call_reduce', 'collect', 'entries', 'filter', 'iter',
-             'map', 'next', 'reduce', 'require_number', 'skip', 'take', 'to_string'],
+             'map', 'message', 'next', 'reduce', 'require_number', 'skip', 'take', 'to_string'],
         )
 
     def test_generic_exported_fn_imports(self):

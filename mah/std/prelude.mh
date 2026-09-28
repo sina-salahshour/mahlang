@@ -1,10 +1,11 @@
-# The Mah prelude: iterators and ranges.
+# The Mah prelude: iterators, ranges, and (M25) errors.
 #
 # The preprocessor appends this file to a program whenever the program uses
-# anything it declares (see mah/preprocessor.py). Everything here is
-# "system" code: its traits count as built-in traits and its types as
-# built-in types for the orphan rule, and its impls may target built-in
-# types like String.
+# anything it declares (see mah/preprocessor.py) -- M25 adds a `try`/`throw`
+# token as its own trigger, alongside every name this file declares.
+# Everything here is "system" code: its traits count as built-in traits and
+# its types as built-in types for the orphan rule, and its impls may target
+# built-in types like String (M25: `RuntimeError`).
 #
 # Only struct/enum/trait/impl items are allowed here. They're hoisted, so
 # sitting after the user's code doesn't matter. A top-level `fn` or `let`
@@ -334,4 +335,16 @@ impl Map {
         }
         out
     }
+}
+
+# -- errors -----------------------------------------------------------------
+
+# Anything thrown with `throw` must implement Error. `message` is what an
+# uncaught error prints; by default it's the value's own to_string.
+trait Error {
+    fn message(self) { self.to_string() }
+}
+
+impl Error for RuntimeError {
+    fn message(self) { self.message }
 }

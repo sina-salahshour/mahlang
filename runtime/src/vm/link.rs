@@ -9,7 +9,10 @@
 use std::rc::Rc;
 
 use crate::decimal::Decimal;
-use crate::decode::{self, Addr, BinOp, Const, FunctionDecl, NativeRef, Program, RawInstr, TypeBody, TypeDecl};
+use crate::decode::{
+    self, Addr, BinOp, Const, FunctionDecl, HandlerEntry, NativeRef, Program, RawInstr, TypeBody, TypeDecl,
+    RUNTIME_ERROR_VARIANTS,
+};
 
 use super::value::{FunctionInfo, Value};
 
@@ -113,6 +116,14 @@ pub enum LinkedInstr {
     DeferPeek { dest: Addr },
     DeferPop { dest: Addr },
     DeferScopePop,
+    /// M25 (1.4)
+    MatchType { value: Addr, type_idx: usize, dest: Addr },
+    /// M25 (1.4)
+    DeferDepth { dest: Addr },
+    /// M25 (1.4)
+    DeferAbove { depth: Addr, dest: Addr },
+    /// M25 (1.4)
+    Throw { value: Addr },
     Native { native: NativeFn, args: Vec<Addr>, dest: Option<Addr> },
 }
 
@@ -121,6 +132,9 @@ pub struct LinkedProgram {
     pub functions: Vec<Rc<FunctionInfo>>,
     pub code: Vec<LinkedInstr>,
     pub debug: Option<DebugIndex>,
+    /// M25 (docs/MAHC_FORMAT.md #4.8): copied straight through -- addresses
+    /// are already final instruction indices, no relinking needed.
+    pub handlers: Vec<HandlerEntry>,
 }
 
 fn convert_const(c: &Const, strings: &[String]) -> decode::FResult<Value> {
@@ -140,17 +154,33 @@ fn convert_const(c: &Const, strings: &[String]) -> decode::FResult<Value> {
     })
 }
 
-fn build_types(type_decls: &[TypeDecl], interned: &[Rc<str>]) -> Vec<TypeInfo> {
+fn build_types(type_decls: &[TypeDecl], interned: &[Rc<str>], minor: u16) -> Vec<TypeInfo> {
+    let promise_variants = if minor >= 4 {
+        vec![
+            (Rc::from("Pending"), vec![]),
+            (Rc::from("Settled"), vec![Rc::from("value")]),
+            (Rc::from("Failed"), vec![Rc::from("error")]),
+        ]
+    } else {
+        vec![(Rc::from("Pending"), vec![]), (Rc::from("Settled"), vec![Rc::from("value")])]
+    };
     let mut infos = vec![
         TypeInfo {
             name: Rc::from("Option"),
             kind: TypeKind::Enum(vec![(Rc::from("none"), vec![]), (Rc::from("some"), vec![Rc::from("value")])]),
         },
-        TypeInfo {
-            name: Rc::from("Promise"),
-            kind: TypeKind::Enum(vec![(Rc::from("Pending"), vec![]), (Rc::from("Settled"), vec![Rc::from("value")])]),
-        },
+        TypeInfo { name: Rc::from("Promise"), kind: TypeKind::Enum(promise_variants) },
     ];
+    if minor >= 4 {
+        // M25 (docs/MAHC_FORMAT.md #4.1): the built-in `RuntimeError` enum,
+        // index 2 -- every variant has one field, `message`.
+        infos.push(TypeInfo {
+            name: Rc::from("RuntimeError"),
+            kind: TypeKind::Enum(
+                RUNTIME_ERROR_VARIANTS.iter().map(|&v| (Rc::from(v), vec![Rc::from("message")])).collect(),
+            ),
+        });
+    }
     for t in type_decls {
         let name = interned[t.name].clone();
         let kind = match &t.body {
@@ -296,6 +326,12 @@ fn link_instr(
         RawInstr::DeferPeek { dest } => LinkedInstr::DeferPeek { dest: *dest },
         RawInstr::DeferPop { dest } => LinkedInstr::DeferPop { dest: *dest },
         RawInstr::DeferScopePop => LinkedInstr::DeferScopePop,
+        RawInstr::MatchType { value, type_idx, dest } => {
+            LinkedInstr::MatchType { value: *value, type_idx: *type_idx, dest: *dest }
+        }
+        RawInstr::DeferDepth { dest } => LinkedInstr::DeferDepth { dest: *dest },
+        RawInstr::DeferAbove { depth, dest } => LinkedInstr::DeferAbove { depth: *depth, dest: *dest },
+        RawInstr::Throw { value } => LinkedInstr::Throw { value: *value },
         RawInstr::Native { native, args, dest } => {
             LinkedInstr::Native { native: natives[*native], args: args.clone(), dest: *dest }
         }
@@ -306,7 +342,7 @@ pub fn link(program: &Program) -> decode::FResult<LinkedProgram> {
     let interned: Vec<Rc<str>> = program.strings.iter().map(|s| Rc::from(s.as_str())).collect();
     let constants: Vec<Value> =
         program.constants.iter().map(|c| convert_const(c, &program.strings)).collect::<decode::FResult<_>>()?;
-    let types = build_types(&program.types, &interned);
+    let types = build_types(&program.types, &interned, program.minor);
     let natives = validate_natives(&program.natives, &program.strings)?;
     let functions = build_functions(&program.functions, &interned);
     let code: Vec<LinkedInstr> =
@@ -316,5 +352,5 @@ pub fn link(program: &Program) -> decode::FResult<LinkedProgram> {
         runs: d.runs.iter().map(|r| (r.1, r.2, r.3)).collect(),
         file_paths: d.files.iter().map(|&i| interned[i].clone()).collect(),
     });
-    Ok(LinkedProgram { types, functions, code, debug })
+    Ok(LinkedProgram { types, functions, code, debug, handlers: program.handlers.clone() })
 }

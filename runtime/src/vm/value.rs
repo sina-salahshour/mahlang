@@ -90,6 +90,12 @@ pub struct ClosureData {
 pub struct StructData {
     pub type_name: Rc<str>,
     pub fields: Vec<(Rc<str>, Value)>,
+    /// M25 (docs/MAHC_FORMAT.md #4.4): VM-internal, never visible to Mah
+    /// code -- the pc a `throw` of this value first happened at (unset
+    /// stays `None`), used only to locate an uncaught error; re-throwing
+    /// (including automatically, when no catch arm matches) keeps the
+    /// original.
+    pub thrown_at: Option<usize>,
 }
 
 impl StructData {
@@ -111,6 +117,8 @@ pub struct EnumData {
     pub type_name: Rc<str>,
     pub variant: Rc<str>,
     pub fields: Vec<(Rc<str>, Value)>,
+    /// M25: see `StructData::thrown_at`'s docstring above.
+    pub thrown_at: Option<usize>,
 }
 
 impl EnumData {
@@ -147,12 +155,21 @@ pub struct Continuation {
 pub struct PromiseData {
     /// `None` = Pending, `Some(v)` = Settled { value: v }.
     pub settled: Option<Value>,
+    /// M25 (docs/MAHC_FORMAT.md #4.6): `Some(e)` = Failed { error: e }.
+    /// `settled`/`failed` are never both `Some` -- resolving/failing an
+    /// already-settled-or-failed Promise does nothing (see `Vm::resolve_promise`/
+    /// `Vm::fail_promise`).
+    pub failed: Option<Value>,
+    /// M25: set the first time any task `.await`s this Promise (settled,
+    /// pending, or already failed) -- used at program end to find failed
+    /// Promises nobody ever looked at.
+    pub observed: bool,
     pub callbacks: Vec<Continuation>,
 }
 
 impl PromiseData {
     pub fn new_pending() -> Rc<RefCell<PromiseData>> {
-        Rc::new(RefCell::new(PromiseData { settled: None, callbacks: Vec::new() }))
+        Rc::new(RefCell::new(PromiseData { settled: None, failed: None, observed: false, callbacks: Vec::new() }))
     }
 }
 

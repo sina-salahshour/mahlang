@@ -217,7 +217,10 @@ from .ast_nodes import (
     StructDecl,
     StructLit,
     StructPat,
+    ThrowExpr,
     TraitDecl,
+    TryExpr,
+    TypePat,
     Unary,
     WhileStmt,
     WildcardPat,
@@ -316,9 +319,28 @@ class Resolver:
         # level, but pre-seeding it here means a `Promise` value still
         # pattern-matches and struct/enum-hovers through the exact same
         # generic machinery any other enum does.
+        # M25 (docs/ERRORS.md, docs/MAHC_FORMAT.md #4.1): `Promise` gains a
+        # third variant, `Failed { error }`, and a new built-in enum
+        # `RuntimeError` is pre-seeded the same way -- every VM runtime-
+        # error site throws one of its variants instead of aborting (see
+        # `code_interpreter.py`'s `kind`/`RUNTIME_ERROR_VARIANTS`). Variant
+        # order matches docs/MAHC_FORMAT.md #4.1 exactly (it's also the
+        # bytecode TYPES-section order for a minor-4 file, see
+        # `mah/bytecode/lower.py`'s `build_types`).
         self.enum_decls: dict = {
             "Option": {"none": [], "some": ["value"]},
-            "Promise": {"Pending": [], "Settled": ["value"]},
+            "Promise": {"Pending": [], "Settled": ["value"], "Failed": ["error"]},
+            "RuntimeError": {
+                "DivisionByZero": ["message"],
+                "TypeMismatch": ["message"],
+                "NoSuchField": ["message"],
+                "NoSuchMethod": ["message"],
+                "ArgumentError": ["message"],
+                "IndexOutOfRange": ["message"],
+                "MatchFailed": ["message"],
+                "InputError": ["message"],
+                "Internal": ["message"],
+            },
         }
         # M7: source position -> Symbol, for every position that either
         # declared or referenced a variable/parameter/function-binding/
@@ -752,6 +774,9 @@ class Resolver:
                 self._validate_type_expr(p, tp_scope, inside_trait_or_impl)
             if texpr.ret is not None:
                 self._validate_type_expr(texpr.ret, tp_scope, inside_trait_or_impl)
+            # M25: a `fn(...) -> ... throws E | F` type's own throws list.
+            for t in texpr.throws or []:
+                self._validate_type_expr(t, tp_scope, inside_trait_or_impl)
             return
         name = texpr.name
         pos = texpr.position
@@ -784,7 +809,7 @@ class Resolver:
         # deliberately left out, exactly like every other use of this dict.
         if name in self.struct_decls:
             self.type_position_index[pos] = ("struct", name)
-        elif name in self.enum_decls and name not in ("Option", "Promise"):
+        elif name in self.enum_decls and name not in ("Option", "Promise", "RuntimeError"):
             self.type_position_index[pos] = ("enum", name)
         elif name in self.trait_decls and name not in _SYSTEM_TRAIT_ARITY:
             self.type_position_index[pos] = ("trait", name)
@@ -841,6 +866,11 @@ class Resolver:
                 self._pending_type_exprs.append((ptype, full_scope, inside_trait_or_impl))
         if method.return_type is not None:
             self._pending_type_exprs.append((method.return_type, full_scope, inside_trait_or_impl))
+        # M25: same as `_resolve_fn_expr`'s throws-clause handling above --
+        # needed here too so a bodyless (required) trait method's own
+        # `throws` clause is still validated.
+        for texpr in method.throws or []:
+            self._pending_type_exprs.append((texpr, full_scope, inside_trait_or_impl))
 
     def _record_type_expr(self, texpr) -> None:
         """Queue one annotation met while resolving ordinary code (a `let`
@@ -1348,6 +1378,12 @@ class Resolver:
         for annotation in [*fn.param_types, fn.return_type]:
             if annotation is not None:
                 self._pending_type_exprs.append((annotation, full_scope, inside))
+        # M25 (syntax only -- see docs/ERRORS.md; M26 does the actual
+        # checking): validate a `throws` clause's type names the same way
+        # as a return-type annotation. `None` (no clause) and `[]`
+        # (`throws never`) both iterate zero times.
+        for texpr in fn.throws or []:
+            self._pending_type_exprs.append((texpr, full_scope, inside))
         self._fn_type_param_stack.append(full_scope)
         try:
             self._resolve_fn_expr_body(fn, allow_self)
@@ -1982,6 +2018,33 @@ class Resolver:
             self.resolve_expr(expr.obj)
             self.resolve_expr(expr.key)
             return
+        if isinstance(expr, ThrowExpr):
+            # M25 (docs/ERRORS.md): `throw e` -- just resolve the operand;
+            # nothing to declare, and its type (Never) is a typecheck.py
+            # concern, not this pass's.
+            self.resolve_expr(expr.value)
+            return
+        if isinstance(expr, TryExpr):
+            # M25: `body` is a Block for the catch/block-else forms, or any
+            # Expr for `try expr else fallback` (see the parser's
+            # `_parse_try`).
+            if isinstance(expr.body, Block):
+                self.resolve_block(expr.body)
+            else:
+                self.resolve_expr(expr.body)
+            for arm in expr.arms:
+                # Exactly like a MatchArm of a MatchStmt (resolve_stmt's
+                # MatchStmt branch) -- same scoping for pattern bindings
+                # and guards, one scope layer per arm.
+                self._push()
+                self.resolve_pattern(arm.pattern)
+                if arm.guard is not None:
+                    self.resolve_expr(arm.guard)
+                self.resolve_block(arm.body)
+                self._pop()
+            if expr.fallback is not None:
+                self.resolve_expr(expr.fallback)
+            return
         raise AssertionError(f"unhandled expression node {expr!r}")
 
     # -- patterns (M4) -----------------------------------------------------
@@ -2090,5 +2153,29 @@ class Resolver:
             for (fname, _sub), fpos in zip(pattern.fields, pattern.field_name_positions):
                 if fpos is not None:
                     self.field_position_index[fpos] = ("variant_field", pattern.type_name, pattern.variant, fname)
+            return
+        if isinstance(pattern, TypePat):
+            # M25: legal only as a catch arm's top-level pattern (the
+            # parser only ever builds one there -- see `_parse_pattern`'s
+            # `allow_type_test`). `type_name` must be a declared struct or
+            # enum -- user types, prelude types, or a built-in (Option,
+            # Promise, RuntimeError, all pre-seeded into `enum_decls`).
+            # Same generic "unknown type" message `_validate_type_expr`
+            # gives for an annotation naming an unknown type -- neither of
+            # StructPat's/EnumPat's own (struct-only/enum-only) messages
+            # fits, since a type test can name either kind.
+            if pattern.type_name not in self.struct_decls and pattern.type_name not in self.enum_decls:
+                raise Exception(f"Unknown type '{pattern.type_name}' at position {pattern.position}")
+            # LSP: register the type name's use site -- see
+            # type_position_index's docstring.
+            type_pos = pattern.type_position if pattern.type_position is not None else pattern.position
+            if pattern.type_name in self.struct_decls:
+                self.type_position_index[type_pos] = ("struct", pattern.type_name)
+            elif pattern.type_name not in ("Option", "Promise", "RuntimeError"):
+                self.type_position_index[type_pos] = ("enum", pattern.type_name)
+            if pattern.name is not None:
+                slot = self.frame_stack[-1].alloc()
+                self._declare(pattern.name, slot, pattern.position, kind="binding")
+                pattern.address = slot
             return
         raise AssertionError(f"unhandled pattern node {pattern!r}")

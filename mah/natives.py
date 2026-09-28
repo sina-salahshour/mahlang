@@ -66,7 +66,7 @@ def _io_input(ctx: NativeContext, args) -> object:
         ch = ctx.stdin.read(1)
         if ch == "":
             if not started:
-                raise MahRuntimeError("input: end of input")
+                raise MahRuntimeError("input: end of input", kind="InputError")
             break
         if ch.isdigit():
             started = True

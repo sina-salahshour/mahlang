@@ -2873,6 +2873,57 @@ node that resolved to it. Then:
       free of type errors, codegen unchanged) and
       `tests/test_typecheck_wiring.py` (manifest, driver, CLI, LSP).
 
+26. **M25 — errors: syntax and runtime. ✅ Landed.** Design in
+    `docs/ERRORS.md`; bytecode 1.4 in `docs/MAHC_FORMAT.md`. Syntax and
+    runtime only — the static checker's error-set inference/checking
+    (`throws` verification, "unhandled error" diagnostics) is **M26**,
+    next.
+
+    - **Syntax**: `throw`/`try` are new reserved keywords; `catch`/
+      `throws`/`never` stay contextual (ordinary `ID` tokens, matched by
+      `literal`, so `let catch = 1` keeps working). `try { } catch { arms
+      }`'s arms are `match` arms plus one new pattern kind, `name: Type`/
+      `_: Type` ("type-test", legal only as a catch arm's own top-level
+      pattern). `try { } else expr` / `try expr else expr` are sugar for
+      catching everything. A function/method/`fn`-type signature can
+      carry a `throws A | B` (or `throws never`) clause, parsed and
+      stored but ignored until M26.
+    - **Runtime, both VMs**: a `throw` opcode unwinds to the nearest
+      enclosing `try`'s compiled handler (or up through `defer`red
+      blocks, then the task itself) via a new HANDLERS bytecode section
+      (one entry per `try`/implicit-`defer`-guard region, innermost
+      first) — see `docs/MAHC_FORMAT.md` #4.8/#6.8 for the exact
+      algorithm. Every existing VM runtime-error site (division by zero,
+      a bad method call, argument binding, ...) now throws a value of a
+      new built-in enum, `RuntimeError`, instead of aborting immediately;
+      an *uncaught* one still produces exactly the pre-1.4 message and
+      location, so no existing error-message test changed. A detached
+      task's uncaught error fails its Promise (which gains a third
+      variant, `Failed { error }`) instead of stopping the program;
+      `.await` re-throws it in the awaiting task; an unobserved failed
+      Promise is still reported at program end. `codegen.py` tracks
+      "open regions" per function (closed/paused around a nested
+      function's own code, so a handler range never covers one) and
+      gives a function containing `defer` anywhere an implicit
+      unwind-and-drain handler wrapping its whole body.
+    - **Prelude**: the `Error` trait (`fn message(self) { self.to_string()
+      }`), and `impl Error for RuntimeError`.
+    - **Editor/LSP, templates**: `mah/lsp/analysis.py` hover for the new
+      keywords; `mah/project/templates/docs/mah-language.md` gained an
+      Errors section. Tree-sitter/TextMate grammars are a follow-up
+      (out of scope for M25).
+    - Tests: `tests/test_errors.py` (the full behavioral matrix — catch by
+      variant/type-test/guard, re-throw of unmatched, `try`/`else`, defer
+      ordering during unwinding including a deferred block that itself
+      throws, uncaught-error messages and positions, non-`Error` values,
+      every `RuntimeError` variant, closures/`break` interacting with
+      `try`, `to_string` throwing during `print`), run on both VMs via
+      the normal harness; `tests/test_parser.py`, `tests/test_bytecode.py`
+      (1.4 header, HANDLERS round-trip and validation, new-opcode/
+      built-in-type minor gating), `tests/test_format.py`,
+      `tests/test_typecheck.py`, an LSP hover test, and
+      `runtime/`'s own `cargo test`.
+
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
 it** (`make test` must stay green) — see `docs/TESTING.md` for where

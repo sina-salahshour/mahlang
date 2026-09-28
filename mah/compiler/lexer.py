@@ -77,6 +77,12 @@ class TokenType(Enum):
     IMPL = "impl"
     FOR = "for"
     IN = "in"
+    # M25: `try`/`throw` are reserved keywords (docs/ERRORS.md). `catch`,
+    # `throws`, and `never` stay ordinary `ID` tokens (contextual --
+    # matched by `literal` in the parser) so they remain usable as
+    # identifiers everywhere else.
+    TRY = "try"
+    THROW = "throw"
     # literals / identifiers
     STRING = "STRING"
     NUMBER = "NUMBER"
@@ -116,6 +122,8 @@ KEYWORDS = {
     "impl": TokenType.IMPL,
     "for": TokenType.FOR,
     "in": TokenType.IN,
+    "try": TokenType.TRY,
+    "throw": TokenType.THROW,
 }
 
 _SINGLE_CHAR = {

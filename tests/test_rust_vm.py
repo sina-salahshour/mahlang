@@ -97,7 +97,7 @@ class BundleTests(unittest.TestCase):
         rc, out, _err = _run_main(["dis", self._write_bundle(target="x86_64-linux")])
         self.assertEqual(rc, 0)
         lines = out.splitlines()
-        self.assertEqual(lines[0], "MAHC version 1.3")
+        self.assertEqual(lines[0], "MAHC version 1.4")  # M25 bumped the current minor to 4
         self.assertEqual(
             lines[1], f"runtime: rust mah-vm 9.9.9 (x86_64-linux), self-contained, {len(_FAKE_VM)} bytes"
         )

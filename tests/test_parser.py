@@ -24,19 +24,25 @@ from mah.compiler.ast_nodes import (
     ExprStmt,
     FieldAccess,
     FnExpr,
+    FnType,
     IfStmt,
     ImplDecl,
     Ident,
     LetStmt,
     MatchStmt,
     MethodCall,
+    MethodDecl,
+    NamedType,
     NumberLit,
     PrintStmt,
     RangePat,
     StructDecl,
     StructLit,
     StructPat,
+    ThrowExpr,
     TraitDecl,
+    TryExpr,
+    TypePat,
     Unary,
     WildcardPat,
 )
@@ -545,6 +551,123 @@ class M17OperatorParsingTests(unittest.TestCase):
         self.assertIsInstance(expr, Unary)
         self.assertEqual(expr.op, "!")
         self.assertIsInstance(expr.operand, MethodCall)
+
+
+class M25ErrorSyntaxTests(unittest.TestCase):
+    """M25: `throw`/`try`/`catch`/`throws` -- see docs/ERRORS.md. AST shape
+    only; tests/test_errors.py covers end-to-end behavior."""
+
+    def test_throw_expr(self):
+        # `throw E.A` alone is the program's tail (no trailing `;`, nothing
+        # after it) -- see `parse_match_stmt`'s docstring above for the
+        # identical, pre-existing MatchStmt precedent this mirrors.
+        (stmt,) = parse("throw E.A")
+        self.assertIsInstance(stmt, ExprStmt)
+        expr = stmt.value
+        self.assertIsInstance(expr, ThrowExpr)
+        self.assertIsInstance(expr.value, FieldAccess)
+
+    def test_try_catch_form(self):
+        (stmt,) = parse('let r = try { 1 } catch { E.A => { 2 } _ => { 3 } }')
+        self.assertIsInstance(stmt, LetStmt)
+        expr = stmt.value
+        self.assertIsInstance(expr, TryExpr)
+        self.assertIsInstance(expr.body, Block)
+        self.assertIsNone(expr.fallback)
+        self.assertEqual(len(expr.arms), 2)
+        self.assertIsInstance(expr.arms[0].pattern, EnumPat)
+        self.assertIsInstance(expr.arms[1].pattern, WildcardPat)
+
+    def test_try_block_else_form(self):
+        (stmt,) = parse("let r = try { 1 } else 9")
+        expr = stmt.value
+        self.assertIsInstance(expr, TryExpr)
+        self.assertIsInstance(expr.body, Block)
+        self.assertEqual(expr.arms, [])
+        self.assertIsInstance(expr.fallback, NumberLit)
+        self.assertEqual(expr.fallback.value, 9)
+
+    def test_try_expr_else_form(self):
+        (stmt,) = parse("let r = try f(x) else 0")
+        expr = stmt.value
+        self.assertIsInstance(expr, TryExpr)
+        self.assertIsInstance(expr.body, Call)
+        self.assertEqual(expr.arms, [])
+        self.assertIsInstance(expr.fallback, NumberLit)
+
+    def test_type_pat_in_catch_arm_binds_name_and_type(self):
+        (stmt,) = parse("let r = try { 1 } catch { e: ParseError => { 2 } }")
+        pattern = stmt.value.arms[0].pattern
+        self.assertIsInstance(pattern, TypePat)
+        self.assertEqual(pattern.name, "e")
+        self.assertEqual(pattern.type_name, "ParseError")
+
+    def test_type_pat_wildcard_name_is_none(self):
+        (stmt,) = parse("let r = try { 1 } catch { _: ParseError => { 2 } }")
+        pattern = stmt.value.arms[0].pattern
+        self.assertIsInstance(pattern, TypePat)
+        self.assertIsNone(pattern.name)
+        self.assertEqual(pattern.type_name, "ParseError")
+
+    def test_missing_catch_or_else_is_a_syntax_error(self):
+        program, parser = _parse_with_parser("let r = try { 1 }\nprint(r)")
+        self.assertTrue(parser.errors)
+        message, _position = parser.errors[0]
+        self.assertIn("expected 'catch' or 'else'", message)
+
+    def test_id_colon_outside_catch_arm_is_not_a_type_pat(self):
+        # `match` arms don't allow the type-test pattern -- an `ID :` there
+        # keeps today's (pre-M25) behavior: a plain BindPat, then whatever
+        # error the dangling `:` gives.
+        program, parser = _parse_with_parser("match x { e: T => { 1 } }")
+        self.assertTrue(parser.errors)
+
+    def test_throws_clause_none_when_absent(self):
+        (stmt,) = parse("fn f(x) { x }")
+        self.assertIsNone(stmt.value.throws)
+
+    def test_throws_never_is_empty_list(self):
+        (stmt,) = parse("fn f(x) { x } ")
+        self.assertIsNone(stmt.value.throws)
+        (stmt,) = parse("fn g() throws never { }")
+        self.assertEqual(stmt.value.throws, [])
+
+    def test_throws_list_of_named_types(self):
+        (stmt,) = parse("fn f(x) throws E | ParseError { x }")
+        throws = stmt.value.throws
+        self.assertEqual(len(throws), 2)
+        self.assertIsInstance(throws[0], NamedType)
+        self.assertEqual(throws[0].name, "E")
+        self.assertIsInstance(throws[1], NamedType)
+        self.assertEqual(throws[1].name, "ParseError")
+
+    def test_throws_on_fn_type(self):
+        (stmt,) = parse("let h: fn(Number) -> String throws E = k")
+        ftype = stmt.type_ann
+        self.assertIsInstance(ftype, FnType)
+        self.assertEqual(len(ftype.throws), 1)
+        self.assertEqual(ftype.throws[0].name, "E")
+
+    def test_throws_on_method_decl(self):
+        program, parser = _parse_with_parser(
+            "trait T { fn m(self) throws E }\nimpl T for S { fn m(self) throws E { 1 } }"
+        )
+        self.assertFalse(parser.errors)
+        trait_decl = program[0]
+        self.assertIsInstance(trait_decl, TraitDecl)
+        method = trait_decl.methods[0]
+        self.assertIsInstance(method, MethodDecl)
+        self.assertEqual(len(method.throws), 1)
+        self.assertEqual(method.throws[0].name, "E")
+
+    def test_catch_throws_never_are_contextual_identifiers(self):
+        (stmts) = parse("let catch = 1\nlet throws = 2\nlet never = 3")
+        self.assertEqual([s.name for s in stmts], ["catch", "throws", "never"])
+
+
+def _parse_with_parser(source: str):
+    parser = Parser(Lexer(source))
+    return parser.parse_program(), parser
 
 
 if __name__ == "__main__":

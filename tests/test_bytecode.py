@@ -27,9 +27,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from mah.bytecode.decode import decode
 from mah.bytecode.disasm import disassemble
 from mah.bytecode.encode import encode
-from mah.bytecode.format import SEC_PARAMS, SHEBANG, MahcFormatError
+from mah.bytecode.format import SEC_HANDLERS, SEC_PARAMS, SHEBANG, MahcFormatError
 from mah.bytecode.leb128 import read_varint, read_varuint, write_varint, write_varuint
-from mah.bytecode.program import Const, FunctionDecl, Instr, NativeRef, Program
+from mah.bytecode.program import Const, FunctionDecl, Instr, NativeRef, Program, TypeDecl
 from mah.cli.main import main as cli_main
 from mah.code_interpreter import run_bytes
 from mah.runtime_values import MahRuntimeError
@@ -87,10 +87,10 @@ class RoundTripTests(unittest.TestCase):
         for name in _EXAMPLE_FILES:
             with self.subTest(example=name):
                 data = compile_bytes(path=example_path(name))
-                # M19: the reference encoder now writes minor version 3
-                # (Vectors and Maps; 2 was M17's `matchrange` etc.) -- see
-                # docs/MAHC_FORMAT.md #7.
-                self.assertEqual(data[:8], b"MAHC\x01\x00\x03\x00")
+                # M25: the reference encoder now writes minor version 4
+                # (typed, catchable errors; 3 was M19's Vectors/Maps) --
+                # see docs/MAHC_FORMAT.md #7.
+                self.assertEqual(data[:8], b"MAHC\x01\x00\x04\x00")
 
     def test_decoded_bytes_run_the_same_as_the_source(self):
         for name, stdin in (("traits.mh", ""), ("enums.mh", "")):
@@ -139,10 +139,10 @@ class LoaderValidationTests(unittest.TestCase):
         self.assertIn("major", str(cm.exception))
 
     def test_unsupported_minor_version(self):
-        # M19: this VM now implements minor version 3, so the smallest
-        # genuinely unsupported minor version is 4.
+        # M25: this VM now implements minor version 4, so the smallest
+        # genuinely unsupported minor version is 5.
         data = bytearray(compile_bytes(text="print(1)"))
-        data[6] = 4
+        data[6] = 5
         with self.assertRaises(MahcFormatError) as cm:
             decode(bytes(data))
         self.assertIn("minor", str(cm.exception))
@@ -164,16 +164,17 @@ class LoaderValidationTests(unittest.TestCase):
         self.assertIn("truncated", str(cm.exception))
 
     def test_unknown_required_section_after_code(self):
-        # M16: 0x07 is now PARAMS (a known required section in 1.1), so the
-        # first genuinely unknown required id is 0x08; re-adding 0x07 is a
-        # duplicate instead -- both must be rejected, with the right reason.
+        # M25: 0x08 is now HANDLERS (a known required section in 1.4), so
+        # the first genuinely unknown required id is 0x09; re-adding 0x08
+        # is a duplicate instead -- both must be rejected, with the right
+        # reason.
         data = compile_bytes(text="print(1)", target="release")
         with self.assertRaises(MahcFormatError) as cm:
-            decode(data + bytes([0x08]) + write_varuint(0))
-        self.assertIn("unknown required section 0x08", str(cm.exception))
+            decode(data + bytes([0x09]) + write_varuint(0))
+        self.assertIn("unknown required section 0x09", str(cm.exception))
         with self.assertRaises(MahcFormatError) as cm:
-            decode(data + bytes([0x07]) + write_varuint(0))
-        self.assertIn("duplicate required section 0x07", str(cm.exception))
+            decode(data + bytes([0x08]) + write_varuint(0))
+        self.assertIn("duplicate required section 0x08", str(cm.exception))
 
     def test_unknown_opcode(self):
         program = _minimal_program([Instr("halt", ())])
@@ -549,10 +550,10 @@ class ParamsAndKwargsBytecodeTests(unittest.TestCase):
     def test_header_is_minor_1_and_params_section_has_names_and_defaults(self):
         data = compile_bytes(text="fn f(a, b = 1) { a }")
         # M17: the reference encoder always writes the CURRENT minor
-        # version (now 3, since M19), regardless of which features a given
+        # version (now 4, since M25), regardless of which features a given
         # program actually uses -- this test's own name predates that bump
         # but still exercises exactly what it says (PARAMS names/defaults).
-        self.assertEqual(data[:8], b"MAHC\x01\x00\x03\x00")
+        self.assertEqual(data[:8], b"MAHC\x01\x00\x04\x00")
         program = decode(data)
         fn = next(
             f for f in program.functions if f.name is not None and program.strings[f.name] == "f"
@@ -625,6 +626,149 @@ class ParamsAndKwargsBytecodeTests(unittest.TestCase):
             with self.subTest(example=name):
                 program = compile_program(path=example_path(name))
                 self.assertEqual(decode(encode(program)), program)
+
+
+class M25HandlersAndOpcodeTests(unittest.TestCase):
+    """M25: typed, catchable errors -- the 1.4 bump, the HANDLERS section
+    (docs/MAHC_FORMAT.md #4.8), the new opcodes (#4.6), and built-in type
+    numbering (#4.1/#4.3)."""
+
+    def _program(
+        self, code, *, handlers=None, minor=4, types=None, functions=None,
+        strings=None, natives=None, constants=None,
+    ):
+        fns = functions if functions is not None else [FunctionDecl(0, 1, 0, None, params=[])]
+        return Program(
+            strings=strings if strings is not None else [],
+            constants=constants if constants is not None else [],
+            types=types if types is not None else [],
+            natives=natives if natives is not None else [],
+            functions=fns,
+            code=code,
+            debug=None,
+            minor=minor,
+            handlers=handlers if handlers is not None else [],
+        )
+
+    def test_current_encoder_writes_minor_4_with_an_empty_handlers_section(self):
+        program = compile_program(text="print(1)")
+        self.assertEqual(program.minor, 4)
+        self.assertEqual(program.handlers, [])
+        self.assertEqual(decode(encode(program)), program)
+
+    def test_a_try_gives_a_nonempty_handlers_section_that_round_trips(self):
+        program = compile_program(text='print(try { 1 / 0 } catch { _ => { -1 } })')
+        self.assertTrue(program.handlers)
+        for start, end, handler, _slot in program.handlers:
+            self.assertLess(start, end)
+            self.assertLessEqual(end, len(program.code))
+            self.assertLess(handler, len(program.code))
+        self.assertEqual(decode(encode(program)), program)
+
+    def test_handlers_round_trip_through_encode_decode_directly(self):
+        program = self._program(
+            [
+                Instr("loadk", (0, (0, 0))),
+                Instr("throw", ((0, 0),)),
+                Instr("loadk", (0, (0, 1))),
+                Instr("halt", ()),
+            ],
+            handlers=[(0, 2, 2, 1)],
+            constants=[Const(3, 1)],
+        )
+        self.assertEqual(decode(encode(program)), program)
+
+    def test_new_opcodes_rejected_below_minor_4(self):
+        for op, args in (
+            ("throw", ((0, 0),)),
+            ("matchtype", ((0, 0), 0, (0, 1))),
+            ("deferdepth", ((0, 0),)),
+            ("deferabove", ((0, 0), (0, 1))),
+        ):
+            with self.subTest(op=op):
+                program = self._program([Instr(op, args), Instr("halt", ())], minor=3)
+                with self.assertRaisesRegex(MahcFormatError, r"requires minor version >= 4"):
+                    decode(encode(program))
+
+    def test_handlers_section_in_a_minor_3_file_is_rejected(self):
+        # A minor < 4 file's HANDLERS section is simply an unknown required
+        # section (0x08 isn't in that minor's required list at all) --
+        # existing generic section-order validation already covers this.
+        program = self._program([Instr("halt", ())], minor=3)
+        data = encode(program)
+        with self.assertRaises(MahcFormatError) as cm:
+            decode(data + bytes([SEC_HANDLERS]) + write_varuint(0))
+        self.assertIn("0x08", str(cm.exception))
+
+    def test_minor_4_file_missing_handlers_section_is_rejected(self):
+        data = compile_bytes(text="print(1)")
+        stripped = _strip_section(data, SEC_HANDLERS)
+        with self.assertRaises(MahcFormatError) as cm:
+            decode(stripped)
+        self.assertIn("0x08", str(cm.exception))
+
+    def test_handler_range_start_must_be_less_than_end(self):
+        program = self._program([Instr("halt", ())], handlers=[(0, 0, 0, 0)])
+        with self.assertRaisesRegex(MahcFormatError, "HANDLERS"):
+            decode(encode(program))
+
+    def test_handler_range_end_must_not_exceed_code_length(self):
+        program = self._program([Instr("halt", ())], handlers=[(0, 5, 0, 0)])
+        with self.assertRaisesRegex(MahcFormatError, "HANDLERS"):
+            decode(encode(program))
+
+    def test_handler_target_must_be_in_range(self):
+        program = self._program(
+            [Instr("loadk", (0, (0, 0))), Instr("halt", ())],
+            handlers=[(0, 1, 5, 0)],
+            constants=[Const(3, 1)],
+        )
+        with self.assertRaisesRegex(MahcFormatError, "HANDLERS"):
+            decode(encode(program))
+
+    def test_disasm_shows_the_handler_table(self):
+        program = compile_program(text='print(try { 1 / 0 } catch { _ => { -1 } })')
+        text = disassemble(program)
+        self.assertIn("HANDLERS:", text)
+        start, end, handler, slot = program.handlers[0]
+        self.assertIn(f"[{start}, {end}) -> {handler} slot={slot}", text)
+
+    def test_disasm_says_none_when_no_handlers(self):
+        program = compile_program(text="print(1)")
+        text = disassemble(program)
+        self.assertIn("HANDLERS:", text)
+        self.assertIn("(none)", text)
+
+    def test_user_type_is_numbered_from_3_in_a_minor_4_file(self):
+        program = compile_program(text="struct P { x }\nlet p = P { x: 1 }\nprint(p)")
+        self.assertEqual(program.minor, 4)
+        self.assertEqual(len(program.types), 1)
+        # `struct` instructions reference type index 3 (0=Option,
+        # 1=Promise, 2=RuntimeError, 3=the first user type).
+        struct_instrs = [i for i in program.code if i.op == "struct"]
+        self.assertTrue(struct_instrs)
+        self.assertEqual(struct_instrs[0].args[0], 3)
+
+    def test_hand_built_minor_3_file_with_user_type_2_still_runs(self):
+        # docs/MAHC_FORMAT.md #7: "new built-in types at the next free type
+        # indices" -- a minor < 4 file's own user types are still numbered
+        # from 2 and must keep working.
+        program = self._program(
+            [
+                Instr("struct", (2, ((0, 0),), (0, 1))),
+                Instr("native", (0, ((0, 1),), None)),
+                Instr("halt", ()),
+            ],
+            minor=3,
+            types=[TypeDecl(0, 0, [1], None)],
+            strings=["P", "x", "io.print"],
+            natives=[NativeRef(2, 1)],
+            functions=[FunctionDecl(0, 2, 0, None, params=[])],
+        )
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            run_bytes(encode(program))
+        self.assertEqual(out.getvalue(), "P { x: none }\n")
 
 
 if __name__ == "__main__":

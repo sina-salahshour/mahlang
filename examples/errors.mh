@@ -1,0 +1,99 @@
+# Typed, catchable errors (see docs/ERRORS.md). `throw` raises a value --
+# any struct/enum that `impl`s the built-in `Error` trait -- as an error;
+# it unwinds to the nearest enclosing `try`, or up to the program itself.
+
+enum ParseError { Empty, BadDigit }
+
+impl Error for ParseError {
+    fn message(self) {
+        match self {
+            ParseError.Empty => { "empty input" }
+            ParseError.BadDigit => { "not a digit" }
+        }
+    }
+}
+
+fn first_digit(s) {
+    if s.len() == 0 { throw ParseError.Empty }
+    let c = s.char_at(0)
+    if c < "0" | c > "9" { throw ParseError.BadDigit }
+    c
+}
+
+# `try { ... } catch { arms }`'s arms are `match` arms, plus a type-test
+# pattern (`name: Type` / `_: Type`) that matches any instance of a type.
+print(try { first_digit("5x") } catch { ParseError.Empty => { "was empty" } })
+print(try { first_digit("") } catch {
+    ParseError.Empty => { "was empty" }
+    e: ParseError => { "other: " + e.message() }
+})
+
+# Expected output so far:
+#   5
+#   was empty
+
+# An arm no pattern matches re-throws the error to whatever encloses this
+# `try` -- here, the outer `try` catches what the inner one didn't handle.
+fn digit_or_rethrow(s) {
+    try { first_digit(s) } catch { ParseError.Empty => { "?" } }
+}
+print(try { digit_or_rethrow("!") } catch { e: ParseError => { "outer: " + e.message() } })
+
+# `try EXPR else FALLBACK` catches everything and evaluates to FALLBACK.
+print(try first_digit("9") else "none")
+print(try first_digit("") else "none")
+
+# Expected output so far:
+#   outer: not a digit
+#   9
+#   none
+
+# Every VM-raised failure is a value of the built-in `RuntimeError` enum,
+# catchable the same way as any other error.
+let not_a_number: Unknown = "a"
+print(try { 1 / 0 } catch { RuntimeError.DivisionByZero { message } => { message } })
+print(try { not_a_number - 1 } catch { e: RuntimeError => { e.message } })
+print(try { 1 % 0 } catch { e => { e.message() } })   # catch-all + RuntimeError.message()
+
+# Expected output so far:
+#   Division by zero
+#   Cannot apply '-' to String and Number
+#   Division by zero
+
+# `defer`red blocks still run, in order, while an error unwinds past them.
+struct Cleanup { name }
+impl Error for Cleanup {}
+
+fn risky_work() {
+    defer print("closing resource")
+    throw Cleanup { name: "boom" }
+}
+
+try { risky_work() } catch { _ => { print("handled") } }
+
+# Expected output so far:
+#   closing resource
+#   handled
+
+# A detached task's error settles its Promise instead of stopping the
+# program; `.await` re-throws it in the awaiting task.
+enum WorkError { Failed }
+impl Error for WorkError {}
+
+fn background_work() {
+    sleep_async(1)
+    throw WorkError.Failed
+}
+
+let p = detach background_work()
+print("dispatched")
+print(try { p.await } catch { WorkError.Failed => { "background task failed" } })
+
+# Expected output so far:
+#   dispatched
+#   background task failed
+
+print("done")
+
+# Expected final line:
+#   done

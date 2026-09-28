@@ -11,7 +11,7 @@ instruction.
 
 from __future__ import annotations
 
-from .format import BUILTIN_TYPES, TAG_DEC, TAG_FALSE, TAG_INT, TAG_NONE, TAG_STR, TAG_TRUE
+from .format import TAG_DEC, TAG_FALSE, TAG_INT, TAG_NONE, TAG_STR, TAG_TRUE, builtin_types_for
 from .program import Program
 
 
@@ -37,6 +37,9 @@ def _str_list(r: "_Renderer", indices) -> str:
 class _Renderer:
     def __init__(self, program: Program):
         self.p = program
+        # M25: how many built-in types (and where user types start
+        # numbering from) depends on the file's own minor version.
+        self.builtin_types = builtin_types_for(program.minor)
 
     def s(self, idx: int) -> str:
         return _quote(self.p.strings[idx])
@@ -61,15 +64,15 @@ class _Renderer:
         return f"<const?{c.tag}>"
 
     def type_name(self, t_idx: int) -> str:
-        if t_idx in (0, 1):
-            return BUILTIN_TYPES[t_idx][0]
-        decl = self.p.types[t_idx - 2]
+        if t_idx < len(self.builtin_types):
+            return self.builtin_types[t_idx][0]
+        decl = self.p.types[t_idx - len(self.builtin_types)]
         return self.p.strings[decl.name]
 
     def variant_name(self, t_idx: int, variant_idx: int) -> str:
-        if t_idx in (0, 1):
-            return BUILTIN_TYPES[t_idx][1][variant_idx][0]
-        decl = self.p.types[t_idx - 2]
+        if t_idx < len(self.builtin_types):
+            return self.builtin_types[t_idx][1][variant_idx][0]
+        decl = self.p.types[t_idx - len(self.builtin_types)]
         return self.p.strings[decl.variants[variant_idx][0]]
 
     def func(self, f_idx: int) -> str:
@@ -152,10 +155,16 @@ def _instr_line(r: _Renderer, i: int, instr) -> str:
         rendered = f"value={_addr(a[0])} type={r.type_name(a[1])} variant={r.variant_name(a[1], a[2])} dest={_addr(a[3])}"
     elif op == "matchrange":
         rendered = f"value={_addr(a[0])} lo={_addr(a[1])} hi={_addr(a[2])} inclusive={a[3]} dest={_addr(a[4])}"
+    elif op == "matchtype":
+        rendered = f"value={_addr(a[0])} type={r.type_name(a[1])} dest={_addr(a[2])}"
     elif op == "deferadd":
         rendered = f"closure={_addr(a[0])}"
-    elif op in ("deferpeek", "deferpop"):
+    elif op in ("deferpeek", "deferpop", "deferdepth"):
         rendered = f"dest={_addr(a[0])}"
+    elif op == "deferabove":
+        rendered = f"depth={_addr(a[0])} dest={_addr(a[1])}"
+    elif op == "throw":
+        rendered = f"value={_addr(a[0])}"
     elif op == "native":
         native = r.p.natives[a[0]]
         rendered = f"fn={r.s(native.name)} args={_addr_list(a[1])} dest={_addr(a[2])}"
@@ -177,8 +186,9 @@ def disassemble(program: Program) -> str:
     if program.types:
         lines.append("")
         lines.append("TYPES:")
+        base = len(builtin_types_for(program.minor))
         for i, t in enumerate(program.types):
-            idx = i + 2
+            idx = i + base
             name = program.strings[t.name]
             if t.kind == 0:
                 fields = ", ".join(program.strings[f] for f in t.fields)
@@ -210,6 +220,14 @@ def disassemble(program: Program) -> str:
         lines.append(
             f"  {i}: entry={fn.entry} slots={fn.slot_count} params=({params_text}) name={name}"
         )
+
+    if program.minor >= 4:
+        lines.append("")
+        lines.append("HANDLERS:")
+        if not program.handlers:
+            lines.append("  (none)")
+        for start, end, handler, slot in program.handlers:
+            lines.append(f"  [{start}, {end}) -> {handler} slot={slot}")
 
     debug_by_pc: dict[int, tuple[int, int, int]] = {}
     if program.debug is not None:

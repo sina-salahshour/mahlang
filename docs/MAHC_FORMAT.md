@@ -1,4 +1,4 @@
-# The `.mahc` bytecode format (version 1.3)
+# The `.mahc` bytecode format (version 1.4)
 
 `mah build prog.mh` compiles a program (its entry file plus everything it
 imports) into a single `.mahc` file; `mah runc prog.mahc` runs one. This
@@ -43,7 +43,7 @@ recommended.
 ```
 magic      bytes(4)  = 0x4D 0x41 0x48 0x43   ("MAHC")
 major      u16       = 1
-minor      u16       = 2          (0 or 1 for older files; see §7)
+minor      u16       = 4          (0-3 for older files; see §7)
 sections   (id u8, length varuint, payload bytes(length))*   until end of file
 ```
 
@@ -57,13 +57,16 @@ sections   (id u8, length varuint, payload bytes(length))*   until end of file
 - A VM **must** reject a file whose `major` differs from the one it
   implements, and **should** reject one whose `minor` is greater than the
   one it implements (it may use opcodes/natives the VM doesn't know). An
-  encoder writes the lowest minor version whose features it uses.
+  encoder writes the lowest minor version whose features it uses (the
+  reference encoder always writes the current minor, 4).
 - **Required sections**, each present exactly once and in increasing id
   order: STRINGS (`0x01`), CONSTANTS (`0x02`), TYPES (`0x03`), NATIVES
-  (`0x04`), FUNCTIONS (`0x05`), CODE (`0x06`), and — in files with minor ≥ 1
-  only — PARAMS (`0x07`). A 1.0 file **must not** contain PARAMS; a 1.1 or
-  later file **must**.
-- Ids `0x08`–`0x7F` are reserved for future *required* sections: a VM
+  (`0x04`), FUNCTIONS (`0x05`), CODE (`0x06`), — in files with minor ≥ 1 —
+  PARAMS (`0x07`), and — in files with minor ≥ 4 — HANDLERS (`0x08`,
+  §4.8). A 1.0 file **must not** contain PARAMS; a 1.1–1.3 file **must**
+  contain it but **must not** contain HANDLERS; a 1.4 file **must**
+  contain both.
+- Ids `0x09`–`0x7F` are reserved for future *required* sections: a VM
   **must** reject a file containing one it doesn't know.
 - Ids `0x80`–`0xFF` are *optional* sections, allowed after CODE in any
   order: a VM **must** skip ones it doesn't know (using `length`). `0x80` is
@@ -102,14 +105,31 @@ Tags `6`–`255` are reserved for future versions (e.g. array/map literals).
 
 ### 4.3 TYPES (`0x03`)
 
-User-declared structs and enums. Type **indices** `0` and `1` are built in
+User-declared structs and enums. Type **indices** at the start are built in
 and implicit (never written in the section); user types are numbered from
-`2` in section order.
+the next free index in section order.
+
+In a file with **minor < 4**, the built-ins are:
 
 | index | type | variants (index: name {fields}) |
 |---|---|---|
 | `0` | `Option` | `0: none`, `1: some { value }` |
 | `1` | `Promise` | `0: Pending`, `1: Settled { value }` |
+
+and user types are numbered from `2`, as in 1.0–1.3.
+
+In a file with **minor ≥ 4** *(1.4)*, `Promise` gains a third variant and
+a new built-in enum `RuntimeError` (docs/ERRORS.md) is added at index 2:
+
+| index | type | variants (index: name {fields}) |
+|---|---|---|
+| `0` | `Option` | `0: none`, `1: some { value }` |
+| `1` | `Promise` | `0: Pending`, `1: Settled { value }`, `2: Failed { error }` |
+| `2` | `RuntimeError` | `0: DivisionByZero { message }`, `1: TypeMismatch { message }`, `2: NoSuchField { message }`, `3: NoSuchMethod { message }`, `4: ArgumentError { message }`, `5: IndexOutOfRange { message }`, `6: MatchFailed { message }`, `7: InputError { message }`, `8: Internal { message }` |
+
+and user types are numbered from `3`. (§7's "new built-in types at the
+next free type indices" is exactly this: both VMs' decode/link honor the
+file's own minor to know where user types start.)
 
 ```
 count varuint
@@ -251,17 +271,22 @@ Opcodes (semantics in §6):
 | `0x37` | `matchrange` *(1.2)* | value `A`, lo `A?`, hi `A?`, inclusive `B`, dest `A` |
 | `0x38` | `vector` *(1.3)* | items `A*`, dest `A` |
 | `0x39` | `map` *(1.3)* | pairs `A*` (`k1 v1 k2 v2 …`), dest `A` |
+| `0x3A` | `matchtype` *(1.4)* | value `A`, type `T`, dest `A` |
 | `0x40` | `deferpush` | — |
 | `0x41` | `deferadd` | closure `A` |
 | `0x42` | `deferpeek` | dest `A` |
 | `0x43` | `deferpop` | dest `A` |
 | `0x44` | `deferscopepop` | — |
+| `0x45` | `deferdepth` *(1.4)* | dest `A` |
+| `0x46` | `deferabove` *(1.4)* | depth `A`, dest `A` |
 | `0x50` | `native` | fn `X`, args `A*`, dest `A?` |
+| `0x60` | `throw` *(1.4)* | value `A` |
 
 All other opcode values are reserved. Opcodes, operand kinds, and natives
 marked *(1.1)* **must not** appear in a file whose minor version is 0,
-those marked *(1.2)* not in one whose minor version is below 2, and those
-marked *(1.3)* not in one whose minor version is below 3.
+those marked *(1.2)* not in one whose minor version is below 2, those
+marked *(1.3)* not in one whose minor version is below 3, and those
+marked *(1.4)* not in one whose minor version is below 4.
 
 In the `*kw` opcodes, `kwnames` names the **last** `len(kwnames)` entries
 of `args`, in order; the entries before them are positional. `len(kwnames)
@@ -284,6 +309,35 @@ with a run at pc `0`. A `line` of `0` means
 "no source position". Used only for error messages. `mah build --target
 debug` (the default) writes it; `--target release` omits it.
 
+### 4.8 HANDLERS (`0x08`, required iff minor ≥ 4) *(1.4)*
+```
+count varuint
+count × (start L, end L, handler L, slot varuint)
+```
+One entry per `try`/`catch` region (and every implicit one `defer`
+introduces, §6.8) compiled anywhere in the program, in **section order**
+(the encoder writes an inner region's entries before the entries of any
+region enclosing it -- "innermost first"). A handler entry covers
+instructions `start ≤ pc < end`; on a throw at such a `pc`, execution
+continues at `handler` in the **same frame** (not a fresh one -- a jump
+target, not a call), with the thrown value written into slot `slot` of
+that frame, at depth `0`. Unwinding scans this table in section order and
+takes the **first** entry whose range contains the throwing `pc` (see
+§6.8 for the full algorithm across frames).
+
+Validated at load: `start < end ≤` the CODE section's own instruction
+count, and `handler <` that count. A 1.4 file with no `try`/`defer`
+anywhere still has this section, with `count` `0`. A minor < 4 file
+**must not** contain this section at all (it's simply not on that minor's
+required-section list, so one present there is rejected as an unknown
+required section, like any other). `mah dis` prints the table.
+
+Nested functions' code sits inline inside their enclosing function's own
+code (jumped over by a `closure` instruction's own preceding jump), so an
+encoder **must not** let a handler range cover a nested function's body --
+ranges are split around them. This is what makes "pc range → same frame"
+sound without a frame needing to know which function it's running.
+
 ## 5. Values
 
 | type name | values |
@@ -292,16 +346,17 @@ debug` (the default) writes it; `--target release` omits it.
 | `String` | immutable Unicode text |
 | `Bool` | `true`, `false` |
 | `Option` | enum type 0; `none` is a single shared value |
-| `Promise` | enum type 1, plus scheduler state (§6.4) |
+| `Promise` | enum type 1, plus scheduler state (§6.4); *(1.4)* also a hidden `observed` flag (§6.4) |
+| `RuntimeError` *(1.4)* | enum type 2 (§4.3); every VM-raised failure, docs/ERRORS.md |
 | `Function` | a closure: (function index, defining frame) |
 | `Vector` *(1.3)* | an ordered, growable list of values, indexed from `0`; **mutable, by reference** |
 | `Map` *(1.3)* | an insertion-ordered table from keys (Strings, Numbers, Bools) to values; **mutable, by reference** (§6.9) |
-| user struct | (type, field values in declaration order), **mutable, by reference** |
-| user enum | (type, variant, field values), mutable, by reference |
+| user struct | (type, field values in declaration order), **mutable, by reference**; *(1.4)* also a hidden `thrown_at` slot (§6.8), never visible to Mah code |
+| user enum | (type, variant, field values), mutable, by reference; *(1.4)* also a hidden `thrown_at` slot (§6.8) |
 
 The **type name** of a value (used by method dispatch): `Number`,
-`String`, `Bool`, `Function`, `Option`, `Promise`, `Vector`, `Map`, or the
-user type's name.
+`String`, `Bool`, `Function`, `Option`, `Promise`, `Vector`, `Map`,
+`RuntimeError` *(1.4)*, or the user type's name.
 
 **Truthiness** (`jmpf`, `and`, `or`): `false`, `none`, the Number `0`, and
 the empty String are falsy; every other value is truthy.
@@ -393,49 +448,72 @@ the empty String are falsy; every other value is truthy.
   known statically); otherwise a runtime error. `setfield` mutates in place.
 - `matchstruct v T dest`: `dest ← (v is an instance of struct T)`.
   `matchenum v T k dest`: `dest ← (v is an instance of enum T, variant k)`.
-- `matchfail`: runtime error "No pattern in 'match' matched the value".
+- `matchfail`: runtime error "No pattern in 'match' matched the value"
+  (`RuntimeError.MatchFailed`, §6.8).
 - `matchrange v lo hi inclusive dest` *(1.2)*: `dest ←` a Bool, true iff
   `v` and every present bound are all Numbers or all Strings, and (`lo`
   absent or `lo ≤ v`) and (`hi` absent, or `v < hi`, or `v ≤ hi` when
   `inclusive` is 1). It never raises: a value of another type simply
   doesn't match. At least one of `lo`/`hi` is present (validated at load).
   Strings compare as `lt` does.
+- `matchtype v T dest` *(1.4)*: `dest ←` a Bool, true iff `v` is an
+  instance of `T` -- for a struct `T`, exactly like `matchstruct`; for an
+  enum `T`, any variant matches (unlike `matchenum`, which checks one
+  specific variant). `none`/`some(..)` (type 0) and every Promise (type 1,
+  any state) count as instances of `Option`/`Promise` respectively. Never
+  raises. Used to compile a catch arm's type-test pattern (`name: Type`,
+  docs/ERRORS.md).
 
 ### 6.4 Tasks, promises, and the scheduler
 Single-threaded cooperative scheduling:
-- A **Promise** is an enum instance of type 1: `Pending`, or `Settled
-  { value }` once resolved; it also holds an internal list of waiting
-  continuations. Resolving an already-settled promise does nothing;
-  resolving a pending one sets it to `Settled { value }` and then runs its
-  waiting continuations **synchronously, in registration order**.
+- A **Promise** is an enum instance of type 1: `Pending`, `Settled
+  { value }` once resolved, or *(1.4)* `Failed { error }` once a detached
+  task throws past its own top (§6.8); it also holds an internal list of
+  waiting continuations and, *(1.4)*, a hidden `observed` flag (§6.8),
+  never visible to Mah code. Resolving/failing an already-settled-or-
+  failed promise does nothing; resolving a pending one sets it to
+  `Settled { value }`, and *(1.4)* failing one sets it to `Failed { error
+  }`, then either way runs its waiting continuations **synchronously, in
+  registration order**.
 - `detach callee args dest` / `detachkw callee args kwnames dest`: bind
   arguments like `call`/`callkw` (errors happen here, in the calling task);
   create a new pending Promise `p` and a new task whose frame is set up
   like `call` (empty
   return stack), with `p` as the promise it resolves when finished. **Run
   the new task immediately**, until it finishes (then resolve `p` with its
-  result) or suspends. Then `dest ← p` and the calling task continues.
+  result), suspends, or *(1.4)* fails past its own top (then fail `p`
+  with the error, §6.8). Then `dest ← p` and the calling task continues.
 - `detachmethod recv name args trait dest` / `detachmethodkw ...`: method
   lookup exactly like `callmethod` (§6.7), then like `detach`/`detachkw`
   with the resolved function and the argument list including `recv` when
   it's a method call. If the target is a native method, call it and `dest ←`
   a Promise already settled with its result (keyword arguments to a native
   method → runtime error, unexpected keyword argument).
-- `await p dest`: `p` must be a Promise (else runtime error). If settled,
-  `dest ← value`. Otherwise the current task **suspends**: register a
-  continuation on `p` that writes the value to `dest` and resumes the task
-  at the next instruction; control returns to whatever was running the task
-  (the `detach` that started it, or the scheduler loop).
+- `await p dest`: `p` must be a Promise (else runtime error:
+  `RuntimeError.TypeMismatch`). *(1.4)* Sets `p`'s `observed` flag
+  regardless of what follows. If settled, `dest ← value`. *(1.4)* If
+  failed, throw `error` at this `await` instruction (§6.8) -- caught by an
+  enclosing `try` exactly like any other throw. Otherwise (pending) the
+  current task **suspends**: register a continuation on `p` that, once it
+  settles, writes the value to `dest` and resumes the task at the next
+  instruction, or, *(1.4)* once it fails, resumes the task by throwing
+  `error` at this same `await` instruction; control returns to whatever
+  was running the task (the `detach` that started it, or the scheduler
+  loop) either way.
 - `time.sleep_async(ms)` returns a pending promise and registers a **timer**
   at `now + ms`.
-- **Scheduler loop**: after task 0 is first run (it runs until it halts or
-  suspends), repeat: if task 0 has finished and no timers remain, the
-  program ends; otherwise take the earliest timer (ties: registration
-  order), wait until it's due, and resolve its promise with `none`. So the
-  program ends only once the main code has finished *and* no scheduled work
-  remains.
+- **Scheduler loop**: after task 0 is first run (it runs until it halts,
+  suspends, or -- fatally, §6.8 -- fails), repeat: if task 0 has finished
+  and no timers remain, the program ends; otherwise take the earliest
+  timer (ties: registration order), wait until it's due, and resolve its
+  promise with `none`. So the program ends only once the main code has
+  finished *and* no scheduled work remains. *(1.4)* Once it does, if any
+  detached task's Promise failed and was never observed, the program
+  still stops with the uncaught-error report (§6.8) for the **first**
+  such Promise, in fail order.
 - When a detached task finishes, its promise is resolved with the task's
-  result (running the promise's continuations).
+  result (running the promise's continuations); *(1.4)* if it fails past
+  its own top instead, its promise is failed with the error the same way.
 
 ### 6.5 Defer
 Each task has a defer stack of scopes; a scope is a stack of closures.
@@ -444,6 +522,17 @@ Each task has a defer stack of scopes; a scope is a stack of closures.
 - `deferpeek dest`: `dest ← (top scope is non-empty)` as a Bool.
 - `deferpop dest`: pop the top scope's most recent closure into `dest`.
 - `deferscopepop`: discard the (empty) top scope.
+- `deferdepth dest` *(1.4)*: `dest ←` a Number, how many scopes the
+  task's defer stack currently holds.
+- `deferabove depth dest` *(1.4)*: `depth` holds a Number `d` (from an
+  earlier `deferdepth`); `dest ←` a Bool, whether the defer stack
+  currently holds more than `d` scopes. Used, with `deferdepth`, to drain
+  a task's defer stack back down to a saved depth while unwinding a throw
+  (§6.8) -- `deferpop`/`deferscopepop` alone drain by a fixed *count* of
+  scopes (known at compile time for `return`/`break`/`continue`); a throw
+  needs to drain down to a saved *depth* instead, since the same handler
+  code runs regardless of how many scopes happened to be open when the
+  throw occurred.
 Encoders drain scopes with ordinary `call`/`retval` instructions.
 
 ### 6.6 `to_string` (the `Printable` system trait)
@@ -534,18 +623,109 @@ name. A target is (function value or native, `is_method`).
      optional parameters, see above). Either way, `retval`
      follows.
 
-### 6.8 Runtime errors
-Version 1.0 has no error values and no way to catch an error: a runtime
-error stops the whole program with a message. With DEBUG present, VMs
-should add the failing instruction's location: the reference CLI appends
-`at position #LINE:COL` for the entry file and `at position FILE#LINE:COL`
-for others. Without DEBUG (a `--target release` build), the message is
-reported alone, with no location or instruction index.
+### 6.8 Throwing, unwinding, and runtime errors *(rewritten for 1.4)*
 
-Structured errors (error values, a way to catch or propagate them) are
-planned. They'll arrive as a minor version: new opcodes, and probably a
-built-in error type alongside `Option`/`Promise`. Nothing in 1.0 has to
-change for that.
+Versions 1.0–1.3 had no error values and no way to catch an error: a
+runtime error stopped the whole program with a message. 1.4 (docs/
+ERRORS.md) adds a `throw` opcode, the HANDLERS table (§4.8), and turns
+every VM-raised failure into a catchable value instead of an immediate
+abort.
+
+**`throw value`**: throw `value` at this instruction. If `value`'s type
+has no `Error`-trait target for method `message` in the method table
+(§6.7) -- i.e. it doesn't `impl Error` -- throw `RuntimeError.TypeMismatch
+{ message: "Cannot throw a value of type 'T': it does not implement
+Error" }` instead (`T` = `value`'s type name).
+
+**Throwing** value `v` at instruction `pc` in task `t` (this is also what
+happens to every runtime error below, and to a `throw` opcode's own
+value):
+1. If `v` is a struct/enum instance whose hidden `thrown_at` slot is
+   unset, set it to `pc` (VM-internal, never visible to Mah code; used
+   only to locate an uncaught error; re-throwing -- including
+   automatically, when no catch arm matches -- keeps the original).
+2. Loop: find the first HANDLERS entry (in section order) with
+   `start ≤ pc < end`.
+   - Found: write `v` into slot `entry.slot` of `t`'s current frame (at
+     depth `0`), set `t`'s pc to `entry.handler`, and continue running
+     `t` from there.
+   - Not found and `t`'s return stack is non-empty: pop `(ret_pc,
+     frame)`, make `frame` `t`'s current frame, set `pc = ret_pc - 1`
+     (the call instruction that's still unwinding), and repeat.
+   - Not found and `t`'s return stack is empty: the error is **uncaught
+     in `t`** (below).
+
+**Every existing runtime-error site** (division by zero, a bad method
+call, argument binding, an out-of-range index, a `match` with no
+matching arm, a wrapped host-language exception, ...), in both VMs,
+throws a `RuntimeError` value at the failing instruction instead of
+aborting, instead of the pre-1.4 immediate stop: variant chosen by kind
+(below), field `message` = **exactly the pre-1.4 message text** (no
+location baked in). This is why every pre-1.4 error-message test stays
+green: the *uncaught*-error report (below) reproduces that exact text
+plus its location, unless something now catches it.
+
+**Which `RuntimeError` variant each site becomes** (docs/ERRORS.md's
+motivation: these are deliberately **not** tracked by the static checker,
+unlike a user `throw` -- almost every function does arithmetic or
+indexing, so tracking them would make every inferred error set
+non-empty and meaningless):
+- `DivisionByZero`: "Division by zero" (`div`, `idiv`, `mod`, `0 ** negative`).
+- `TypeMismatch`: operator type errors ("Cannot apply ...", "Cannot
+  compare ...", "Cannot negate ..."), calling/detaching a non-function,
+  `.await` on a non-Promise, field access on a non-struct value, an
+  invalid Map key, a non-Number or non-integer index/slice bound,
+  `index_assign` with a range, `to_string` returning a non-String,
+  throwing a non-`Error` value.
+- `NoSuchField`: "'T' has no field 'f'".
+- `NoSuchMethod`: "has no method", "does not implement trait", an
+  ambiguous method, a static function called as a method, "Field 'f' of
+  'T' is not a function".
+- `ArgumentError`: every argument-binding error (§6.1, including
+  native-method keyword errors).
+- `IndexOutOfRange`: `char_at` out of range, `index_assign` on a Vector
+  index that names no item.
+- `MatchFailed`: `matchfail`.
+- `InputError`: `io.input` errors.
+- `Internal`: everything else, including "cannot suspend ... when called
+  implicitly by the runtime", "program counter out of range", and any
+  wrapped host-language exception. Both VMs must classify every site
+  identically; a unit test in each VM's own test suite pins at least one
+  message per variant.
+
+**Uncaught at a task root:**
+- **Main task** (task 0): the program stops immediately (pending timers
+  are abandoned, exactly as a pre-1.4 runtime error already did) with
+  the uncaught-error report below.
+- **Detached task**: its Promise **fails** with the error (§6.4) instead
+  of stopping the program. The VM also remembers every failed Promise,
+  in fail order. Once the program would otherwise end normally (main
+  task finished, no timers left), if any failed Promise was never
+  `.await`ed (its hidden `observed` flag is unset), the program stops
+  with the uncaught-error report for the **first** such Promise.
+- **A synchronous sub-task** (the Mah `to_string` a VM invokes for
+  `print`/`add` with a String operand, and anything else run the way
+  `.await` is forbidden to -- i.e. `invoke_sync` in both reference
+  implementations): the error is thrown in the **calling** task, at the
+  instruction that invoked it, so it can be caught there.
+
+**Uncaught-error report** (the fatal message text; the CLI prints it
+exactly as a pre-1.4 runtime error, `at position ...` included):
+- A `RuntimeError` value: its own `message` field, located at
+  `thrown_at` (`at position #L:C` etc., exactly as a runtime error was
+  already reported; no location in a release build). This is what keeps
+  every pre-1.4 error-message test's text unchanged.
+- Any other value, of type `T`: `Uncaught T: <m>`, located the same way,
+  where `<m>` is the result of calling its `Error.message` method
+  synchronously; if that throws, suspends, or returns a non-String, `<m>`
+  is `to_string(value)` instead; if that fails too, the report is just
+  `Uncaught T` (no `: <m>` at all).
+
+With DEBUG present, VMs should add the failing instruction's location:
+the reference CLI appends `at position #LINE:COL` for the entry file and
+`at position FILE#LINE:COL` for others. Without DEBUG (a `--target
+release` build), the message is reported alone, with no location or
+instruction index -- unchanged from 1.0–1.3.
 
 ### 6.9 Vectors and Maps *(1.3)*
 - `vector items dest`: `dest ←` a new Vector holding the values at `items`,
@@ -597,7 +777,9 @@ change for that.
 
 - **Minor version** (backwards compatible for readers): new natives, new
   opcodes (from the reserved values), new constant tags, new optional
-  sections, new built-in types at the next free type indices. A 1.x VM runs any 1.y file with y ≤ x.
+  sections, new built-in types at the next free type indices, and
+  (required only from that minor on, exactly like PARAMS was for 1.1) new
+  *required* sections. A 1.x VM runs any 1.y file with y ≤ x.
 - **Major version**: anything that changes the meaning or encoding of
   existing items.
 - **1.1** added parameter names and defaults (the PARAMS
@@ -619,5 +801,17 @@ change for that.
   Iterating them and `Map.entries()` are prelude code again (`impl
   Iterable for Vector`/`Map`, the `MapEntry` struct), needing nothing more
   from a VM.
-- Planned growth, for orientation: string utilities, filesystem,
-  networking, and process natives, structured errors.
+- **1.4** added typed, catchable errors (docs/ERRORS.md): the `throw`,
+  `matchtype`, `deferdepth`, and `deferabove` opcodes; the HANDLERS
+  section (§4.8, required from 1.4); the built-in `RuntimeError` enum
+  (type index 2, user types now numbered from 3); and `Promise`'s third
+  variant, `Failed { error }`. Every VM-raised failure became a catchable
+  `RuntimeError` value instead of an immediate abort (§6.8) -- an
+  *uncaught* one still produces exactly the same message and location a
+  1.0–1.3 VM already gave, so no existing error-message test needed to
+  change. A 1.4 VM still runs 1.0–1.3 files unchanged (no HANDLERS
+  section, no new opcodes, `Promise` only ever `Pending`/`Settled`, user
+  types numbered from 2 as before).
+- Planned growth, for orientation: error-set checking (the static
+  checker's `throws` inference and "unhandled error" diagnostics -- M26),
+  string utilities, filesystem, networking, and process natives.

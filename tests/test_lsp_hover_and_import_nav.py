@@ -148,6 +148,50 @@ class AsyncHoverTests(unittest.TestCase):
         self.assertNotIn("**keyword**", hover["contents"]["value"])
 
 
+class M25ErrorHoverTests(unittest.TestCase):
+    """M25 (docs/ERRORS.md): `try`/`throw` are real keywords; `catch`/
+    `throws` are contextual (still usable as identifiers -- see
+    `analysis._is_error_contextual_keyword`)."""
+
+    def test_hover_on_try_and_throw(self):
+        src = 'enum E { A }\nimpl Error for E {}\nlet r = try { throw E.A } catch { _ => { 1 } }\nprint(r)\n'
+        for kw in ("try", "throw"):
+            line, col = _find(src, kw)
+            hover = analysis.get_hover(src, line, col)
+            self.assertIsNotNone(hover, f"hover on {kw!r} returned None")
+            self.assertIn(f"**keyword** `{kw}`", hover["contents"]["value"])
+
+    def test_hover_on_catch(self):
+        src = "let r = try { 1 } catch { _ => { 2 } }\nprint(r)\n"
+        line, col = _find(src, "catch")
+        hover = analysis.get_hover(src, line, col)
+        self.assertIsNotNone(hover)
+        self.assertIn("**keyword** `catch`", hover["contents"]["value"])
+
+    def test_hover_on_throws_clause(self):
+        src = "fn f(x) throws E { x }\n"
+        line, col = _find(src, "throws")
+        hover = analysis.get_hover(src, line, col)
+        self.assertIsNotNone(hover)
+        self.assertIn("**keyword** `throws`", hover["contents"]["value"])
+
+    def test_catch_and_throws_as_plain_identifiers_are_not_keywords(self):
+        src = "let catch = 1\nlet throws = 2\nprint(catch + throws)\n"
+        for name in ("catch", "throws"):
+            line, col = _find(src, name, occurrence=1)  # the print(...) use
+            hover = analysis.get_hover(src, line, col)
+            self.assertIsNotNone(hover)
+            self.assertNotIn("**keyword**", hover["contents"]["value"])
+
+    def test_hover_on_runtime_error_type_name_degrades_gracefully(self):
+        # `RuntimeError` is a built-in with no user-written declaration to
+        # link to -- same as `Option`/`Promise`, hover returns None rather
+        # than crashing.
+        src = "print(try { 1 / 0 } catch { e: RuntimeError => { e.message } })\n"
+        line, col = _find(src, "RuntimeError")
+        analysis.get_hover(src, line, col)  # must not raise
+
+
 class ImportGotoDefinitionTests(unittest.TestCase):
     def test_namespaced_import_path_string_jumps_to_file(self):
         path = os.path.join(EXAMPLES_DIR, "import_demo.mh")

@@ -181,6 +181,13 @@ def _uses_prelude(token_lists: list) -> bool:
         for tok in tokens:
             if tok.kind == "id" and tok.value in triggers:
                 return True
+            # M25 (docs/ERRORS.md): a `try`/`throw` token means the prelude's
+            # `Error` trait (and `RuntimeError`'s `impl Error for
+            # RuntimeError`) may be needed -- `try`/`throw` are real
+            # keywords, not user-declarable names, so no `declared`-style
+            # exclusion is needed the way `PRELUDE_TRIGGERS` names do.
+            if tok.kind == "id" and tok.value in ("try", "throw"):
+                return True
         for i in range(len(tokens) - 1):
             a, b = tokens[i], tokens[i + 1]
             if a.kind == "dot" and b.kind == "dot" and b.start == a.end:
@@ -659,7 +666,15 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
     # that doesn't trigger it, which the LSP relies on.
     prelude_start = None
     if _uses_prelude(program_tokens):
-        emit("\n", entry_path, len(text), 0, None)
+        # M25: a `;` (not just a newline) separates the user's own code
+        # from the prelude's -- otherwise a trailing expression statement
+        # that ISN'T one of the parser's block-shaped-exempt forms (e.g. a
+        # bare `throw e` as literally the program's last line, spec test
+        # #7) would need a semicolon it doesn't actually need from the
+        # user's own point of view (nothing follows in THEIR file), since
+        # the parser would otherwise see the prelude's own first token as
+        # "more code after this statement, in the same block."
+        emit(";\n", entry_path, len(text), 0, None)
         prelude_start = state["len"]
         inline_module(PRELUDE_PATH, None)
 

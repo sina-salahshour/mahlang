@@ -74,3 +74,8 @@ class Program:
     code: list
     debug: object = None  # DebugInfo | None
     minor: int = 0
+    # M25 (1.4, docs/MAHC_FORMAT.md #4.8): list[tuple[int, int, int, int]] --
+    # (start, end, handler, slot), in section order (innermost-first --
+    # see compiler/codegen.py's region-closing order). Always `[]` for
+    # minor < 4 (no HANDLERS section at all).
+    handlers: list = field(default_factory=list)

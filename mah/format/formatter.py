@@ -316,6 +316,19 @@ def _facts(program: list, toks: list, module_starts: set) -> _Facts:
                 facts.brace_kinds[brace] = "match"
             for arm in node.arms:
                 add_start(arm.pattern)
+        elif isinstance(node, ast.TryExpr):
+            # M25: `try { } catch { arms }` -- the catch block's own arms
+            # are formatted exactly like a `match`'s (same `_Facts.brace_kinds`
+            # "match" treatment); the body block (and, for an else form, a
+            # fallback that's itself a `{ }` block) are ordinary blocks,
+            # already handled generically by the `ast.Block` branch above.
+            if node.arms:
+                catch_idx = index_of(node.handler_position)
+                brace = next_brace(catch_idx) if catch_idx is not None else None
+                if brace is not None:
+                    facts.brace_kinds[brace] = "match"
+                for arm in node.arms:
+                    add_start(arm.pattern)
         elif isinstance(node, (ast.ImplDecl, ast.TraitDecl)):
             brace = next_brace(index_of(node.position))
             if brace is not None:
