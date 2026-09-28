@@ -2924,6 +2924,36 @@ node that resolved to it. Then:
       `tests/test_typecheck.py`, an LSP hover test, and
       `runtime/`'s own `cargo test`.
 
+27. **M26 — errors: the checker's error sets. ✅ Landed.** Design in
+    `docs/ERRORS.md` ("Inference", "Uncaught errors"), with the exact
+    scope in its "M26: what landed" section. Static only: codegen and
+    both VMs are unchanged.
+
+    - `mah/compiler/types.py`: `ESet` (a node in the program-wide
+      error-set graph: own names, links with exclusions, and `acc`/`var`/
+      `sealed` kinds), `solve` (least fixpoint), `TFn.throws`,
+      `TCon.throws` (Promises), `Unifier.flow` (trail-recorded, so a
+      failed unification rolls it back), error-set levels and
+      quantification in `Scheme`/`instantiate`.
+    - `mah/compiler/typecheck.py`: accumulators per function / `try` body
+      / `detach`, `throw` typing (must implement `Error`), catch-arm
+      coverage (`_handled`), rethrow of a catch-all binding, sealed
+      `throws` clauses on functions and fn types (inferred when left
+      out), flattening + quantifying error sets at generalization, and
+      `_report_errors`. Diagnostic kinds `unhandled` and `warning` join
+      `mismatch`/`implicit`; `is_warning` decides severity in
+      `mah check`, the driver and the LSP.
+    - `examples/errors.mh`: its first `try` now covers both variants (the
+      checker rightly reported the uncovered one); output unchanged.
+    - Templates: `docs/mah-language.md`'s Errors section describes the
+      inference and diagnostics; the "not available" line for it is gone.
+    - Tests: `tests/test_typecheck.py` (`M26ErrorSetTests`; two M25
+      checker tests updated on purpose: a top-level uncaught `throw` is now
+      reported, and function types show `throws`),
+      `tests/test_typecheck_wiring.py` (strict fails on unhandled, not on
+      a warning), `tests/test_lsp_hover_types_and_completion.py` (hover
+      shows `throws`).
+
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
 it** (`make test` must stay green) — see `docs/TESTING.md` for where

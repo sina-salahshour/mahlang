@@ -27,7 +27,7 @@ from ..compiler.lexer import KEYWORDS, Lexer, Token, TokenType  # noqa: E402
 from ..compiler.parser import Parser  # noqa: E402
 from ..compiler.resolve import Resolver  # noqa: E402
 from ..compiler import typecheck  # noqa: E402
-from ..compiler.types import TCon, TFn, prune as prune_type, show as show_type  # noqa: E402
+from ..compiler.types import TCon, TFn, prune as prune_type, show as show_type, show_throws  # noqa: E402
 from ..preprocessor import BUFFER_PATH, demangle_message, preprocess  # noqa: E402
 from ..project.manifest import check_level_for  # noqa: E402
 from ..runtime_values import BUILTIN_TYPE_NAMES  # noqa: E402
@@ -597,8 +597,8 @@ def get_diagnostics(text: str, path: Optional[str] = None) -> list[dict]:
                 except Exception:  # noqa: BLE001 - _log itself, or importing it, failed
                     pass
             else:
-                severity = SEVERITY_WARNING if level == "loose" else SEVERITY_ERROR
                 for diag in typecheck.reportable(type_diagnostics, level):
+                    severity = SEVERITY_WARNING if typecheck.is_warning(diag, level) else SEVERITY_ERROR
                     length = _token_length_at(combined, diag.position)
                     diagnostics.append(
                         _diagnostic_for_combined_offset(
@@ -1499,7 +1499,9 @@ def _fn_signature_text(name: str, t, skip_receiver: bool = False) -> str:
         params[index] += " = ..."
     ret = prune_type(t.ret)
     arrow = "" if isinstance(ret, TCon) and ret.name == "None" else f" -> {_type_text(ret)}"
-    return f"fn {name}({', '.join(params)}){arrow}"
+    # M26: the error set the checker inferred (or the written `throws`).
+    throws = demangle_message(show_throws(t.throws))
+    return f"fn {name}({', '.join(params)}){arrow}{throws}"
 
 
 def _combined_token_position(pp, token: Token) -> Optional[int]:

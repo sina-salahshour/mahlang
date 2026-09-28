@@ -20,7 +20,7 @@ from mah.bytecode.lower import line_col  # noqa: E402
 from mah.compiler.lexer import Lexer  # noqa: E402
 from mah.compiler.parser import Parser  # noqa: E402
 from mah.compiler.resolve import Resolver  # noqa: E402
-from mah.compiler.typecheck import Checker, check_program, reportable  # noqa: E402
+from mah.compiler.typecheck import Checker, check_program, is_warning, reportable  # noqa: E402
 from mah.compiler.types import (  # noqa: E402
     NUMBER,
     STRING,
@@ -592,14 +592,17 @@ class M25ErrorCheckerTests(_Base):
         )
 
     def test_throw_in_an_if_else_branch_used_as_a_typed_let_value(self):
-        self.assertClean(
+        # No type mismatch; since M26 the uncaught `E` is reported instead.
+        diagnostics, _ = check(
             "enum E { A }\nimpl Error for E {}\nlet y: Number = if true { 1 } else { throw E.A }"
         )
+        self.assertEqual(diagnostics, [("unhandled", "Unhandled error: E", 3)])
 
     def test_throw_has_type_never(self):
+        # M26: the function type now shows the error set it infers too.
         self.assertTypes(
             "enum E { A }\nimpl Error for E {}\nfn f() -> Number { if true { 1 } else { throw E.A } }",
-            f="fn() -> Number",
+            f="fn() -> Number throws E",
         )
 
     def test_type_test_arm_binds_the_named_type(self):
@@ -611,6 +614,206 @@ class M25ErrorCheckerTests(_Base):
 
     def test_try_else_joins_body_and_fallback(self):
         self.assertClean("let n: Number = try 1 / 0 else 0")
+
+
+_ERRORS = "enum A { X, Y }\nimpl Error for A {}\nstruct B { code: Number }\nimpl Error for B {}\n"
+_ERROR_LINES = _ERRORS.count("\n")
+
+
+class M26ErrorSetTests(_Base):
+    """M26 (docs/ERRORS.md's "Inference"/"Uncaught errors"): error sets --
+    inferred per function, carried by function types (`throws`, inferred
+    when not written), filtered by `try`, and checked at the top of the
+    program and against written `throws` lists."""
+
+    def diagnostics(self, src: str):
+        diagnostics, _ = check(_ERRORS + src)
+        return [(k, m, line - _ERROR_LINES) for k, m, line in diagnostics]
+
+    def types(self, src: str):
+        return check(_ERRORS + src)[1]
+
+    # -- inference ---------------------------------------------------------
+
+    def test_a_function_throws_what_it_throws(self):
+        self.assertEqual(self.types("fn f() -> Number { throw A.X }")["f"], ["fn() -> Number throws A"])
+
+    def test_errors_infect_callers(self):
+        types = self.types("fn f(x) { if x { throw A.X }\n1 }\nfn g() { f(true) }")
+        self.assertEqual(types["g"], ["fn() -> Number throws A"])
+
+    def test_a_non_throwing_function_shows_no_throws(self):
+        self.assertEqual(self.types("fn f() { 1 }")["f"], ["fn() -> Number"])
+
+    def test_self_recursion(self):
+        types = self.types("fn f(n) -> Number { if n > 0 { f(n - 1) } else { throw A.X } }")
+        self.assertEqual(types["f"], ["fn(Number) -> Number throws A"])
+
+    def test_mutually_recursive_methods_share_their_errors(self):
+        types = self.types(
+            "struct P { }\nimpl P {\n"
+            "fn a(self, n) -> Number { if n > 0 { self.b(n - 1) } else { throw A.X } }\n"
+            "fn b(self, n) -> Number { if n > 5 { throw B { code: 1 } } else { self.a(n) } }\n}"
+        )
+        self.assertEqual(types["a"], ["fn(P, Number) -> Number throws A | B"])
+        self.assertEqual(types["b"], ["fn(P, Number) -> Number throws A | B"])
+
+    def test_a_callback_s_errors_belong_to_each_call(self):
+        # `apply` is generic in its callback's error set: one call passing a
+        # throwing callback doesn't make the other throw.
+        src = (
+            "fn apply(f) { f() }\nfn bad() -> Number { throw A.X }\nfn good() { 1 }\n"
+            "fn only_good() { apply(good) }\nfn only_bad() { apply(bad) }"
+        )
+        types = self.types(src)
+        self.assertEqual(types["only_good"], ["fn() -> Number"])
+        self.assertEqual(types["only_bad"], ["fn() -> Number throws A"])
+
+    def test_a_closure_returned_keeps_its_errors(self):
+        types = self.types("fn make() { fn() -> Number { throw A.X } }")
+        self.assertEqual(types["make"], ["fn() -> fn() -> Number throws A"])
+
+    def test_a_deferred_block_s_errors_are_the_function_s(self):
+        types = self.types("fn f() { defer { throw A.X }\n1 }")
+        self.assertEqual(types["f"], ["fn() -> Number throws A"])
+
+    def test_a_callback_passed_to_an_unchecked_method_throws_there(self):
+        self.assertEqual(
+            [d for d in self.diagnostics("let v = [1]\nv.map(fn(x) { throw A.X })") if d[0] == "unhandled"],
+            [("unhandled", "Unhandled error: A", 2)],
+        )
+
+    def test_runtime_errors_are_never_tracked(self):
+        self.assertEqual(self.diagnostics("let n = 1 / 0\nthrow RuntimeError.Internal { message: \"x\" }"), [])
+
+    # -- try/catch -----------------------------------------------------------
+
+    def test_a_type_test_arm_handles_the_type(self):
+        self.assertEqual(self.diagnostics("fn f() { throw A.X }\ntry { f() } catch { e: A => { 1 } }"), [])
+
+    def test_one_variant_handles_only_part_of_a_type(self):
+        self.assertEqual(
+            self.diagnostics("fn f() { throw A.X }\ntry { f() } catch { A.X => { 1 } }"),
+            [("unhandled", "Unhandled error: A", 2)],
+        )
+
+    def test_every_variant_handles_the_whole_type(self):
+        self.assertEqual(
+            self.diagnostics("fn f() { throw A.X }\ntry { f() } catch { A.X => { 1 }\nA.Y => { 2 } }"), []
+        )
+
+    def test_a_guarded_arm_handles_nothing(self):
+        self.assertEqual(
+            self.diagnostics("fn f() { throw A.X }\nlet k = 1\ntry { f() } catch { e: A if k > 0 => { 1 } }"),
+            [("unhandled", "Unhandled error: A", 3)],
+        )
+
+    def test_a_catch_all_and_try_else_handle_everything(self):
+        self.assertEqual(self.diagnostics("fn f() { throw A.X }\ntry { f() } catch { _ => { 1 } }"), [])
+        self.assertEqual(self.diagnostics("fn f() { throw A.X }\nlet n = try f() else 0"), [])
+
+    def test_errors_thrown_by_an_arm_escape(self):
+        self.assertEqual(
+            self.diagnostics("fn f() { throw A.X }\ntry { f() } catch { _ => { throw B { code: 1 } } }"),
+            [("unhandled", "Unhandled error: B", 2)],
+        )
+
+    def test_rethrowing_a_caught_error(self):
+        src = "fn f() { throw A.X }\nfn g() { try { f() } catch { e => { throw e } } }"
+        self.assertEqual(self.types(src)["g"], ["fn() -> T throws A"])
+
+    def test_a_try_inside_a_function_filters_its_errors(self):
+        types = self.types("fn f() { throw A.X }\nfn g() { try { f() } catch { e: A => { 1 } } }")
+        self.assertEqual(types["g"], ["fn() -> Number"])
+
+    def test_an_arm_for_an_error_never_thrown_is_a_warning(self):
+        self.assertEqual(
+            self.diagnostics("fn f() { throw A.X }\ntry { f() } catch { e: A => { 1 }\ne: B => { 2 } }"),
+            [("warning", "B is never thrown here", 3)],
+        )
+
+    def test_a_runtime_error_arm_is_never_warned_about(self):
+        self.assertEqual(self.diagnostics("try { 1 / 0 } catch { e: RuntimeError => { 1 } }"), [])
+
+    # -- detach/await ----------------------------------------------------------
+
+    def test_a_detached_task_s_errors_come_out_of_await(self):
+        src = "fn w() -> Number { throw A.X }\nlet p = detach w()\nlet v = p.await"
+        self.assertEqual(self.diagnostics(src), [("unhandled", "Unhandled error: A", 3)])
+
+    def test_await_in_a_function_is_generic_in_the_promise_s_errors(self):
+        src = "fn w() -> Number { throw A.X }\nfn get(p) { p.await }\nlet v = get(detach w())"
+        self.assertEqual(self.diagnostics(src), [("unhandled", "Unhandled error: A", 3)])
+
+    # -- throws clauses ----------------------------------------------------------
+
+    def test_a_throws_clause_seals_what_callers_see(self):
+        types = self.types("fn f(x) -> Number throws A | B { if x { throw A.X }\n1 }")
+        self.assertEqual(types["f"], ["fn(T) -> Number throws A | B"])
+
+    def test_a_throws_clause_must_cover_the_body(self):
+        self.assertEqual(
+            self.diagnostics("fn f() throws A { throw B { code: 1 } }"),
+            [("unhandled", "'f' can throw B, which isn't in its throws list", 1)],
+        )
+        self.assertEqual(
+            self.diagnostics("fn f(x) throws never { if x { throw A.X } }"),
+            [("unhandled", "'f' can throw A, which isn't in its throws list", 1)],
+        )
+
+    def test_a_throws_list_names_error_types(self):
+        self.assertEqual(
+            self.diagnostics("struct S { }\nfn f() throws S { 1 }"),
+            [("mismatch", "S doesn't implement Error, so it can't be in a throws list", 2)],
+        )
+
+    def test_fn_type_throws_is_inferred_when_left_out(self):
+        src = "fn run(cb: fn() -> Number) -> Number { cb() }\nlet n = run(fn() { 1 })\nlet m = run(fn() { throw A.X })"
+        self.assertEqual(self.diagnostics(src), [("unhandled", "Unhandled error: A", 3)])
+
+    def test_fn_type_throws_clause_is_checked(self):
+        src = "fn run(cb: fn() -> Number throws never) -> Number { cb() }\nlet n = run(fn() { throw A.X })"
+        self.assertEqual(
+            self.diagnostics(src),
+            [("unhandled", "This function can throw A, but its expected type only allows throws never", 2)],
+        )
+        types = self.types("fn run(cb: fn() -> Number throws A) -> Number { cb() }")
+        self.assertEqual(types["run"], ["fn(fn() -> Number throws A) -> Number throws A"])
+
+    def test_a_throws_clause_naming_a_type_parameter_is_inferred(self):
+        src = (
+            "fn apply<T, U, E>(f: fn(T) -> U throws E, x: T) -> U throws E { f(x) }\n"
+            "fn bad(x: Number) -> Number { throw A.X }\n"
+            "fn good() { apply(bad, 1) }"
+        )
+        self.assertEqual(self.diagnostics(src), [])
+        self.assertEqual(self.types(src)["good"], ["fn() -> Number throws A"])
+
+    # -- misuse ------------------------------------------------------------------
+
+    def test_throwing_a_non_error(self):
+        self.assertEqual(
+            self.diagnostics("throw 5"), [("mismatch", "Number doesn't implement Error, so it can't be thrown", 1)]
+        )
+        self.assertEqual(
+            self.diagnostics("struct S { }\nthrow S { }"),
+            [("mismatch", "S doesn't implement Error, so it can't be thrown", 2)],
+        )
+
+    def test_an_unknown_callee_is_reported_only_at_explicit(self):
+        src = "let u: Unknown = 1\nu()"
+        self.assertEqual(self.diagnostics(src), [("implicit", "Can't infer what this throws; annotate it", 2)])
+        self.assertEqual(self.diagnostics("let u: Unknown = 1\ntry u() else 0"), [])
+
+    def test_levels(self):
+        pp, program, resolver = _front_end(
+            _ERRORS + "fn f() { throw A.X }\nf()\ntry { f() } catch { e: A => { 1 }\ne: B => { 2 } }"
+        )
+        diagnostics = check_program(program, resolver)
+        self.assertEqual(sorted(d.kind for d in reportable(diagnostics, "strict")), ["unhandled", "warning"])
+        warnings = {d.kind: is_warning(d, "strict") for d in diagnostics}
+        self.assertEqual(warnings, {"unhandled": False, "warning": True})
+        self.assertTrue(all(is_warning(d, "loose") for d in diagnostics))
 
 
 class ExplicitLevelTests(_Base):

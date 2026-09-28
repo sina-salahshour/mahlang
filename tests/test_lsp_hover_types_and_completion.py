@@ -93,6 +93,36 @@ class HoverInferredTypeTests(unittest.TestCase):
         self.assertIn("fn id(a: T) -> T", self._value("id"))
 
 
+class HoverThrowsTests(unittest.TestCase):
+    """M26: a function's hover signature shows its inferred error set."""
+
+    SRC = (
+        "enum Bad { Oops }\n"
+        "impl Error for Bad {}\n"
+        "fn risky(n) {\n"
+        "\tif n > 0 { throw Bad.Oops }\n"
+        "\treturn n\n"
+        "}\n"
+        "fn safe() {\n"
+        "\treturn try risky(1) else 0\n"
+        "}\n"
+    )
+
+    def _value(self, needle, occurrence=0):
+        line, col = _find(self.SRC, needle, occurrence)
+        hover = analysis.get_hover(self.SRC, line, col)
+        self.assertIsNotNone(hover)
+        return hover["contents"]["value"]
+
+    def test_throwing_function_shows_throws(self):
+        self.assertIn("fn risky(n: Number) -> Number throws Bad", self._value("risky"))
+
+    def test_handled_errors_are_not_shown(self):
+        value = self._value("safe")
+        self.assertIn("fn safe() -> Number", value)
+        self.assertNotIn("throws", value)
+
+
 class HoverMethodAndFieldTypeTests(unittest.TestCase):
     SRC = (
         "struct Board { c1 }\n"

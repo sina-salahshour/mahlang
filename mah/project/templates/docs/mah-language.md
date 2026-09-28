@@ -648,7 +648,8 @@ let b = try first_digit("x") else "?"          # try/else shorthand
 print(a, b)                                    # other: not a digit ?
 print(try { 1 / 0 } catch { e: RuntimeError => { e.message } })   # Division by zero
 
-fn load(s: String) -> String throws ParseError { s }   # `throws`: documentation, not checked yet
+fn load(s: String) -> String throws ParseError { first_digit(s) }   # checked: must cover the body
+let run: fn(String) -> String throws never = fn(s) { s }   # fn types take `throws` too
 ```
 
 Every VM-raised failure (division by zero, a bad method call, an
@@ -657,10 +658,23 @@ built-in `RuntimeError` enum -- catchable the same way as any other error
 (`RuntimeError.DivisionByZero { message } =>`, or a type-test `e:
 RuntimeError =>`). `Error`'s default `message()` is the value's own
 `to_string()`; override it (as above) for a nicer message. `defer`red
-blocks still run, in order, while an error unwinds past them. A function's
-signature may declare what it can throw with `throws` (as above; `throws
-never` declares none) -- purely documentation for now, not yet checked. An
-error nothing catches stops the program with a message and source location.
+blocks still run, in order, while an error unwinds past them. An error
+nothing catches stops the program with a message and source location.
+
+The type checker infers what every function can throw (its **error set**),
+with no annotation: a function throws what its body `throw`s plus whatever
+the functions it calls throw, minus what a `try` around them fully handles
+(`e: T`, `_`/`e`, or arms for every variant of an enum; a single variant or
+a guarded arm handles only part of a type, so the type stays). Hover shows
+it (`fn first_digit(s: String) -> String throws ParseError`). An error that
+can reach the top of the program is reported as `Unhandled error: T` (a
+warning in `loose` mode, an error in `strict`/`explicit`), and a `catch`
+arm naming a type the body never throws is a warning. `RuntimeError`s are
+catchable but never tracked. A function or function type may declare its
+error set with `throws A | B` (or `throws never`); leaving it out means
+"inferred", and a written one must cover everything the body can throw.
+Only values whose type implements `Error` can be thrown or listed after
+`throws`.
 Compile errors (syntax, undefined names, wrong struct fields) are reported
 before anything runs.
 
@@ -674,7 +688,6 @@ before anything runs.
 - String methods other than `len`/`char_at` (no `split`, `replace`, ...).
 - `&&`, `||`, `+=`, `++`, ternary `?:`.
 - Type-checking trait-typed values, bounds, and the prelude's iterator methods (the checker skips these for now); classes/inheritance.
-- Checking `throws` clauses or inferring a function's error set ("unhandled error" diagnostics) -- `try`/`throw`/`catch` themselves work at runtime; see Errors.
 - Variadic parameters (`*args`, `**kwargs`); only `print` takes any number of arguments.
 - File, network, or OS access (planned as future built-ins).
 - `null`/`nil`/`undefined`: use `none`.

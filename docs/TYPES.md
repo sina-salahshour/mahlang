@@ -1,6 +1,6 @@
 # Mah static types
 
-Status: **M21 (syntax) and M22 (the core checker) landed, plus a first slice of M23 (method calls) and M24 (hover types); the rest of M23 (trait types, bounds, the standard library) and M24 (completion from checker types) are next.** See `docs/V2_DESIGN.md`'s M22 entry for where the implementation deviates from this design. This replaces `docs/NEXT_PHASES.md`'s
+Status: **M21 (syntax) and M22 (the core checker) landed, plus a first slice of M23 (method calls) and M24 (hover types); the rest of M23 (trait types, bounds, the standard library) and M24 (completion from checker types) are next.** See `docs/V2_DESIGN.md`'s M22 entry for where the implementation deviates from this design. Error sets (`throws`, M26) are a separate layer on top of this, designed in `docs/ERRORS.md`. This replaces `docs/NEXT_PHASES.md`'s
 "The type system" sketch for now. That sketch treated types as runtime
 values. This design is purely static, so nothing about it runs. Types can
 still become runtime values later (for `match`-on-type narrowing), and

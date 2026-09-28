@@ -22,7 +22,12 @@ fn first_digit(s) {
 
 # `try { ... } catch { arms }`'s arms are `match` arms, plus a type-test
 # pattern (`name: Type` / `_: Type`) that matches any instance of a type.
-print(try { first_digit("5x") } catch { ParseError.Empty => { "was empty" } })
+# The checker knows `first_digit` throws ParseError; arms covering every
+# variant handle it fully (`mah check` warns about any error left unhandled).
+print(try { first_digit("5x") } catch {
+    ParseError.Empty => { "was empty" }
+    ParseError.BadDigit => { "bad digit" }
+})
 print(try { first_digit("") } catch {
     ParseError.Empty => { "was empty" }
     e: ParseError => { "other: " + e.message() }
