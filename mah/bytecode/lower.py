@@ -21,7 +21,7 @@ from decimal import Decimal
 from ..preprocessor import BUFFER_PATH, PRELUDE_PATH, demangle_message, source_label, std_module_name
 from ..runtime_values import NONE_VALUE
 from .format import MINOR, NATIVE_ARITIES, NATIVE_SINCE_MINOR, TAG_DEC, TAG_FALSE, TAG_INT, TAG_NONE, TAG_STR, TAG_TRUE
-from .program import Const, DebugInfo, FunctionDecl, Instr, NativeRef, Program, TypeDecl
+from .program import Const, DebugInfo, FunctionDecl, Instr, NativeRef, Program, TestEntry, TypeDecl
 
 # IR op -> bytecode op, for the binary/comparison ops whose bytecode
 # mnemonic differs from the IR's own operator spelling (M14_SPEC.md's
@@ -412,6 +412,12 @@ class _Lowerer:
         self._file_index[path] = idx
         return idx
 
+    def line_of(self, offset: int) -> int:
+        """M28: the line (in its own file) of a combined-text offset, for
+        the TESTS table -- 0 when unknown."""
+        path, src_offset = self.pp.map_to_source(offset)
+        return line_col(self.pp.files.get(path, ""), src_offset)[0]
+
     def _position_for(self, offset: int | None) -> tuple[int, int, int]:
         if offset is None:
             return (0, 0, 0)
@@ -449,6 +455,9 @@ def lower(buf, resolver, pp, target: str = "debug") -> Program:
         debug=debug,
         minor=_file_minor(lowerer.natives, lowerer.strings),
         handlers=list(buf.handlers),
+        tests=[
+            TestEntry(lowerer.intern_str(name), slot, lowerer.line_of(position)) for name, slot, position in buf.tests
+        ],
     )
 
 

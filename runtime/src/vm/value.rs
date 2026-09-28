@@ -96,6 +96,9 @@ pub struct StructData {
     /// (including automatically, when no catch arm matches) keeps the
     /// original.
     pub thrown_at: Option<usize>,
+    /// M28: recorded with `thrown_at` -- that pc, then each enclosing call
+    /// site in the throwing task, innermost first (`mah test` reports).
+    pub backtrace: Option<Vec<usize>>,
 }
 
 impl StructData {
@@ -117,8 +120,9 @@ pub struct EnumData {
     pub type_name: Rc<str>,
     pub variant: Rc<str>,
     pub fields: Vec<(Rc<str>, Value)>,
-    /// M25: see `StructData::thrown_at`'s docstring above.
+    /// M25/M28: see `StructData`'s `thrown_at`/`backtrace` above.
     pub thrown_at: Option<usize>,
+    pub backtrace: Option<Vec<usize>>,
 }
 
 impl EnumData {

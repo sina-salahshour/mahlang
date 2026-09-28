@@ -15,6 +15,7 @@ mod natives;
 mod value;
 
 pub use error::RuntimeError;
+pub use exec::TestOutcome;
 pub use link::is_known_native;
 
 use crate::decode::{self, FormatError};
@@ -45,6 +46,19 @@ impl From<RuntimeError> for VmError {
 pub fn run_bytes(data: &[u8]) -> Result<(), VmError> {
     let program = decode::decode(data)?;
     run_program(&program)
+}
+
+/// M28 (docs/MAHC_FORMAT.md #6.10): run test number `index` of a `mah
+/// test` build -- its top-level declarations, then that test -- and
+/// describe how it ended. Only a bad file or index is an `Err`.
+pub fn run_test_bytes(data: &[u8], index: usize) -> Result<exec::TestOutcome, VmError> {
+    let program = decode::decode(data)?;
+    let Some(entry) = program.tests.get(index) else {
+        return Err(VmError::Format(format!("no test number {index} (the file has {})", program.tests.len())));
+    };
+    let slot = entry.slot;
+    let linked = link::link(&program)?;
+    Ok(exec::execute_test(&linked, slot)?)
 }
 
 /// Link and run an already-decoded `Program`.

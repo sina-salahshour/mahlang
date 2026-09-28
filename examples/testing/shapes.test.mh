@@ -1,0 +1,24 @@
+# Tests for shapes.mh: `mah test --file examples/testing/shapes.test.mh`.
+import "std:test"
+import shapes from "./shapes"
+
+test "a rectangle's area" {
+    assert_eq(shapes.area(shapes.rect(3, 4)), 12)
+}
+
+test "a circle's area" {
+    assert_eq(shapes.area(shapes.circle(2)), 12)
+}
+
+test "negative sizes are rejected" {
+    let e = assert_throws(fn() { shapes.rect(0 - 1, 2) })
+    assert_eq(e.message(), "sizes can't be negative")
+}
+
+test "private helpers are testable too" {
+    shapes.check_size(0) # doesn't throw
+}
+
+test "circles with a real pi" {
+    skip("waiting for a demo that imports std:math")
+}

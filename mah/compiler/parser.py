@@ -17,6 +17,7 @@ from decimal import Decimal
 from typing import Optional
 
 from .ast_nodes import (
+    TestDecl,
     NativeCall,
     AssignStmt,
     Binary,
@@ -185,8 +186,12 @@ _SYNC_TOKENS = _STATEMENT_LEADING | {
 
 
 class Parser:
-    def __init__(self, lexer: Lexer) -> None:
+    def __init__(self, lexer: Lexer, allow_tests: bool = False) -> None:
         self.lexer = lexer
+        # M28: `test "name" { ... }` blocks are parsed only when compiling a
+        # `.test.mh` file (and only at the top level); elsewhere `test` is an
+        # ordinary name.
+        self.allow_tests = allow_tests
         self.current: Token = lexer.get_next_token()
         # M19: the most recently consumed token -- `_on_same_line` needs its
         # end to tell `x[0]` (indexing) from `x` then a `[...]` literal
@@ -286,6 +291,10 @@ class Parser:
             try:
                 if self.current.type in _STATEMENT_LEADING:
                     stmts.append(self.parse_stmt())
+                    continue
+
+                if end_type is TokenType.EOF and self._at_test_decl():
+                    stmts.append(self._parse_test_decl())
                     continue
 
                 if self._at_extern_fn():
@@ -1268,6 +1277,44 @@ class Parser:
             param_types=param_types,
             return_type=return_type,
             throws=throws,
+        )
+
+    # -- M28: test blocks ------------------------------------------------------
+
+    def _at_test_decl(self) -> bool:
+        if not (
+            self.current.type is TokenType.ID
+            and self.current.literal == "test"
+            and self.lexer.peek_token().type is TokenType.STRING
+        ):
+            return False
+        if not self.allow_tests:
+            raise SyntaxError(
+                f"'test' blocks are only allowed in *.test.mh files at position '{self.current.position}'"
+            )
+        return True
+
+    def _parse_test_decl(self) -> TestDecl:
+        """`test "name" { body }` (docs/MAH_TEST.md): the body becomes a
+        parameterless function, so it can `return`, `.await` and throw."""
+        test_tok = self.advance()  # `test`
+        name_tok = self.advance()  # STRING
+        body = self.parse_block()
+        fn = FnExpr(
+            name=None,
+            params=[],
+            body=body,
+            position=test_tok.position,
+            param_positions=[],
+            defaults=[],
+            type_params=[],
+            param_types=[],
+        )
+        return TestDecl(
+            name=decode_string_literal(name_tok.literal[1:-1]),
+            fn=fn,
+            position=test_tok.position,
+            name_position=name_tok.position,
         )
 
     # -- M27: extern fn ------------------------------------------------------

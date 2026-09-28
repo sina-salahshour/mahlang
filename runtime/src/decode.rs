@@ -27,6 +27,7 @@ const SEC_PARAMS: u8 = 0x07;
 /// M25 (1.4, docs/MAHC_FORMAT.md #4.8): required iff minor >= 4.
 const SEC_HANDLERS: u8 = 0x08;
 const SEC_DEBUG: u8 = 0x80;
+const SEC_TESTS: u8 = 0x81; // M28: optional, `mah test` builds only
 
 const REQUIRED_SECTIONS: &[u8] = &[
     SEC_STRINGS,
@@ -305,6 +306,16 @@ pub struct Program {
     pub minor: u16,
     /// M25 (1.4, docs/MAHC_FORMAT.md #4.8): always empty for minor < 4.
     pub handlers: Vec<HandlerEntry>,
+    /// M28 (docs/MAHC_FORMAT.md #4.9): the optional TESTS section -- only
+    /// in a `mah test` build.
+    pub tests: Vec<TestEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TestEntry {
+    pub name: usize,
+    pub slot: usize,
+    pub line: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -448,6 +459,12 @@ fn read_sections(r: &mut Reader, minor: u16) -> FResult<Sections> {
                     return err("duplicate DEBUG section");
                 }
                 debug_payload = Some(payload);
+            } else if sec_id == SEC_TESTS {
+                // M28: kept alongside the required payloads.
+                if payloads.contains_key(&SEC_TESTS) {
+                    return err("duplicate TESTS section");
+                }
+                payloads.insert(SEC_TESTS, payload);
             }
             // else: an unknown optional section -- already consumed, skip it.
         }
@@ -1255,6 +1272,30 @@ fn newer_minor_message(r: &mut Reader, minor: u16) -> String {
     format!("{message}: it uses natives this VM doesn't have ({}); upgrade mah to run it", missing.join(", "))
 }
 
+/// M28 (docs/MAHC_FORMAT.md #4.9): `count x (name str, slot varuint, line
+/// varuint)`; `slot` must be a slot of the main function's frame.
+fn parse_tests(payload: &[u8], nstrings: usize, nslots: u64) -> FResult<Vec<TestEntry>> {
+    let mut pr = Reader::new(payload);
+    let count = pr.varuint()?;
+    let mut tests = Vec::new();
+    for _ in 0..count {
+        let name = pr.varuint()?;
+        if name as usize >= nstrings {
+            return err(format!("TESTS: name string index {name} out of range"));
+        }
+        let slot = pr.varuint()?;
+        if slot >= nslots {
+            return err(format!("TESTS: slot {slot} out of range"));
+        }
+        let line = pr.varuint()?;
+        tests.push(TestEntry { name: name as usize, slot: slot as usize, line });
+    }
+    if pr.remaining() != 0 {
+        return err("TESTS section payload not fully consumed (trailing garbage)");
+    }
+    Ok(tests)
+}
+
 pub fn decode(data: &[u8]) -> FResult<Program> {
     let data: &[u8] = if data.starts_with(b"#!") {
         match data.iter().position(|&b| b == b'\n') {
@@ -1315,7 +1356,15 @@ pub fn decode(data: &[u8]) -> FResult<Program> {
         None => None,
     };
 
-    Ok(Program { strings, constants, types, natives, functions, code, debug, minor, handlers })
+    let tests = match sections.payloads.get(&SEC_TESTS) {
+        Some(p) => match functions.first() {
+            Some(main) => parse_tests(p, strings.len(), main.slot_count)?,
+            None => return err("TESTS section in a file with no functions"),
+        },
+        None => Vec::new(),
+    };
+
+    Ok(Program { strings, constants, types, natives, functions, code, debug, minor, handlers, tests })
 }
 
 #[cfg(test)]

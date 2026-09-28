@@ -186,5 +186,37 @@ def _run_rust_capturing(data: bytes, stdin: str):
     return stdout, None
 
 
+def run_test_case(text: str, index: int):
+    """M28: compile `text` as a test file and run its test number `index`
+    on the VM `MAH_TEST_VM` selects, returning `(stdout, TestOutcome)` --
+    in-process on the Python VM, `mah-vm test FILE N` on the Rust one."""
+    from mah.code_interpreter import run_test_bytes
+    from mah.compiler.driver import compile_to_bytes as driver_compile
+    from mah.test_outcome import parse_outcome
+
+    data = driver_compile(text=text, test=True)
+    if os.environ.get("MAH_TEST_VM") != "rust":
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            outcome = run_test_bytes(data, index)
+        return out.getvalue(), outcome
+
+    import subprocess
+    import tempfile
+
+    from mah.rust_vm import find_vm
+
+    fd, path = tempfile.mkstemp(suffix=".mahc")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        result = subprocess.run([find_vm(), "test", path, str(index)], capture_output=True, text=True)
+    finally:
+        os.unlink(path)
+    outcome = parse_outcome(result.stderr)
+    assert outcome is not None, f"mah-vm test exited {result.returncode}: {result.stderr}"
+    return result.stdout, outcome
+
+
 def example_path(name: str) -> str:
     return os.path.join(EXAMPLES_DIR, name)

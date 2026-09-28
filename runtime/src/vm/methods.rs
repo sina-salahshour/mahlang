@@ -337,7 +337,7 @@ pub fn deep_copy(value: &Value, memo: &mut HashMap<usize, Value>) -> Value {
                 return existing.clone();
             }
             let type_name = s.borrow().type_name.clone();
-            let out = Rc::new(RefCell::new(StructData { type_name, fields: Vec::new(), thrown_at: None }));
+            let out = Rc::new(RefCell::new(StructData { type_name, fields: Vec::new(), thrown_at: None, backtrace: None }));
             memo.insert(key, Value::Struct(out.clone()));
             let copied: Vec<(Rc<str>, Value)> =
                 s.borrow().fields.iter().map(|(n, v)| (n.clone(), deep_copy(v, memo))).collect();
@@ -351,7 +351,7 @@ pub fn deep_copy(value: &Value, memo: &mut HashMap<usize, Value>) -> Value {
             }
             let type_name = e.borrow().type_name.clone();
             let variant = e.borrow().variant.clone();
-            let out = Rc::new(RefCell::new(EnumData { type_name, variant, fields: Vec::new(), thrown_at: None }));
+            let out = Rc::new(RefCell::new(EnumData { type_name, variant, fields: Vec::new(), thrown_at: None, backtrace: None }));
             memo.insert(key, Value::Enum(out.clone()));
             let copied: Vec<(Rc<str>, Value)> =
                 e.borrow().fields.iter().map(|(n, v)| (n.clone(), deep_copy(v, memo))).collect();

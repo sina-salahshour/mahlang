@@ -79,3 +79,13 @@ class Program:
     # see compiler/codegen.py's region-closing order). Always `[]` for
     # minor < 4 (no HANDLERS section at all).
     handlers: list = field(default_factory=list)
+    # M28 (docs/MAHC_FORMAT.md #4.9): list[TestEntry] -- the optional TESTS
+    # section, present only in a file built for `mah test`.
+    tests: list = field(default_factory=list)
+
+
+@dataclass
+class TestEntry:
+    name: int  # string index
+    slot: int  # the main frame slot holding the test's closure
+    line: int  # the `test` keyword's line in the entry file (0 = unknown)

@@ -14,6 +14,7 @@ methods, ...).
 | `mah-project.toml` | project manifest: name, version, entry point, build targets |
 | `src/` | Mah source files |
 | `src/main.mh` | entry point (the `entry` in the manifest); top-level code runs top to bottom |
+| `src/*.test.mh` | tests, run by `mah test` (`src/main.test.mh` tests `src/main.mh`) |
 | `docs/mah-language.md` | the complete Mah language reference |
 | `build/` | compiled output from `mah build` (git-ignored) |
 
@@ -27,6 +28,7 @@ mah run other.mh            # run a specific file instead
 mah build                   # write every [[target]] from mah-project.toml
 mah build --target release  # write one target
 mah check                   # run the static type checker and print its diagnostics
+mah test                    # run every test (*.test.mh); `mah test NAME` runs the matching ones
 mah runc build/{{name}}.mahc   # run a compiled file (or just ./build/{{name}}.mahc)
 mah dis build/{{name}}.mahc    # show the compiled bytecode
 mah run --vm rust           # run on the native Rust runtime (if it's installed)
@@ -41,8 +43,13 @@ refuses to touch a file with a syntax error.
 A compile error (syntax, undefined name, wrong struct fields) is reported
 before anything runs. A runtime error stops the program and says where it
 happened, `at position #LINE:COL` (or `file.mh#LINE:COL` inside an imported
-file, `std:math#LINE:COL` inside the standard library). There's no test framework yet: check your changes by running the
-program and reading its output.
+file, `std:math#LINE:COL` inside the standard library).
+
+Check your changes with `mah test`. Tests live in `*.test.mh` files next to
+the code they test: `test "name" { ... }` blocks using `assert`/`assert_eq`/
+... from `std:test` (see "Testing" in `docs/mah-language.md`). A test file
+`x.test.mh` can call `x.mh`'s non-exported functions too. Add or update a
+test with every change, and make sure `mah test` passes.
 
 ## `mah-project.toml`
 

@@ -32,8 +32,10 @@ self-contained = true    # this target is a standalone executable
 which ignores the manifest like all single-file commands.)
 
 `mah-vm` itself is small: `mah-vm run FILE` runs a `.mahc` file (plain,
-shebang'd, or a self-contained bundle) and `mah-vm --version` prints
-`mah-vm 0.1.0 (x86_64-linux)`. The CLI finds it through `$MAH_VM`, then
+shebang'd, or a self-contained bundle), `mah-vm test FILE INDEX` runs one
+test of a `mah test` build and prints its outcome on stderr (M28,
+docs/MAHC_FORMAT.md §6.10; `mah test --vm rust` drives it), and `mah-vm
+--version` prints `mah-vm 0.1.0 (x86_64-linux)`. The CLI finds it through `$MAH_VM`, then
 next to the installed `mah` package (`make install-mah` copies it there if
 it's built), then `runtime/target/release/`, then `PATH`
 (`mah/rust_vm.py`).

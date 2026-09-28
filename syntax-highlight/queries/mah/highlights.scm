@@ -198,3 +198,7 @@
   (#any-of? @type.builtin
     "Number" "String" "Bool" "Function" "Option" "Promise" "Vector" "Map"
     "Printable" "Index" "IndexAssign" "Unknown" "Never" "None"))
+
+; M28: the contextual `test` of a test block -- last, so it wins over the
+; generic identifier captures above.
+(test_block keyword: (identifier) @keyword)

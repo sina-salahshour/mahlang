@@ -89,6 +89,11 @@
           "match": "\\bcatch(?=\\s*\\{)"
         },
         {
+          "comment": "M28: `test` is contextual -- a keyword only at the start of a line, right before a test block's name string (`*.test.mh` files).",
+          "name": "keyword.control.mah",
+          "match": "^\\s*\\btest(?=\\s+\")"
+        },
+        {
           "comment": "M27: `extern` is contextual too -- a keyword only right before `fn` (standard library modules).",
           "name": "storage.modifier.mah",
           "match": "\\bextern(?=\\s+fn\\b)"

@@ -35,6 +35,7 @@ from .format import (
     SEC_NATIVES,
     SEC_PARAMS,
     SEC_STRINGS,
+    SEC_TESTS,
     SEC_TYPES,
     TAG_DEC,
     TAG_FALSE,
@@ -47,7 +48,7 @@ from .format import (
 )
 from . import bundle
 from .leb128 import read_varint, read_varuint
-from .program import Const, DebugInfo, FunctionDecl, Instr, NativeRef, Program, TypeDecl
+from .program import Const, DebugInfo, FunctionDecl, Instr, NativeRef, Program, TestEntry, TypeDecl
 
 
 class _Reader:
@@ -164,6 +165,11 @@ def _read_sections(r: _Reader, minor: int) -> tuple[dict, bytes | None]:
                 if debug_payload is not None:
                     raise MahcFormatError("duplicate DEBUG section")
                 debug_payload = payload
+            elif sec_id == SEC_TESTS:
+                # M28: kept alongside the required payloads.
+                if SEC_TESTS in payloads:
+                    raise MahcFormatError("duplicate TESTS section")
+                payloads[SEC_TESTS] = payload
             # else: an unknown optional section -- already consumed, skip it.
     if expect_idx < len(required):
         raise MahcFormatError(f"missing required section 0x{required[expect_idx]:02x}")
@@ -552,6 +558,23 @@ def _parse_handlers(payload: bytes, ncode: int) -> list:
     return handlers
 
 
+def _parse_tests(payload: bytes, nstrings: int, nslots: int) -> list:
+    """M28 (docs/MAHC_FORMAT.md #4.9): `count x (name str, slot varuint,
+    line varuint)`; `slot` must be a slot of the main function's frame."""
+    pr = _Reader(payload)
+    tests = []
+    for _ in range(pr.varuint()):
+        name = pr.varuint()
+        if name >= nstrings:
+            raise MahcFormatError(f"TESTS: name string index {name} out of range")
+        slot = pr.varuint()
+        if slot >= nslots:
+            raise MahcFormatError(f"TESTS: slot {slot} out of range")
+        tests.append(TestEntry(name, slot, pr.varuint()))
+    _check_consumed(pr, "TESTS")
+    return tests
+
+
 def _parse_debug(payload: bytes, nstrings: int) -> DebugInfo:
     pr = _Reader(payload)
     nfiles = pr.varuint()
@@ -634,4 +657,12 @@ def decode(data: bytes) -> Program:
 
     debug = _parse_debug(debug_payload, len(strings)) if debug_payload is not None else None
 
-    return Program(strings, constants, types, natives, functions, code, debug, minor=minor, handlers=handlers)
+    tests = []
+    if SEC_TESTS in payloads:
+        if not functions:
+            raise MahcFormatError("TESTS section in a file with no functions")
+        tests = _parse_tests(payloads[SEC_TESTS], len(strings), functions[0].slot_count)
+
+    return Program(
+        strings, constants, types, natives, functions, code, debug, minor=minor, handlers=handlers, tests=tests
+    )

@@ -229,6 +229,13 @@ def disassemble(program: Program) -> str:
         for start, end, handler, slot in program.handlers:
             lines.append(f"  [{start}, {end}) -> {handler} slot={slot}")
 
+    if program.tests:
+        # M28 (docs/MAHC_FORMAT.md #4.9): a `mah test` build's test table.
+        lines.append("")
+        lines.append("TESTS:")
+        for t in program.tests:
+            lines.append(f"  {program.strings[t.name]!r} slot={t.slot} line={t.line}")
+
     debug_by_pc: dict[int, tuple[int, int, int]] = {}
     if program.debug is not None:
         prev = None

@@ -491,17 +491,25 @@ impl<'p> Vm<'p> {
     /// was found; `task`'s pc/frame are already set to resume there) or
     /// `false` (uncaught in `task`).
     fn unwind(&mut self, task: &TaskRef, value: Value, mut pc: usize) -> RResult<bool> {
+        // M28: where it was thrown, then each enclosing call site.
+        let backtrace = || {
+            let mut bt = vec![pc];
+            bt.extend(task.borrow().return_stack.iter().rev().map(|(ret_pc, _)| ret_pc - 1));
+            bt
+        };
         match &value {
             Value::Struct(s) => {
                 let mut b = s.borrow_mut();
                 if b.thrown_at.is_none() {
                     b.thrown_at = Some(pc);
+                    b.backtrace = Some(backtrace());
                 }
             }
             Value::Enum(e) => {
                 let mut b = e.borrow_mut();
                 if b.thrown_at.is_none() {
                     b.thrown_at = Some(pc);
+                    b.backtrace = Some(backtrace());
                 }
             }
             _ => {}
@@ -546,6 +554,7 @@ impl<'p> Vm<'p> {
             variant: Rc::from(kind.variant_name()),
             fields: vec![(Rc::from("message"), Value::Str(Rc::from(message)))],
             thrown_at: None,
+            backtrace: None,
         })))
     }
 
@@ -1331,7 +1340,7 @@ impl<'p> Vm<'p> {
                     fields.push((fname.clone(), rd(*addr)?));
                 }
                 let type_name = ty.name.clone();
-                wr!(*dest, Value::Struct(Rc::new(RefCell::new(StructData { type_name, fields, thrown_at: None }))));
+                wr!(*dest, Value::Struct(Rc::new(RefCell::new(StructData { type_name, fields, thrown_at: None, backtrace: None }))));
             }
             LinkedInstr::Enum { type_idx, variant, values, dest } => {
                 let ty = &self.types[*type_idx];
@@ -1356,6 +1365,7 @@ impl<'p> Vm<'p> {
                             variant: variant_name,
                             fields,
                             thrown_at: None,
+                            backtrace: None,
                         })))
                     );
                 }
@@ -1493,7 +1503,140 @@ fn repeat_str(s: &Rc<str>, n: &crate::decimal::Decimal) -> Value {
 
 /// Run a fully linked program to completion -- docs/MAHC_FORMAT.md #6.1's
 /// startup plus #6.4's scheduler loop.
+/// M28 (docs/MAHC_FORMAT.md #6.10): the result of one test of a `mah test`
+/// build -- mirrors `mah/test_outcome.py`'s `TestOutcome`, and `format` is
+/// its text form exactly.
+pub struct TestOutcome {
+    /// "ok", "skipped", or "failed" ("timeout" is the runner's own).
+    pub status: &'static str,
+    pub message: String,
+    /// `(file, line)`, innermost first; file `None` for the test file.
+    pub frames: Vec<(Option<String>, u64)>,
+    pub leftover: bool,
+}
+
+impl TestOutcome {
+    fn new(status: &'static str, message: impl Into<String>) -> Self {
+        TestOutcome { status, message: message.into(), frames: Vec::new(), leftover: false }
+    }
+
+    pub fn format(&self) -> String {
+        let mut out = format!("status {}\nleftover {}\n", self.status, if self.leftover { 1 } else { 0 });
+        for (file, line) in &self.frames {
+            out.push_str(&format!("frame {line} {}\n", file.as_deref().unwrap_or("-")));
+        }
+        out.push_str("message\n");
+        out.push_str(&self.message);
+        out
+    }
+}
+
+impl<'a> Vm<'a> {
+    /// A thrown value's backtrace as `(file, line)` pairs (file `None` for
+    /// the entry file), empty without DEBUG info.
+    fn frames_of(&self, value: &Value) -> Vec<(Option<String>, u64)> {
+        let backtrace = match value {
+            Value::Struct(s) => s.borrow().backtrace.clone(),
+            Value::Enum(e) => e.borrow().backtrace.clone(),
+            _ => None,
+        };
+        let (Some(debug), Some(backtrace)) = (self.debug, backtrace) else { return Vec::new() };
+        let mut out = Vec::new();
+        for pc in backtrace {
+            let idx = debug.pcs.partition_point(|&x| x <= pc);
+            if idx == 0 {
+                continue;
+            }
+            let (file_idx, line, _col) = debug.runs[idx - 1];
+            if line != 0 {
+                let file = if file_idx == 0 { None } else { Some(debug.file_paths[file_idx].to_string()) };
+                out.push((file, line));
+            }
+        }
+        out
+    }
+
+    /// Run the test whose closure the top-level code stored in main-frame
+    /// slot `slot`, to completion (driving timers), and describe how it
+    /// ended. Mirrors `code_interpreter.py`'s `run_test`.
+    fn run_test(&mut self, main_frame: &FrameRef, slot: usize) -> RResult<TestOutcome> {
+        let closure = match value::read_addr(main_frame, (0, slot as u64))? {
+            Value::Function(c) => c,
+            _ => return Err(RuntimeError::new("TESTS entry doesn't hold a test")),
+        };
+        let promise = self.spawn_detached(&closure, Vec::new())?;
+        loop {
+            let pending = {
+                let p = promise.borrow();
+                p.settled.is_none() && p.failed.is_none()
+            };
+            if !pending || !self.drain_next_timer()? {
+                break;
+            }
+        }
+        let leftover = !self.timers.is_empty();
+        let (settled, failed) = {
+            let p = promise.borrow();
+            (p.settled.is_some(), p.failed.clone())
+        };
+        let mut outcome = if settled {
+            TestOutcome::new("ok", "")
+        } else if let Some(error) = failed {
+            promise.borrow_mut().observed = true;
+            self.failed_outcome(&error)?
+        } else {
+            TestOutcome::new("failed", "the test never finished: it waits on a Promise nothing will settle")
+        };
+        outcome.leftover = leftover;
+        Ok(outcome)
+    }
+
+    fn failed_outcome(&mut self, error: &Value) -> RResult<TestOutcome> {
+        let tname = type_name_of(error, &self.names);
+        if let Value::Struct(s) = error {
+            if tname.as_ref() == "SkipTest" {
+                let reason = s.borrow().get("reason").cloned().unwrap_or(Value::Str(Rc::from("")));
+                let text = match reason {
+                    Value::Str(r) => r.to_string(),
+                    other => self.to_str(&other)?,
+                };
+                return Ok(TestOutcome::new("skipped", text));
+            }
+        }
+        let message = match error {
+            Value::Struct(_) if tname.as_ref() == "AssertionError" => {
+                self.uncaught_message(error).unwrap_or_else(|| "assertion failed".to_string())
+            }
+            Value::Enum(e) if tname.as_ref() == "RuntimeError" => match e.borrow().get("message") {
+                Some(Value::Str(m)) => m.to_string(),
+                _ => String::new(),
+            },
+            _ => match self.uncaught_message(error) {
+                Some(m) => format!("Uncaught {tname}: {m}"),
+                None => format!("Uncaught {tname}"),
+            },
+        };
+        let mut outcome = TestOutcome::new("failed", message);
+        outcome.frames = self.frames_of(error);
+        Ok(outcome)
+    }
+}
+
 pub fn execute(linked: &LinkedProgram) -> RResult<()> {
+    run(linked, None).map(|_| ())
+}
+
+/// M28: run the test in main-frame slot `slot` after the file's own
+/// top-level code (docs/MAHC_FORMAT.md #6.10).
+pub fn execute_test(linked: &LinkedProgram, slot: usize) -> RResult<TestOutcome> {
+    match run(linked, Some(slot)) {
+        Ok(outcome) => Ok(outcome.expect("a test run always has an outcome")),
+        // The file's own top-level code failed before the test ran.
+        Err(e) => Ok(TestOutcome::new("failed", e.message)),
+    }
+}
+
+fn run(linked: &LinkedProgram, test_slot: Option<usize>) -> RResult<Option<TestOutcome>> {
     let names = BuiltinTypeNames::new();
     let method_table = build_initial_method_table(&names);
     if linked.functions.is_empty() {
@@ -1502,7 +1645,7 @@ pub fn execute(linked: &LinkedProgram) -> RResult<()> {
     let main_fn = &linked.functions[0];
     let main_frame = value::new_frame(main_fn.slot_count, None);
     let main_promise = PromiseData::new_pending();
-    let main_task = value::new_task(main_fn.entry, main_frame, Some(main_promise.clone()));
+    let main_task = value::new_task(main_fn.entry, main_frame.clone(), Some(main_promise.clone()));
     let mut vm = Vm {
         code: &linked.code,
         types: &linked.types,
@@ -1545,6 +1688,10 @@ pub fn execute(linked: &LinkedProgram) -> RResult<()> {
         }
     }
 
+    let outcome = match test_slot {
+        Some(slot) => Some(vm.run_test(&main_frame, slot)?),
+        None => None,
+    };
     vm.flush_stdout();
-    Ok(())
+    Ok(outcome)
 }

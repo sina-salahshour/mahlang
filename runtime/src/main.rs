@@ -14,7 +14,7 @@ use mah_vm::vm::{self, VmError};
 const STACK_SIZE: usize = 1 << 30;
 
 fn usage() -> ! {
-    eprintln!("usage: mah-vm --version | mah-vm run <path>");
+    eprintln!("usage: mah-vm --version | mah-vm run <path> | mah-vm test <path> <index>");
     std::process::exit(2);
 }
 
@@ -56,6 +56,40 @@ fn load_and_run(path: &str) -> i32 {
     }
 }
 
+/// M28: `mah-vm test FILE INDEX` -- run one test of a `mah test` build.
+/// The outcome goes to stderr in `mah/test_outcome.py`'s text form (exit
+/// 0); only a file the VM can't run exits 2, as for `run`.
+fn load_and_test(path: &str, index: &str) -> i32 {
+    let Ok(index) = index.parse::<usize>() else { usage() };
+    let data = match read_file_bytes(path) {
+        Ok(d) => d,
+        Err(code) => return code,
+    };
+    let mahc: &[u8] = match bundle::split(&data) {
+        Ok(Some((_info, slice))) => slice,
+        Ok(None) => &data,
+        Err(msg) => {
+            eprintln!("error: invalid .mahc file: {msg}");
+            return 2;
+        }
+    };
+    match vm::run_test_bytes(mahc, index) {
+        Ok(outcome) => {
+            let _ = std::io::stdout().flush();
+            eprint!("{}", outcome.format());
+            0
+        }
+        Err(VmError::Format(msg)) => {
+            eprintln!("error: invalid .mahc file: {msg}");
+            2
+        }
+        Err(VmError::Runtime(msg)) => {
+            eprintln!("RuntimeError: {msg}");
+            1
+        }
+    }
+}
+
 fn run_cli(args: Vec<String>) -> i32 {
     match args.as_slice() {
         [flag] if flag == "--version" => {
@@ -64,6 +98,7 @@ fn run_cli(args: Vec<String>) -> i32 {
             0
         }
         [cmd, path] if cmd == "run" => load_and_run(path),
+        [cmd, path, index] if cmd == "test" => load_and_test(path, index),
         _ => usage(),
     }
 }

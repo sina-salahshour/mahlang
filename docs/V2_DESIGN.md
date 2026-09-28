@@ -3007,6 +3007,32 @@ node that resolved to it. Then:
       error. Two tests changed on purpose: the unsupported-minor test now
       uses 6, and `sin(x: 1)`'s error now comes from the resolver.
 
+29. **M28 — `std:test` and `mah test`. ✅ Landed.** Design in
+    `docs/MAH_TEST.md` (with a "M28: what landed" section); the TESTS
+    section and per-test execution in `docs/MAHC_FORMAT.md` §4.9/§6.10.
+
+    - **Compiler**: contextual `test "name" { body }` (`TestDecl`) at the
+      top level of `*.test.mh` files, compiled to a closure in a hidden
+      main-frame slot plus a TESTS table entry; test files hold only
+      declarations; `mah run`/`mah build` refuse them and nothing can
+      import one; `x.test.mh` sees all of `x.mh`'s top-level names
+      (preprocessor `visible_names`).
+    - **`std:test`** (`mah/std/test.mh`): `assert`, `assert_eq`,
+      `assert_ne`, `assert_throws`, `fail`, `skip`; `AssertionError`,
+      `SkipTest`.
+    - **VMs**: thrown values record a backtrace (`StructInstance`/
+      `EnumInstance.backtrace`, Rust `backtrace` fields); a per-test entry
+      point (`run_test_bytes`, `mah-vm test FILE N`) with a shared outcome
+      format (`mah/test_outcome.py`).
+    - **CLI** (`mah/cli/test_runner.py`): discovery, `FILTER`, `--file`,
+      `--vm`, `--timeout`, cargo-style output, exit code.
+    - **Editors**: formatter, tree-sitter (`test_block`, the keyword is an
+      `identifier` so `test = 1` still parses), TextMate, LSP symbols/
+      hover; `mah init` adds `src/main.test.mh`.
+    - Tests: `tests/test_mah_test.py` (syntax, file rules, private access,
+      bytecode, every outcome on both VMs, `std:test`, the CLI, LSP),
+      `runtime/tests/vm_diff.py` outcome parity, `examples/testing/`.
+
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
 it** (`make test` must stay green) — see `docs/TESTING.md` for where

@@ -41,6 +41,7 @@ import dataclasses
 from dataclasses import dataclass
 
 from .ast_nodes import (
+    TestDecl,
     NativeCall,
     AssignStmt,
     Binary,
@@ -1197,6 +1198,11 @@ class Checker:
             return True
         if isinstance(stmt, ContinueStmt):
             return True
+        if isinstance(stmt, TestDecl):
+            # M28: a test body is checked like any function; the runner
+            # catches whatever it throws, so its errors go nowhere.
+            self._check_fn(stmt.fn)
+            return False
         if isinstance(stmt, DeferStmt):
             # M26: a deferred block runs as this scope exits, so its
             # errors are this scope's.
