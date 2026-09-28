@@ -9,6 +9,7 @@
 
 mod error;
 mod exec;
+mod fs;
 mod link;
 mod methods;
 mod natives;

@@ -539,5 +539,20 @@ pub fn call_native(vm: &mut Vm, native: NativeFn, args: &[Value]) -> Result<Valu
             vm.fail_promise(&p, args[1].clone())?;
             Ok(Value::Bool(true))
         }
+        NativeFn::FsReadText => super::fs::read_text(vm, args),
+        NativeFn::FsWriteText => super::fs::write_text(vm, args, false),
+        NativeFn::FsAppendText => super::fs::write_text(vm, args, true),
+        NativeFn::FsInfo => super::fs::info(vm, args),
+        NativeFn::FsListDir => super::fs::list_dir(vm, args),
+        NativeFn::FsMkdir => super::fs::mkdir(vm, args),
+        NativeFn::FsRemove => super::fs::remove(vm, args),
+        NativeFn::FsRename => super::fs::rename(vm, args),
+        NativeFn::FsCopy => super::fs::copy(vm, args),
+        NativeFn::FsTempDir => super::fs::temp_dir(vm),
+        NativeFn::FsOpen => super::fs::open(vm, args),
+        NativeFn::FsReadLine => super::fs::read_line(vm, args),
+        NativeFn::FsReadAll => super::fs::read_all(vm, args),
+        NativeFn::FsWrite => super::fs::write(vm, args),
+        NativeFn::FsClose => super::fs::close(vm, args),
     }
 }

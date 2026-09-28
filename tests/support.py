@@ -53,6 +53,11 @@ def compile_source(*, path: str | None = None, text: str | None = None):
     lexer = Lexer(pp.text)
     parser = Parser(lexer)
     program = parser.parse_program()
+    # The parser recovers from syntax errors and collects them (for the
+    # LSP); the compiler proper refuses them, and so must this.
+    if parser.errors:
+        message, _position = parser.errors[0]
+        raise SyntaxError(message)
 
     resolver = Resolver(prelude_start=pp.prelude_start)
     resolver.resolve_program(program)

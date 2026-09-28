@@ -8,7 +8,8 @@ first module; **M29 landed the String methods** (Phase 1's first item);
 `std:collections`**, and **M32 `std:regex`**, completing Phase 1;
 **M33 made `input` async** (Phase 0 step 7, and step 4's I/O half);
 **M34 landed `std:time` and `std:async`** (Phase 2, with step 4's
-cancellable timers). The rest is design. Agreed 2026-09-28. Depends on
+cancellable timers); **M35 landed `std:fs`** (with Phase 0 step 3,
+handles). The rest is design. Agreed 2026-09-28. Depends on
 [`ERRORS.md`](ERRORS.md) (every failure below is a thrown, typed error)
 and on the static checker in [`TYPES.md`](TYPES.md).
 
@@ -65,7 +66,13 @@ import "std:math"            # flat import works too
 3. **Handle values.** A new opaque value kind for OS resources (`File`,
    `Socket`, `Process`, `Timer`): a type name plus a native index, with
    `close()`. Needed in both `mah/runtime_values.py` and the Rust `Value`
-   enum (`runtime/src/vm/value.rs`).
+   enum (`runtime/src/vm/value.rs`). ✅ **Landed (M35), more simply**: a
+   handle is a whole-Number id in a per-VM table (open files so far),
+   wrapped by its module in an ordinary struct (`File { id, path, mode }`)
+   with the methods. That gives the checker a real type, a closed or
+   unknown id is a clear error (`FsError` kind `closed`), and it needed no
+   new value kind in either VM or in the bytecode. (`Timer` never needed
+   one: std:async's `TimerId` wraps a Promise.)
 4. **Async scheduler.** Today the scheduler only handles `sleep_async`
    timers. It gains:
    - worker threads that run blocking I/O and settle a Promise (with a
@@ -488,6 +495,34 @@ arithmetic, `format(time, pattern)` and `parse(text, pattern)`.
 - Handles: `open(path, mode)` returns a `File` with `read_line()`,
   `lines()` (Iterable), `write(s)` and `close()`.
 - Throws `FsError`. Binary reads/writes wait for a `Bytes` type.
+
+✅ **Landed (M35)**, in `mah/std/fs.mh`, with these decisions:
+
+- **Async underneath, waiting like a call.** Each of the fifteen 1.12
+  `fs.*` natives returns a Promise and does the work on a worker thread;
+  the std:fs functions await it. So `fs.read_text(p)` waits, while
+  `detach fs.read_text(p)` gives a Promise and lets other tasks and
+  timers run. Both VMs' I/O hub (M33) runs the jobs and settles their
+  Promises from the scheduler.
+- **`FsError { kind, op, path, description }`**, a struct rather than an
+  enum so a `catch` can test `e.kind` without listing every variant's
+  fields. The kinds are `not_found`, `permission_denied`,
+  `already_exists`, `is_a_directory`, `not_a_directory`,
+  `directory_not_empty`, `invalid_utf8`, `closed` and `other` (with the
+  OS's own text), mapped identically from Python's exceptions and Rust's
+  `io::ErrorKind`. Natives never build it: they settle `[false, kind,
+  description]` and std:fs throws.
+- **Text is exact**: strict UTF-8, no newline translation, lines split
+  at `\n` only (dropping a `\r` before it, like `input`); writes to an
+  open file are unbuffered. `list_dir` is sorted.
+- `remove(path, recursive = false)` takes files and empty directories,
+  or a whole tree with `recursive`. `copy` copies files only. `info(path)`
+  gives `FileInfo { kind, size, modified }` (modified in seconds, like
+  std:time). `temp_dir()` makes a fresh temporary directory, which the
+  tests and examples use.
+- **`glob`** is written in Mah over `list_dir`: `*`, `?`, `[abc]`,
+  `[!abc]`, `[a-z]` within a name, `**` across directories; hidden names
+  match only a pattern part that starts with "."; results sorted.
 
 ### `std:process`
 

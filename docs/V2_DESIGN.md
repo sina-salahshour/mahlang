@@ -3186,6 +3186,27 @@ node that resolved to it. Then:
       (natives, program lifetime with cleared and active timers, checker
       types and errors), `vm_diff.py` cases, `examples/timers.mh`.
 
+36. **M35 — `std:fs` and handles. ✅ Landed.** `docs/STDLIB.md` Phase 3's
+    first module and Phase 0 step 3; bytecode 1.12 (natives only) in
+    `docs/MAHC_FORMAT.md` §4.4/§7. Decisions in `STDLIB.md`.
+
+    - **Natives, both VMs**: fifteen `fs.*` (`mah/fs_natives.py`,
+      `runtime/src/vm/fs.rs`), each a Promise of a result Vector (`[true,
+      value]` / `[false, kind, description]`) settled by a worker thread.
+      The I/O hub gained `submit(promise, job)` and completions tagged
+      "line" or "value" (Rust: `Completion`, with jobs returning
+      `Send`-able `IoValue` data turned into Mah values on the VM's
+      thread).
+    - **Handles**: open files are ids in a per-VM table (a dict in
+      `_IoHub`; an `Arc<Mutex<HashMap>>` in Rust, since an open job adds
+      its file from the worker), wrapped by `struct File` in Mah.
+    - **`mah/std/fs.mh`**: the functions, `FsError`, `FileInfo`, `File`
+      (with lazy `lines()`), and `glob` in Mah.
+    - Tests: `mah/std/fs.test.mh` (both VMs, each test in its own
+      `temp_dir()`), `FsTests` (invalid UTF-8 and exact bytes, which Mah
+      can't set up; permission errors when not root; argument errors;
+      checker types), a `vm_diff.py` case, `examples/files.mh`.
+
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
 it** (`make test` must stay green) — see `docs/TESTING.md` for where

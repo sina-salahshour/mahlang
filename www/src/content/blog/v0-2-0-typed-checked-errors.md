@@ -6,14 +6,15 @@ tags: [changelog]
 version: "0.2.0"
 ---
 
-This release (milestones M22 through M34) adds a static type checker,
+This release (milestones M22 through M35) adds a static type checker,
 errors you can throw, catch, and have checked, the first modules of a
 standard library (math, paths, JSON, CSV, random numbers, collections,
 regular expressions), a test runner, and String methods. Types and error sets cost nothing at run
 time: they're erased before codegen. The bytecode gains 1.4's handler
 table for `try`, 1.5's math natives, 1.7's natives behind JSON and CSV,
 1.8's random number generator, 1.9's regex matcher, 1.10's
-asynchronous `input`, and 1.11's clocks and hand-settled Promises.
+asynchronous `input`, 1.11's clocks and hand-settled Promises, and 1.12's
+file system access.
 
 ## Errors: `throw`, `try`, `catch`
 
@@ -207,6 +208,32 @@ backreferences), and a pattern outside it is a `RegexError` with its
 position. `find` gives an `Option<Match>`, and `replace_all` takes `$1`
 / `$name` templates or a function. `must_compile` is for fixed patterns.
 The Rust runtime gains its first dependency, the `regex` crate.
+
+## `std:fs`
+
+```mah
+import fs from "std:fs"
+
+try {
+    let dir = fs.temp_dir()
+    defer fs.remove(dir, recursive: true)
+    fs.write_text(dir + "/a.txt", "one\ntwo\n")
+    for let line in fs.open(dir + "/a.txt").lines() {
+        print(line)                             # one, then two
+    }
+    print(fs.glob(dir + "/*.txt").len())        # 1
+} catch {
+    e: FsError => { print(e.message()) }
+}
+```
+
+Files and directories: whole-file `read_text`/`write_text`/`append_text`,
+`open` for a line at a time, `list_dir`, `mkdir`, `remove`, `rename`,
+`copy`, `info`, `glob` with `**`, and `temp_dir`. The work runs off the
+program's thread, so a `detach`ed read doesn't hold anything up. Failures
+are an `FsError` with a `kind` (`"not_found"`, `"permission_denied"`,
+...) that's the same on both runtimes. Text is read and written exactly
+as UTF-8.
 
 ## `std:time` and `std:async`
 

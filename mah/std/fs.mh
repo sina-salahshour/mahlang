@@ -1,0 +1,367 @@
+# std:fs -- files and directories (docs/STDLIB.md).
+#
+#   import fs from "std:fs"
+#   fs.write_text("notes.txt", "one\ntwo\n")
+#   fs.read_text("notes.txt")                # "one\ntwo\n"
+#   for let name in fs.list_dir(".") { ... }  # sorted names
+#   let f = fs.open("big.log")
+#   defer f.close()
+#   for let line in f.lines() { ... }         # one line at a time
+#
+# Every function waits for the file system like a call, but the work runs
+# off the program's own thread: `detach fs.read_text(p)` gives a Promise and
+# lets other tasks and timers run meanwhile. Failures throw FsError. Text is
+# UTF-8, read and written exactly (no newline translation); paths are
+# relative to the current directory.
+
+extern fn native_read_text(path: String) -> Promise<Vector<Unknown>> = "fs.read_text"
+extern fn native_write_text(path: String, text: String) -> Promise<
+    Vector<Unknown>
+> = "fs.write_text"
+extern fn native_append_text(path: String, text: String) -> Promise<
+    Vector<Unknown>
+> = "fs.append_text"
+extern fn native_info(path: String) -> Promise<Vector<Unknown>> = "fs.info"
+extern fn native_list_dir(path: String) -> Promise<Vector<Unknown>> = "fs.list_dir"
+extern fn native_mkdir(path: String, parents: Bool) -> Promise<Vector<Unknown>> = "fs.mkdir"
+extern fn native_remove(path: String, recursive: Bool) -> Promise<Vector<Unknown>> = "fs.remove"
+extern fn native_rename(from: String, to: String) -> Promise<Vector<Unknown>> = "fs.rename"
+extern fn native_copy(from: String, to: String) -> Promise<Vector<Unknown>> = "fs.copy"
+extern fn native_temp_dir() -> Promise<Vector<Unknown>> = "fs.temp_dir"
+extern fn native_open(path: String, mode: String) -> Promise<Vector<Unknown>> = "fs.open"
+extern fn native_read_line(id: Number) -> Promise<Vector<Unknown>> = "fs.read_line"
+extern fn native_read_all(id: Number) -> Promise<Vector<Unknown>> = "fs.read_all"
+extern fn native_write(id: Number, text: String) -> Promise<Vector<Unknown>> = "fs.write"
+extern fn native_close(id: Number) -> Promise<Vector<Unknown>> = "fs.close"
+
+# What went wrong: `kind` is "not_found", "permission_denied",
+# "already_exists", "is_a_directory", "not_a_directory",
+# "directory_not_empty", "invalid_utf8", "closed" (a closed File) or
+# "other"; `op` the function; `path` the path it was given.
+struct FsError { kind: String, op: String, path: String, description: String }
+
+impl Error for FsError {
+    fn message(self) -> String { self.op + ": " + self.description + ": " + self.path }
+}
+
+# A native's result, `[true, value]` or `[false, kind, description]`
+# (docs/MAHC_FORMAT.md #4.4), as its value or a thrown FsError.
+fn result(r: Vector<Unknown>, op: String, path: String) -> Unknown throws FsError {
+    if r[0] { return r[1] }
+    throw FsError { kind: r[1], op: op, path: path, description: r[2] }
+}
+
+# -- whole files ----------------------------------------------------------------
+
+# The whole file as text.
+export fn read_text(path: String) -> String throws FsError {
+    result(native_read_text(path).await, "read_text", path)
+}
+
+# Writes `text` to the file, creating it or replacing what it held.
+export fn write_text(path: String, text: String) throws FsError {
+    result(native_write_text(path, text).await, "write_text", path)
+}
+
+# Adds `text` to the end of the file, creating it if need be.
+export fn append_text(path: String, text: String) throws FsError {
+    result(native_append_text(path, text).await, "append_text", path)
+}
+
+# -- paths ----------------------------------------------------------------------
+
+# What `info` tells: `kind` is "file", "dir" or "other"; `size` in bytes;
+# `modified` in seconds since 1970 (like std:time's `now()`).
+struct FileInfo { kind: String, size: Number, modified: Number }
+
+# About the file or directory at `path` (following symbolic links).
+export fn info(path: String) -> FileInfo throws FsError {
+    let r = result(native_info(path).await, "info", path)
+    FileInfo { kind: r[0], size: r[1], modified: r[2] / 1000 }
+}
+
+# Whether something is at `path` (false for anything that can't be looked
+# at, too).
+export fn exists(path: String) -> Bool { native_info(path).await[0] }
+
+export fn is_file(path: String) -> Bool {
+    let r = native_info(path).await
+    if !r[0] { return false }
+    r[1][0] == "file"
+}
+
+export fn is_dir(path: String) -> Bool {
+    let r = native_info(path).await
+    if !r[0] { return false }
+    r[1][0] == "dir"
+}
+
+# The names in a directory, sorted.
+export fn list_dir(path: String) -> Vector<String> throws FsError {
+    result(native_list_dir(path).await, "list_dir", path)
+}
+
+# Makes a directory; with `parents`, also any missing directories above it,
+# and it's fine if it already exists.
+export fn mkdir(path: String, parents: Bool = false) throws FsError {
+    result(native_mkdir(path, parents).await, "mkdir", path)
+}
+
+# Removes a file, or an empty directory -- or, with `recursive`, a
+# directory and everything in it.
+export fn remove(path: String, recursive: Bool = false) throws FsError {
+    result(native_remove(path, recursive).await, "remove", path)
+}
+
+# Moves `from` to `to`, replacing a file there.
+export fn rename(from: String, to: String) throws FsError {
+    result(native_rename(from, to).await, "rename", from)
+}
+
+# Copies the file `from` to `to`, replacing a file there.
+export fn copy(from: String, to: String) throws FsError {
+    result(native_copy(from, to).await, "copy", from)
+}
+
+# A new, empty directory in the system's temporary directory (yours to
+# remove).
+export fn temp_dir() -> String throws FsError {
+    result(native_temp_dir().await, "temp_dir", "")
+}
+
+# -- open files -----------------------------------------------------------------
+
+# An open file, for reading or writing it a piece at a time. Close it when
+# done (`defer f.close()`).
+struct File { id: Number, path: String, mode: String }
+
+# Opens the file at `path` with `mode` "r" (read), "w" (write, replacing
+# what it held) or "a" (append).
+export fn open(path: String, mode: String = "r") -> File throws FsError {
+    let id = result(native_open(path, mode).await, "open", path)
+    File { id: id, path: path, mode: mode }
+}
+
+impl File {
+    # The next line, without its line ending -- or `none` at the end.
+    fn read_line(self) -> Unknown throws FsError {
+        result(native_read_line(self.id).await, "read_line", self.path)
+    }
+
+    # Everything from here to the end.
+    fn read_all(self) -> String throws FsError {
+        result(native_read_all(self.id).await, "read_all", self.path)
+    }
+
+    # The rest of the lines, read one at a time as a loop asks for them.
+    fn lines(self) -> __FileLines { __FileLines { file: self } }
+
+    fn write(self, text: String) throws FsError {
+        result(native_write(self.id, text).await, "write", self.path)
+    }
+
+    # Closing twice does nothing.
+    fn close(self) throws FsError {
+        result(native_close(self.id).await, "close", self.path)
+    }
+}
+
+impl Printable for File {
+    fn to_string(self) { "File(\"" + self.path + "\", \"" + self.mode + "\")" }
+}
+
+struct __FileLines { file: File }
+
+struct __FileLinesIterator { file: File }
+
+impl Iterable<String> for __FileLines {
+    fn iter(self) { __FileLinesIterator { file: self.file } }
+}
+
+impl Iterator<String> for __FileLinesIterator {
+    fn next(self) {
+        let line = self.file.read_line()
+        if line == none { none } else { some(line) }
+    }
+}
+
+# -- glob -----------------------------------------------------------------------
+
+struct __ClassMatch { matched: Bool, next: Number }
+
+# Whether `c` is in the `[...]` starting at `start`, and the index just past
+# its `]` (-1 when there's no `]`: then the `[` is a plain character).
+fn class_matches(pattern: String, start: Number, c: String) -> __ClassMatch {
+    let i = start + 1
+    let negated = false
+    if i < pattern.len() {
+        if pattern[i] == "!" | pattern[i] == "^" {
+            negated = true
+            i = i + 1
+        }
+    }
+    let found = false
+    let first = true
+    while i < pattern.len() {
+        let p = pattern[i]
+        if p == "]" & !first { return __ClassMatch { matched: found != negated, next: i + 1 } }
+        first = false
+        let hi = p
+        let next = i + 1
+        if next + 1 < pattern.len() {
+            if pattern[next] == "-" & pattern[next + 1] != "]" {
+                hi = pattern[next + 1]
+                next = next + 2
+            }
+        }
+        if c >= p & c <= hi { found = true }
+        i = next
+    }
+    __ClassMatch { matched: false, next: 0 - 1 }
+}
+
+# Whether `name` matches a glob segment: `*` any run of characters, `?` one
+# character, `[abc]` / `[a-z]` / `[!abc]` one character of (not of) a set.
+fn matches(pattern: String, name: String) -> Bool {
+    let p = 0
+    let n = 0
+    let star = 0 - 1
+    let resume = 0
+    while n < name.len() {
+        let advanced = false
+        if p < pattern.len() {
+            let c = pattern[p]
+            if c == "*" {
+                star = p
+                resume = n
+                p = p + 1
+                advanced = true
+            } elif c == "?" {
+                p = p + 1
+                n = n + 1
+                advanced = true
+            } elif c == "[" {
+                let got = class_matches(pattern, p, name[n])
+                if got.next < 0 {
+                    # an unclosed [ is a plain character
+                    if name[n] == "[" {
+                        p = p + 1
+                        n = n + 1
+                        advanced = true
+                    }
+                } elif got.matched {
+                    p = got.next
+                    n = n + 1
+                    advanced = true
+                }
+            } elif c == name[n] {
+                p = p + 1
+                n = n + 1
+                advanced = true
+            }
+        }
+        if !advanced {
+            if star < 0 { return false }
+            p = star + 1
+            resume = resume + 1
+            n = resume
+        }
+    }
+    while p < pattern.len() {
+        if pattern[p] != "*" { return false }
+        p = p + 1
+    }
+    true
+}
+
+fn has_wildcard(segment: String) -> Bool {
+    segment.contains("*") | segment.contains("?") | segment.contains("[")
+}
+
+fn child(prefix: String, name: String) -> String {
+    if prefix == "" { return name }
+    if prefix.ends_with("/") { return prefix + name }
+    prefix + "/" + name
+}
+
+fn walk(dir: String, prefix: String, segments: Vector<String>, i: Number, out: Map<String, Bool>) {
+    if i == segments.len() {
+        if prefix != "" { out[prefix] = true }
+        return none
+    }
+    let segment = segments[i]
+    if segment == "" | segment == "." {
+        walk(dir, prefix, segments, i + 1, out)
+        return none
+    }
+    if segment == "**" {
+        # zero or more directories
+        walk(dir, prefix, segments, i + 1, out)
+        let names = try list_dir(dir) else []
+        for let name in names {
+            if !name.starts_with(".") {
+                let path = child(dir, name)
+                if is_dir(path) { walk(path, child(prefix, name), segments, i, out) }
+            }
+        }
+        return none
+    }
+    if !has_wildcard(segment) {
+        let path = child(dir, segment)
+        if exists(path) { walk(path, child(prefix, segment), segments, i + 1, out) }
+        return none
+    }
+    let names = try list_dir(dir) else []
+    for let name in names {
+        # hidden names only match a pattern that starts with "."
+        let visible = !name.starts_with(".") | segment.starts_with(".")
+        if visible {
+            if matches(segment, name) {
+                let path = child(dir, name)
+                if i + 1 == segments.len() {
+                    walk(path, child(prefix, name), segments, i + 1, out)
+                } elif is_dir(path) {
+                    walk(path, child(prefix, name), segments, i + 1, out)
+                }
+            }
+        }
+    }
+}
+
+# A merge sort of Strings (for glob's result).
+fn sort(v: Vector<String>) -> Vector<String> {
+    if v.len() <= 1 { return v }
+    let mid = v.len() // 2
+    let a = sort(v[..mid])
+    let b = sort(v[mid..])
+    let out = []
+    let i = 0
+    let j = 0
+    while i < a.len() | j < b.len() {
+        let take_a = j >= b.len()
+        if !take_a { if i < a.len() { take_a = a[i] <= b[j] } }
+        if take_a {
+            out.push(a[i])
+            i = i + 1
+        } else {
+            out.push(b[j])
+            j = j + 1
+        }
+    }
+    out
+}
+
+# The paths matching `pattern`, sorted: `*`, `?` and `[...]` match within
+# one name, `**` any number of directories (`src/**/*.mh`). Names starting
+# with "." only match a pattern part that does too. Paths come back the way
+# the pattern is written (relative, or from "/").
+export fn glob(pattern: String) -> Vector<String> {
+    let segments = pattern.split("/")
+    let out = [:]
+    if pattern.starts_with("/") {
+        walk("/", "/", segments, 1, out)
+    } else {
+        walk(".", "", segments, 0, out)
+    }
+    sort(out.keys())
+}

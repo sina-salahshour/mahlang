@@ -480,17 +480,46 @@ pub struct Vm<'p> {
 /// reader thread, so lines are handed out in the order `input` asked.
 /// Mirrors `code_interpreter.py`'s `_IoHub`.
 struct IoHub {
-    done_tx: std::sync::mpsc::Sender<(u64, Option<String>)>,
-    done_rx: std::sync::mpsc::Receiver<(u64, Option<String>)>,
+    done_tx: std::sync::mpsc::Sender<(u64, Completion)>,
+    done_rx: std::sync::mpsc::Receiver<(u64, Completion)>,
     pending: HashMap<u64, Rc<RefCell<PromiseData>>>,
     next_id: u64,
     stdin_requests: Option<std::sync::mpsc::Sender<u64>>,
+    /// M35 (std:fs): open files by id -- the VM's handle table. Shared with
+    /// the workers, since an `fs.open` job adds its file itself.
+    pub files: super::fs::FileTable,
+}
+
+/// What a worker reports: a line of standard input (`None` at its end), or
+/// a job's result as plain data (M35), turned into Mah values on the VM's
+/// own thread.
+pub enum Completion {
+    Line(Option<String>),
+    Value(super::fs::IoValue),
 }
 
 impl IoHub {
     fn new() -> IoHub {
         let (done_tx, done_rx) = std::sync::mpsc::channel();
-        IoHub { done_tx, done_rx, pending: HashMap::new(), next_id: 0, stdin_requests: None }
+        IoHub {
+            done_tx,
+            done_rx,
+            pending: HashMap::new(),
+            next_id: 0,
+            stdin_requests: None,
+            files: super::fs::FileTable::default(),
+        }
+    }
+
+    /// M35: run `job` on a worker thread; its result settles `promise`.
+    fn submit(&mut self, promise: Rc<RefCell<PromiseData>>, job: Box<dyn FnOnce() -> super::fs::IoValue + Send>) {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.pending.insert(id, promise);
+        let done = self.done_tx.clone();
+        std::thread::spawn(move || {
+            let _ = done.send((id, Completion::Value(job())));
+        });
     }
 
     fn read_line(&mut self, promise: Rc<RefCell<PromiseData>>) {
@@ -507,7 +536,7 @@ impl IoHub {
     }
 }
 
-fn stdin_worker(requests: std::sync::mpsc::Receiver<u64>, done: std::sync::mpsc::Sender<(u64, Option<String>)>) {
+fn stdin_worker(requests: std::sync::mpsc::Receiver<u64>, done: std::sync::mpsc::Sender<(u64, Completion)>) {
     use std::io::BufRead;
     // Ends when the VM (the only sender) is dropped.
     while let Ok(id) = requests.recv() {
@@ -524,7 +553,7 @@ fn stdin_worker(requests: std::sync::mpsc::Receiver<u64>, done: std::sync::mpsc:
                 Some(line)
             }
         };
-        if done.send((id, got)).is_err() {
+        if done.send((id, Completion::Line(got))).is_err() {
             return;
         }
     }
@@ -540,6 +569,16 @@ impl<'p> Vm<'p> {
     pub fn read_stdin_char(&self) -> Option<char> {
         read_stdin_char(&self.stdin)
     }
+    /// M35: run `job` off the VM's thread; its result settles `promise`.
+    pub fn submit(&mut self, promise: Rc<RefCell<PromiseData>>, job: Box<dyn FnOnce() -> super::fs::IoValue + Send>) {
+        self.io.submit(promise, job);
+    }
+
+    /// M35: the open-file table (std:fs).
+    pub fn files(&self) -> &super::fs::FileTable {
+        &self.io.files
+    }
+
     /// M34: drop `promise`'s pending timer, if it has one.
     pub fn cancel_timer(&mut self, promise: &Rc<RefCell<PromiseData>>) -> bool {
         let before = self.timers.len();
@@ -1186,11 +1225,12 @@ impl<'p> Vm<'p> {
         }
     }
 
-    fn settle_io(&mut self, (id, line): (u64, Option<String>)) -> RResult<()> {
+    fn settle_io(&mut self, (id, completion): (u64, Completion)) -> RResult<()> {
         let Some(promise) = self.io.pending.remove(&id) else { return Ok(()) };
-        match line {
-            Some(text) => self.resolve_promise(&promise, Value::Str(Rc::from(text.as_str()))),
-            None => {
+        match completion {
+            Completion::Value(v) => self.resolve_promise(&promise, v.into_value()),
+            Completion::Line(Some(text)) => self.resolve_promise(&promise, Value::Str(Rc::from(text.as_str()))),
+            Completion::Line(None) => {
                 let error = Value::Struct(Rc::new(RefCell::new(StructData {
                     type_name: Rc::from("EndOfInput"),
                     fields: Vec::new(),

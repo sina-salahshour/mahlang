@@ -52,7 +52,7 @@ that fails with "unsupported minor version" when run.
 | file | what |
 |---|---|
 | `runtime/src/decode.rs` | port of `mah/bytecode/decode.py`, same validation and messages |
-| `runtime/src/vm.rs` | port of `mah/code_interpreter.py` + `mah/natives.py` |
+| `runtime/src/vm/` | port of `mah/code_interpreter.py` (`exec.rs`: the step loop, scheduler and I/O hub; `link.rs`; `value.rs`) + `mah/natives.py` (`natives.rs`), `mah/string_methods.py` (`methods.rs`) and `mah/fs_natives.py` (`fs.rs`, std:fs's natives and the open-file table) |
 | `runtime/src/decimal.rs`, `bigint.rs` | Mah's `Number` (below) |
 | `runtime/src/bundle.rs` | reads self-contained bundles (below) |
 | `runtime/src/main.rs` | the `mah-vm` command |

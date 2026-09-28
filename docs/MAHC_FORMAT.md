@@ -1,4 +1,4 @@
-# The `.mahc` bytecode format (version 1.11)
+# The `.mahc` bytecode format (version 1.12)
 
 `mah build prog.mh` compiles a program (its entry file plus everything it
 imports) into a single `.mahc` file; `mah runc prog.mahc` runs one. This
@@ -64,7 +64,7 @@ sections   (id u8, length varuint, payload bytes(length))*   until end of file
   version whose features it uses. *(1.5)* The reference encoder writes 4
   (every file it produces has 1.4's TYPES layout and HANDLERS section),
   or the highest `(1.x)` marker among the natives the file lists (5 for
-  the `std:math` natives, 7 for the ones behind `std:json`/`std:csv`, 8 for `std:random`'s, 9 for `std:regex`'s, 10 for `io.read_line`, 11 for `std:time`/`std:async`'s), so a program that doesn't call newer natives
+  the `std:math` natives, 7 for the ones behind `std:json`/`std:csv`, 8 for `std:random`'s, 9 for `std:regex`'s, 10 for `io.read_line`, 11 for `std:time`/`std:async`'s, 12 for `std:fs`'s), so a program that doesn't call newer natives
   still runs on an older VM. *(1.6)* Native methods (§6.7) are called by
   name, so it also writes the minor that added any native method whose
   *name* a `callmethod`/`callmethodkw`/`detachmethod`/`detachmethodkw` in
@@ -181,6 +181,18 @@ Version 1.0 defines:
 | `promise.new` | 0 | *(1.11)* a new pending Promise, settled only by the two natives below |
 | `promise.resolve` | 2 | *(1.11)* `resolve(p, value)`: if `p` is pending, settles it with `value`, running its continuations synchronously (§6.4), and gives `true`; otherwise does nothing and gives `false` |
 | `promise.fail` | 2 | *(1.11)* `fail(p, error)`: likewise, failing `p` with `error` (each awaiting task throws it) |
+| `fs.read_text` | 1 | *(1.12)* `path` → the whole file as text |
+| `fs.write_text` / `fs.append_text` | 2 | *(1.12)* `path, text` → `none`; write replaces (creating), append adds (creating) |
+| `fs.info` | 1 | *(1.12)* `path` → `[kind, size, modified]`: kind `"file"`, `"dir"` or `"other"` (following symlinks), size in bytes, modified in whole ms since 1970 (0 before it) |
+| `fs.list_dir` | 1 | *(1.12)* `path` → the entry names, sorted by code point |
+| `fs.mkdir` | 2 | *(1.12)* `path, parents` → `none`; with `parents` (`true`), missing ancestors too, and an existing directory is fine |
+| `fs.remove` | 2 | *(1.12)* `path, recursive` → `none`: a file or symlink; a directory only if empty, or with `recursive` (`true`) the whole tree |
+| `fs.rename` / `fs.copy` | 2 | *(1.12)* `from, to` → `none`, replacing a file at `to`; `copy` copies a file's bytes and refuses a directory (`is_a_directory`) |
+| `fs.temp_dir` | 0 | *(1.12)* → the path of a new, empty directory in the system's temporary directory |
+| `fs.open` | 2 | *(1.12)* `path, mode` → a file id (below); mode `"r"`, `"w"` (replacing) or `"a"` (appending), else `RuntimeError.ArgumentError` at once; `"r"` of a directory is `is_a_directory` |
+| `fs.read_line` / `fs.read_all` | 1 | *(1.12)* `id` → the next line without its `\n` or `\r\n` (`none` at the end) / the rest of the file |
+| `fs.write` | 2 | *(1.12)* `id, text` → `none` |
+| `fs.close` | 1 | *(1.12)* `id` → `none`; closing a closed file does nothing |
 | `math.sin` | 1 | sine of a Number (radians); the result is computed in IEEE-754 double precision and converted to Number via its shortest round-trip decimal text |
 | `math.cos` | 1 | cosine, same rules |
 | `time.sleep_async` | 1 | returns a new pending Promise that the scheduler settles with `none` after the argument's number of milliseconds (§6.4) |
@@ -244,6 +256,27 @@ a `TypeMismatch`, `seed: expected a Number, got TYPE` (likewise `below`);
 a seed that isn't whole or is 2^64 or more in size is an `ArgumentError`,
 `seed: expected a whole number smaller than 2^64 in size`; a bound out of
 range, `below: expected a whole number from 1 to 2^64`.
+
+The `(1.12)` natives are `std:fs`'s. Each returns a pending Promise at once
+and does its blocking work off the VM's thread of execution, as an I/O
+operation (§6.4), settling it with a **result**: `[true, value]` (the
+value the table lists), or `[false, kind, description]`, which std:fs
+turns into an `FsError`. `kind` is `not_found`, `permission_denied`,
+`already_exists`, `is_a_directory`, `not_a_directory`,
+`directory_not_empty`, `invalid_utf8` or `closed`, each with a fixed
+description (`no such file or directory`, `permission denied`, `already
+exists`, `is a directory`, `not a directory`, `directory not empty`, `not
+valid UTF-8 text`, `the file is closed`), or `other`, whose description
+is the OS's own error text (strerror). Reading a file opened for writing,
+or writing one opened for reading, is `other` with `the file isn't open
+for reading` / `... for writing`. Text is UTF-8, strictly decoded and
+written byte for byte (no newline translation); writes to an open file
+are unbuffered. **Open files** live in the VM's handle table: `fs.open`
+gives a positive whole-Number id, and the file natives take it back; an
+id that isn't open (closed, or never opened) settles with `[false,
+"closed", ...]`. A non-String path or text, or a non-Number id, is a
+`RuntimeError.TypeMismatch` at once (`NAME: path must be a String, got
+TYPE`; `NAME: expected a file id, got TYPE`).
 
 The `(1.11)` natives are `std:time`'s clocks and the building blocks of
 `std:async`. A non-Promise argument to `time.cancel`, `promise.resolve`
@@ -1063,6 +1096,8 @@ message
 - **1.11** added natives only: `time.now_ms`, `time.monotonic_ms`,
   `time.cancel`, `promise.new`, `promise.resolve`, and `promise.fail`
   (§4.4), behind `std:time` and `std:async`.
+- **1.12** added natives only: the fifteen `fs.*` natives (§4.4) behind
+  `std:fs`, with open files as ids in a per-VM handle table.
 - Planned growth, for orientation: error-set checking (the static
   checker's `throws` inference and "unhandled error" diagnostics -- M26),
   string utilities, filesystem, networking, and process natives.
