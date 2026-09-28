@@ -434,6 +434,36 @@ class CompletionImportPathTests(unittest.TestCase):
         finally:
             os.remove(tmp_path)
 
+    def test_std_modules_after_std_prefix(self):
+        src = 'import "foo" from "std:'
+        items = {item["label"]: item for item in analysis.get_completions(src, None, 0, len(src))}
+        self.assertIn("std:math", items)
+        self.assertIn("std:test", items)
+        # neither the prelude nor a module's tests are importable
+        self.assertFalse({"std:prelude", "std:math.test"} & items.keys())
+        self.assertTrue(all(label.startswith("std:") for label in items))
+        math = items["std:math"]
+        self.assertEqual(math["kind"], analysis.COMPLETION_MODULE)
+        self.assertEqual(math["detail"], "numbers beyond the built-in operators")
+        # the edit replaces everything typed inside the string, `std:` included
+        self.assertEqual(
+            math["textEdit"],
+            {"range": analysis.make_range(src, src.index("std:"), len(src)), "newText": "std:math"},
+        )
+
+    def test_std_modules_narrow_by_name(self):
+        src = 'import m from "std:ma'
+        labels = [item["label"] for item in analysis.get_completions(src, None, 0, len(src))]
+        self.assertEqual(labels, ["std:math"])
+
+    def test_std_modules_offered_before_the_prefix_is_typed(self):
+        for src in ('import "', 'import "st'):
+            labels = {item["label"] for item in analysis.get_completions(src, None, 0, len(src))}
+            self.assertIn("std:math", labels, msg=src)
+        src = 'import "./li'
+        labels = {item["label"] for item in analysis.get_completions(src, None, 0, len(src))}
+        self.assertNotIn("std:math", labels)
+
 
 class TraitHoverDefinitionRenameTests(unittest.TestCase):
     """M12: hover/go-to-definition/rename on `trait`/`impl` -- keyword

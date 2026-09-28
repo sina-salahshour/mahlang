@@ -17,8 +17,9 @@ currently provides:
   variable/function/parameter resolved to (with its doc comment),
   struct/enum shapes, and trait and method signatures
 - completion: keywords, builtins, names in scope, imported and
-  namespaced names, and methods/fields after a `.` based on the
-  receiver's type
+  namespaced names, methods/fields after a `.` based on the
+  receiver's type, and — inside an `import "..."` string — `.mh` files and
+  the standard library's `std:` modules
 - go to definition — scope-aware, and it follows imports: jumping from a
   namespaced call, the namespace name itself, or an `import` path
   string, into the file it points at
