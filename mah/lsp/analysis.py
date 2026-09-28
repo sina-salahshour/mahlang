@@ -173,12 +173,14 @@ KEYWORD_DOCS = {
     "no arm matches is re-thrown automatically. Contextual -- still usable "
     "as an ordinary identifier elsewhere.\n\n"
     "```mah\ntry { risky() } catch {\n\tMyError.Kind => { 0 }\n\te: OtherError => { 1 }\n\t_ => { 2 }\n}\n```",
-    "throws": "Declares the error type(s) a function can throw "
-    "(`throws never` for none) -- optional, and not yet checked (see "
-    "docs/ERRORS.md). Contextual -- still usable as an ordinary "
-    "identifier elsewhere.\n\n"
+    "throws": "Declares the error type(s) a function or function type can "
+    "throw (`throws never` for none). Optional: left out, the checker "
+    "infers the set; written, callers see exactly it and the body is "
+    "checked against it (M26, docs/ERRORS.md). Contextual -- still usable "
+    "as an ordinary identifier elsewhere.\n\n"
     "```mah\nfn load(path: String) -> Config throws FsError | JsonError { ... }\n"
-    "fn pure(x: Number) -> Number throws never { x }\n```",
+    "fn pure(x: Number) -> Number throws never { x }\n"
+    "let cb: fn() -> Number throws never = fn() { 1 }\n```",
 }
 
 BUILTIN_DOCS = {

@@ -29,7 +29,9 @@ print(r.await)                  # 5
   `detach (a + b)`. `return`, and a `break`/`continue` for a loop
   outside the detached expression, are compile errors inside it.
 - `value.await` waits for a Promise. A Promise is an enum:
-  `Promise.Pending` or `Promise.Settled { value }`.
+  `Promise.Pending`, `Promise.Settled { value }`, or `Promise.Failed {
+  error }` when the task threw: `.await` then re-throws `error` in the
+  awaiting task (see [Errors](/docs/errors)).
 - The program exits once the main code is done **and** no detached work
   is still pending.
 

@@ -173,6 +173,90 @@
     }
   },
   {
+    "type": "catch_arm",
+    "named": true,
+    "fields": {
+      "body": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "block",
+            "named": true
+          }
+        ]
+      },
+      "guard": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "expr",
+            "named": true
+          }
+        ]
+      },
+      "pattern": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "enum_pattern",
+            "named": true
+          },
+          {
+            "type": "false",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "negative_number",
+            "named": true
+          },
+          {
+            "type": "none_pattern",
+            "named": true
+          },
+          {
+            "type": "number",
+            "named": true
+          },
+          {
+            "type": "range_pattern",
+            "named": true
+          },
+          {
+            "type": "some_pattern",
+            "named": true
+          },
+          {
+            "type": "string",
+            "named": true
+          },
+          {
+            "type": "struct_pattern",
+            "named": true
+          },
+          {
+            "type": "true",
+            "named": true
+          },
+          {
+            "type": "type_test_pattern",
+            "named": true
+          },
+          {
+            "type": "wildcard_pattern",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "cos_call",
     "named": true,
     "fields": {},
@@ -636,7 +720,15 @@
           "named": true
         },
         {
+          "type": "throw_expr",
+          "named": true
+        },
+        {
           "type": "true",
+          "named": true
+        },
+        {
+          "type": "try_expr",
           "named": true
         },
         {
@@ -789,6 +881,10 @@
           "named": true
         },
         {
+          "type": "throws_clause",
+          "named": true
+        },
+        {
           "type": "type_parameters",
           "named": true
         }
@@ -848,6 +944,10 @@
       "types": [
         {
           "type": "param",
+          "named": true
+        },
+        {
+          "type": "throws_clause",
           "named": true
         },
         {
@@ -962,6 +1062,10 @@
         },
         {
           "type": "named_type",
+          "named": true
+        },
+        {
+          "type": "throws_clause",
           "named": true
         }
       ]
@@ -1104,6 +1208,10 @@
       "types": [
         {
           "type": "param",
+          "named": true
+        },
+        {
+          "type": "throws_clause",
           "named": true
         },
         {
@@ -1892,6 +2000,37 @@
     }
   },
   {
+    "type": "throw_expr",
+    "named": true,
+    "fields": {
+      "value": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "expr",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "throws_clause",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "named_type",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "trait_decl",
     "named": true,
     "fields": {
@@ -1977,7 +2116,47 @@
           "named": true
         },
         {
+          "type": "throws_clause",
+          "named": true
+        },
+        {
           "type": "type_parameters",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "try_expr",
+    "named": true,
+    "fields": {
+      "body": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "expr",
+            "named": true
+          }
+        ]
+      },
+      "fallback": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "expr",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "catch_arm",
           "named": true
         }
       ]
@@ -2063,6 +2242,36 @@
           "named": true
         }
       ]
+    }
+  },
+  {
+    "type": "type_test_pattern",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "wildcard_pattern",
+            "named": true
+          }
+        ]
+      },
+      "type": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
     }
   },
   {
@@ -2234,6 +2443,10 @@
     "named": false
   },
   {
+    "type": "catch",
+    "named": false
+  },
+  {
     "type": "comment",
     "named": true,
     "extra": true
@@ -2319,6 +2532,10 @@
     "named": false
   },
   {
+    "type": "never",
+    "named": false
+  },
+  {
     "type": "none",
     "named": false
   },
@@ -2355,12 +2572,24 @@
     "named": false
   },
   {
+    "type": "throw",
+    "named": false
+  },
+  {
+    "type": "throws",
+    "named": false
+  },
+  {
     "type": "trait",
     "named": false
   },
   {
     "type": "true",
     "named": true
+  },
+  {
+    "type": "try",
+    "named": false
   },
   {
     "type": "while",

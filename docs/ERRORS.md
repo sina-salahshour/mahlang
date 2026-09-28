@@ -296,7 +296,8 @@ types; the runtime needs only the handler table and type tests
 1. **Syntax. ✅ Landed (M25).** Lexer keywords, parser for `throw`,
    `try/catch`, `try/else`, `throws` annotations, type-test patterns.
    AST, resolver, formatter, LSP (via the `mah-add-feature` skill).
-   Tree-sitter/TextMate grammars are a deliberately deferred follow-up.
+   Tree-sitter/TextMate grammars followed with M26 (`throw_expr`,
+   `try_expr`, `catch_arm`, `type_test_pattern`, `throws_clause`).
 2. **Runtime. ✅ Landed (M25).** `Error` trait and `RuntimeError` in the
    prelude, `throw` opcode, the HANDLERS table, unwinding with `defer`,
    runtime-error sites converted, uncaught-error reporting (no stack
@@ -305,9 +306,10 @@ types; the runtime needs only the handler table and type tests
    fixpoint inference, function types with `throws`, Promise error sets,
    unhandled/unreachable diagnostics at each strictness level, hover
    showing a function's `throws`.
-4. **Docs and templates. ✅ Landed (M25), except the website.**
+4. **Docs and templates. ✅ Landed (M25, website with M26).**
    `mah/project/templates/` (language reference, AGENTS.md),
-   `examples/errors.mh`. Website docs (`www/`) are out of scope for M25.
+   `examples/errors.mh`, the website's `/docs/errors` page and the
+   v0.2.0 changelog post.
 
 Tests for each step per `docs/TESTING.md`: parser/formatter round-trips,
 runtime unwinding (nested `try`, re-throw, `defer` order, errors across

@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **Highlighting** for errors (Mah v0.2.0): `throw`/`try`, and `catch`,
+  `throws` and `never` where they're keywords (`try { } catch {`, a
+  `throws A | B` / `throws never` clause); elsewhere they stay plain names.
+- **Language server**: hover shows what a function throws, and the checker
+  reports unhandled errors, `throws` clauses the body doesn't honor, and
+  `catch` arms for errors that are never thrown (always a warning).
+
 ## 0.3.0
 
 Like 0.2.0, the extension client (`src/extension.ts`) is unchanged: new

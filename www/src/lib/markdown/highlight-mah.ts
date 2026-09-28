@@ -34,7 +34,15 @@ const KEYWORDS = new Set([
 	'in',
 	'import',
 	'export',
-	'from'
+	'from',
+	// M25/M26 errors: `throw`/`try` are reserved; `catch`/`throws`/`never`
+	// are contextual in the real lexer, but in doc samples they only ever
+	// appear as keywords.
+	'throw',
+	'try',
+	'catch',
+	'throws',
+	'never'
 ]);
 
 // Constant-like keywords get their own token class.
@@ -61,7 +69,9 @@ const BUILTIN_TYPES = new Set([
 	'Index',
 	'IndexAssign',
 	'Iterable',
-	'Iterator'
+	'Iterator',
+	'Error',
+	'RuntimeError'
 ]);
 
 function escapeHtml(s: string): string {

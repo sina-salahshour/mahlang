@@ -2953,6 +2953,16 @@ node that resolved to it. Then:
       `tests/test_typecheck_wiring.py` (strict fails on unhandled, not on
       a warning), `tests/test_lsp_hover_types_and_completion.py` (hover
       shows `throws`).
+    - Editors and website (M25's deferred follow-ups, done here):
+      `syntax-highlight/grammar.js` (+ `highlights.scm`, parser
+      regenerated with tree-sitter-cli 0.25.10, which reproduces the
+      previously committed parser byte-for-byte) and the VS Code TextMate
+      grammar highlight `throw`/`try`/`catch`/`throws`/`never`, keeping
+      the contextual ones usable as names; `if_expr` became
+      right-associative for `try if ... else ... else ...`. Website: a new
+      `/docs/errors` page, notes on the Types/Async pages, the code-block
+      highlighter's keywords, and the v0.2.0 changelog post (LSP
+      `SERVER_VERSION` and `mah-vm` bumped to 0.2.0).
 
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
