@@ -331,7 +331,8 @@ currently provides:
   function/parameter resolved to (with its doc comment), struct/enum
   shapes, and trait and method signatures
 - completion: keywords, builtins, names in scope, imported and namespaced
-  names, and methods/fields after a `.` based on the receiver's type
+  names, methods/fields after a `.` based on the receiver's type, and `.mh`
+  files and `std:` modules inside an `import "..."` string
 - go to definition — scope-aware (locals, then globals), and it follows
   imports: jumping from a namespaced call, the namespace name itself, or
   an `import` path string, into the file it points at

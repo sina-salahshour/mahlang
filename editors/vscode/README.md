@@ -13,7 +13,8 @@ Editor support for [Mah](https://github.com/sina-salahshour/mahlang) (`.mh` file
     every file in the workspace that imports it), and struct/enum type,
     variant, and field names
   - completion — keywords, builtins, in-scope symbols, namespaced imports,
-    and `.mh` file paths while typing inside an `import "..."` string
+    and `.mh` file paths and `std:` modules (`std:math`, ...) while typing
+    inside an `import "..."` string
 - A custom file icon for `.mh` files in the Explorer (VS Code's built-in icon themes
   only — see **File icon note** below if you use a third-party icon theme)
 

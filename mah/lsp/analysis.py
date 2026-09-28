@@ -28,7 +28,7 @@ from ..compiler.parser import Parser  # noqa: E402
 from ..compiler.resolve import Resolver  # noqa: E402
 from ..compiler import typecheck  # noqa: E402
 from ..compiler.types import TCon, TFn, prune as prune_type, show as show_type, show_throws  # noqa: E402
-from ..preprocessor import BUFFER_PATH, demangle_message, preprocess, source_label  # noqa: E402
+from ..preprocessor import BUFFER_PATH, STD_DIR, STD_PREFIX, demangle_message, preprocess, source_label  # noqa: E402
 from ..project.manifest import check_level_for  # noqa: E402
 from ..runtime_values import BUILTIN_TYPE_NAMES  # noqa: E402
 
@@ -1024,14 +1024,17 @@ def _import_path_completions(text: str, path: Optional[str], offset: int):
     ctx = _import_string_context(text, offset)
     if ctx is None:
         return None
-    partial, _quote_offset = ctx
+    partial, quote_offset = ctx
+    std_items = _std_module_completions(text, partial, quote_offset, offset)
+    if partial.startswith(STD_PREFIX):
+        return std_items
     base_dir = os.path.dirname(path) if path else os.getcwd()
     typed_dir, _sep, typed_prefix = partial.rpartition("/")
     search_dir = os.path.join(base_dir, typed_dir) if typed_dir else base_dir
     try:
         entries = os.listdir(search_dir)
     except OSError:
-        return []
+        return std_items
     items = []
     for entry in sorted(entries):
         if not entry.startswith(typed_prefix):
@@ -1047,6 +1050,51 @@ def _import_path_completions(text: str, path: Optional[str], offset: int):
                     "detail": entry,
                 }
             )
+    return items + std_items
+
+
+def _std_module_summary(path: str) -> str:
+    """A std module's one-line summary: its header comment's first line,
+    after `# std:name -- `."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            first = f.readline().strip()
+    except OSError:
+        return ""
+    _head, sep, summary = first.partition(" -- ")
+    # without the trailing "(docs/....md)." pointer
+    return re.sub(r"\s*\(docs/[^)]*\)\.?$", "", summary.strip()) if sep else ""
+
+
+def _std_module_completions(text: str, partial: str, quote_offset: int, offset: int) -> list[dict]:
+    """`std:<name>` for every standard library module (docs/STDLIB.md),
+    when what's typed so far could still become one (`"`, `"st`, `"std:m`).
+    Each replaces the whole typed path, since editors split words at `:`."""
+    if "/" in partial or "\\" in partial:
+        return []
+    if not (partial.startswith(STD_PREFIX) or STD_PREFIX.startswith(partial)):
+        return []
+    try:
+        entries = sorted(os.listdir(STD_DIR))
+    except OSError:
+        return []
+    typed = partial[len(STD_PREFIX) :] if partial.startswith(STD_PREFIX) else ""
+    replace = make_range(text, quote_offset, offset)
+    items = []
+    for entry in entries:
+        name = entry[: -len(".mh")]
+        if not entry.endswith(".mh") or entry.endswith(".test.mh") or name == "prelude" or not name.startswith(typed):
+            continue
+        label = STD_PREFIX + name
+        items.append(
+            {
+                "label": label,
+                "kind": COMPLETION_MODULE,
+                "detail": _std_module_summary(os.path.join(STD_DIR, entry)) or "standard library module",
+                "filterText": label,
+                "textEdit": {"range": replace, "newText": label},
+            }
+        )
     return items
 
 

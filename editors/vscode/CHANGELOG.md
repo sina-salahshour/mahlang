@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Completion** offers the standard library's modules (`std:math`,
+  `std:test`, ...) inside an `import "..."` / `from "..."` string.
 - **Highlighting** for errors (Mah v0.2.0): `throw`/`try`, and `catch`,
   `throws` and `never` where they're keywords (`try { } catch {`, a
   `throws A | B` / `throws never` clause); elsewhere they stay plain names.
