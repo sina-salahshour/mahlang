@@ -1,0 +1,94 @@
+# Tests for std:async, run by tests/test_stdlib.py (or
+# `mah test --file mah/std/async.test.mh`).
+import "std:test"
+import async from "./async"
+
+fn after(ms: Number, value: Unknown) -> Unknown {
+    sleep_async(ms)
+    value
+}
+
+struct Boom { at: Number }
+
+impl Error for Boom {
+    fn message(self) { "boom " + self.at }
+}
+
+fn fails_after(ms: Number) -> Unknown {
+    sleep_async(ms)
+    throw Boom { at: ms }
+}
+
+test "all keeps the order" {
+    let got = async.all([detach after(40, "a"), detach after(5, "b"), detach after(20, "c")])
+    assert_eq(got.join(), "abc")
+    assert_eq(async.all([]).len(), 0)
+}
+
+test "all throws the first failure right away" {
+    let slow = detach after(300, "slow")
+    let e = assert_throws(
+        fn() { async.all([slow, detach fails_after(10), detach fails_after(60)]) }
+    )
+    assert_eq(e.message(), "boom 10")
+}
+
+test "race takes the first to settle" {
+    assert_eq(async.race([detach after(60, "slow"), detach after(5, "fast")]), "fast")
+    let e = assert_throws(fn() { async.race([detach after(80, "slow"), detach fails_after(5)]) })
+    assert_eq(e.message(), "boom 5")
+    assert_eq(async.race([detach fails_after(80), detach after(5, "ok")]), "ok")
+    assert_eq(
+        assert_throws(fn() { async.race([]) }).message,
+        "race: the Vector of Promises is empty"
+    )
+}
+
+test "timeout" {
+    assert_eq(async.timeout(detach after(5, "in time"), 500), "in time")
+    let e = assert_throws(fn() { async.timeout(detach after(500, "late"), 20) })
+    assert_eq(e.message(), "timed out after 20 ms")
+    match e {
+        TimeoutError { ms } => { assert_eq(ms, 20) }
+        _ => { fail("not a TimeoutError") }
+    }
+    assert_eq(assert_throws(fn() { async.timeout(detach fails_after(5), 500) }).message(), "boom 5")
+}
+
+test "set_timeout and clear_timeout" {
+    let log = []
+    async.set_timeout(fn() { log.push("second") }, 30)
+    async.set_timeout(fn() { log.push("first") }, 10)
+    let cleared = async.set_timeout(fn() { log.push("never") }, 20)
+    async.clear_timeout(cleared)
+    async.clear_timeout(cleared)
+    sleep_async(60)
+    assert_eq(log.join(","), "first,second")
+}
+
+test "set_interval until cleared" {
+    let count = [0]
+    let id = async.set_interval(fn() { count[0] = count[0] + 1 }, 10)
+    async.set_timeout(fn() { async.clear_interval(id) }, 75)
+    sleep_async(150)
+    let n = count[0]
+    # about 7 calls; generous bounds for a slow machine
+    assert(n >= 2 & n <= 8)
+    sleep_async(40)
+    assert_eq(count[0], n)
+}
+
+test "an interval can clear itself" {
+    let count = [0]
+    let holder = []
+    let id = async.set_interval(
+        fn() {
+            count[0] = count[0] + 1
+            if count[0] == 3 { async.clear_interval(holder[0]) }
+        },
+        5
+    )
+    holder.push(id)
+    sleep_async(80)
+    assert_eq(count[0], 3)
+}

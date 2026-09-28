@@ -45,6 +45,10 @@ M33 bumps MINOR to 10: a new native (`io.read_line`, a Promise of the next
 line of standard input, behind the async `input`) and pending I/O in the
 scheduler -- docs/MAHC_FORMAT.md #4.4/#6.4. The compiler stops emitting
 `io.input`, which VMs keep for older files.
+
+M34 bumps MINOR to 11: new natives only (`time.now_ms`/`monotonic_ms`/
+`cancel`, `promise.new`/`resolve`/`fail`, behind std:time and std:async)
+-- docs/MAHC_FORMAT.md #4.4.
 """
 
 from __future__ import annotations
@@ -57,7 +61,7 @@ MAGIC = b"MAHC"
 # `.mahc` extension).
 SHEBANG = b"#!/usr/bin/env -S mah runc\n"
 MAJOR = 1
-MINOR = 10
+MINOR = 11
 
 # -- section ids (docs/MAHC_FORMAT.md #3) -----------------------------------
 SEC_STRINGS = 0x01
@@ -170,6 +174,13 @@ NATIVE_ARITIES = {
     "regex.find_all": 2,
     # M33 (1.10): the async `input`.
     "io.read_line": 1,
+    # M34 (1.11): std:time and std:async.
+    "time.now_ms": 0,
+    "time.monotonic_ms": 0,
+    "time.cancel": 1,
+    "promise.new": 0,
+    "promise.resolve": 2,
+    "promise.fail": 2,
 }
 
 # M16: which minor version introduced each 1.1+ native -- a 1.0 file
@@ -199,6 +210,12 @@ NATIVE_SINCE_MINOR = {
     "regex.find": 9,
     "regex.find_all": 9,
     "io.read_line": 10,
+    "time.now_ms": 11,
+    "time.monotonic_ms": 11,
+    "time.cancel": 11,
+    "promise.new": 11,
+    "promise.resolve": 11,
+    "promise.fail": 11,
 }
 
 # M29: native inherent methods added after 1.0, by the minor that added

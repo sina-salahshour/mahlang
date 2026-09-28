@@ -469,6 +469,8 @@ pub struct Vm<'p> {
     pub regex_cache: HashMap<Rc<str>, regex::Regex>,
     /// M33 (docs/MAHC_FORMAT.md #6.4): blocking operations in flight.
     io: IoHub,
+    /// M34: when this VM started, for `time.monotonic_ms`.
+    started: Instant,
 }
 
 /// M33: blocking operations run on worker threads, which only report back
@@ -538,6 +540,18 @@ impl<'p> Vm<'p> {
     pub fn read_stdin_char(&self) -> Option<char> {
         read_stdin_char(&self.stdin)
     }
+    /// M34: drop `promise`'s pending timer, if it has one.
+    pub fn cancel_timer(&mut self, promise: &Rc<RefCell<PromiseData>>) -> bool {
+        let before = self.timers.len();
+        self.timers.retain(|t| !Rc::ptr_eq(&t.promise, promise));
+        self.timers.len() != before
+    }
+
+    /// M34: whole milliseconds since this VM started.
+    pub fn monotonic_ms(&self) -> u64 {
+        self.started.elapsed().as_millis() as u64
+    }
+
     /// M33: settle `promise` with the next line of standard input (or fail
     /// it with EndOfInput), from the scheduler, later.
     pub fn read_line(&mut self, promise: Rc<RefCell<PromiseData>>) {
@@ -1066,7 +1080,7 @@ impl<'p> Vm<'p> {
         Ok(promise)
     }
 
-    fn resolve_promise(&mut self, p: &Rc<RefCell<PromiseData>>, value: Value) -> RResult<()> {
+    pub(super) fn resolve_promise(&mut self, p: &Rc<RefCell<PromiseData>>, value: Value) -> RResult<()> {
         if p.borrow().settled.is_some() || p.borrow().failed.is_some() {
             return Ok(());
         }
@@ -1085,7 +1099,7 @@ impl<'p> Vm<'p> {
     /// nothing if it's already settled or failed. Each waiting task
     /// resumes by throwing `error` at its own `.await` instruction
     /// (`resume_pc - 1`).
-    fn fail_promise(&mut self, p: &Rc<RefCell<PromiseData>>, error: Value) -> RResult<()> {
+    pub(super) fn fail_promise(&mut self, p: &Rc<RefCell<PromiseData>>, error: Value) -> RResult<()> {
         if p.borrow().settled.is_some() || p.borrow().failed.is_some() {
             return Ok(());
         }
@@ -1825,6 +1839,7 @@ fn run(linked: &LinkedProgram, test_slot: Option<usize>) -> RResult<Option<TestO
         failed_promises: Vec::new(),
         regex_cache: HashMap::new(),
         io: IoHub::new(),
+        started: Instant::now(),
     };
     vm.drive(main_task, None)?;
 

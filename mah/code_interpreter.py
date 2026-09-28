@@ -1057,6 +1057,7 @@ def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, dead
         to_string=lambda v: to_str(v),
         schedule_timer=lambda secs, p: schedule_timer(secs, p),
         read_line=lambda p: io.read_line(p),
+        cancel_timer=lambda p: cancel_timer(p),
     )
 
     def enter_closure(task: Task, closure: Closure, arg_values: list) -> None:
@@ -1152,6 +1153,15 @@ def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, dead
 
     def schedule_timer(delay_seconds: float, promise: PromiseInstance) -> None:
         heapq.heappush(timers, (time.monotonic() + delay_seconds, next(timer_seq), promise))
+
+    def cancel_timer(promise: PromiseInstance) -> bool:
+        """M34: drop `promise`'s pending timer, if it has one."""
+        kept = [entry for entry in timers if entry[2] is not promise]
+        if len(kept) == len(timers):
+            return False
+        timers[:] = kept
+        heapq.heapify(timers)
+        return True
 
     def drain_next_timer() -> bool:
         if not timers:

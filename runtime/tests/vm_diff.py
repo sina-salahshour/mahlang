@@ -456,6 +456,31 @@ print(try (detach input()).await else "no more")
 let u: Unknown = 1
 input(u)
 """, b""),
+    # M34: std:time's calendar and formatting, and std:async's ordering.
+    ("std_time", """
+import time from "std:time"
+for let ts in [0, 951782400, 1790597925.318, 0 - 86400.5, 253402300799] {
+    let d = time.utc(ts)
+    print(d, d.weekday(), d.day_of_year(), time.format(d, "%a %d %b %Y %H:%M:%S.%f"))
+}
+print(time.parse("Thu, 29 Feb 2024 13:05", "%a, %d %b %Y %H:%M"), time.parse_iso("2024-02-29T13:05:09.007Z").timestamp())
+print(try { time.parse("2023-02-29", "%Y-%m-%d") } catch { e: TimeError => { e.message() } }, time.duration_text(10807))
+""", b""),
+    ("std_async", """
+import async from "std:async"
+fn after(ms: Number, value: Unknown) -> Unknown {
+    sleep_async(ms)
+    value
+}
+print(async.all([detach after(30, "a"), detach after(5, "b")]), async.race([detach after(40, 1), detach after(5, 2)]))
+print(try { async.timeout(detach after(200, "late"), 10) } catch { e: TimeoutError => { e.message() } })
+let log = []
+async.set_timeout(fn() { log.push("b") }, 20)
+async.set_timeout(fn() { log.push("a") }, 5)
+async.clear_timeout(async.set_timeout(fn() { log.push("never") }, 10))
+sleep_async(50)
+print(log)
+""", b""),
     ("std_csv", """
 import csv from "std:csv"
 print(csv.parse("a,\\"b,c\\"\\r\\n\\n\\"q\\"\\"x\\",\\n"), csv.parse_records("n,v\\nx,1\\n"))

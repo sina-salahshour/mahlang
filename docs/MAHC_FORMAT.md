@@ -1,4 +1,4 @@
-# The `.mahc` bytecode format (version 1.10)
+# The `.mahc` bytecode format (version 1.11)
 
 `mah build prog.mh` compiles a program (its entry file plus everything it
 imports) into a single `.mahc` file; `mah runc prog.mahc` runs one. This
@@ -64,7 +64,7 @@ sections   (id u8, length varuint, payload bytes(length))*   until end of file
   version whose features it uses. *(1.5)* The reference encoder writes 4
   (every file it produces has 1.4's TYPES layout and HANDLERS section),
   or the highest `(1.x)` marker among the natives the file lists (5 for
-  the `std:math` natives, 7 for the ones behind `std:json`/`std:csv`, 8 for `std:random`'s, 9 for `std:regex`'s, 10 for `io.read_line`), so a program that doesn't call newer natives
+  the `std:math` natives, 7 for the ones behind `std:json`/`std:csv`, 8 for `std:random`'s, 9 for `std:regex`'s, 10 for `io.read_line`, 11 for `std:time`/`std:async`'s), so a program that doesn't call newer natives
   still runs on an older VM. *(1.6)* Native methods (§6.7) are called by
   name, so it also writes the minor that added any native method whose
   *name* a `callmethod`/`callmethodkw`/`detachmethod`/`detachmethodkw` in
@@ -175,6 +175,12 @@ Version 1.0 defines:
 | `io.write` | 1 | *(1.1)* writes `to_string(v)` (§6.6) to standard output with **no** newline; returns `none` |
 | `io.input` | 0 | reads characters from standard input: skips characters until the first ASCII digit, then consumes digits up to and including the first non-digit (or end of input); returns that Number. End of input before any digit is a runtime error. *(1.10: no longer emitted, since `input` compiles to `io.read_line`; VMs keep it for older files.)* |
 | `io.read_line` | 1 | *(1.10)* the async `input(prompt)`: writes the prompt (a String, else `RuntimeError.TypeMismatch`, `input: the prompt must be a String, got TYPE`) to standard output with no newline and flushes it, then returns a pending Promise that the scheduler (§6.4) settles with the next line of standard input as a String, without its `\n` or `\r\n`, or fails with an `EndOfInput` struct value (no fields; the prelude's type) when there are no more lines. Lines go to calls in call order. |
+| `time.now_ms` | 0 | *(1.11)* the wall-clock time: whole milliseconds since 1970-01-01 00:00:00 UTC |
+| `time.monotonic_ms` | 0 | *(1.11)* whole milliseconds since the VM started, from a clock that never goes backwards |
+| `time.cancel` | 1 | *(1.11)* removes the pending timer (§6.4) that would settle the given Promise; the Promise then never settles, and the timer no longer keeps the program running. `true` if there was one |
+| `promise.new` | 0 | *(1.11)* a new pending Promise, settled only by the two natives below |
+| `promise.resolve` | 2 | *(1.11)* `resolve(p, value)`: if `p` is pending, settles it with `value`, running its continuations synchronously (§6.4), and gives `true`; otherwise does nothing and gives `false` |
+| `promise.fail` | 2 | *(1.11)* `fail(p, error)`: likewise, failing `p` with `error` (each awaiting task throws it) |
 | `math.sin` | 1 | sine of a Number (radians); the result is computed in IEEE-754 double precision and converted to Number via its shortest round-trip decimal text |
 | `math.cos` | 1 | cosine, same rules |
 | `time.sleep_async` | 1 | returns a new pending Promise that the scheduler settles with `none` after the argument's number of milliseconds (§6.4) |
@@ -238,6 +244,14 @@ a `TypeMismatch`, `seed: expected a Number, got TYPE` (likewise `below`);
 a seed that isn't whole or is 2^64 or more in size is an `ArgumentError`,
 `seed: expected a whole number smaller than 2^64 in size`; a bound out of
 range, `below: expected a whole number from 1 to 2^64`.
+
+The `(1.11)` natives are `std:time`'s clocks and the building blocks of
+`std:async`. A non-Promise argument to `time.cancel`, `promise.resolve`
+or `promise.fail` is a `RuntimeError.TypeMismatch`, `NAME: expected a
+Promise, got TYPE` (NAME `cancel`, `resolve` or `fail`). Settling a
+Promise from inside a running task resumes the tasks waiting on it right
+then, before the settling native returns, exactly as a `detach` runs its
+new task at once.
 
 The `(1.9)` natives are `std:regex`'s matcher. `std:regex` parses every
 pattern itself (in Mah, so its syntax errors are the same everywhere) and
@@ -1046,6 +1060,9 @@ message
   operations in the scheduler loop (§6.4). The compiler stops emitting
   `io.input` for `input()`, but VMs keep implementing it, so older files
   run unchanged.
+- **1.11** added natives only: `time.now_ms`, `time.monotonic_ms`,
+  `time.cancel`, `promise.new`, `promise.resolve`, and `promise.fail`
+  (§4.4), behind `std:time` and `std:async`.
 - Planned growth, for orientation: error-set checking (the static
   checker's `throws` inference and "unhandled error" diagnostics -- M26),
   string utilities, filesystem, networking, and process natives.

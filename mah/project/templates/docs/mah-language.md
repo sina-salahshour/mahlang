@@ -657,7 +657,8 @@ are global across all imported files and need no `export`.
 
 Standard library modules are imported as `"std:<name>"`, the same two ways
 as a file: `std:math`, `std:path`, `std:json`, `std:csv`, `std:random`,
-`std:collections`, `std:regex` (and `std:test`, below).
+`std:collections`, `std:regex`, `std:time`, `std:async` (and `std:test`,
+below).
 
 ```mah
 import math from "std:math"
@@ -792,6 +793,44 @@ Also `replace` (first match only), `replace_all(text, fn(m) { ... })`,
 `Match.groups`/`end`. A group the pattern lacks (`m.group(9)`) throws
 `RuntimeError.ArgumentError`.
 
+`std:time`: times and durations are Numbers of **seconds** (so `t + 90`
+and `b - a` work); dates are UTC only (no time zones yet).
+
+```mah
+import time from "std:time"
+let start = time.monotonic()                     # seconds since the program started
+let d = time.utc(1790597925)                     # a DateTime from seconds since 1970 (time.now() is now)
+print(d, d.year, d.weekday())                    # 2026-09-28T12:18:45Z 2026 1 (Monday = 1)
+print(time.format(d, "%a %d %b %Y %H:%M"))       # Mon 28 Sep 2026 12:18
+let due = try time.parse("2026-10-05", "%Y-%m-%d") else d   # parse/date throw TimeError
+print(time.duration_text(due.timestamp() - d.timestamp()))  # 6d 11h 41m 15s
+print(time.duration_text(time.monotonic() - start) != "")   # true
+```
+
+Codes: `%Y %m %d %H %M %S %f`(ms) `%j %B %b %A %a %%`. Also `time.date(y, m,
+d, h = 0, ...)`, `.timestamp()`, `.day_of_year()`, `time.iso(d)` /
+`time.parse_iso(text)`.
+
+`std:async` combines Promises (from `detach`) and runs timers. Each
+function waits like a call; its value and errors are those of the
+Promises:
+
+```mah
+import async from "std:async"
+fn job(ms: Number, name: String) -> String { sleep_async(ms); name }
+print(async.all([detach job(30, "a"), detach job(10, "b")]))   # [a, b] (in order)
+print(async.race([detach job(30, "slow"), detach job(5, "fast")]))  # fast
+print(try async.timeout(detach job(500, "x"), 20) else "too slow")  # too slow (TimeoutError)
+let count = [0]
+let ticker = async.set_interval(fn() { count[0] = count[0] + 1 }, 10)
+sleep_async(55)
+async.clear_interval(ticker)                     # cleared timers don't keep the program alive
+print(count[0] > 0)                              # true
+```
+
+`set_timeout(f, ms)` / `clear_timeout(id)` likewise. Timer callbacks are
+`fn() throws never`: handle errors inside them.
+
 ## Errors
 
 `throw` raises a value -- any struct/enum that `impl`s the built-in `Error`
@@ -923,5 +962,6 @@ test "not ready yet" {
 - Variadic parameters (`*args`, `**kwargs`); only `print` takes any number of arguments.
 - File, network, or OS access, and every other planned `std:` module
   besides `std:math`, `std:path`, `std:json`, `std:csv`, `std:random`,
-  `std:collections`, `std:regex` and `std:test`.
+  `std:collections`, `std:regex`, `std:time`, `std:async` and `std:test`.
+  Time zones (`std:time` is UTC only).
 - `null`/`nil`/`undefined`: use `none`.

@@ -1,0 +1,117 @@
+# Tests for std:time, run by tests/test_stdlib.py (or
+# `mah test --file mah/std/time.test.mh`).
+import "std:test"
+import time from "./time"
+
+test "clocks" {
+    assert(time.now() > 1700000000)
+    let a = time.monotonic()
+    sleep_async(20)
+    let b = time.monotonic()
+    assert(b - a >= 0.015)
+    assert(a >= 0)
+}
+
+test "utc and back" {
+    for let ts in [
+        0,
+        86399.999,
+        951782400,
+        1790597925.318,
+        0 - 1,
+        0 - 86400.5,
+        253402300799,
+        0 - 62135596800
+    ] {
+        assert_eq(time.utc(ts).timestamp(), ts)
+    }
+    assert_eq("" + time.utc(0), "1970-01-01T00:00:00Z")
+    assert_eq("" + time.utc(951782400), "2000-02-29T00:00:00Z")
+    assert_eq("" + time.utc(0 - 86400.5), "1969-12-30T23:59:59.500Z")
+    assert_eq("" + time.utc(253402300799), "9999-12-31T23:59:59Z")
+    # rounded down to the millisecond
+    assert_eq(time.utc(0.0015).millisecond, 1)
+    assert_eq(time.utc(0 - 0.0005).millisecond, 999)
+}
+
+test "weekday and day of year" {
+    assert_eq(time.utc(0).weekday(), 4)
+    assert_eq(time.date(2026, 9, 28).weekday(), 1)
+    assert_eq(time.date(2000, 2, 29).weekday(), 2)
+    assert_eq(time.date(1, 1, 1).weekday(), 1)
+    assert_eq(time.date(2024, 12, 31).day_of_year(), 366)
+    assert_eq(time.date(2023, 12, 31).day_of_year(), 365)
+}
+
+test "date checks its parts" {
+    assert_eq(time.date(2024, 2, 29, 13, 5, 9, 7).timestamp(), 1709211909.007)
+    let error = fn(f: fn() -> Unknown) -> String { assert_throws(f).message() }
+    assert_eq(error(fn() { time.date(2023, 2, 29) }), "date: 2023-02 has no day 29")
+    assert_eq(error(fn() { time.date(2024, 13, 1) }), "date: no month 13")
+    assert_eq(error(fn() { time.date(2024, 1, 1, 24) }), "date: no time of day 24:0:0.0")
+    assert_eq(
+        error(fn() { time.date(2024, 1, 1.5) }),
+        "date: every part must be a whole number, got 1.5"
+    )
+    # centuries are leap years only every 400 years
+    assert_eq(error(fn() { time.date(1900, 2, 29) }), "date: 1900-02 has no day 29")
+    assert_eq(time.date(2000, 2, 29).day, 29)
+}
+
+test "format" {
+    let d = time.date(2024, 2, 29, 13, 5, 9, 7)
+    assert_eq(
+        time.format(d, "%A %a %B %b %Y-%m-%d %H:%M:%S.%f day %j 100%%"),
+        "Thursday Thu February Feb 2024-02-29 13:05:09.007 day 060 100%"
+    )
+    assert_eq(time.format(time.date(33, 1, 2), "%Y|%d"), "0033|02")
+    assert_eq(assert_throws(fn() { time.format(d, "%Q") }).message, "format: unknown code %Q")
+    assert_eq(
+        assert_throws(fn() { time.format(d, "50%") }).message(),
+        "format: the pattern ends with %"
+    )
+}
+
+test "parse" {
+    assert_eq(
+        "" + time.parse("Thu, 29 Feb 2024 13:05", "%a, %d %b %Y %H:%M"),
+        "2024-02-29T13:05:00Z"
+    )
+    assert_eq("" + time.parse("march 3 2025", "%B %d %Y"), "2025-03-03T00:00:00Z")
+    assert_eq("" + time.parse("12:30", "%H:%M"), "1970-01-01T12:30:00Z")
+    let error = fn(text: String, pattern: String) -> String {
+        assert_throws(fn() { time.parse(text, pattern) }).message()
+    }
+    assert_eq(error("2023-02-29", "%Y-%m-%d"), "date: 2023-02 has no day 29")
+    assert_eq(error("24-01-01", "%Y-%m-%d"), "parse: expected a 4-digit year at position 0")
+    assert_eq(error("2024-01-01x", "%Y-%m-%d"), "parse: unexpected text at position 10")
+    assert_eq(error("2024/01/01", "%Y-%m-%d"), "parse: expected \"-\" at position 4")
+    assert_eq(error("Smarch 1", "%B %d"), "parse: expected a month name at position 0")
+    assert_eq(error("2024", "%Y-%q"), "parse: expected \"-\" at position 4")
+    assert_eq(error("2024-", "%Y-%q"), "parse: unknown code %q")
+}
+
+test "iso" {
+    let d = time.date(2024, 2, 29, 13, 5, 9, 7)
+    assert_eq(time.iso(d), "2024-02-29T13:05:09.007Z")
+    for let text in [
+        "2024-02-29T13:05:09.007Z",
+        "2024-02-29T13:05:09Z",
+        "2024-02-29T13:05",
+        "2024-02-29"
+    ] {
+        assert_eq(time.parse_iso(text).year, 2024)
+    }
+    assert_eq(time.parse_iso(time.iso(d)).timestamp(), d.timestamp())
+    assert_eq(
+        assert_throws(fn() { time.parse_iso("yesterday") }).message(),
+        "parse_iso: not an ISO 8601 date and time: \"yesterday\""
+    )
+}
+
+test "duration_text" {
+    let got = [0.25, 1.5, 59.999, 125, 10807, 187200, 0 - 2].map(
+        fn(s) { time.duration_text(s) }
+    ).reduce()
+    assert_eq(got.join("|"), "250ms|1.5s|59.999s|2m 5s|3h 0m 7s|2d 4h 0m 0s|-2s")
+}

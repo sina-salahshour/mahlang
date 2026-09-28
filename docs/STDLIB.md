@@ -6,8 +6,9 @@ first module; **M29 landed the String methods** (Phase 1's first item);
 **M30 landed `std:path`, `std:json` and `std:csv`**; **M31 landed
 `std:random` (with Phase 0 step 6, the shared PRNG) and
 `std:collections`**, and **M32 `std:regex`**, completing Phase 1;
-**M33 made `input` async** (Phase 0 step 7, and step 4's I/O half). The
-rest is design. Agreed 2026-09-28. Depends on
+**M33 made `input` async** (Phase 0 step 7, and step 4's I/O half);
+**M34 landed `std:time` and `std:async`** (Phase 2, with step 4's
+cancellable timers). The rest is design. Agreed 2026-09-28. Depends on
 [`ERRORS.md`](ERRORS.md) (every failure below is a thrown, typed error)
 and on the static checker in [`TYPES.md`](TYPES.md).
 
@@ -71,7 +72,9 @@ import "std:math"            # flat import works too
      value, or an error per `ERRORS.md`); ✅ **landed (M33)** for standard
      input: one reader thread per VM, whose results the scheduler settles
      on the VM's own thread (docs/MAHC_FORMAT.md §6.4);
-   - callback timers with cancellation, for `std:async`;
+   - callback timers with cancellation, for `std:async`; ✅ **landed
+     (M34)** as `time.cancel` (drop a `sleep_async` timer) plus
+     `set_timeout`/`set_interval` in Mah on top of it;
    - "the program is done when the main task has finished and no timer
      or I/O is pending", as in Node. ✅ **Landed (M33).**
 5. **Native table versioning. ✅ Landed (M27).** New natives bump the
@@ -425,6 +428,27 @@ share, and parity tests cover that subset.
 `now()` (wall-clock time), `monotonic()`, a `Duration` type with
 arithmetic, `format(time, pattern)` and `parse(text, pattern)`.
 
+✅ **Landed (M34)**, in `mah/std/time.mh`, with these decisions:
+
+- **Times and durations are Numbers of seconds** (to the millisecond):
+  `now()` counts from 1970-01-01 UTC, `monotonic()` from the program's
+  start. Mah has no operator overloading, so a `Duration` type couldn't
+  have arithmetic; plain Numbers get `t + 90` and `b - a` for free.
+  `duration_text(seconds)` writes one as "250ms", "1.5s", "2m 5s", ...
+- **`DateTime { year, month, day, hour, minute, second, millisecond }`**
+  is a UTC calendar reading (`utc(t)`, `date(y, m, d, h = 0, ...)`, and
+  `.timestamp()`, `.weekday()` (ISO, Monday = 1), `.day_of_year()`), using
+  H. Hinnant's days-from-civil algorithms in plain Mah, proleptic
+  Gregorian from year 1 to 9999. It prints as ISO 8601 (`iso` /
+  `parse_iso`). **No time zones yet**: the Rust runtime would need the
+  OS's time zone database, which is left for later.
+- `format(dt, pattern)` and `parse(text, pattern)` use strftime-style
+  codes: `%Y %m %d %H %M %S %f %j %B %b %A %a %%`. `parse` throws
+  `TimeError` for text that doesn't match or names an impossible date (as
+  does `date`); a bad code in `format`'s pattern is a
+  `RuntimeError.ArgumentError`, since it's a mistake in the program.
+- Two 1.11 natives: `time.now_ms` and `time.monotonic_ms`.
+
 ### `std:async`
 
 - `all(promises)`, `race(promises)`.
@@ -434,6 +458,25 @@ arithmetic, `format(time, pattern)` and `parse(text, pattern)`.
   `clear_timeout(id)` and `clear_interval(id)` cancel it. Callbacks must
   throw nothing (`ERRORS.md`, "Interactions"). An active interval keeps
   the program running.
+
+✅ **Landed (M34)**, in `mah/std/async.mh`, with these decisions:
+
+- **Written in Mah** over four 1.11 natives: `promise.new`,
+  `promise.resolve` and `promise.fail` (a Promise settled by hand), and
+  `time.cancel` (drop the timer behind a `detach sleep_async(ms)`).
+- **`all`, `race` and `timeout` wait like any call** and return the value
+  (detach them to keep going). Watcher tasks await the inputs and report
+  which one decided the outcome; the function then awaits that Promise
+  itself, already settled. So `all` fails as soon as any input fails,
+  `race` settles with the first to settle (value or error), and the
+  checker sees each return exactly the inputs' type and throw exactly
+  their errors (plus `TimeoutError { ms }` for `timeout`). They're generic
+  over `Vector<Promise<T>>`.
+- **Timers**: `set_timeout`/`set_interval` return a `TimerId`; an
+  interval's next wait starts when the callback returns. Clearing cancels
+  the pending timer, so a cleared timer never keeps the program running.
+  Callbacks are typed `fn() throws never`, so the checker enforces
+  "callbacks must throw nothing".
 
 ## Phase 3: OS access
 

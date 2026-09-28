@@ -1,0 +1,151 @@
+# std:async -- combining Promises, and timers (docs/STDLIB.md).
+#
+#   import async from "std:async"
+#   let [a, b] = ...                          (no destructuring yet:)
+#   let both = async.all([detach fetch(1), detach fetch(2)])
+#   let first = async.race([detach slow(), detach fast()])
+#   let value = async.timeout(detach work(), 500)     # TimeoutError after 500 ms
+#
+#   let ticker = async.set_interval(fn() { print("tick") }, 1000)
+#   async.clear_interval(ticker)
+#
+# A Promise comes from `detach`: `detach f(x)` starts `f` and hands back its
+# Promise. These functions wait like any call; detach them in turn to keep
+# going meanwhile. Timer callbacks must handle their own errors (their type
+# is `fn() throws never`, so the checker says when one can throw); at run
+# time an error one throws anyway is reported when the program ends.
+
+extern fn new_promise() -> Promise<Unknown> = "promise.new"
+extern fn settle(promise: Promise<Unknown>, value: Unknown) -> Bool = "promise.resolve"
+extern fn cancel(promise: Promise<Unknown>) -> Bool = "time.cancel"
+
+# `timeout`'s: the Promise didn't settle within `ms` milliseconds.
+struct TimeoutError { ms: Number }
+
+impl Error for TimeoutError {
+    fn message(self) -> String { "timed out after " + self.ms + " ms" }
+}
+
+fn argument_error(message: String) -> Unknown {
+    throw RuntimeError.ArgumentError { message: message }
+}
+
+# -- combining Promises ---------------------------------------------------------
+#
+# Watcher tasks await the Promises and settle `result` with the index of the
+# one that decided the outcome; the function then awaits that Promise
+# itself -- already settled, so it gives its value or throws its error at
+# once, and the checker sees each function return and throw exactly what
+# the Promises do.
+
+struct __AllState { remaining: Number, result: Promise<Unknown> }
+
+fn watch_all(p: Promise<Unknown>, i: Number, state: __AllState) {
+    try {
+        p.await
+        state.remaining = state.remaining - 1
+        if state.remaining == 0 { settle(state.result, 0 - 1) }
+    } catch {
+        e => { settle(state.result, i) }
+    }
+}
+
+# Every Promise's value, in the same order, once all have settled. Throws
+# the first error any of them fails with, as soon as it does.
+export fn all<T>(promises: Vector<Promise<T>>) -> Vector<T> {
+    let out = []
+    if promises.len() == 0 { return out }
+    let state = __AllState { remaining: promises.len(), result: new_promise() }
+    let i = 0
+    while i < promises.len() {
+        detach watch_all(promises[i], i, state)
+        i = i + 1
+    }
+    let failed = state.result.await
+    if failed >= 0 { promises[failed].await }
+    for let p in promises {
+        out.push(p.await)
+    }
+    out
+}
+
+fn watch_race(p: Promise<Unknown>, i: Number, result: Promise<Unknown>) {
+    try { p.await } catch { e => { } }
+    settle(result, i)
+}
+
+# The value of whichever Promise settles first -- or the error of the
+# first to fail, if that comes first. The rest keep running.
+export fn race<T>(promises: Vector<Promise<T>>) -> T {
+    if promises.len() == 0 { argument_error("race: the Vector of Promises is empty") }
+    let result = new_promise()
+    let i = 0
+    while i < promises.len() {
+        detach watch_race(promises[i], i, result)
+        i = i + 1
+    }
+    promises[result.await].await
+}
+
+fn expire(timer: Promise<Unknown>, result: Promise<Unknown>) {
+    timer.await
+    settle(result, 1)
+}
+
+# `promise`'s value, if it settles within `ms` milliseconds; otherwise
+# throws TimeoutError (and `promise` keeps running).
+export fn timeout<T>(promise: Promise<T>, ms: Number) -> T {
+    let result = new_promise()
+    let timer = detach sleep_async(ms)
+    defer { cancel(timer) }
+    detach watch_race(promise, 0, result)
+    detach expire(timer, result)
+    if result.await == 1 { throw TimeoutError { ms: ms } }
+    promise.await
+}
+
+# -- timers ---------------------------------------------------------------------
+
+# A running timeout or interval, for clear_timeout/clear_interval.
+struct TimerId { timer: Promise<Unknown>, active: Bool }
+
+fn fire_once(id: TimerId, f: fn() -> Unknown throws never) {
+    id.timer.await
+    if id.active {
+        id.active = false
+        f()
+    }
+}
+
+fn repeat(id: TimerId, f: fn() -> Unknown throws never, ms: Number) {
+    while id.active {
+        id.timer.await
+        if !id.active { break }
+        f()
+        if id.active { id.timer = detach sleep_async(ms) }
+    }
+}
+
+# Calls `f` once, after `ms` milliseconds, unless cleared first.
+export fn set_timeout(f: fn() -> Unknown throws never, ms: Number) -> TimerId {
+    let id = TimerId { timer: detach sleep_async(ms), active: true }
+    detach fire_once(id, f)
+    id
+}
+
+# Calls `f` every `ms` milliseconds (counted from when the last call
+# returned) until cleared. An active interval keeps the program running.
+export fn set_interval(f: fn() -> Unknown throws never, ms: Number) -> TimerId {
+    let id = TimerId { timer: detach sleep_async(ms), active: true }
+    detach repeat(id, f, ms)
+    id
+}
+
+# Stops a timeout (or interval) before its next call; it then no longer
+# keeps the program running. Clearing one twice does nothing.
+export fn clear_timeout(id: TimerId) {
+    id.active = false
+    cancel(id.timer)
+}
+
+export fn clear_interval(id: TimerId) { clear_timeout(id) }

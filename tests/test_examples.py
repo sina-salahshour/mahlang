@@ -200,6 +200,20 @@ class ExampleTests(unittest.TestCase):
             'missing ) at position 0 in "(\\d+"\n'
         )
 
+    def test_timers(self):
+        # M34: std:async's all/race/timeout/intervals and std:time's dates.
+        out = run_file(example_path("timers.mh"))
+        self.assertEqual(
+            out,
+            '[build done, test done, lint done]\n'
+            'fastest: quick done\n'
+            'deploy gave up: timed out after 50 ms\n'
+            'ticker ran: true | elapsed under a second: true\n'
+            'Monday 28 September 2026, 09:30 -> Thu 01 Oct, 11:00\n'
+            'in between: 3d 1h 30m 0s\n'
+            'no such date\n'
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

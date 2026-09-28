@@ -33,18 +33,32 @@ from .runtime_values import (
 
 
 class NativeContext:
-    __slots__ = ("_to_string", "_schedule_timer", "_read_line")
+    __slots__ = ("_to_string", "_schedule_timer", "_read_line", "_cancel_timer", "_started")
 
-    def __init__(self, to_string, schedule_timer, read_line=None):
+    def __init__(self, to_string, schedule_timer, read_line=None, cancel_timer=None):
+        import time
+
         self._to_string = to_string
         self._schedule_timer = schedule_timer
         self._read_line = read_line
+        self._cancel_timer = cancel_timer
+        self._started = time.monotonic()
 
     def to_string(self, value) -> str:
         return self._to_string(value)
 
     def schedule_timer(self, seconds: float, promise) -> None:
         self._schedule_timer(seconds, promise)
+
+    def cancel_timer(self, promise) -> bool:
+        """M34: drop the pending timer that would settle `promise`."""
+        return self._cancel_timer(promise)
+
+    def monotonic_ms(self) -> int:
+        """M34: whole milliseconds since this VM started."""
+        import time
+
+        return int((time.monotonic() - self._started) * 1000)
 
     def read_line(self, promise) -> None:
         """M33: settle `promise` with the next line of standard input (or
@@ -415,6 +429,62 @@ def _regex_find_all(ctx: NativeContext, args) -> object:
     return VectorValue(out)
 
 
+# -- M34 (1.11): clocks, timer cancellation, and hand-settled Promises -------
+
+
+def _time_now_ms(ctx: NativeContext, args) -> object:
+    """Wall-clock time: whole milliseconds since 1970-01-01 00:00 UTC."""
+    import time
+
+    return Decimal(time.time_ns() // 1_000_000)
+
+
+def _time_monotonic_ms(ctx: NativeContext, args) -> object:
+    """Whole milliseconds since the VM started, never going backwards."""
+    return Decimal(ctx.monotonic_ms())
+
+
+def _promise_arg(name: str, value) -> PromiseInstance:
+    if not isinstance(value, PromiseInstance):
+        raise MahRuntimeError(f"{name}: expected a Promise, got {type_name_of(value)}", kind="TypeMismatch")
+    return value
+
+
+def _time_cancel(ctx: NativeContext, args) -> object:
+    """Cancels the pending `sleep_async` timer behind a Promise, which then
+    never settles (and no longer keeps the program running). Whether there
+    was such a timer."""
+    (promise,) = args
+    return ctx.cancel_timer(_promise_arg("cancel", promise))
+
+
+def _promise_new(ctx: NativeContext, args) -> object:
+    """A new pending Promise, settled by `promise.resolve`/`promise.fail`."""
+    return PromiseInstance()
+
+
+def _promise_resolve(ctx: NativeContext, args) -> object:
+    """Settles a pending Promise with a value, resuming the tasks awaiting
+    it right away; whether it was pending (a settled one is left alone)."""
+    promise, value = args
+    promise = _promise_arg("resolve", promise)
+    if promise.variant != "Pending":
+        return False
+    promise.resolve(value)
+    return True
+
+
+def _promise_fail(ctx: NativeContext, args) -> object:
+    """Fails a pending Promise with an error, which each task awaiting it
+    throws; whether it was pending."""
+    promise, error = args
+    promise = _promise_arg("fail", promise)
+    if promise.variant != "Pending":
+        return False
+    promise.fail(error)
+    return True
+
+
 def _time_sleep_async(ctx: NativeContext, args) -> object:
     (ms,) = args
     promise = PromiseInstance()
@@ -456,4 +526,11 @@ NATIVES: dict[str, tuple[int, object]] = {
     "regex.find_all": (2, _regex_find_all),
     # M33 (1.10): the async `input`.
     "io.read_line": (1, _io_read_line),
+    # M34 (1.11): std:time and std:async.
+    "time.now_ms": (0, _time_now_ms),
+    "time.monotonic_ms": (0, _time_monotonic_ms),
+    "time.cancel": (1, _time_cancel),
+    "promise.new": (0, _promise_new),
+    "promise.resolve": (2, _promise_resolve),
+    "promise.fail": (2, _promise_fail),
 }

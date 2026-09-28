@@ -498,5 +498,104 @@ class RegexTests(unittest.TestCase):
         self.assertEqual(got, {"r": "Regex", "m": "Option<Match>", "all": "Vector<Match>", "s": "Vector<String>"})
 
 
+class TimeAndAsyncTests(unittest.TestCase):
+    """M34: std:time and std:async -- behavior is covered by their .test.mh
+    files on both VMs; this pins the natives, program lifetime, and what the
+    checker sees."""
+
+    def test_bytecode_minor(self):
+        from mah.bytecode.decode import decode
+
+        for src in ('import time from "std:time"\nprint(time.now())', 'import async from "std:async"\nprint(async.all([]))'):
+            self.assertEqual(decode(compile_bytes(text=src)).minor, 11)
+
+    def test_natives(self):
+        from mah.natives import NATIVES, NativeContext
+        from mah.runtime_values import PromiseInstance
+
+        cancelled = []
+        ctx = NativeContext(to_string=str, schedule_timer=None, cancel_timer=lambda p: cancelled.append(p) or True)
+
+        def call(name, *args):
+            return NATIVES[name][1](ctx, list(args))
+
+        p = call("promise.new")
+        self.assertIsInstance(p, PromiseInstance)
+        self.assertIs(call("promise.resolve", p, "v"), True)
+        self.assertIs(call("promise.resolve", p, "w"), False)
+        self.assertIs(call("promise.fail", p, "e"), False)
+        self.assertEqual(p.fields["value"], "v")
+        q = call("promise.new")
+        self.assertIs(call("promise.fail", q, "e"), True)
+        self.assertEqual(q.variant, "Failed")
+        self.assertIs(call("time.cancel", q), True)
+        self.assertEqual(cancelled, [q])
+        self.assertGreater(call("time.now_ms"), 1_700_000_000_000)
+        self.assertGreaterEqual(call("time.monotonic_ms"), 0)
+        for name, args in [("time.cancel", [1]), ("promise.resolve", ["x", 1]), ("promise.fail", [none_like(), 1])]:
+            with self.subTest(name=name):
+                with self.assertRaises(MahRuntimeError) as cm:
+                    call(name, *args)
+                self.assertIn("expected a Promise, got", str(cm.exception))
+
+    def test_a_cleared_timer_does_not_keep_the_program_running(self):
+        import time as pytime
+
+        src = (
+            'import async from "std:async"\n'
+            'let t = async.set_timeout(fn() { print("never") }, 5000)\n'
+            'let i = async.set_interval(fn() { print("never") }, 5000)\n'
+            "async.clear_timeout(t)\nasync.clear_interval(i)\nprint(\"done\")\n"
+        )
+        start = pytime.monotonic()
+        self.assertEqual(run_source(src), "done\n")
+        self.assertLess(pytime.monotonic() - start, 3)
+
+    def test_an_active_interval_keeps_it_running(self):
+        src = (
+            'import async from "std:async"\n'
+            "let n = [0]\n"
+            "let holder = []\n"
+            'holder.push(async.set_interval(fn() { n[0] = n[0] + 1; print("tick", n[0]); if n[0] == 3 { async.clear_interval(holder[0]) } }, 5))\n'
+            'print("main done")\n'
+        )
+        self.assertEqual(run_source(src), "main done\ntick 1\ntick 2\ntick 3\n")
+
+    def test_checker_sees_through_the_combinators(self):
+        diagnostics, types = check(
+            'import async from "std:async"\nimport time from "std:time"\n'
+            "struct Boom { }\nimpl Error for Boom { fn message(self) { \"boom\" } }\n"
+            'fn f(n: Number) -> String { "x" + n }\n'
+            "fn g(n: Number) -> Number { if n > 1 { throw Boom { } }; n }\n"
+            "let a = async.all([detach f(1), detach f(2)])\n"
+            "let r = try async.race([detach g(1)]) else 0\n"
+            "let x = try async.timeout(detach f(1), 5) else \"\"\n"
+            "let d = time.utc(0)\nlet s = time.format(d, \"%Y\")\n"
+            "let u = async.race([detach g(1)])\n"
+        )
+        got = {k: types[k][-1] for k in ("a", "r", "x", "d", "s")}
+        self.assertEqual(got, {"a": "Vector<String>", "r": "Number", "x": "String", "d": "DateTime", "s": "String"})
+        unhandled = [d[1] for d in diagnostics if d[0] == "unhandled"]
+        self.assertEqual(unhandled, ["Unhandled error: Boom"])
+        diagnostics, _ = check('import async from "std:async"\nlet x = async.timeout(detach sleep_async(1), 5)')
+        self.assertIn("Unhandled error: TimeoutError", [d[1] for d in diagnostics if d[0] == "unhandled"])
+
+    def test_timer_callbacks_must_not_throw(self):
+        src = (
+            'import async from "std:async"\nstruct Boom { }\nimpl Error for Boom { fn message(self) { \"boom\" } }\n'
+            "async.set_timeout(fn() { throw Boom { } }, 5)\n"
+        )
+        diagnostics, _ = check(src)
+        self.assertIn(
+            "This function can throw Boom, but its expected type only allows throws never", [d[1] for d in diagnostics]
+        )
+
+
+def none_like():
+    from mah.runtime_values import NONE_VALUE
+
+    return NONE_VALUE
+
+
 if __name__ == "__main__":
     unittest.main()

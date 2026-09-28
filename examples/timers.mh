@@ -1,0 +1,48 @@
+# std:time and std:async (M34): a small job runner with a progress ticker,
+# a deadline, and dates.
+
+import time from "std:time"
+import async from "std:async"
+
+struct Job { name: String, ms: Number }
+
+fn run_job(job: Job) -> String {
+    sleep_async(job.ms)
+    job.name + " done"
+}
+
+let started = time.monotonic()
+let ticks = [0]
+let ticker = async.set_interval(fn() { ticks[0] = ticks[0] + 1 }, 20)
+
+# Start three jobs at once; `all` waits for every one, in order.
+let jobs = [
+    Job { name: "build", ms: 60 },
+    Job { name: "test", ms: 30 },
+    Job { name: "lint", ms: 10 }
+]
+print(async.all(jobs.map(fn(job) { detach run_job(job) }).reduce()))
+
+# The first to finish wins a race.
+print(
+    "fastest:",
+    async.race(
+        [detach run_job(Job { name: "slow", ms: 80 }), detach run_job(Job { name: "quick", ms: 5 })]
+    )
+)
+
+# A deadline: `timeout` throws TimeoutError when the job takes too long.
+let deploy = try { async.timeout(detach run_job(Job { name: "deploy", ms: 500 }), 50) } catch {
+    e: TimeoutError => { "deploy gave up: " + e.message() }
+}
+print(deploy)
+
+async.clear_interval(ticker)
+print("ticker ran:", ticks[0] > 0, "| elapsed under a second:", time.monotonic() - started < 1)
+
+# Dates are UTC; times are Numbers of seconds, so arithmetic just works.
+let launch = try time.date(2026, 9, 28, 9, 30) else time.utc(0)
+let review = time.utc(launch.timestamp() + 3 * 86400 + 90 * 60)
+print(time.format(launch, "%A %d %B %Y, %H:%M"), "->", time.format(review, "%a %d %b, %H:%M"))
+print("in between:", time.duration_text(review.timestamp() - launch.timestamp()))
+print(try time.parse("31/04/2026", "%d/%m/%Y") else "no such date")
