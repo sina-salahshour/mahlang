@@ -1,14 +1,14 @@
 ---
-title: "v0.2.0: typed, checked errors, the type checker, and std:math"
+title: "v0.2.0: checked errors, the type checker, std:math, and mah test"
 date: 2026-09-28
-description: "throw/try/catch with a built-in Error trait and RuntimeError enum on both VMs, a checker that infers what every function throws, the first static type checker with mah check, and the start of the standard library."
+description: "throw/try/catch with a built-in Error trait and RuntimeError enum on both VMs, a checker that infers what every function throws, the first static type checker with mah check, the start of the standard library, and a built-in test runner."
 tags: [changelog]
 version: "0.2.0"
 ---
 
-This release (milestones M22 through M27) adds a static type checker,
-errors you can throw, catch, and have checked, and the first module of a
-standard library. Types and error sets cost nothing at run time: they're
+This release (milestones M22 through M28) adds a static type checker,
+errors you can throw, catch, and have checked, the first modules of a
+standard library, and a test runner. Types and error sets cost nothing at run time: they're
 erased before codegen. The bytecode gains 1.4's handler table for `try`
 and 1.5's math natives.
 
@@ -116,10 +116,51 @@ bytecode version it needs, 1.4 unless it uses the new natives. So a
 too old names the natives it's missing. See
 [Standard library](/docs/standard-library).
 
+## `mah test`
+
+Tests live in `*.test.mh` files: `test "name" { ... }` blocks, with
+assertions from `std:test`. `mah test` finds them all and runs each test
+in a fresh VM:
+
+```mah
+# src/calc.test.mh
+import "std:test"
+
+fn add(a, b) { a + b }
+
+test "adds two numbers" {
+    assert_eq(add(2, 2), 5)
+}
+```
+
+```text
+$ mah test
+running 1 test
+test src/calc.test.mh::adds two numbers ... FAILED
+
+failures:
+
+---- src/calc.test.mh::adds two numbers ----
+assert_eq failed at src/calc.test.mh:7
+  actual:   4
+  expected: 5
+
+test result: FAILED. 0 passed; 1 failed; 0 skipped; finished in 0.03s
+```
+
+- A failure points at your failing line, even from inside a helper
+  function: thrown values now carry a backtrace, and other errors print a
+  Mah stack trace.
+- `x.test.mh` can test `x.mh`'s private functions.
+- `mah test NAME` filters, `--vm rust` runs on `mah-vm`, and `--timeout`
+  stops runaway tests.
+- New projects start with `src/main.test.mh`. See [Testing](/docs/testing).
+
 ## Editors
 
 The tree-sitter grammar (Neovim) and the VS Code TextMate grammar now
-highlight `throw`, `try`, `catch`, `throws`, `never` and `extern`. The
-last four only count as keywords where they can be one, so `let catch = 1`
-still works. Hover and go-to-definition reach into standard library
+highlight `throw`, `try`, `catch`, `throws`, `never`, `extern` and
+`test`. The last five only count as keywords where they can be one, so
+`let catch = 1` still works. The editor lists a test file's tests as
+symbols. Hover and go-to-definition reach into standard library
 modules.

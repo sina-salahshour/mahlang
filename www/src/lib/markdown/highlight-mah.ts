@@ -42,7 +42,9 @@ const KEYWORDS = new Set([
 	'throws',
 	'never',
 	// M27: contextual, only before `fn` (std modules); never a name in docs.
-	'extern'
+	'extern',
+	// M28: contextual, only before a test block's name; never a name in docs.
+	'test'
 ]);
 
 // Constant-like keywords get their own token class.

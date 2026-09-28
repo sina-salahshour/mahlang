@@ -702,6 +702,56 @@ Only values whose type implements `Error` can be thrown or listed after
 Compile errors (syntax, undefined names, wrong struct fields) are reported
 before anything runs.
 
+## Testing
+
+Tests live in `*.test.mh` files and run with `mah test`. A test file holds
+only declarations (`import`, `fn`, `let`, `struct`, `enum`, `trait`,
+`impl`) and `test "name" { ... }` blocks; `std:test` has the assertions:
+
+```mah
+# src/calc.test.mh
+import "std:test"
+
+fn add(a, b) { a + b }
+
+test "adds two numbers" {
+    assert_eq(add(2, 3), 5)
+    assert(add(1, 1) > 1, "should grow")
+}
+
+test "division by zero throws" {
+    let e = assert_throws(fn() { 1 / 0 })
+    assert_eq(e.message, "Division by zero")
+}
+
+test "not ready yet" {
+    skip("needs real data")
+}
+```
+
+| `std:test` | |
+|---|---|
+| `assert(cond, message = "")` | fails unless `cond` is truthy |
+| `assert_eq(actual, expected, message = "")` | fails unless `actual == expected`; the report shows both |
+| `assert_ne(a, b, message = "")` | fails if `a == b` |
+| `assert_throws(f)` | calls `f`, returns what it threw; fails if it returned normally |
+| `fail(message)` / `skip(reason = "")` | fail now / report the test as skipped |
+
+- `mah test` finds every `*.test.mh` under the project (not `build/` or
+  hidden directories) and runs each test in a fresh VM, so tests can't see
+  each other's state. `mah test NAME` runs the tests whose name (or
+  `file::name`) contains NAME; `--file`, `--vm` and `--timeout MS` also work.
+- A failure is reported at the line of your failing assertion (or, for
+  any other error, with a stack trace), plus whatever the test printed.
+- `x.test.mh` importing `x.mh` from the same directory sees all of
+  `x.mh`'s top-level names, exported or not. Nothing else does.
+- A test body may throw anything and may `.await`; timers still pending
+  when it finishes are cancelled, with a warning.
+- `==` compares Vectors, Maps, structs and enums **by identity**, so
+  `assert_eq([1], [1])` fails; compare their parts, or `len()`s.
+- `test` is only a keyword at the top level of a test file, right before a
+  string. `mah run`/`mah build` refuse a test file, and nothing can import one.
+
 ## Not available (don't use these)
 
 - Tuples, sets, assigning to a slice (`v[1..3] = ...`),
@@ -714,5 +764,5 @@ before anything runs.
 - Type-checking trait-typed values, bounds, and the prelude's iterator methods (the checker skips these for now); classes/inheritance.
 - Variadic parameters (`*args`, `**kwargs`); only `print` takes any number of arguments.
 - File, network, or OS access, JSON, randomness, and every other planned
-  `std:` module besides `std:math`.
+  `std:` module besides `std:math` and `std:test`.
 - `null`/`nil`/`undefined`: use `none`.

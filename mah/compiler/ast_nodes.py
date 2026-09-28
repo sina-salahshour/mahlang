@@ -803,6 +803,23 @@ class MatchStmt:
     position: int
 
 
+# -- M28: test blocks (.test.mh files only) -------------------------------
+
+
+@dataclass
+class TestDecl:
+    """M28 (docs/MAH_TEST.md): `test "name" { body }` at the top level of a
+    `.test.mh` file. `fn` is the body as a parameterless function literal;
+    codegen stores its closure in the hidden global slot `slot` (set by the
+    resolver), which the bytecode's TESTS table points the runner at."""
+
+    name: str  # the decoded string literal
+    fn: object  # FnExpr, no parameters
+    position: int  # the `test` token
+    name_position: int  # the name's string literal
+    slot: Optional[int] = field(default=None, repr=False)
+
+
 # -- M27: extern fn (std modules only) -----------------------------------
 
 

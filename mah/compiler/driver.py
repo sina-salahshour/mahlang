@@ -23,6 +23,7 @@ from . import typecheck
 from .codegen import Codegen
 from .lexer import Lexer
 from .parser import Parser
+from .ast_nodes import EnumDecl, ImplDecl, LetStmt, StructDecl, TestDecl, TraitDecl
 from .resolve import Resolver
 
 
@@ -81,7 +82,44 @@ def format_diagnostic(pp, diag) -> str:
     return _format_located_messages(pp, [(diag.text(), diag.position)])
 
 
-def _parse_and_resolve(*, path: str | None, text: str | None):
+TEST_SUFFIX = ".test.mh"
+
+# M28 (docs/MAH_TEST.md): what a test file's own top level may hold -- no
+# statement that would run by itself.
+_TEST_FILE_DECLARATIONS = (LetStmt, StructDecl, EnumDecl, TraitDecl, ImplDecl, TestDecl)
+
+
+def is_test_file(path: str | None) -> bool:
+    return path is not None and path.endswith(TEST_SUFFIX)
+
+
+def _check_test_file(pp, program: list) -> None:
+    """M28: in a test file, only declarations and `test` blocks at the top
+    level (imports are already gone), and `test` blocks only in the test
+    file itself, not in something it imports."""
+    for stmt in program:
+        position = getattr(stmt, "position", None)
+        in_entry = position is not None and pp.map_to_source(position)[0] == pp.entry_path
+        if isinstance(stmt, TestDecl) and not in_entry:
+            raise SyntaxError(
+                _format_parser_errors(pp, [("'test' blocks are only allowed in the test file itself", position)])
+            )
+        if in_entry and not isinstance(stmt, _TEST_FILE_DECLARATIONS):
+            raise SyntaxError(
+                _format_parser_errors(
+                    pp,
+                    [
+                        (
+                            "A test file may only contain declarations and 'test' blocks; "
+                            "move this statement into a test",
+                            position,
+                        )
+                    ],
+                )
+            )
+
+
+def _parse_and_resolve(*, path: str | None, text: str | None, test: bool = False):
     """preprocess -> lex -> parse -> resolve, shared by `compile_to_program`
     and `type_check` so the two front ends can't drift. Raises `SyntaxError`
     for a preprocess or parse error (already located); a resolve error
@@ -100,10 +138,12 @@ def _parse_and_resolve(*, path: str | None, text: str | None):
         raise SyntaxError(f"{message} at position #{line}:{col}")
 
     lexer = Lexer(pp.text)
-    parser = Parser(lexer)
+    parser = Parser(lexer, allow_tests=test)
     program = parser.parse_program()
     if parser.errors:
         raise SyntaxError(_format_parser_errors(pp, parser.errors))
+    if test:
+        _check_test_file(pp, program)
 
     resolver = Resolver(prelude_start=pp.prelude_start)
     resolver.resolve_program(program)
@@ -112,9 +152,19 @@ def _parse_and_resolve(*, path: str | None, text: str | None):
 
 
 def compile_to_program(
-    *, path: str | None = None, text: str | None = None, target: str = "debug", check: str = "loose"
+    *,
+    path: str | None = None,
+    text: str | None = None,
+    target: str = "debug",
+    check: str = "loose",
+    test: bool = False,
 ) -> Program:
-    pp, program, resolver = _parse_and_resolve(path=path, text=text)
+    """`test=True` (M28, `mah test`) compiles a test file: its `test`
+    blocks, and a TESTS table in the output. Otherwise a `.test.mh` file is
+    refused -- tests never end up in `mah run`/`mah build` output."""
+    if not test and is_test_file(path):
+        raise SyntaxError(f"'{os.path.basename(path)}' is a test file; run it with `mah test`")
+    pp, program, resolver = _parse_and_resolve(path=path, text=text, test=test)
 
     # M22: zero cost under "loose" -- the checker never runs at all.
     if check != "loose":
@@ -132,9 +182,14 @@ def compile_to_program(
 
 
 def compile_to_bytes(
-    *, path: str | None = None, text: str | None = None, target: str = "debug", check: str = "loose"
+    *,
+    path: str | None = None,
+    text: str | None = None,
+    target: str = "debug",
+    check: str = "loose",
+    test: bool = False,
 ) -> bytes:
-    return encode(compile_to_program(path=path, text=text, target=target, check=check))
+    return encode(compile_to_program(path=path, text=text, target=target, check=check, test=test))
 
 
 def type_check(*, path: str | None = None, text: str | None = None):
@@ -148,6 +203,6 @@ def type_check(*, path: str | None = None, text: str | None = None):
 
     Returns `(pp, diagnostics)`: `pp` (the `Preprocessed` result) is
     needed by the caller to locate each diagnostic (`format_diagnostic`)."""
-    pp, program, resolver = _parse_and_resolve(path=path, text=text)
+    pp, program, resolver = _parse_and_resolve(path=path, text=text, test=is_test_file(path))
     diagnostics = typecheck.check_program(program, resolver)
     return pp, diagnostics

@@ -396,6 +396,100 @@ def run_malformed_cases(vm_path: str, tmpdir: str, verbose: bool) -> list[Result
     return results
 
 
+# ---------------------------------------------------------------------------
+# M28: `mah test` outcomes -- one test file, every test run by both VMs'
+# per-test entry points (`run_test_bytes` / `mah-vm test FILE N`), comparing
+# the test's stdout and its outcome text (docs/MAHC_FORMAT.md #6.10).
+# ---------------------------------------------------------------------------
+
+TEST_FILE = """import "std:test"
+
+fn helper(x) {
+    assert_eq(x, 3)
+}
+
+let counter = [0]
+
+test "passes" {
+    assert_eq(1 + 2, 3)
+    counter.push(1)
+}
+
+test "fails with output" {
+    print("some output")
+    assert_eq(2 + 2, 5, "math")
+}
+
+test "fails in a helper" {
+    helper(4)
+}
+
+test "skipped" {
+    skip("later")
+}
+
+test "runtime error" {
+    let v = [1]
+    v[5]
+}
+
+test "uncaught user error" {
+    fail("stop")
+}
+
+test "async" {
+    sleep_async(5)
+    assert(true)
+}
+
+test "leftover timers" {
+    let p = detach sleep_async(50)
+}
+
+test "isolated" {
+    assert_eq(counter.len(), 1)
+}
+"""
+
+_PY_RUN_TEST = (
+    "import sys\n"
+    "from mah.code_interpreter import run_test_bytes\n"
+    "from mah.test_outcome import format_outcome\n"
+    "outcome = run_test_bytes(open(sys.argv[1], 'rb').read(), int(sys.argv[2]))\n"
+    "sys.stdout.flush()\n"
+    "sys.stderr.write(format_outcome(outcome))\n"
+)
+
+
+def run_test_outcomes(vm_path: str, tmpdir: str, verbose: bool) -> list[Result]:
+    env = {**os.environ, "PYTHONPATH": REPO_ROOT}
+    src = os.path.join(tmpdir, "outcomes.test.mh")
+    with open(src, "w") as f:
+        f.write(TEST_FILE)
+    mahc = os.path.join(tmpdir, "outcomes.mahc")
+    build = (
+        "import sys\nfrom mah.compiler.driver import compile_to_bytes\nfrom mah.bytecode.decode import decode\n"
+        "data = compile_to_bytes(path=sys.argv[1], test=True)\nopen(sys.argv[2], 'wb').write(data)\n"
+        "print(len(decode(data).tests))\n"
+    )
+    count = int(
+        subprocess.run(
+            [sys.executable, "-c", build, src, mahc], check=True, capture_output=True, text=True, cwd=REPO_ROOT, env=env
+        ).stdout
+    )
+    results = []
+    for i in range(count):
+        py = subprocess.run(
+            [sys.executable, "-c", _PY_RUN_TEST, mahc, str(i)], capture_output=True, cwd=REPO_ROOT, env=env, timeout=30
+        )
+        rs = subprocess.run([vm_path, "test", mahc, str(i)], capture_output=True, cwd=REPO_ROOT, timeout=30)
+        r = compare(f"test:{i}", py, rs)
+        results.append(r)
+        if verbose:
+            print(f"  {'ok' if r.passed else 'FAIL'}  test:{i}")
+    return results
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--vm", default=DEFAULT_VM, help="path to the mah-vm binary")
@@ -414,6 +508,8 @@ def main() -> int:
         all_results += run_inline_programs(args.vm, tmpdir, args.verbose)
         print("== malformed files ==")
         all_results += run_malformed_cases(args.vm, tmpdir, args.verbose)
+        print("== mah test outcomes ==")
+        all_results += run_test_outcomes(args.vm, tmpdir, args.verbose)
 
     passed = [r for r in all_results if r.passed]
     failed = [r for r in all_results if not r.passed]

@@ -1,0 +1,77 @@
+# std:test -- assertions for `test` blocks (docs/MAH_TEST.md).
+#
+#   import "std:test"
+#
+#   test "adds two numbers" {
+#       assert_eq(add(2, 3), 5)
+#   }
+#
+# Run test files (`*.test.mh`) with `mah test`. A failing assertion throws
+# an AssertionError, which the runner reports with the line of the
+# assertion; `skip` throws SkipTest, which it reports as skipped.
+
+# A failed assertion. `message` is the whole report: what failed, plus the
+# values involved.
+struct AssertionError { message: String }
+
+impl Error for AssertionError {
+    fn message(self) { self.message }
+}
+
+# Thrown by `skip`: the runner reports the test as skipped, with `reason`.
+struct SkipTest { reason: String }
+
+impl Error for SkipTest {
+    fn message(self) { "skipped: " + self.reason }
+}
+
+# How a value appears in a failure report: a String in quotes (so "1" and
+# 1 look different), anything else as it prints.
+fn describe(value: Unknown) -> String {
+    let text = "" + value
+    if text == value { "\"" + text + "\"" } else { text }
+}
+
+fn headline(what: String, message: String) -> String {
+    if message == "" { what } else { what + ": " + message }
+}
+
+# Fails unless `cond` is truthy.
+export fn assert(cond: Unknown, message: String = "") {
+    if !cond {
+        throw AssertionError { message: headline("assert failed", message) }
+    }
+}
+
+# Fails unless `actual == expected`; the report shows both.
+export fn assert_eq<T>(actual: T, expected: T, message: String = "") {
+    if actual != expected {
+        let values = "\n  actual:   " + describe(actual) + "\n  expected: " + describe(expected)
+        throw AssertionError { message: headline("assert_eq failed", message) + values }
+    }
+}
+
+# Fails if `a == b`.
+export fn assert_ne<T>(a: T, b: T, message: String = "") {
+    if a == b {
+        throw AssertionError {
+            message: headline("assert_ne failed", message) + "\n  both: " + describe(a)
+        }
+    }
+}
+
+# Calls `f` and returns the error it throws; fails if it returns normally.
+export fn assert_throws(f: fn() -> Unknown) -> Unknown {
+    try { f() } catch { e => { return e } }
+    throw AssertionError { message: "assert_throws failed: the function returned normally" }
+}
+
+# Fails right away.
+export fn fail(message: String) {
+    throw AssertionError { message: headline("failed", message) }
+}
+
+# Stops the test and reports it as skipped.
+export fn skip(reason: String = "") {
+    throw SkipTest { reason: reason }
+}

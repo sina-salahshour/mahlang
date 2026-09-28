@@ -77,7 +77,7 @@ sections   (id u8, length varuint, payload bytes(length))*   until end of file
   **must** reject a file containing one it doesn't know.
 - Ids `0x80`–`0xFF` are *optional* sections, allowed after CODE in any
   order: a VM **must** skip ones it doesn't know (using `length`). `0x80` is
-  DEBUG (§4.7).
+  DEBUG (§4.7); `0x81` is TESTS (§4.9), written only for `mah test`.
 - A section's payload **must** be fully consumed by its own contents
   (trailing garbage inside a section is an error), and every index anywhere
   in the file **must** be in range; VMs validate this at load time.
@@ -362,6 +362,24 @@ code (jumped over by a `closure` instruction's own preceding jump), so an
 encoder **must not** let a handler range cover a nested function's body --
 ranges are split around them. This is what makes "pc range → same frame"
 sound without a frame needing to know which function it's running.
+
+### 4.9 TESTS (`0x81`, optional)
+
+The test table of a file built for `mah test` (docs/MAH_TEST.md); ordinary
+`mah build` output never has one. Being optional, it needs no new minor
+version: a VM that doesn't run tests skips it like any unknown optional
+section.
+
+```
+count × (name str, slot varuint, line varuint)
+```
+
+One entry per `test "name" { ... }` block, in source order. `slot` is a
+slot of function 0's frame (the main frame; it **must** be below that
+function's `slot_count`) into which the file's top-level code stores the
+test's closure, a function of no parameters. `line` is the line of the
+`test` keyword in the entry file (0 if unknown), for tools. How a VM runs
+one entry is §6.10.
 
 ## 5. Values
 
@@ -798,6 +816,47 @@ instruction index -- unchanged from 1.0–1.3.
 - Iteration, `map`/`filter`/… and `Map.entries()` aren't VM features: the
   prelude implements them in Mah on top of the methods above (§7).
 
+### 6.10 Running one test *(TESTS files)*
+
+A VM that runs tests takes a file with a TESTS section (§4.9) and an entry
+index, in a fresh VM each time:
+
+1. Run the program exactly as for an ordinary run (the main task, then
+   timers, then the check for unobserved failed Promises, §6.4/§6.8). A
+   test file's top level holds only declarations, so this defines the
+   functions and constants and stores every test closure in its slot. If
+   this fails, the test **failed**, with that error's usual report as its
+   message.
+2. Call the closure in the entry's `slot` as a new detached task (§6.4)
+   and run the scheduler (timers) until that task's Promise settles or
+   fails. Timers still pending then are dropped, not run: the outcome
+   notes that (`leftover`).
+3. The outcome: **ok** if the Promise settled; **skipped** if it failed
+   with a `SkipTest` struct (message: its `reason` field); **failed** for
+   any other error, with message: an `AssertionError`'s `Error.message()`,
+   a `RuntimeError`'s `message` field, or `Uncaught T: <m>` (§6.8). If the
+   task can never finish (it awaits a Promise nothing will settle), the
+   test **failed**.
+
+For a failed test the VM also reports a **backtrace**: when a value is
+thrown for the first time (the moment `thrown_at` is recorded, §6.8), the
+VM records that pc, then the call instruction of every frame still on the
+throwing task's return stack, innermost first. Each is mapped through
+DEBUG (§4.7) to `(file, line)`, dropping pcs with no line; file 0, the
+test file itself, is reported without a name.
+
+The reference VMs report an outcome in this text form (`mah-vm test FILE
+INDEX` writes it to standard error and exits 0; the Python VM returns it
+as `mah/test_outcome.py`'s `TestOutcome`):
+
+```
+status ok|skipped|failed
+leftover 0|1
+frame LINE FILE          (zero or more, innermost first; FILE "-" = the test file)
+message
+...the message, to the end...
+```
+
 ## 7. Versioning and extension rules
 
 - **Minor version** (backwards compatible for readers): new natives, new
@@ -842,6 +901,8 @@ instruction index -- unchanged from 1.0–1.3.
   (§4.4), behind the standard library's `std:math`. From 1.5 on, the
   reference encoder writes the lowest minor its natives need (§3), so a
   program that doesn't use them is still a 1.4 file.
+- The optional TESTS section (§4.9, for `mah test`) came without a minor
+  version: older VMs skip it, and a program with one still runs normally.
 - Planned growth, for orientation: error-set checking (the static
   checker's `throws` inference and "unhandled error" diagnostics -- M26),
   string utilities, filesystem, networking, and process natives.

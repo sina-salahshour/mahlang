@@ -109,6 +109,10 @@
           "named": true
         },
         {
+          "type": "test_block",
+          "named": true
+        },
+        {
           "type": "trait_decl",
           "named": true
         }
@@ -318,6 +322,10 @@
         },
         {
           "type": "struct_decl",
+          "named": true
+        },
+        {
+          "type": "test_block",
           "named": true
         },
         {
@@ -1891,6 +1899,10 @@
           "named": true
         },
         {
+          "type": "test_block",
+          "named": true
+        },
+        {
           "type": "trait_decl",
           "named": true
         }
@@ -2041,6 +2053,42 @@
           "named": true
         }
       ]
+    }
+  },
+  {
+    "type": "test_block",
+    "named": true,
+    "fields": {
+      "body": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "block",
+            "named": true
+          }
+        ]
+      },
+      "keyword": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "string",
+            "named": true
+          }
+        ]
+      }
     }
   },
   {

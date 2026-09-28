@@ -1,0 +1,54 @@
+# Tests for std:math, run by tests/test_stdlib.py (or
+# `mah test --file mah/std/math.test.mh`).
+import "std:test"
+import math from "./math"
+
+test "constants" {
+    assert(math.pi > 3.14159 & math.pi < 3.1416)
+    assert(math.e > 2.71828 & math.e < 2.71829)
+}
+
+test "sqrt is exact" {
+    assert_eq(math.sqrt(16), 4)
+    # exact to Number's 28 digits
+    assert_eq(math.sqrt(2) * math.sqrt(2), 1.999999999999999999999999999)
+    let e = assert_throws(fn() { math.sqrt(0 - 1) })
+    assert_eq(e.message, "sqrt: argument out of range")
+}
+
+test "floor and ceil round toward the right side of zero" {
+    assert_eq(math.floor(2.7), 2)
+    assert_eq(math.floor(0 - 2.1), 0 - 3)
+    assert_eq(math.ceil(2.1), 3)
+    assert_eq(math.ceil(0 - 2.7), 0 - 2)
+}
+
+test "round halves away from zero" {
+    assert_eq(math.round(2.5), 3)
+    assert_eq(math.round(0 - 2.5), 0 - 3)
+    assert_eq(math.round(3.14159, 2), 3.14)
+    assert_eq(math.round(1250, 0 - 2), 1300)
+}
+
+test "abs, min, max and clamp" {
+    assert_eq(math.abs(0 - 2), 2)
+    assert_eq(math.min(3, 1), 1)
+    assert_eq(math.max(3, 1), 3)
+    assert_eq(math.clamp(15, 0, 10), 10)
+    assert_eq(math.clamp(0 - 5, 0, 10), 0)
+}
+
+test "trigonometry and logarithms" {
+    assert_eq(math.sin(0), 0)
+    assert_eq(math.cos(0), 1)
+    assert_eq(math.atan2(1, 1) * 4, 3.1415926535897932)
+    assert_eq(math.log(math.e), 1)
+    assert_eq(math.log10(1000), 3)
+}
+
+test "domain errors" {
+    let e = assert_throws(fn() { math.log(0) })
+    assert_eq(e.message, "log: argument out of range")
+    assert_throws(fn() { math.asin(2) })
+    assert_throws(fn() { math.exp(100000) })
+}

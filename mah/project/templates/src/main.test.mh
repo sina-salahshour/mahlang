@@ -1,0 +1,9 @@
+# Tests for main.mh. Run them with `mah test`.
+import "std:test"
+import main from "./main"
+
+test "greets by name" {
+    # main.test.mh sits next to main.mh, so it sees `greet` even though
+    # main.mh doesn't export it.
+    assert_eq(main.greet("Mah"), "Hello, Mah!")
+}

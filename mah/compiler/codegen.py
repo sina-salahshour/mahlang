@@ -194,6 +194,7 @@ import dataclasses
 from decimal import Decimal
 
 from .ast_nodes import (
+    TestDecl,
     NativeCall,
     AssignStmt,
     Binary,
@@ -288,6 +289,8 @@ class CodeBuffer:
         self.code: list = []
         self.code_pointer = 0
         self.global_slot_count = 0
+        # M28: `(name, global slot, source position)` per test block.
+        self.tests: list = []
         # M14: parallel to `code` -- the source position (a combined-text
         # offset, or None) in effect when each instruction was emitted, for
         # `mah/bytecode/lower.py`'s DEBUG section. Appended on a normal
@@ -466,6 +469,12 @@ class Codegen:
             self._gen_continue(stmt)
         elif isinstance(stmt, ReturnStmt):
             self._gen_return(stmt)
+        elif isinstance(stmt, TestDecl):
+            # M28: the test's closure goes into its hidden global slot; the
+            # TESTS table (docs/MAHC_FORMAT.md #4.9) points the runner there.
+            src = self.gen_expr(stmt.fn)
+            self.buf.emit(("=", src, None, (0, stmt.slot)))
+            self.buf.tests.append((stmt.name, stmt.slot, stmt.position))
         elif isinstance(stmt, StructDecl):
             pass  # purely a resolve-time/compile-time declaration; no runtime code
         elif isinstance(stmt, EnumDecl):

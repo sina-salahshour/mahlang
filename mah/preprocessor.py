@@ -73,6 +73,8 @@ PRELUDE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "std", "
 # back to a user file.
 STD_DIR = os.path.dirname(PRELUDE_PATH)
 STD_PREFIX = "std:"
+# M28: test files (docs/MAH_TEST.md) -- run only by `mah test`.
+TEST_SUFFIX = ".test.mh"
 _STD_NAME_RE = re.compile(r"[a-z][a-z0-9_]*")
 
 
@@ -451,6 +453,9 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
 
     files: dict[str, str] = {entry_path: text}
     exports: dict[str, set] = {}
+    # M28: every module's top-level names, exported or not (for a sibling
+    # test file's private access, see `visible_names`).
+    top_levels: dict[str, set] = {}
     module_index: dict[str, int] = {entry_path: 0}
     segments: list[Segment] = []
     entry_imports: list[ImportSite] = []
@@ -485,6 +490,14 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
         prev = tokens[i - 1]
         return "\n" in source[prev.end : tokens[i].start]
 
+    def visible_names(importer: str, resolved: str) -> set:
+        """M28 (docs/MAH_TEST.md): `<stem>.test.mh` sees every top-level
+        name of `<stem>.mh` in the same directory; everyone else sees only
+        its exports."""
+        if importer.endswith(TEST_SUFFIX) and importer[: -len(TEST_SUFFIX)] + DEFAULT_EXT == resolved:
+            return top_levels.get(resolved, set())
+        return exports.get(resolved, set())
+
     def inline_module(resolved: str, root) -> None:
         """Recursively process and emit an imported module (once)."""
         if resolved in included:
@@ -508,6 +521,7 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
 
         info = analyze_module(tokens)
         exports[fpath] = info.exported
+        top_levels[fpath] = info.top_level
         idx = module_index[fpath]
 
         # References to this module's own top-level names get mangled (unless
@@ -595,7 +609,14 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
                             entry_imports.append(record)
                         root_record = record
 
-                    if not exists:
+                    if exists and resolved.endswith(TEST_SUFFIX):
+                        # M28: tests only ever run through `mah test`.
+                        exists = False
+                        if is_entry:
+                            errors.append(
+                                (f"can't import the test file '{literal}'", str_tok.start, len(str_tok.value))
+                            )
+                    elif not exists:
                         if is_entry:
                             what = (
                                 f"unknown standard library module '{literal}'"
@@ -612,7 +633,7 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
                     else:
                         inline_module(resolved, root_record)
                         target_idx = module_index[resolved]
-                        target_exports = exports.get(resolved, set())
+                        target_exports = visible_names(fpath, resolved)
                         if kind == "ns":
                             ns_map[ns_tok.value] = (target_idx, target_exports)
                             ns_names.add(ns_tok.value)

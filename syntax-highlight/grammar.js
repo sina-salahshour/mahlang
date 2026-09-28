@@ -127,6 +127,7 @@ module.exports = grammar({
         $.print_stmt,
         $.defer_stmt,
         $.extern_fn_stmt,
+        $.test_block,
         $.expr_stmt,
       ),
 
@@ -144,6 +145,17 @@ module.exports = grammar({
 
     export_stmt: ($) =>
       seq("export", choice($.let_stmt, $.fn_stmt, $.extern_fn_stmt, $.identifier)),
+
+    // M28 (docs/MAH_TEST.md): `test "name" { body }` in a `*.test.mh`
+    // file. `test` is contextual in the real parser (a keyword only right
+    // before a string literal), so it's an ordinary identifier here too --
+    // a literal "test" token would win over `identifier` at the start of
+    // every statement and break `test = 1`. The string after it is what
+    // makes this a test block; highlights.scm colors the identifier. (Any
+    // identifier is accepted, the usual "more permissive than the real
+    // parser" trade-off.)
+    test_block: ($) =>
+      prec(1, seq(field("keyword", $.identifier), field("name", $.string), field("body", $.block))),
 
     // M27 (docs/STDLIB.md): `extern fn NAME(params) -> T = "module.native"`
     // binds a VM native (standard library modules only -- the real

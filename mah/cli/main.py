@@ -26,7 +26,7 @@ from ..project.manifest import MANIFEST_NAME, MahProjectError, check_level_for, 
 
 sys.tracebacklimit = 0
 
-_SUBCOMMANDS = {"run", "build", "runc", "dis", "lsp", "init", "format", "check"}
+_SUBCOMMANDS = {"run", "build", "runc", "dis", "lsp", "init", "format", "check", "test"}
 
 
 def read_file(file_name):
@@ -229,6 +229,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
              "\"loose\" outside a project)",
     )
 
+    test_parser = subparsers.add_parser(
+        "test", help="run the project's tests (every *.test.mh file; see docs/MAH_TEST.md)"
+    )
+    test_parser.add_argument(
+        "filter", nargs="?", default=None,
+        help="run only tests whose name, or FILE::NAME, contains this text",
+    )
+    test_parser.add_argument("--file", default=None, help="run the tests in one .test.mh file")
+    test_parser.add_argument(
+        "--timeout", type=int, default=None, metavar="MS", help="fail any test that runs longer than this"
+    )
+    _add_vm_argument(test_parser)
+
     lsp_parser = subparsers.add_parser("lsp", help="start the Mah language server (speaks LSP over stdio)")
     lsp_parser.add_argument(
         "--version", action="store_true",
@@ -309,6 +322,10 @@ def main(argv: list[str] | None = None) -> int:
             _report_runtime_error(e)
             return 1
         return 0
+
+    if args.command == "test":
+        from .test_runner import run as run_tests
+        return run_tests(args.filter, args.file, args.vm, args.timeout)
 
     if args.command == "format":
         from ..format.cli import run_format

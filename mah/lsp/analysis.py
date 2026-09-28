@@ -171,6 +171,11 @@ KEYWORD_DOCS = {
     "no arm matches is re-thrown automatically. Contextual -- still usable "
     "as an ordinary identifier elsewhere.\n\n"
     "```mah\ntry { risky() } catch {\n\tMyError.Kind => { 0 }\n\te: OtherError => { 1 }\n\t_ => { 2 }\n}\n```",
+    "test": "A test block, in a `*.test.mh` file: `test \"name\" { body }`. "
+    "`mah test` runs each one in a fresh VM and reports ok, FAILED or skipped; "
+    "the assertions come from `std:test`. Contextual -- an ordinary name "
+    "everywhere else.\n\n"
+    "```mah\nimport \"std:test\"\n\ntest \"adds two numbers\" {\n\tassert_eq(1 + 2, 3)\n}\n```",
     "extern": "Binds a VM native to a Mah function: `extern fn NAME(params) "
     "-> T = \"module.native\"`. Only standard library modules (`std:...`) "
     "may use it; the annotations are the native's type. Contextual -- still "
@@ -385,6 +390,20 @@ def _token_index_at_offset(tokens: list[Token], offset: int) -> Optional[int]:
     return None
 
 
+def _is_test_path(path: Optional[str]) -> bool:
+    """M28: a `.test.mh` file, where `test "name" { ... }` blocks parse."""
+    return path is not None and path.endswith(".test.mh")
+
+
+def _is_test_keyword(token: Token, tokens: list[Token]) -> bool:
+    """M28: `test` is contextual -- a keyword only right before the string
+    literal naming a test block."""
+    if token.type != TokenType.ID or token.literal != "test":
+        return False
+    pos = next((i for i, t in enumerate(tokens) if t.position == token.position), None)
+    return pos is not None and pos + 1 < len(tokens) and tokens[pos + 1].type is TokenType.STRING
+
+
 def _is_member_name(tokens: list[Token], token: Token) -> bool:
     """M27: whether ``token`` is a name after `.` (a field/method/namespace
     member) or after `fn` (a declaration) -- never a bare built-in call."""
@@ -550,7 +569,7 @@ def get_diagnostics(text: str, path: Optional[str] = None) -> list[dict]:
         return diagnostics
 
     lexer = Lexer(combined)
-    parser = Parser(lexer)
+    parser = Parser(lexer, allow_tests=_is_test_path(path))
     program = parser.parse_program()
 
     # 2. Every syntax error the parser collected, not just the first --
@@ -745,11 +764,11 @@ def collect_symbols(
     while index < count:
         token = tokens[index]
 
-        if token.type == TokenType.Def and index + 1 < count:
+        if token.type == TokenType.FN and index + 1 < count:
             name_token = tokens[index + 1]
             if name_token.type == TokenType.ID:
                 params = _read_params(tokens, index + 2)
-                detail = f"def {name_token.literal}({', '.join(params)})"
+                detail = f"fn {name_token.literal}({', '.join(params)})"
                 key = ("fn", name_token.literal)
                 if key not in seen_names:
                     seen_names.add(key)
@@ -779,7 +798,7 @@ def collect_symbols(
                             )
                         )
 
-        elif token.type == TokenType.Let and index + 1 < count:
+        elif token.type == TokenType.LET and index + 1 < count:
             name_token = tokens[index + 1]
             if name_token.type == TokenType.ID:
                 key = ("var", name_token.literal)
@@ -802,13 +821,13 @@ def collect_symbols(
 
 
 def _read_param_tokens(tokens: list[Token], start: int):
-    """Yield ``(name, token)`` for parameters of ``def name( ... )``."""
-    if start >= len(tokens) or tokens[start].type != TokenType.ParenOpen:
+    """Yield ``(name, token)`` for parameters of ``fn name( ... )``."""
+    if start >= len(tokens) or tokens[start].type != TokenType.PAREN_OPEN:
         return
     index = start + 1
     while index < len(tokens):
         token = tokens[index]
-        if token.type == TokenType.ParenClose:
+        if token.type == TokenType.PAREN_CLOSE:
             return
         if token.type == TokenType.ID:
             yield token.literal, token
@@ -894,6 +913,20 @@ def collect_namespaces(text: str, path: Optional[str]) -> list[Namespace]:
 def get_document_symbols(text: str) -> list[dict]:
     tokens, _lex_error = tokenize(text)
     result = []
+    # M28: every `test "name" { ... }` block, named by its string.
+    for i, tok in enumerate(tokens[:-1]):
+        if _is_test_keyword(tok, tokens):
+            name_tok = tokens[i + 1]
+            token_range = make_range(text, name_tok.position, name_tok.position + len(name_tok.literal))
+            result.append(
+                {
+                    "name": name_tok.literal[1:-1],
+                    "detail": "test",
+                    "kind": SYMBOL_FUNCTION,
+                    "range": token_range,
+                    "selectionRange": token_range,
+                }
+            )
     for symbol in collect_symbols(tokens):
         if symbol.detail == "parameter":
             continue  # parameters are not reported as document symbols
@@ -1409,6 +1442,8 @@ def get_hover(text: str, line: int, character: int, path: Optional[str] = None) 
         # M27: `sin`/`cos` aren't keywords any more; an unbound one is the
         # built-in function.
         value = f"**builtin** `{token.literal}`\n\n" + BUILTIN_DOCS.get(token.literal, "")
+    elif _is_test_keyword(token, tokens):
+        value = f"**keyword** `test`\n\n" + KEYWORD_DOCS["test"]
     elif token.type is TokenType.ID and _is_await_field(token, tokens):
         value = f"**keyword** `.{token.literal}`\n\n" + KEYWORD_DOCS.get(token.literal, "")
     elif token.type is TokenType.NUMBER:
@@ -1681,7 +1716,7 @@ def _resolve_for_navigation(text: str, path: Optional[str]):
         return None
     combined = pp.text
     lexer = Lexer(combined)
-    parser = Parser(lexer)
+    parser = Parser(lexer, allow_tests=_is_test_path(path))
     program = parser.parse_program()
     resolver = Resolver(prelude_start=pp.prelude_start)
     try:
@@ -2313,7 +2348,7 @@ def _rename_variable_cross_file(found, new_name: str, entry_text: str) -> Option
         if fpp.errors:
             return None
         flexer = Lexer(fpp.text)
-        fparser = Parser(flexer)
+        fparser = Parser(flexer, allow_tests=_is_test_path(preprocess_path))
         fprogram = fparser.parse_program()
         if fparser.errors:
             return None

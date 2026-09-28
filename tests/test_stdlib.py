@@ -213,6 +213,27 @@ class StdMathTests(unittest.TestCase):
         self.assertEqual(diagnostics, [])
 
 
+class StdModuleTestFilesTests(unittest.TestCase):
+    """M28: each std module can ship its own Mah tests, `mah/std/<name>.test.mh`
+    -- all of them must pass, on the VM `MAH_TEST_VM` selects."""
+
+    def test_every_std_test_file_passes(self):
+        import contextlib
+        import io
+
+        from mah.cli.main import main
+
+        vm = "rust" if os.environ.get("MAH_TEST_VM") == "rust" else "python"
+        files = sorted(f for f in os.listdir(STD_DIR) if f.endswith(".test.mh"))
+        self.assertIn("math.test.mh", files)
+        for name in files:
+            with self.subTest(file=name):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    code = main(["test", "--file", os.path.join(STD_DIR, name), "--vm", vm])
+                self.assertEqual(code, 0, out.getvalue())
+
+
 class BuiltinSinCosTests(unittest.TestCase):
     """`sin`/`cos` aren't keywords any more: an unbound call is still the
     built-in (same bytecode as before), and any binding of the name wins."""

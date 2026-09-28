@@ -31,7 +31,13 @@ useful while iterating on one area.
   exercises the actual user-visible contract, and survives internal
   refactors of resolve.py/codegen.py that don't change behavior).
 - `tests/test_examples.py` — golden-output tests for everything under
-  `examples/`. These are the project's existing demo programs; the tests
+  `examples/`.
+- `mah/std/*.test.mh` (M28) — the standard library's own tests, written in
+  Mah with `std:test` and run by `mah test` (`mah test --file
+  mah/std/math.test.mh`). `tests/test_stdlib.py` runs every one of them on
+  the VM `MAH_TEST_VM` selects, so `make test`/`make test-rust` cover them.
+  (Mah *programs'* tests, in user projects, are `mah test`'s job too — see
+  `docs/MAH_TEST.md`; this file is about testing the implementation.) These are the project's existing demo programs; the tests
   just pin their current output so a regression is caught immediately.
 
 ## The policy — read this before finishing any milestone

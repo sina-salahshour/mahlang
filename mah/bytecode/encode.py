@@ -13,6 +13,7 @@ from .format import (
     SEC_CODE,
     SEC_CONSTANTS,
     SEC_DEBUG,
+    SEC_TESTS,
     SEC_FUNCTIONS,
     SEC_HANDLERS,
     SEC_NATIVES,
@@ -185,5 +186,12 @@ def encode(program: Program) -> bytes:
             payload += write_varuint(line)
             payload += write_varuint(col)
         out += _section(SEC_DEBUG, bytes(payload))
+
+    # TESTS (optional, M28: only in a `mah test` build)
+    if program.tests:
+        payload = bytearray(write_varuint(len(program.tests)))
+        for t in program.tests:
+            payload += write_varuint(t.name) + write_varuint(t.slot) + write_varuint(t.line)
+        out += _section(SEC_TESTS, bytes(payload))
 
     return bytes(out)

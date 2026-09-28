@@ -1,6 +1,8 @@
 # `std:test` and `mah test`
 
-Status: **design, not implemented.** Agreed 2026-09-28. Depends on
+Status: **M28 landed 2026-09-28**, the whole plan below except LSP code
+lenses. See "M28: what landed" at the end for where the implementation
+settled details this design left open. Depends on
 [`ERRORS.md`](ERRORS.md) (a failing assertion throws) and on `std:`
 import resolution from [`STDLIB.md`](STDLIB.md) Phase 0. It lands right
 after those two, before the rest of the standard library, so each std
@@ -176,3 +178,41 @@ Tests per `docs/TESTING.md`: parser/formatter round-trips for `test`
 blocks, the contextual-keyword rule, private-access scoping, each
 assertion's pass/fail output, skip, isolation between tests, async
 tests, leftover-timer warnings, filter and exit codes, on both VMs.
+
+## M28: what landed
+
+- **Syntax**: `TestDecl` (parser `_parse_test_decl`, only with
+  `Parser(allow_tests=True)`, only at the top level). The body is a
+  parameterless `FnExpr`; the resolver gives it a hidden main-frame slot,
+  and codegen stores the closure there and records `(name, slot,
+  position)`, which lowering writes as the optional TESTS section
+  (`docs/MAHC_FORMAT.md` §4.9). A `test "x" { }` outside a test file is
+  "'test' blocks are only allowed in *.test.mh files". The declarations-
+  only rule (`compiler/driver.py`'s `_check_test_file`) allows any `let`,
+  not only constant ones.
+- **`std:test`** (`mah/std/test.mh`) is plain Mah. `AssertionError` has
+  a single `message` field holding the whole report ("assert_eq failed:
+  why", then `actual:`/`expected:` lines; Strings are quoted so `"1"` and
+  `1` differ). There's no `location` field: the VM's **backtrace** gives
+  the runner the failing line instead (see below). `assert_throws` returns
+  `Unknown`, not the typed `E`: the checker can't yet turn an error set
+  into a type. `AssertionError`/`SkipTest` are global struct names, like
+  every struct.
+- **Backtraces**: both VMs record, when a value is first thrown, that pc
+  and every enclosing call site in the task (`docs/MAHC_FORMAT.md`
+  §6.10). The runner reports an assertion at the innermost frame in the
+  test file (so a failing assert in a helper points at the helper's line)
+  and prints a `stack trace:` for other errors with more than one frame.
+- **Running one test**: `code_interpreter.run_test_bytes(data, index,
+  timeout)` / `mah-vm test FILE INDEX`, identical outcomes
+  (`mah/test_outcome.py`'s text form; `runtime/tests/vm_diff.py` compares
+  them). The Python VM runs tests in-process, in a fresh VM each, with
+  `--timeout` as a deadline checked in the step loop; the Rust VM is a
+  subprocess per test, killed at the timeout.
+- **Output**: a failed test also shows what it printed (`stdout:`). A
+  test file that doesn't compile is reported on stderr and fails the run.
+  `mah test` without a project needs `--file`.
+- **LSP**: document symbols list tests (and `collect_symbols`, which still
+  used the retired v1 token names, works again), hover explains `test`,
+  diagnostics parse test files as test files. No code lenses yet.
+- **Not done**: parallel files, code lenses.

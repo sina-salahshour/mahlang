@@ -184,7 +184,8 @@ def _blank_module_syntax(text: str, toks: list):
 
 
 def _parse(text: str, original: str) -> list:
-    parser = Parser(Lexer(text))
+    # M28: `test` blocks parse everywhere here -- formatting only reprints.
+    parser = Parser(Lexer(text), allow_tests=True)
     try:
         program = parser.parse_program()
     except SyntaxError as exc:

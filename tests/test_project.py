@@ -21,6 +21,7 @@ from mah.bytecode.decode import decode
 from mah.cli.main import main as cli_main
 from mah.project.init import init_project, sanitize_package_name
 from mah.project.manifest import MahProjectError, find_manifest, load_project
+from mah.compiler.driver import compile_to_bytes  # noqa: E402
 from tests.support import compile_source
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -63,8 +64,8 @@ class InitTests(unittest.TestCase):
                     created.add(os.path.relpath(os.path.join(root, name), os.path.join(td, "foo")))
             self.assertEqual(
                 created,
-                {"mah-project.toml", os.path.join("src", "main.mh"), ".gitignore", "AGENTS.md", "CLAUDE.md",
-                 os.path.join("docs", "mah-language.md")},
+                {"mah-project.toml", os.path.join("src", "main.mh"), os.path.join("src", "main.test.mh"),
+                 ".gitignore", "AGENTS.md", "CLAUDE.md", os.path.join("docs", "mah-language.md")},
             )
 
     def test_generated_manifest_loads(self):
@@ -530,7 +531,11 @@ class DocsSanityTests(unittest.TestCase):
                 continue
             checked += 1
             try:
-                compile_source(text=block)
+                if block.split("\n", 1)[0].endswith(".test.mh"):
+                    # M28: a test file compiles only as one (`mah test`).
+                    compile_to_bytes(text=block, test=True)
+                else:
+                    compile_source(text=block)
             except Exception as e:  # noqa: BLE001 -- report every failure, don't stop at the first
                 failures.append((block, e))
 

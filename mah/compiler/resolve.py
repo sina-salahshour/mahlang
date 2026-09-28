@@ -174,6 +174,7 @@ declaration ("hoisting"):
 from __future__ import annotations
 
 from .ast_nodes import (
+    TestDecl,
     NativeCall,
     AssignStmt,
     Binary,
@@ -288,6 +289,8 @@ class Symbol:
 
 class Resolver:
     def __init__(self, prelude_start: int | None = None):
+        # M28: the test names seen so far (unique per test file).
+        self.test_names: set = set()
         # M17: the combined-text offset where the prelude begins (see
         # preprocessor.py's `Preprocessed.prelude_start`), or `None` if it
         # wasn't included. A declaration whose own position is `>=
@@ -1252,6 +1255,14 @@ class Resolver:
             # variables for free, with zero new resolve logic. See
             # docs/V2_DESIGN.md's M9 milestone.
             self.resolve_expr(stmt.closure_expr)
+        elif isinstance(stmt, TestDecl):
+            # M28 (docs/MAH_TEST.md): a hidden global slot for the test's
+            # closure -- no name to declare, so nothing can refer to it.
+            if stmt.name in self.test_names:
+                raise SyntaxError(f"Two tests are named '{stmt.name}' at position {stmt.name_position}")
+            self.test_names.add(stmt.name)
+            stmt.slot = self.frame_stack[-1].alloc()
+            self._resolve_fn_expr(stmt.fn)
         elif isinstance(stmt, StructDecl):
             seen = set()
             for name in stmt.fields:

@@ -86,14 +86,17 @@ class StructInstance:
     VM-internal field, never visible to Mah code -- the pc a `throw` of
     this value first happened at (unset stays `None`), used only to
     locate an uncaught error; re-throwing (including automatically, when
-    no catch arm matches) keeps the original."""
+    no catch arm matches) keeps the original. M28: `backtrace` is recorded
+    at the same moment -- that pc, then each enclosing call site in the
+    throwing task, innermost first -- for `mah test`'s failure reports."""
 
-    __slots__ = ("type_name", "fields", "thrown_at")
+    __slots__ = ("type_name", "fields", "thrown_at", "backtrace")
 
     def __init__(self, type_name, fields):
         self.type_name = type_name
         self.fields = fields  # dict[str, Any]
         self.thrown_at = None
+        self.backtrace = None
 
 
 class VectorValue:
@@ -138,14 +141,15 @@ class EnumInstance:
     the same representation rather than a bespoke class -- see NONE_VALUE
     below."""
 
-    __slots__ = ("type_name", "variant", "fields", "thrown_at")
+    __slots__ = ("type_name", "variant", "fields", "thrown_at", "backtrace")
 
     def __init__(self, type_name, variant, fields):
         self.type_name = type_name
         self.variant = variant
         self.fields = fields  # dict[str, Any]
-        # M25: see StructInstance.thrown_at's docstring above.
+        # M25/M28: see StructInstance's docstring above.
         self.thrown_at = None
+        self.backtrace = None
 
     def __repr__(self):
         return f"EnumInstance({self.type_name!r}, {self.variant!r}, {self.fields!r})"

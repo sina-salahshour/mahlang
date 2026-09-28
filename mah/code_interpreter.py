@@ -56,6 +56,7 @@ from .bytecode.decode import decode
 from .bytecode.format import MahcFormatError
 from .bytecode.program import Program
 from .natives import NATIVES, NativeContext
+from .test_outcome import TestOutcome
 from .runtime_values import (
     BUILTIN_TYPE_NAMES,
     Closure,
@@ -848,6 +849,32 @@ def run_program(program: Program):
     _execute(linked)
 
 
+class _Timeout(BaseException):
+    """M28: a test ran past its deadline. A `BaseException`, so nothing in
+    the step loop (which wraps every `Exception` as a Mah RuntimeError)
+    can catch it."""
+
+
+def run_test_bytes(data: bytes, index: int, timeout: float | None = None) -> TestOutcome:
+    """M28 (docs/MAHC_FORMAT.md #6.10): run test number `index` of a `mah
+    test` build (its TESTS table): the file's top-level declarations first,
+    then that test's body, in a fresh VM. `timeout` is in seconds. Raises
+    MahcFormatError for a bad file or index; everything the test itself
+    does ends up in the returned outcome."""
+    program = decode(data)
+    if not 0 <= index < len(program.tests):
+        raise MahcFormatError(f"no test number {index} (the file has {len(program.tests)})")
+    linked = _link(program)
+    deadline = time.monotonic() + timeout if timeout is not None else None
+    try:
+        return _execute(linked, test_slot=program.tests[index].slot, deadline=deadline)
+    except _Timeout:
+        return TestOutcome("timeout", f"took longer than {timeout:g}s")
+    except MahRuntimeError as exc:
+        # The file's own top-level code failed before the test ran.
+        return TestOutcome("failed", str(exc))
+
+
 def _locate_factory(debug: DebugIndex | None):
     if debug is None:
         return lambda pc, message: message
@@ -866,7 +893,11 @@ def _locate_factory(debug: DebugIndex | None):
     return locate
 
 
-def _execute(linked: LinkedProgram) -> None:
+def _execute(linked: LinkedProgram, test_slot: int | None = None, deadline: float | None = None):
+    """Run a linked program. M28: with `test_slot`, run the test whose
+    closure the top-level code stored in that main-frame slot, afterwards,
+    and return its `TestOutcome`; `deadline` (a `time.monotonic()` value)
+    stops it with `_Timeout`."""
     code = linked.code
     locate = _locate_factory(linked.debug)
     return_register = NONE_VALUE
@@ -1033,6 +1064,9 @@ def _execute(linked: LinkedProgram) -> None:
         if not timers:
             return False
         wake_time, _seq, promise = heapq.heappop(timers)
+        if deadline is not None and wake_time > deadline:
+            time.sleep(max(0.0, deadline - time.monotonic()))
+            raise _Timeout()
         remaining = wake_time - time.monotonic()
         if remaining > 0:
             time.sleep(remaining)
@@ -1118,6 +1152,8 @@ def _execute(linked: LinkedProgram) -> None:
         ran out with no handler covering any frame)."""
         if isinstance(value, (StructInstance, EnumInstance)) and value.thrown_at is None:
             value.thrown_at = pc
+            # M28: where it was thrown, then each enclosing call site.
+            value.backtrace = [pc] + [ret_pc - 1 for ret_pc, _frame in reversed(task.return_stack)]
         while True:
             found = find_handler(pc)
             if found is not None:
@@ -1214,7 +1250,12 @@ def _execute(linked: LinkedProgram) -> None:
             value, pc = pending
             if not unwind(task, value, pc):
                 return "failed", value
+        steps = 0
         while True:
+            if deadline is not None:
+                steps += 1
+                if steps & 0xFFF == 0 and time.monotonic() > deadline:
+                    raise _Timeout()
             current_pc = task.pc
             instr = code[current_pc]
             task.pc = current_pc + 1
@@ -1533,6 +1574,53 @@ def _execute(linked: LinkedProgram) -> None:
         # status == "suspended": nothing to do here, a continuation is
         # already registered (the `await` case, or a timer).
 
+    # -- M28: one test (docs/MAHC_FORMAT.md #6.10) --------------------------
+
+    def frames_of(value) -> list:
+        """A thrown value's backtrace as `(file, line)` pairs, file `None`
+        for the entry (test) file -- empty without DEBUG info."""
+        debug = linked.debug
+        out = []
+        if debug is None:
+            return out
+        for pc in getattr(value, "backtrace", None) or []:
+            idx = bisect.bisect_right(debug.pcs, pc) - 1
+            if idx < 0:
+                continue
+            file_idx, line, _col = debug.runs[idx]
+            if line:
+                out.append((None if file_idx == 0 else debug.file_paths[file_idx], line))
+        return out
+
+    def run_test(slot: int) -> TestOutcome:
+        closure = main_frame.slots[slot]
+        promise = PromiseInstance()
+        frame = Frame(slots=[NONE_VALUE] * closure.slot_count, static_parent=closure.defining_frame)
+        drive(Task(pc=closure.code_address, current_frame=frame, watching_promise=promise))
+        while promise.variant == "Pending":
+            if not drain_next_timer():
+                break
+        leftover = bool(timers)
+        if promise.variant == "Settled":
+            return TestOutcome("ok", leftover=leftover)
+        if promise.variant == "Pending":
+            return TestOutcome(
+                "failed", "the test never finished: it waits on a Promise nothing will settle", leftover=leftover
+            )
+        promise.observed = True
+        error = promise.fields["error"]
+        if isinstance(error, StructInstance) and error.type_name == "SkipTest":
+            reason = error.fields.get("reason", "")
+            return TestOutcome("skipped", reason if isinstance(reason, str) else to_str(reason), leftover=leftover)
+        if isinstance(error, StructInstance) and error.type_name == "AssertionError":
+            message = _uncaught_message(error) or "assertion failed"
+        elif isinstance(error, EnumInstance) and error.type_name == "RuntimeError":
+            message = error.fields.get("message", "")
+        else:
+            m = _uncaught_message(error)
+            message = f"Uncaught {type_name_of(error)}" + ("" if m is None else f": {m}")
+        return TestOutcome("failed", message, frames_of(error), leftover)
+
     if not linked.functions:
         raise MahcFormatError("FUNCTIONS section must declare at least one function")
     main_fn = linked.functions[0]
@@ -1553,3 +1641,7 @@ def _execute(linked: LinkedProgram) -> None:
             new_exc = MahRuntimeError(uncaught_report(promise.fields["error"]))
             new_exc.located = True
             raise new_exc
+
+    if test_slot is None:
+        return None
+    return run_test(test_slot)

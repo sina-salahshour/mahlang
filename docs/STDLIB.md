@@ -274,9 +274,9 @@ transport failures; a 4xx/5xx status is a normal Response. Rust uses
 
 ## `std:test` and `mah test`
 
-Designed in [`MAH_TEST.md`](MAH_TEST.md). It lands right after the
-errors milestone and Phase 0's `std:` resolution, before the rest of the
-standard library, so every std module can be tested in Mah.
+Designed in [`MAH_TEST.md`](MAH_TEST.md). ✅ **Landed (M28)**, right after
+the errors milestone and Phase 0's `std:` resolution, before the rest of
+the standard library, so every std module can be tested in Mah.
 
 ## For every module
 

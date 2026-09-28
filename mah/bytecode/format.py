@@ -50,6 +50,7 @@ SEC_CODE = 0x06
 SEC_PARAMS = 0x07  # M16 (1.1): required iff minor >= 1 -- docs/MAHC_FORMAT.md #4.5a
 SEC_HANDLERS = 0x08  # M25 (1.4): required iff minor >= 4 -- docs/MAHC_FORMAT.md #4.8
 SEC_DEBUG = 0x80
+SEC_TESTS = 0x81  # M28: optional -- only in `mah test` builds, docs/MAHC_FORMAT.md #4.9
 
 REQUIRED_SECTIONS = (SEC_STRINGS, SEC_CONSTANTS, SEC_TYPES, SEC_NATIVES, SEC_FUNCTIONS, SEC_CODE)
 # M16: PARAMS joins the required-section list only for minor >= 1 files --

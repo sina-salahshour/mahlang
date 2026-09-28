@@ -98,7 +98,9 @@ VMs from it, so a feature isn't done until that document describes it.
   "module.native"` in `mah/std/<module>.mh` (only std modules may use
   `extern fn`). No lowering rule is needed: `extern fn` lowers to the
   `native` opcode by itself. Add parity cases to
-  `runtime/tests/vm_diff.py`.
+  `runtime/tests/vm_diff.py`, and Mah-level tests for the module in
+  `mah/std/<module>.test.mh` (`std:test` + `test "..." { }` blocks; M28 --
+  `tests/test_stdlib.py` runs every std test file on both VMs).
 - **Needs a genuinely new instruction**: add it to `bytecode/format.py`'s
   `OPCODES` (a reserved code + operand kinds), map the IR tuple to it in
   `bytecode/lower.py` (lowering stays 1:1 per instruction), handle it in
@@ -133,6 +135,10 @@ python -m mah run examples/your_test.mh         # run it
   error cases — undefined-name-shaped mistakes, arity/shape mismatches,
   wrong-context misuse). A big new feature (structs, enums, pattern
   matching) probably deserves its own `tests/test_<feature>.py`.
+- Behavior of a standard library module is best tested in Mah itself:
+  `mah/std/<module>.test.mh`, run with `mah test --file ...` (see
+  `docs/MAH_TEST.md`). The Python tests remain the place for compiler/VM
+  behavior and for error cases a Mah test can't express (compile errors).
 - If the change is about parsing/precedence/AST shape, also add a narrow
   test to `tests/test_parser.py` (see `FnDesugaringTests` for the pattern)
   — it isolates a broken layer far faster than an end-to-end failure.
