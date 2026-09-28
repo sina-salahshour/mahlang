@@ -22,10 +22,10 @@ from inside a standard library function is reported at your call to it,
 and in your editor, hover and go-to-definition work on its functions like
 on your own (showing locations like `std:math#20:9`).
 
-So far there are `std:math`, `std:path`, `std:json` and `std:csv` (and
-`std:test`, see [Testing](/docs/testing)). The rest of the plan (fs,
-process, random, time, async, regex, collections, sockets, http) is in
-`docs/STDLIB.md` in the repository.
+So far there are `std:math`, `std:path`, `std:json`, `std:csv`,
+`std:random` and `std:collections` (and `std:test`, see
+[Testing](/docs/testing)). The rest of the plan (fs, process, time,
+async, regex, sockets, http) is in `docs/STDLIB.md` in the repository.
 
 ## `std:math`
 
@@ -177,6 +177,82 @@ with `\n` or `\r\n`, and blank lines are skipped. Errors are a `CsvError
 the wrong number of fields. `FromCsvRow` works like `FromJson`, with
 `from_csv_row(row)` taking a record from `parse_records`.
 
+## `std:random`
+
+```mah
+import random from "std:random"
+
+random.seed(42)                     # leave out for different numbers each run
+print(random.random())              # 0.08386297105988216316063699196
+print(random.randint(1, 6), random.choice(["heads", "tails"]))
+let deck = ["A", "K", "Q", "J"]
+random.shuffle(deck)
+print(deck, random.sample(deck, 2))
+```
+
+| Function | |
+|---|---|
+| `random()` | a Number in [0, 1) |
+| `uniform(lo, hi)` | a Number in [lo, hi) |
+| `randint(lo, hi)` | a whole Number from `lo` to `hi`, both included |
+| `choice(v)` | one item of a non-empty Vector |
+| `shuffle(v)`, `shuffled(v)` | in place, or a shuffled copy |
+| `sample(v, k)` | `k` items from different positions |
+| `seed(n)` | makes everything after it repeatable |
+
+Every VM uses the same generator (xoshiro256**), so a seeded program
+prints the same numbers on the Python and the Rust runtime. Without a
+seed, it starts from the operating system's randomness. It isn't meant
+for cryptography. `Rng.new(seed)` makes an independent generator with the
+same methods, which is handy when one part of a program needs repeatable
+numbers and the rest doesn't:
+
+```mah
+import "std:random"
+
+let a = Rng.new(7)
+let b = Rng.new(7)
+print(a.randint(1, 100) == b.randint(1, 100))    # true
+```
+
+Bad arguments, like `choice([])` or `randint(5, 1)`, throw a
+`RuntimeError.ArgumentError`.
+
+## `std:collections`
+
+`Set`, `Deque` and `PriorityQueue`, usually imported flat. Each works
+with `for` and `map`/`filter`/`reduce`, and prints with its name.
+
+```mah
+import "std:collections"
+
+let tags = Set.of(["red", "blue", "red"])
+tags.add("green")
+print(tags, tags.has("blue"), tags.len())             # Set[red, blue, green] true 3
+print(tags.intersection(Set.of(["blue", "pink"])))    # Set[blue]
+
+let line = Deque.of(["ana", "bo"])
+line.push_front("vip")
+print(line.pop_front(), line.pop_back(), line)        # vip bo Deque[ana]
+
+let tasks = PriorityQueue.new(fn(task) { task.len() })
+for let t in ["write docs", "fix", "test it"] {
+    tasks.push(t)
+}
+print(tasks.pop(), tasks.pop(), tasks.pop())          # fix test it write docs
+```
+
+- **`Set`**: distinct values in the order they were first added. The
+  values must be usable as Map keys (Strings, Numbers, Bools). `add`,
+  `remove`, `has`, `len`, `union`, `intersection`, `difference`,
+  `is_subset`, and `equals` (`==` on two Sets compares identity).
+- **`Deque`**: push and pop at both ends in constant time: `push_front`,
+  `push_back`, `pop_front`, `pop_back`, `front`, `back`, `get(i)`.
+  Popping an empty one gives `none`, like `Vector.pop`.
+- **`PriorityQueue`**: `pop` gives the smallest item (by `key(item)` if
+  you pass a key function), and equal ones in the order they were pushed.
+  For largest first, use a key that negates: `fn(x) { 0 - x }`.
+
 ## How it's built
 
 Each module is a Mah file inside the `mah` package (`mah/std/math.mh`).
@@ -188,9 +264,11 @@ function to a native the VM provides:
 export extern fn tan(x: Number) -> Number = "math.tan"
 ```
 
-`std:path` needs no natives, and `std:json` and `std:csv` are Mah too,
-over a handful of natives for reading a value's type and fields and a
-String's characters.
+`std:path` and `std:collections` need no natives, and `std:json` and
+`std:csv` are Mah too, over a handful of natives for reading a value's
+type and fields and a String's characters. `std:random`'s generator is a
+small native, specified bit for bit so every runtime computes the same
+numbers.
 
 Only standard library modules may use `extern fn`. New natives come with
 a new bytecode minor version, and a compiled program is marked with the

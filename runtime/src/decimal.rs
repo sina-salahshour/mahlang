@@ -198,6 +198,25 @@ impl Decimal {
         Decimal::from_exact(neg, 0, BigUint::from_u64(n.unsigned_abs()))
     }
 
+    pub fn from_u64(n: u64) -> Decimal {
+        if n == 0 {
+            return Decimal::zero();
+        }
+        Decimal::from_exact(false, 0, BigUint::from_u64(n))
+    }
+
+    /// For an integral value whose magnitude fits a `u64`: `(negative,
+    /// magnitude)`. `None` for a fraction or anything larger.
+    pub fn to_sign_u64(&self) -> Option<(bool, u64)> {
+        if self.is_zero() {
+            return Some((false, 0));
+        }
+        if self.exp < 0 {
+            return None;
+        }
+        Some((self.neg, self.to_biguint().mul_pow10(self.exp as u64).to_u64()?))
+    }
+
     /// An exact integer from a zigzag-encoded LEB128 `varint` (the INT
     /// constant tag): `groups` are the 7-bit payloads, low group first.
     /// Arbitrary size, never rounded (Python's `Decimal(int)` is exact).

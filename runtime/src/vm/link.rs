@@ -41,6 +41,11 @@ pub enum NativeFn {
     StringChars,
     StringCodePoint,
     StringFromCodePoint,
+    /// M31 (1.8): the shared xoshiro256** generator, for std:random.
+    RandomSeed,
+    RandomFresh,
+    RandomNext,
+    RandomBelow,
 }
 
 /// Whether this VM implements a native of that name (any arity) -- for
@@ -71,6 +76,10 @@ fn native_by_name(name: &str) -> Option<(u64, NativeFn)> {
         "string.chars" => Some((1, NativeFn::StringChars)),
         "string.code_point" => Some((1, NativeFn::StringCodePoint)),
         "string.from_code_point" => Some((1, NativeFn::StringFromCodePoint)),
+        "random.seed" => Some((1, NativeFn::RandomSeed)),
+        "random.fresh" => Some((0, NativeFn::RandomFresh)),
+        "random.next" => Some((1, NativeFn::RandomNext)),
+        "random.below" => Some((2, NativeFn::RandomBelow)),
         _ => None,
     }
 }

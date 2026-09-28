@@ -171,6 +171,18 @@ class ExampleTests(unittest.TestCase):
             'Chen, Li scored 85\n'
         )
 
+    def test_random_collections(self):
+        # M31: seeded std:random (the same on both VMs) and std:collections.
+        out = run_file(example_path("random_collections.mh"))
+        self.assertEqual(
+            out,
+            'hand: [QS, KC, AS, AH, AD]\n'
+            'suits in hand: Set[S, C, H, D] flush? false\n'
+            'print order: [map/1, invoice/2, report/3, photo/3, memo/3]\n'
+            'last printed: Deque[report, photo, memo]\n'
+            'dice: [1, 3, 1]\n'
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3,7 +3,9 @@
 Status: **M27 landed 2026-09-28: Phase 0 steps 1, 2 and 5 (`std:`
 resolution, `extern fn`, native table versioning) and `std:math`**, the
 first module; **M29 landed the String methods** (Phase 1's first item);
-**M30 landed `std:path`, `std:json` and `std:csv`**. The rest is design. Agreed 2026-09-28. Depends on
+**M30 landed `std:path`, `std:json` and `std:csv`**; **M31 landed
+`std:random` (with Phase 0 step 6, the shared PRNG) and
+`std:collections`**. The rest is design. Agreed 2026-09-28. Depends on
 [`ERRORS.md`](ERRORS.md) (every failure below is a thrown, typed error)
 and on the static checker in [`TYPES.md`](TYPES.md).
 
@@ -76,9 +78,11 @@ import "std:math"            # flat import works too
    and names the natives it's missing: `unsupported minor version 6 (...):
    it uses natives this VM doesn't have ('fs.read_text'); upgrade mah to
    run it`.
-6. **A shared PRNG.** The same algorithm (PCG or xoshiro256**) in both
-   runtimes, not Python's `random`, so seeded output is identical and
-   `runtime/tests/vm_diff.py` keeps working.
+6. **A shared PRNG. ✅ Landed (M31).** The same algorithm (PCG or
+   xoshiro256**) in both runtimes, not Python's `random`, so seeded output
+   is identical and `runtime/tests/vm_diff.py` keeps working. It's
+   xoshiro256** seeded through splitmix64, as four 1.8 natives over a
+   state Vector (docs/MAHC_FORMAT.md §4.4 specifies them bit for bit).
 7. **`input` becomes an ordinary async function.** See below.
 
 ### `input`
@@ -207,6 +211,26 @@ the exact rules; `mah/string_methods.py` is the reference):
 | `seed(n)` | seeds the module's default generator |
 | `Rng.new(seed)` | an independent generator with the same methods |
 
+✅ **Landed (M31)**, in `mah/std/random.mh`, with these decisions:
+
+- The generator is xoshiro256** seeded through splitmix64 (Phase 0 step
+  6), not Python's Mersenne Twister, so a seeded run prints the same
+  numbers on both VMs. `Rng { state }` holds its four 64-bit words in a
+  Vector of Numbers, since there are no handle values yet.
+- `random()` is a multiple of 2^-53 (the top 53 bits of an output over
+  2^53), like a double, then divided with Mah's own 28-digit Numbers.
+  `uniform(lo, hi)` is added: `lo + (hi - lo) * random()`.
+- `randint` and `choice` use `random.below`, which rejects outputs past
+  the largest multiple of the range, so they're unbiased. `randint`
+  accepts any whole bounds up to a range of 2^64.
+- Without `seed`, the module's generator (and `Rng.new()` with no seed)
+  starts from the operating system's randomness. `seed(n)` takes any
+  whole Number smaller than 2^64 in size.
+- Bad arguments (an empty `choice`, `lo > hi`, `k` out of range) throw
+  `RuntimeError.ArgumentError`, like `std:math`'s domain errors, rather
+  than a `RandomError`: they're programming mistakes, which the checker
+  doesn't track.
+
 ### `std:json`
 
 - `parse(text)` returns Map, Vector, Number, String, Bool or `none`.
@@ -300,6 +324,29 @@ methods, so bytecode 1.6), with these decisions:
 `Set`, `Deque` and `PriorityQueue`, written in Mah on top of `Map` and
 `Vector` (no natives). Each implements `Iterable`, so `for` and
 `map`/`filter`/`reduce` work on them.
+
+✅ **Landed (M31)**, in `mah/std/collections.mh`, with these decisions:
+
+- **`Set<T>`** is a Map from value to `true`, so values must be Map keys
+  (Strings, Numbers, Bools), and it keeps first-added order. `Set.new()`,
+  `Set.of(values)`, `add`, `remove` (whether it was there), `has`, `len`,
+  `is_empty`, `clear`, `copy`, `to_vector`, `union`, `intersection`,
+  `difference`, `is_subset`, and `equals` (same values in any order,
+  since `==` on structs compares identity).
+- **`Deque<T>`** keeps items at consecutive Number keys of a Map between
+  a head and a tail index, so both ends are O(1): `push_front`,
+  `push_back`, `pop_front`, `pop_back`, `front`, `back`, `get(i)`
+  (negative from the back), `len`, `is_empty`, `clear`, `to_vector`. Like
+  `Vector.pop`, popping or peeking an empty one gives `none` rather than
+  throwing.
+- **`PriorityQueue<T>`** is a binary min-heap. `PriorityQueue.new(key =
+  none)` orders by `key(item)`, or the items themselves, with `<`; equal
+  priorities come out in push order. For largest first, pass a negating
+  key. `push`, `pop`, `peek` (`none` when empty), `len`, `is_empty`,
+  `clear`, `to_vector` (in order, leaving the queue alone), and `of(values,
+  key = none)`. Iterating goes in priority order without consuming.
+- Each prints as its name then its items (`Set[1, 2]`). The types are
+  global names, like every struct; helper types start with `__`.
 
 ### `std:regex`
 

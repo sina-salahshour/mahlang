@@ -1,0 +1,88 @@
+# Tests for std:random, run by tests/test_stdlib.py (or
+# `mah test --file mah/std/random.test.mh`).
+import "std:test"
+import random from "./random"
+
+test "a seed fixes the sequence, on every VM" {
+    random.seed(42)
+    let a = [random.random(), random.randint(1, 6), random.randint(1, 6)]
+    random.seed(42)
+    let b = [random.random(), random.randint(1, 6), random.randint(1, 6)]
+    assert_eq(b.join(" "), a.join(" "))
+    # pinned: the same numbers in Python and Rust (xoshiro256** seeded
+    # through splitmix64)
+    assert_eq(a.join(" "), "0.08386297105988216316063699196 1 6")
+}
+
+test "Rng instances are independent" {
+    let r = Rng.new(7)
+    let s = Rng.new(7)
+    assert_eq(r.random(), s.random())
+    r.random()
+    let next_r = r.random()
+    s.random()
+    assert_eq(s.random(), next_r)
+    assert_ne(Rng.new(8).random(), Rng.new(7).random())
+    # a negative seed is taken modulo 2^64
+    assert_eq(Rng.new(0 - 1).random(), Rng.new(18446744073709551615).random())
+}
+
+test "values stay in range" {
+    let r = Rng.new(1)
+    let seen = [:]
+    for let i in 0..300 {
+        let x = r.random()
+        assert(x >= 0 & x < 1)
+        let u = r.uniform(2, 3)
+        assert(u >= 2 & u < 3)
+        let n = r.randint(0 - 2, 2)
+        assert(n >= 0 - 2 & n <= 2 & n == n // 1)
+        seen[n] = true
+    }
+    # all five values come up
+    assert_eq(seen.len(), 5)
+    assert_eq(r.randint(4, 4), 4)
+    let big = r.randint(0, 18446744073709551615)
+    assert(big >= 0 & big == big // 1)
+}
+
+test "choice, shuffle, shuffled, sample" {
+    let r = Rng.new(3)
+    let items = [1, 2, 3, 4, 5, 6]
+    let c = r.choice(items)
+    assert(c >= 1 & c <= 6)
+    let copy = r.shuffled(items)
+    assert_eq(items.join(), "123456")
+    assert_eq(copy.len(), 6)
+    assert_eq(copy.reduce(fn(a, b) { a + b }), 21)
+    r.shuffle(items)
+    assert_eq(items.reduce(fn(a, b) { a + b }), 21)
+    let picked = r.sample(items, 4)
+    assert_eq(picked.len(), 4)
+    let distinct = [:]
+    for let x in picked {
+        distinct[x] = true
+    }
+    assert_eq(distinct.len(), 4)
+    assert_eq(r.sample(items, 0).len(), 0)
+    assert_eq(r.choice(["only"]), "only")
+}
+
+test "bad arguments throw ArgumentError" {
+    let message = fn(f: fn() -> Unknown) -> String { assert_throws(f).message }
+    assert_eq(message(fn() { random.randint(2, 1) }), "randint: lo must be at most hi, got 2 and 1")
+    assert_eq(
+        message(fn() { random.randint(1.5, 3) }),
+        "randint: lo and hi must be whole numbers, got 1.5 and 3"
+    )
+    assert_eq(message(fn() { random.choice([]) }), "choice: the Vector is empty")
+    assert_eq(
+        message(fn() { random.sample([1], 2) }),
+        "sample: k must be a whole number from 0 to 1, got 2"
+    )
+    assert_eq(
+        message(fn() { random.seed(0.5) }),
+        "seed: expected a whole number smaller than 2^64 in size"
+    )
+    assert_eq(message(fn() { Rng { state: [0, 0, 0, 0] }.random() }), "next: not a generator state")
+}

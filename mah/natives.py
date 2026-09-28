@@ -189,6 +189,110 @@ def _string_from_code_point(ctx: NativeContext, args) -> object:
     return chr(int(value))
 
 
+# -- M31 (1.8): the shared generator behind std:random ----------------------
+#
+# xoshiro256** (Blackman & Vigna), seeded through splitmix64, over a state
+# of four 64-bit words kept in a Mah Vector of four whole Numbers -- so a
+# seeded sequence is the same on every VM (runtime/src/vm/natives.rs ports
+# this exactly).
+
+_MASK64 = (1 << 64) - 1
+
+
+def _rotl(x: int, k: int) -> int:
+    return ((x << k) | (x >> (64 - k))) & _MASK64
+
+
+def _splitmix64(x: int) -> tuple[int, int]:
+    """(the next splitmix64 state, its output)."""
+    x = (x + 0x9E3779B97F4A7C15) & _MASK64
+    z = x
+    z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & _MASK64
+    z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & _MASK64
+    return x, z ^ (z >> 31)
+
+
+def _state_from_seed(seed: int) -> VectorValue:
+    words = []
+    x = seed & _MASK64
+    for _ in range(4):
+        x, out = _splitmix64(x)
+        words.append(Decimal(out))
+    return VectorValue(words)
+
+
+def _whole(value) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, Decimal) or not value.is_finite():
+        return None
+    if value != value.to_integral_value():
+        return None
+    return int(value)
+
+
+def _random_seed(ctx: NativeContext, args) -> object:
+    """A new state from `seed`, a whole Number with |seed| < 2**64 (a
+    negative one taken modulo 2**64)."""
+    (seed,) = args
+    if isinstance(seed, bool) or not isinstance(seed, Decimal):
+        raise MahRuntimeError(f"seed: expected a Number, got {type_name_of(seed)}", kind="TypeMismatch")
+    n = _whole(seed)
+    if n is None or abs(n) >= 1 << 64:
+        raise MahRuntimeError("seed: expected a whole number smaller than 2^64 in size", kind="ArgumentError")
+    return _state_from_seed(n)
+
+
+def _random_fresh(ctx: NativeContext, args) -> object:
+    """A new state seeded from the operating system's randomness."""
+    import os
+
+    return _state_from_seed(int.from_bytes(os.urandom(8), "little"))
+
+
+def _read_state(name: str, state) -> list[int]:
+    if isinstance(state, VectorValue) and len(state.items) == 4:
+        words = [_whole(w) for w in state.items]
+        if all(w is not None and 0 <= w <= _MASK64 for w in words) and any(words):
+            return words
+    raise MahRuntimeError(f"{name}: not a generator state", kind="ArgumentError")
+
+
+def _next_word(state: VectorValue, s: list[int]) -> int:
+    """xoshiro256**'s next output; advances `s` and writes it back to `state`."""
+    result = (_rotl((s[1] * 5) & _MASK64, 7) * 9) & _MASK64
+    t = (s[1] << 17) & _MASK64
+    s[2] ^= s[0]
+    s[3] ^= s[1]
+    s[1] ^= s[2]
+    s[0] ^= s[3]
+    s[2] ^= t
+    s[3] = _rotl(s[3], 45)
+    state.items[:] = [Decimal(w) for w in s]
+    return result
+
+
+def _random_next(ctx: NativeContext, args) -> object:
+    """The next 64-bit output, a whole Number in [0, 2**64)."""
+    (state,) = args
+    return Decimal(_next_word(state, _read_state("next", state)))
+
+
+def _random_below(ctx: NativeContext, args) -> object:
+    """A uniform whole Number in [0, n), for a whole `n` in [1, 2**64]:
+    outputs at or above the largest multiple of `n` are rejected."""
+    state, n = args
+    s = _read_state("below", state)
+    if isinstance(n, bool) or not isinstance(n, Decimal):
+        raise MahRuntimeError(f"below: expected a Number, got {type_name_of(n)}", kind="TypeMismatch")
+    bound = _whole(n)
+    if bound is None or not 1 <= bound <= 1 << 64:
+        raise MahRuntimeError("below: expected a whole number from 1 to 2^64", kind="ArgumentError")
+    limit = (1 << 64) - (1 << 64) % bound
+    while True:
+        x = _next_word(state, s)
+        if x < limit:
+            return Decimal(x % bound)
+
+
 def _time_sleep_async(ctx: NativeContext, args) -> object:
     (ms,) = args
     promise = PromiseInstance()
@@ -220,4 +324,9 @@ NATIVES: dict[str, tuple[int, object]] = {
     "string.chars": (1, _string_chars),
     "string.code_point": (1, _string_code_point),
     "string.from_code_point": (1, _string_from_code_point),
+    # M31 (1.8): the shared generator, for std:random.
+    "random.seed": (1, _random_seed),
+    "random.fresh": (0, _random_fresh),
+    "random.next": (1, _random_next),
+    "random.below": (2, _random_below),
 }

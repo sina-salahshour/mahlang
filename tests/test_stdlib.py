@@ -370,5 +370,74 @@ class DataModuleTests(unittest.TestCase):
         self.assertFalse({"JsonReader", "quote", "type_name"} & labels)
 
 
+class RandomAndCollectionsTests(unittest.TestCase):
+    """M31: std:random (and the shared generator's natives) and
+    std:collections -- behavior is covered by their .test.mh files."""
+
+    def test_bytecode_minor(self):
+        from mah.bytecode.decode import decode
+
+        self.assertEqual(decode(compile_bytes(text='import random from "std:random"\nprint(random.random())')).minor, 8)
+        # plain Mah over Map and Vector: still runs on a 1.4 VM
+        self.assertEqual(decode(compile_bytes(text='import "std:collections"\nprint(Set.of([1]))')).minor, 4)
+
+    def test_generator_matches_the_reference_vectors(self):
+        from mah.natives import _next_word, _splitmix64
+        from mah.runtime_values import VectorValue
+
+        self.assertEqual(_splitmix64(0)[1], 0xE220A8397B1DCDAF)
+        state, words = VectorValue([]), [1, 2, 3, 4]
+        self.assertEqual([_next_word(state, words) for _ in range(4)], [11520, 0, 1509978240, 1215971899390074240])
+
+    def test_native_errors(self):
+        from decimal import Decimal
+
+        from mah.natives import NATIVES
+        from mah.runtime_values import VectorValue
+
+        def call(name, *args):
+            return NATIVES[name][1](None, list(args))
+
+        state = call("random.seed", Decimal(1))
+        self.assertEqual(len(state.items), 4)
+        # a negative seed is taken modulo 2^64
+        self.assertEqual(call("random.seed", Decimal(-1)).items, call("random.seed", Decimal(2**64 - 1)).items)
+        for name, args, message in [
+            ("random.seed", ["1"], "seed: expected a Number, got String"),
+            ("random.seed", [Decimal(2**64)], "seed: expected a whole number smaller than 2^64 in size"),
+            ("random.next", [VectorValue([Decimal(0)] * 4)], "next: not a generator state"),
+            ("random.next", [VectorValue([Decimal(1)] * 3)], "next: not a generator state"),
+            ("random.below", [state, Decimal(0)], "below: expected a whole number from 1 to 2^64"),
+            ("random.below", [state, Decimal(2**64 + 1)], "below: expected a whole number from 1 to 2^64"),
+        ]:
+            with self.subTest(name=name, args=args):
+                with self.assertRaises(MahRuntimeError) as cm:
+                    call(name, *args)
+                self.assertEqual(str(cm.exception), message)
+        self.assertLess(call("random.below", state, Decimal(2**64)), 2**64)
+
+    def test_checker_types(self):
+        diagnostics, types = check(
+            'import "std:collections"\nimport random from "std:random"\n'
+            'let s = Set.of([1, 2])\nlet d = Deque.of(["a"])\nlet f = d.pop_front()\n'
+            'let q = PriorityQueue.of([3])\nlet r = random.randint(1, 6)\nlet c = random.choice(["x"])\n'
+            'let g = Rng.new(1)'
+        )
+        self.assertEqual([d for d in diagnostics if d[0] != "implicit"], [])
+        got = {k: types[k][-1] for k in ("s", "d", "f", "q", "r", "c", "g")}
+        self.assertEqual(
+            got,
+            {
+                "s": "Set<Number>",
+                "d": "Deque<String>",
+                "f": "String",
+                "q": "PriorityQueue<Number>",
+                "r": "Number",
+                "c": "String",
+                "g": "Rng",
+            },
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
