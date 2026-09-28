@@ -15,7 +15,7 @@ use std::fmt;
 
 pub const MAGIC: &[u8; 4] = b"MAHC";
 pub const MAJOR: u16 = 1;
-pub const MINOR: u16 = 9;
+pub const MINOR: u16 = 10;
 
 const SEC_STRINGS: u8 = 0x01;
 const SEC_CONSTANTS: u8 = 0x02;
@@ -862,6 +862,7 @@ fn native_since_minor(name: &str) -> Option<u16> {
         | "string.from_code_point" => Some(7),
         "random.seed" | "random.fresh" | "random.next" | "random.below" => Some(8),
         "regex.find" | "regex.find_all" => Some(9),
+        "io.read_line" => Some(10),
         _ => None,
     }
 }
@@ -1488,7 +1489,7 @@ mod tests {
         // M27: the current maximum is 5; the file has no sections at all,
         // so there are no natives to name.
         assert_eq!(e.0, format!("unsupported minor version 99 (this VM supports up to minor version {MINOR})"));
-        assert_eq!(MINOR, 9);
+        assert_eq!(MINOR, 10);
     }
 
     #[test]

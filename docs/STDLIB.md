@@ -5,7 +5,8 @@ resolution, `extern fn`, native table versioning) and `std:math`**, the
 first module; **M29 landed the String methods** (Phase 1's first item);
 **M30 landed `std:path`, `std:json` and `std:csv`**; **M31 landed
 `std:random` (with Phase 0 step 6, the shared PRNG) and
-`std:collections`**, and **M32 `std:regex`**, completing Phase 1. The
+`std:collections`**, and **M32 `std:regex`**, completing Phase 1;
+**M33 made `input` async** (Phase 0 step 7, and step 4's I/O half). The
 rest is design. Agreed 2026-09-28. Depends on
 [`ERRORS.md`](ERRORS.md) (every failure below is a thrown, typed error)
 and on the static checker in [`TYPES.md`](TYPES.md).
@@ -67,10 +68,12 @@ import "std:math"            # flat import works too
 4. **Async scheduler.** Today the scheduler only handles `sleep_async`
    timers. It gains:
    - worker threads that run blocking I/O and settle a Promise (with a
-     value, or an error per `ERRORS.md`);
+     value, or an error per `ERRORS.md`); ✅ **landed (M33)** for standard
+     input: one reader thread per VM, whose results the scheduler settles
+     on the VM's own thread (docs/MAHC_FORMAT.md §6.4);
    - callback timers with cancellation, for `std:async`;
    - "the program is done when the main task has finished and no timer
-     or I/O is pending", as in Node.
+     or I/O is pending", as in Node. ✅ **Landed (M33).**
 5. **Native table versioning. ✅ Landed (M27).** New natives bump the
    minor version (`docs/MAHC_FORMAT.md` §4.4/§7: the `std:math` ones are
    1.5). The encoder writes the lowest minor a file needs (1.4 unless it
@@ -84,7 +87,8 @@ import "std:math"            # flat import works too
    is identical and `runtime/tests/vm_diff.py` keeps working. It's
    xoshiro256** seeded through splitmix64, as four 1.8 natives over a
    state Vector (docs/MAHC_FORMAT.md §4.4 specifies them bit for bit).
-7. **`input` becomes an ordinary async function.** See below.
+7. **`input` becomes an ordinary async function. ✅ Landed (M33).** See
+   below.
 
 ### `input`
 
@@ -126,6 +130,28 @@ it breaks existing code. Updated in the same change:
   (`mah/lsp/analysis.py`), `docs/TYPES.md`, `docs/RUST_VM.md`,
   `docs/V2_DESIGN.md`, and the stdin fixtures in `tests/test_bytecode.py`,
   `tests/test_typecheck.py`, `runtime/tests/vm_diff.py`.
+
+✅ **Landed (M33)**, with these decisions:
+
+- `input` is an unbound-name built-in like `sin`/`cos` (a binding of your
+  own named `input` wins), not a prelude function: the prelude can't hold
+  top-level functions, and this way a bare `input()` compiles to the new
+  1.10 native `io.read_line` plus an `await`, while `detach input()`
+  compiles to the native alone and so hands back its pending Promise
+  directly (like `sleep_async`, no task is needed). The checker types it
+  `input(prompt: String = "") -> String throws EndOfInput`.
+- `EndOfInput` is a prelude struct with no fields (`message()` is "end of
+  input"), tracked by the checker like any error. The examples use `try
+  input("decimal: ").to_number() else 0`, which the `strict` check of
+  every example requires.
+- `io.input` stays in both VMs, only no longer emitted, so `.mahc` files
+  built before 1.10 keep running (the Rust `DIGIT_BLOCK_ZEROES` table
+  stays with it).
+- A detached `input` that's never awaited still keeps the program running
+  until its line arrives (the "no I/O pending" rule); `mah test` gives
+  tests an empty standard input, so `input()` there throws `EndOfInput`.
+- `set_interval` in the example above waits for `std:async` (Phase 2):
+  `sleep_async` in a loop does the same job today.
 
 ## Phase 1: pure libraries
 

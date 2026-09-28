@@ -52,7 +52,6 @@ class TokenType(Enum):
     # keywords
     LET = "let"
     PRINT = "print"
-    INPUT = "input"
     IF = "if"
     ELIF = "elif"
     ELSE = "else"
@@ -95,7 +94,6 @@ class TokenType(Enum):
 KEYWORDS = {
     "let": TokenType.LET,
     "print": TokenType.PRINT,
-    "input": TokenType.INPUT,
     "if": TokenType.IF,
     "elif": TokenType.ELIF,
     "else": TokenType.ELSE,

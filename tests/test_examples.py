@@ -50,16 +50,17 @@ class ExampleTests(unittest.TestCase):
         self.assertEqual([int(n) for n in out.split()], PRIMES_UNDER_100)
 
     def test_decimal_to_binary(self):
+        # M33: `input` prints its prompt and reads a String.
         out = run_file(example_path("decimal_to_binary.mh"), stdin="13")
-        self.assertEqual(out.strip(), "1101")
+        self.assertEqual(out, "decimal: 1101\n")
 
     def test_new_decimal_to_binary(self):
         out = run_file(example_path("new_decimal_to_binary.mh"), stdin="13")
-        self.assertEqual(out.strip(), "1101")
+        self.assertEqual(out, "decimal: 1101\n")
 
     def test_binary_to_decimal(self):
         out = run_file(example_path("binary_to_decimal.mh"), stdin="1101")
-        self.assertEqual(out.strip(), "13")
+        self.assertEqual(out, "binary: 13\n")
 
     def test_iterators(self):
         out = run_file(example_path("iterators.mh"))

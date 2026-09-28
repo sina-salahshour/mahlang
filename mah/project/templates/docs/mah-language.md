@@ -87,7 +87,7 @@ loosest of all, `&`/`|` share one level, and `%` shares a level with
 | call | meaning |
 |---|---|
 | `print(a, b, ..., sep: " ", end: "\n")` | prints the arguments separated by `sep` (default: a space), then `end` (default: a newline). `print()` prints just a newline |
-| `input()` | reads an integer from stdin (skips non-digits until one) |
+| `input(prompt = "")` | prints `prompt` (no newline), reads one line from stdin and returns it as a String without the newline; throws `EndOfInput` at the end of the input. Use `.to_number()` for a Number. `detach input()` gives a Promise instead (see Async) |
 | `sin(x)`, `cos(x)` | radians (ordinary names: a `fn sin` of your own takes over) |
 | `sleep_async(ms)` | pauses (see Async) |
 
@@ -559,7 +559,19 @@ print(r.await)                  # 5
 - `value.await` waits for a Promise. A Promise is an enum:
   `Promise.Pending` or `Promise.Settled { value }`.
 - The program exits once the main code is done **and** no detached work
-  is still pending.
+  (a timer, or a detached `input` waiting for its line) is still pending.
+- `input(...)` waits for a line like any call; detached, it lets timers and
+  other tasks run meanwhile:
+
+```mah
+let answer = detach input("number: ")
+for let i in 0..3 {
+    sleep_async(500)
+    print("still waiting...")           # prints while the user types
+}
+let n = try answer.await.to_number() else 0   # .await throws EndOfInput / to_number NumberParseError
+print(n + 1)
+```
 
 ## Type annotations
 

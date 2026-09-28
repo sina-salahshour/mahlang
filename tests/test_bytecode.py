@@ -93,9 +93,17 @@ class RoundTripTests(unittest.TestCase):
                 # the program needs, when it uses a 1.5 native (std:math);
                 # M29: 1.6 when it calls a String method; M30: 1.7 with
                 # std:json/std:csv; M31: 1.8 with std:random; M32: 1.9 with std:regex.
-                minor = {"std_math.mh": 5, "string_methods.mh": 6, "data_formats.mh": 7, "random_collections.mh": 8, "regex_log.mh": 9}.get(
-                    name, 4
-                )
+                # M33: 1.10 with the async `input`.
+                minor = {
+                    "std_math.mh": 5,
+                    "string_methods.mh": 6,
+                    "data_formats.mh": 7,
+                    "random_collections.mh": 8,
+                    "regex_log.mh": 9,
+                    "binary_to_decimal.mh": 10,
+                    "decimal_to_binary.mh": 10,
+                    "new_decimal_to_binary.mh": 10,
+                }.get(name, 4)
                 self.assertEqual(data[:8], b"MAHC\x01\x00" + bytes([minor, 0]))
 
     def test_decoded_bytes_run_the_same_as_the_source(self):
@@ -145,10 +153,10 @@ class LoaderValidationTests(unittest.TestCase):
         self.assertIn("major", str(cm.exception))
 
     def test_unsupported_minor_version(self):
-        # M32: this VM now implements minor version 9, so the smallest
-        # genuinely unsupported minor version is 10.
+        # M33: this VM now implements minor version 10, so the smallest
+        # genuinely unsupported minor version is 11.
         data = bytearray(compile_bytes(text="print(1)"))
-        data[6] = 10
+        data[6] = 11
         with self.assertRaises(MahcFormatError) as cm:
             decode(bytes(data))
         self.assertIn("minor", str(cm.exception))
@@ -161,11 +169,11 @@ class LoaderValidationTests(unittest.TestCase):
         data = compile_bytes(text='import math from "std:math"\nprint(math.tan(1))')
         self.assertIn(b"math.tan", data)
         data = bytearray(data.replace(b"math.tan", b"math.zzz"))
-        data[6] = 10
+        data[6] = 11
         with self.assertRaises(MahcFormatError) as cm:
             decode(bytes(data))
         message = str(cm.exception)
-        self.assertIn("unsupported minor version 10", message)
+        self.assertIn("unsupported minor version 11", message)
         self.assertIn("natives this VM doesn't have ('math.zzz')", message)
 
     def test_minor_is_the_lowest_the_program_needs(self):
@@ -516,10 +524,12 @@ class SemanticsTests(unittest.TestCase):
         self.assertEqual(run_source(src), "P { x: 1, y: 2 }\n")
 
     def test_input_native(self):
-        self.assertEqual(run_source("let a = input()\nprint(a + 1)", stdin="41\n"), "42\n")
+        # M33: `input()` is now `io.read_line` (a String, and EndOfInput at
+        # the end -- tests/test_input.py); pre-1.10 files keep `io.input`.
+        self.assertEqual(run_source("let a = input()\nprint(a.to_number() + 1)", stdin="41\n"), "42\n")
         with self.assertRaises(MahRuntimeError) as cm:
             run_source("let a = input()\nprint(a + 1)", stdin="")
-        self.assertIn("input: end of input", str(cm.exception))
+        self.assertIn("Uncaught EndOfInput: end of input", str(cm.exception))
 
     def test_function_printing(self):
         self.assertEqual(run_source("print(fn(x) { x })"), "<fn>\n")

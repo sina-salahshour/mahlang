@@ -3136,6 +3136,34 @@ node that resolved to it. Then:
       form, the Python spellings, native errors, checker types),
       `vm_diff.py` cases, `examples/regex_log.mh`.
 
+34. **M33 — async `input`. ✅ Landed.** `docs/STDLIB.md` Phase 0 step 7
+    and the I/O half of step 4; bytecode 1.10 in `docs/MAHC_FORMAT.md`
+    §4.4/§6.4. A breaking change: `input(prompt = "")` returns the next
+    line as a String and throws `EndOfInput` at the end, where `input()`
+    used to scan digits into a Number.
+
+    - **Compiler**: `input` is no longer a lexer keyword (`InputExpr` and
+      `TokenType.INPUT` are gone); an unbound `input(...)` is a built-in
+      call like `sin`/`cos` (`_BUILTIN_FNS`), at most one positional
+      argument. Codegen emits the new native `io.read_line(prompt)` and an
+      `await`, or, under `detach`, just the native, whose pending Promise
+      is the result (`_gen_input_promise`). The checker types it `String
+      throws EndOfInput`; the prelude gains `struct EndOfInput` (and
+      `input` became a prelude trigger).
+    - **Scheduler, both VMs**: an I/O hub (`_IoHub` / `IoHub`) with one
+      standard-input reader thread; workers only report completions over
+      a queue/channel, and the scheduler loop's `next_event` settles them
+      on the VM's thread, waiting for whichever comes first, the next
+      completion or the next timer. The program ends when the main task
+      is done and no timer or I/O is pending.
+    - `io.input` stays for pre-1.10 files. Examples use `try
+      input("...").to_number() else 0`; editors highlight `input` as a
+      built-in only in a bare call; the LSP hover documents it.
+    - Tests: `tests/test_input.py` (lines, prompts, CRLF, `EndOfInput`,
+      detach, a user's own `input`, checker types, and a delayed-stdin run
+      on both VMs showing timers tick while `input` waits); the old
+      assertions about the digit-scanning `input` were updated on purpose.
+
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
 it** (`make test` must stay green) — see `docs/TESTING.md` for where

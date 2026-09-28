@@ -302,11 +302,6 @@ class CosExpr:
 
 
 @dataclass
-class InputExpr:
-    position: int
-
-
-@dataclass
 class DetachExpr:
     call: object  # M13: a Call node, a MethodCall node, or (for `detach
                    # sleep_async(ms)`) a SleepAsyncExpr node -- the operand

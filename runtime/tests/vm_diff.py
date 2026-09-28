@@ -436,6 +436,26 @@ for let n in 0..60 {
 import regex from "std:regex"
 regex.compile("a{5000}")
 """, b""),
+    # M33: the async `input` -- lines as Strings, prompts, CRLF, EndOfInput,
+    # and a detached input waiting alongside a timer.
+    ("input_lines", """
+let a = input("first? ")
+let b = input()
+print("[" + a + "]", b.len(), try input() else "eof")
+print(try { input() } catch { e: EndOfInput => { e.message() } })
+""", b"one two\r\nx\n"),
+    ("input_detached", """
+let p = detach input("? ")
+let q = detach input()
+sleep_async(20)
+print("tick")
+print(q.await, p.await)
+print(try (detach input()).await else "no more")
+""", b"alpha\nbeta\n"),
+    ("input_prompt_type_error", """
+let u: Unknown = 1
+input(u)
+""", b""),
     ("std_csv", """
 import csv from "std:csv"
 print(csv.parse("a,\\"b,c\\"\\r\\n\\n\\"q\\"\\"x\\",\\n"), csv.parse_records("n,v\\nx,1\\n"))

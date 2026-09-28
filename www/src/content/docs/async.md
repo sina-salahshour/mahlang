@@ -54,3 +54,24 @@ print(big.await)   # Rect { w: 5, h: 5 }
 `sleep_async(ms)` pauses. Called plainly (not detached) it just blocks
 like any other statement; detach it (or a block containing it) to run it
 concurrently with other detached work.
+
+## `input`
+
+`input(prompt = "")` prints the prompt and waits for a line from
+standard input, returning it as a String (without the newline). It
+throws `EndOfInput` once there are no more lines. Called plainly it waits
+like `sleep_async`. Detached, you get a Promise right away, and timers
+and other tasks keep running while the user types:
+
+```mah
+let answer = detach input("number: ")
+for let i in 0..3 {
+    sleep_async(500)
+    print("still waiting...")
+}
+let n = try answer.await.to_number() else 0
+print("you typed", n)
+```
+
+A detached `input` keeps the program running until its line arrives, even
+if nothing ever `.await`s it.

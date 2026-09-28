@@ -229,12 +229,12 @@
       "patterns": [
         {
           "name": "support.function.builtin.mah",
-          "match": "\\b(print|input|sleep_async)\\b"
+          "match": "\\b(print|sleep_async)\\b"
         },
         {
-          "comment": "M27: `sin`/`cos` are ordinary names (`std:math` exports functions of those names, and `fn sin` is allowed); only a bare call -- not `math.sin(...)` or `fn sin(...)` -- is the built-in.",
+          "comment": "M27: `sin`/`cos` are ordinary names (`std:math` exports functions of those names, and `fn sin` is allowed); only a bare call -- not `math.sin(...)` or `fn sin(...)` -- is the built-in. M33: likewise `input`.",
           "name": "support.function.builtin.mah",
-          "match": "(?<![.\\w])(?<!fn )(sin|cos)(?=\\s*\\()"
+          "match": "(?<![.\\w])(?<!fn )(sin|cos|input)(?=\\s*\\()"
         },
         {
           "name": "support.function.builtin.option.mah",

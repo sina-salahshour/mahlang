@@ -33,17 +33,23 @@ from .runtime_values import (
 
 
 class NativeContext:
-    __slots__ = ("_to_string", "_schedule_timer")
+    __slots__ = ("_to_string", "_schedule_timer", "_read_line")
 
-    def __init__(self, to_string, schedule_timer):
+    def __init__(self, to_string, schedule_timer, read_line=None):
         self._to_string = to_string
         self._schedule_timer = schedule_timer
+        self._read_line = read_line
 
     def to_string(self, value) -> str:
         return self._to_string(value)
 
     def schedule_timer(self, seconds: float, promise) -> None:
         self._schedule_timer(seconds, promise)
+
+    def read_line(self, promise) -> None:
+        """M33: settle `promise` with the next line of standard input (or
+        fail it with EndOfInput), from the scheduler, later."""
+        self._read_line(promise)
 
     @property
     def stdout(self):
@@ -85,6 +91,22 @@ def _io_input(ctx: NativeContext, args) -> object:
             break
         # else: skip characters until the first digit, per docs/MAHC_FORMAT.md #4.4
     return Decimal(raw)
+
+
+def _io_read_line(ctx: NativeContext, args) -> object:
+    """M33 (1.10): `input(prompt)`'s native. Writes `prompt` (flushed, no
+    newline added), then returns a Promise of the next line of standard
+    input without its line ending (`\\n` or `\\r\\n`), which fails with an
+    `EndOfInput` struct when there are no more lines."""
+    (prompt,) = args
+    if not isinstance(prompt, str):
+        raise MahRuntimeError(f"input: the prompt must be a String, got {type_name_of(prompt)}", kind="TypeMismatch")
+    if prompt:
+        ctx.stdout.write(prompt)
+    ctx.stdout.flush()
+    promise = PromiseInstance()
+    ctx.read_line(promise)
+    return promise
 
 
 def _math_sin(ctx: NativeContext, args) -> object:
@@ -404,7 +426,7 @@ def _time_sleep_async(ctx: NativeContext, args) -> object:
 NATIVES: dict[str, tuple[int, object]] = {
     "io.print": (1, _io_print),
     "io.write": (1, _io_write),
-    "io.input": (0, _io_input),
+    "io.input": (0, _io_input),  # pre-1.10 files only; see _io_read_line
     "math.sin": (1, _math_sin),
     "math.cos": (1, _math_cos),
     "time.sleep_async": (1, _time_sleep_async),
@@ -432,4 +454,6 @@ NATIVES: dict[str, tuple[int, object]] = {
     # M32 (1.9): std:regex's matcher.
     "regex.find": (3, _regex_find),
     "regex.find_all": (2, _regex_find_all),
+    # M33 (1.10): the async `input`.
+    "io.read_line": (1, _io_read_line),
 }

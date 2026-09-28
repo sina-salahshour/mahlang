@@ -432,7 +432,6 @@ def _last_tok(element) -> _Tok:
 
 _CALL_LIKE = {
     TokenType.PRINT,
-    TokenType.INPUT,
     TokenType.SLEEP_ASYNC,
     TokenType.SOME,
     TokenType.FN,

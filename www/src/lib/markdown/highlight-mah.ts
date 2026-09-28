@@ -11,7 +11,6 @@
 const KEYWORDS = new Set([
 	'let',
 	'print',
-	'input',
 	'if',
 	'elif',
 	'else',

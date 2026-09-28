@@ -221,7 +221,6 @@ from .ast_nodes import (
     Ident,
     IfStmt,
     ImplDecl,
-    InputExpr,
     LetStmt,
     MatchStmt,
     MethodCall,
@@ -998,6 +997,14 @@ class Codegen:
             self.buf.emit((expr.op, left, right, tmp))
             return tmp
         if isinstance(expr, Call):
+            if expr.builtin == "input":
+                # M33: a bare `input(prompt)` auto-awaits its Promise, like a
+                # bare `sleep_async(ms)` (`detach input()` doesn't: see the
+                # DetachExpr case).
+                promise = self._gen_input_promise(expr)
+                dest = self._temp()
+                self.buf.emit(("await", promise, None, dest))
+                return dest
             if expr.builtin is not None:
                 # M27: an unbound `sin(x)`/`cos(x)` -- the same code the
                 # pre-M27 keyword forms produced.
@@ -1014,11 +1021,12 @@ class Codegen:
             tmp = self._temp()
             self.buf.emit(("cos", src, None, tmp))
             return tmp
-        if isinstance(expr, InputExpr):
-            tmp = self._temp()
-            self.buf.emit(("input", None, None, tmp))
-            return tmp
         if isinstance(expr, DetachExpr):
+            if isinstance(expr.call, Call) and expr.call.builtin == "input":
+                # M33: `detach input(prompt)` -- the still-pending Promise
+                # itself, so other tasks and timers run while the line is
+                # read (like `detach sleep_async(ms)`, no Task is needed).
+                return self._gen_input_promise(expr.call)
             if isinstance(expr.call, SleepAsyncExpr):
                 # `detach sleep_async(ms)`: unlike a bare `sleep_async(ms)`
                 # (see the SleepAsyncExpr case below, which auto-awaits
@@ -1287,6 +1295,18 @@ class Codegen:
         names = tuple(name for name, _value, _pos in kwargs)
         addrs = tuple(self.gen_expr(value) for _name, value, _pos in kwargs)
         return names, addrs
+
+    def _gen_input_promise(self, expr: Call):
+        """M33: `io.read_line(prompt)` -- prints the prompt, then hands back a
+        Promise of the next line (docs/MAHC_FORMAT.md #4.4)."""
+        if expr.args:
+            prompt = self.gen_expr(expr.args[0])
+        else:
+            prompt = self._temp()
+            self.buf.emit(("ld", "", None, prompt))
+        dest = self._temp()
+        self.buf.emit(("native", "io.read_line", (prompt,), dest))
+        return dest
 
     def _gen_call(self, expr: Call) -> tuple:
         callee_addr = self.gen_expr(expr.callee)

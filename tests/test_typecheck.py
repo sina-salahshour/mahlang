@@ -239,7 +239,8 @@ class InferenceTests(_Base):
         )
 
     def test_builtin_expressions(self):
-        self.assertTypes("let s = sin(1)\nlet i = input()", s="Number", i="Number")
+        # M33: `input()` reads a line as a String (it used to read a Number).
+        self.assertTypes('let s = sin(1)\nlet i = try input() else ""', s="Number", i="String")
         self.assertMismatch('let s = sin("x")', "Type mismatch: expected Number, found String", 1)
 
 

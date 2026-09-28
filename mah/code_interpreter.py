@@ -48,6 +48,9 @@ from __future__ import annotations
 import bisect
 import heapq
 import itertools
+import queue
+import sys
+import threading
 import time
 from decimal import Decimal
 from typing import Any, NamedTuple
@@ -899,7 +902,61 @@ def _locate_factory(debug: DebugIndex | None):
     return locate
 
 
+class _IoHub:
+    """M33 (docs/MAHC_FORMAT.md #6.4): blocking operations run on worker
+    threads, which only ever report back through `done`; the scheduler
+    settles their Promises on the VM's own thread. `pending` counts the
+    operations started and not yet settled -- the program keeps running
+    while any is. Standard input has one reader thread, so lines are handed
+    out in the order `input` asked for them."""
+
+    def __init__(self):
+        self.done: queue.Queue = queue.Queue()  # (promise, line or None at end of input)
+        self.pending = 0
+        self._stdin_requests: queue.Queue | None = None
+
+    def read_line(self, promise) -> None:
+        self.pending += 1
+        if self._stdin_requests is None:
+            self._stdin_requests = queue.Queue()
+            threading.Thread(
+                target=self._stdin_worker, args=(sys.stdin, self._stdin_requests, self.done), daemon=True
+            ).start()
+        self._stdin_requests.put(promise)
+
+    @staticmethod
+    def _stdin_worker(stream, requests: queue.Queue, done: queue.Queue) -> None:
+        while True:
+            promise = requests.get()
+            if promise is None:
+                return
+            try:
+                line = stream.readline()
+            except (OSError, ValueError):
+                line = ""
+            if line == "":
+                done.put((promise, None))
+                continue
+            if line.endswith("\n"):
+                line = line[:-1]
+                if line.endswith("\r"):
+                    line = line[:-1]
+            done.put((promise, line))
+
+    def close(self) -> None:
+        if self._stdin_requests is not None:
+            self._stdin_requests.put(None)
+
+
 def _execute(linked: LinkedProgram, test_slot: int | None = None, deadline: float | None = None):
+    io = _IoHub()
+    try:
+        return _execute_with(linked, io, test_slot, deadline)
+    finally:
+        io.close()
+
+
+def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, deadline: float | None):
     """Run a linked program. M28: with `test_slot`, run the test whose
     closure the top-level code stored in that main-frame slot, afterwards,
     and return its `TestOutcome`; `deadline` (a `time.monotonic()` value)
@@ -996,7 +1053,11 @@ def _execute(linked: LinkedProgram, test_slot: int | None = None, deadline: floa
             "IndexAssign"
         ] = (NativeMethod(2, index_assign), True)
 
-    ctx = NativeContext(to_string=lambda v: to_str(v), schedule_timer=lambda secs, p: schedule_timer(secs, p))
+    ctx = NativeContext(
+        to_string=lambda v: to_str(v),
+        schedule_timer=lambda secs, p: schedule_timer(secs, p),
+        read_line=lambda p: io.read_line(p),
+    )
 
     def enter_closure(task: Task, closure: Closure, arg_values: list) -> None:
         new_frame = Frame(slots=[NONE_VALUE] * closure.slot_count, static_parent=closure.defining_frame)
@@ -1104,6 +1165,41 @@ def _execute(linked: LinkedProgram, test_slot: int | None = None, deadline: floa
             time.sleep(remaining)
         promise.resolve(NONE_VALUE)
         return True
+
+    def settle_io(item) -> None:
+        promise, line = item
+        io.pending -= 1
+        if line is None:
+            promise.fail(StructInstance("EndOfInput", {}))
+        else:
+            promise.resolve(line)
+
+    def next_event() -> bool:
+        """M33: handle the next event -- a finished I/O operation, or else
+        the next timer, whichever comes first -- waiting for it if need be.
+        False when there's nothing left that could happen."""
+        try:
+            settle_io(io.done.get_nowait())
+            return True
+        except queue.Empty:
+            pass
+        if not io.pending:
+            return drain_next_timer()
+        sys.stdout.flush()
+        wait = None if not timers else max(0.0, timers[0][0] - time.monotonic())
+        if deadline is not None:
+            left = max(0.0, deadline - time.monotonic())
+            if wait is None or left < wait:
+                try:
+                    settle_io(io.done.get(timeout=left))
+                    return True
+                except queue.Empty:
+                    raise _Timeout() from None
+        try:
+            settle_io(io.done.get(timeout=wait))
+            return True
+        except queue.Empty:
+            return drain_next_timer()
 
     def _op_add(a, b):
         if isinstance(a, str) or isinstance(b, str):
@@ -1645,9 +1741,9 @@ def _execute(linked: LinkedProgram, test_slot: int | None = None, deadline: floa
         frame = Frame(slots=[NONE_VALUE] * closure.slot_count, static_parent=closure.defining_frame)
         drive(Task(pc=closure.code_address, current_frame=frame, watching_promise=promise))
         while promise.variant == "Pending":
-            if not drain_next_timer():
+            if not next_event():
                 break
-        leftover = bool(timers)
+        leftover = bool(timers) or io.pending > 0
         if promise.variant == "Settled":
             return TestOutcome("ok", leftover=leftover)
         if promise.variant == "Pending":
@@ -1676,8 +1772,10 @@ def _execute(linked: LinkedProgram, test_slot: int | None = None, deadline: floa
     main_task = Task(pc=main_fn.entry, current_frame=main_frame, watching_promise=main_promise)
     drive(main_task)
 
-    while main_promise.variant != "Settled" or timers:
-        if not drain_next_timer():
+    # M33: the program ends once the main task has finished and no timer
+    # or I/O operation is pending (docs/MAHC_FORMAT.md #6.4).
+    while main_promise.variant != "Settled" or timers or io.pending:
+        if not next_event():
             break
 
     # M25 (docs/MAHC_FORMAT.md #4.6): once the program would otherwise end

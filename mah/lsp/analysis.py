@@ -67,7 +67,6 @@ KEYWORD_TOKENS = {
 
 BUILTIN_TOKENS = {
     TokenType.PRINT,
-    TokenType.INPUT,
     TokenType.SLEEP_ASYNC,
 }
 
@@ -196,7 +195,13 @@ BUILTIN_DOCS = {
     "(default: a single space), followed by `end` (default: a newline). "
     "`print()` alone just prints `end`.\n\n"
     "`print(a, b, ..., sep: \" \", end: \"\\n\")`",
-    "input": "Read an integer from standard input.\n\n`input()`",
+    "input": "Print `prompt` (no newline added), then read one line from "
+    "standard input and return it as a String, without its line ending. "
+    "Throws `EndOfInput` when there are no more lines. Called bare it "
+    "waits for the line; `detach input()` gives a Promise instead, so "
+    "timers and other tasks keep running while it waits. Use "
+    "`.to_number()` to get a Number. Not a keyword: a binding of your own "
+    "named `input` wins.\n\n`input(prompt = \"\") -> String throws EndOfInput`",
     "sin": "Sine of a number, in radians. Available without an import; "
     "`std:math` has the rest (`tan`, `sqrt`, `log`, ...).\n\n`sin(x)`",
     "cos": "Cosine of a number, in radians. Available without an import; "
@@ -1483,12 +1488,12 @@ def get_hover(text: str, line: int, character: int, path: Optional[str] = None) 
         value = f"**keyword** `{token.literal}`\n\n" + KEYWORD_DOCS.get(token.literal, "")
     elif (
         token.type is TokenType.ID
-        and token.literal in ("sin", "cos")
+        and token.literal in ("sin", "cos", "input")
         and _symbol_at_position(text, line, character, path) is None
         and not _is_member_name(tokens, token)
     ):
-        # M27: `sin`/`cos` aren't keywords any more; an unbound one is the
-        # built-in function.
+        # M27: `sin`/`cos` aren't keywords any more (M33: nor `input`); an
+        # unbound one is the built-in function.
         value = f"**builtin** `{token.literal}`\n\n" + BUILTIN_DOCS.get(token.literal, "")
     elif _is_test_keyword(token, tokens):
         value = f"**keyword** `test`\n\n" + KEYWORD_DOCS["test"]

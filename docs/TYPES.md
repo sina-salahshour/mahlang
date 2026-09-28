@@ -241,7 +241,8 @@ never changes the AST in a way codegen can see.
 | `detach e` | `Promise<type of e>` |
 | `p.await` | `T` for `p: Promise<T>` |
 | `sleep_async(ms)` | `ms: Number`, gives `None` |
-| `print(...)`, `sin`, `cos`, `input()` | `None`, `Number`, `Number`, `Number` |
+| `print(...)`, `sin`, `cos` | `None`, `Number`, `Number` |
+| `input(prompt = "")` | `String`, throws `EndOfInput` (M33; it was a `Number` before) |
 
 **Pending operator constraints**: when an operand's type is still an
 unbound variable, the operator records a constraint and re-checks it once

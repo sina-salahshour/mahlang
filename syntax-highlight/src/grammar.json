@@ -2286,10 +2286,6 @@
         },
         {
           "type": "SYMBOL",
-          "name": "input_call"
-        },
-        {
-          "type": "SYMBOL",
           "name": "detach_expr"
         },
         {
@@ -3149,23 +3145,6 @@
     "none_expr": {
       "type": "STRING",
       "value": "none"
-    },
-    "input_call": {
-      "type": "SEQ",
-      "members": [
-        {
-          "type": "STRING",
-          "value": "input"
-        },
-        {
-          "type": "STRING",
-          "value": "("
-        },
-        {
-          "type": "STRING",
-          "value": ")"
-        }
-      ]
     },
     "detach_expr": {
       "type": "PREC",

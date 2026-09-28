@@ -40,6 +40,11 @@ docs/MAHC_FORMAT.md #4.4.
 
 M32 bumps MINOR to 9: new natives only (`regex.find`/`find_all`, behind
 std:regex) -- docs/MAHC_FORMAT.md #4.4.
+
+M33 bumps MINOR to 10: a new native (`io.read_line`, a Promise of the next
+line of standard input, behind the async `input`) and pending I/O in the
+scheduler -- docs/MAHC_FORMAT.md #4.4/#6.4. The compiler stops emitting
+`io.input`, which VMs keep for older files.
 """
 
 from __future__ import annotations
@@ -52,7 +57,7 @@ MAGIC = b"MAHC"
 # `.mahc` extension).
 SHEBANG = b"#!/usr/bin/env -S mah runc\n"
 MAJOR = 1
-MINOR = 9
+MINOR = 10
 
 # -- section ids (docs/MAHC_FORMAT.md #3) -----------------------------------
 SEC_STRINGS = 0x01
@@ -163,6 +168,8 @@ NATIVE_ARITIES = {
     # M32 (1.9): std:regex's matcher.
     "regex.find": 3,
     "regex.find_all": 2,
+    # M33 (1.10): the async `input`.
+    "io.read_line": 1,
 }
 
 # M16: which minor version introduced each 1.1+ native -- a 1.0 file
@@ -191,6 +198,7 @@ NATIVE_SINCE_MINOR = {
     "random.below": 8,
     "regex.find": 9,
     "regex.find_all": 9,
+    "io.read_line": 10,
 }
 
 # M29: native inherent methods added after 1.0, by the minor that added

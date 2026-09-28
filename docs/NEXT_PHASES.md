@@ -223,9 +223,9 @@ native table versioning, and `std:math`; **M28 added `std:test` and
 `mah test`** ([`MAH_TEST.md`](MAH_TEST.md)), and **M29 the String
 methods**, **M30 `std:path`, `std:json` and `std:csv`**, and **M31
 `std:random` (on a PRNG shared by both VMs) and `std:collections`**, and
-**M32 `std:regex`**, which completes Phase 1. Next, per `STDLIB.md`: the
-rest of Phase 0 (handle values, the async scheduler, `input`) that
-`std:fs`, `std:process`, `std:time` and the rest depend on, each with
-Mah-level tests.
+**M32 `std:regex`**, which completes Phase 1, and **M33 an async `input`**
+(with I/O in the scheduler). Next, per `STDLIB.md`: handle values and
+callback timers (the rest of Phase 0), then `std:time`/`std:async` and
+the OS modules (`std:fs`, `std:process`), each with Mah-level tests.
 `std:test` and the `mah test` runner ([`MAH_TEST.md`](MAH_TEST.md)) come
 right after errors and `std:` resolution.
