@@ -11,7 +11,7 @@ from ..bytecode.decode import decode
 from ..bytecode.disasm import disassemble
 from ..bytecode.format import SHEBANG, MahcFormatError
 from ..bytecode.lower import line_col
-from ..code_interpreter import run_bytes
+from ..code_interpreter import ProgramExit, run_bytes
 from ..runtime_values import MahRuntimeError
 from ..compiler.codegen import Codegen, CodeBuffer
 from ..compiler.driver import _format_parser_errors as _driver_format_parser_errors
@@ -148,7 +148,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command")
 
     run_parser = subparsers.add_parser(
-        "run", help="compile and run a .mh file, or the current project's entry point"
+        "run",
+        help="compile and run a .mh file, or the current project's entry point "
+             "(program arguments go after '--': mah run FILE -- ARGS...)",
     )
     run_parser.add_argument(
         "file", nargs="?", default=None,
@@ -191,7 +193,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     init_parser.add_argument("directory", nargs="?", default=".", help="where to create the project")
 
-    runc_parser = subparsers.add_parser("runc", help="run a compiled .mahc bytecode file")
+    runc_parser = subparsers.add_parser(
+        "runc", help="run a compiled .mahc bytecode file (program arguments go after '--': mah runc FILE -- ARGS...)"
+    )
     runc_parser.add_argument("file", help="path to the .mahc file to run")
     _add_vm_argument(runc_parser)
 
@@ -278,6 +282,13 @@ def main(argv: list[str] | None = None) -> int:
         shorthand = "runc" if argv[0].endswith(".mahc") else "run"
         argv = [shorthand, *argv]
 
+    # M36: everything after the first `--` of `run`/`runc` is the program's
+    # own arguments (`process.args()`), split off before argparse sees it.
+    program_args: list[str] = []
+    if argv and argv[0] in ("run", "runc") and "--" in argv:
+        cut = argv.index("--")
+        argv, program_args = argv[:cut], argv[cut + 1:]
+
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
 
@@ -306,7 +317,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "runc" and args.vm == "rust":
         try:
-            return rust_vm.run_file(args.file)
+            return rust_vm.run_file(args.file, program_args)
         except rust_vm.RustVmNotFound as e:
             print(e, file=sys.stderr)
             return 2
@@ -314,7 +325,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "runc":
         data = read_file_bytes(args.file)
         try:
-            run_bytes(data)
+            run_bytes(data, program_args)
+        except ProgramExit as e:
+            return e.code
         except MahcFormatError as e:
             print(f"error: invalid .mahc file: {e}", file=sys.stderr)
             return 2
@@ -496,11 +509,14 @@ def main(argv: list[str] | None = None) -> int:
             data = compile_to_bytes(path=args.file, text=entry_str, target="debug", check=check_level)
             if args.vm == "rust":
                 try:
-                    return rust_vm.run_bytes(data)
+                    return rust_vm.run_bytes(data, program_args)
                 except rust_vm.RustVmNotFound as e:
                     print(e, file=sys.stderr)
                     return 2
-            run_bytes(data)
+            try:
+                run_bytes(data, program_args)
+            except ProgramExit as e:
+                return e.code
         elif args.command == "check":
             # `entry_str`/`pp` above were already computed for `args.file`
             # (the resolved entry/target file); `run_type_check` reruns the

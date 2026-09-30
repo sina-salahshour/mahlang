@@ -230,6 +230,19 @@ class ExampleTests(unittest.TestCase):
             'not_found: no such file or directory\n'
         )
 
+    def test_process(self):
+        # M36: std:process -- no program arguments, no MAH_DEMO_NAME.
+        out = run_file(example_path("process.mh"))
+        self.assertEqual(
+            out,
+            'arguments: []\n'
+            'hello, world\n'
+            'from echo - exit code 0\n'
+            'HI CHILD\n'
+            'false 2 oops\n'
+            'not_found: no-such-program-mah: no such file or directory\n'
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

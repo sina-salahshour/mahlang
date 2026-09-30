@@ -74,15 +74,15 @@ impl FileTable {
     }
 }
 
-fn ok(value: IoValue) -> IoValue {
+pub(super) fn ok(value: IoValue) -> IoValue {
     IoValue::List(vec![IoValue::Bool(true), value])
 }
 
-fn failure(kind: &str, description: &str) -> IoValue {
+pub(super) fn failure(kind: &str, description: &str) -> IoValue {
     IoValue::List(vec![IoValue::Bool(false), IoValue::Str(kind.to_string()), IoValue::Str(description.to_string())])
 }
 
-fn fixed(kind: &str) -> IoValue {
+pub(super) fn fixed(kind: &str) -> IoValue {
     let description = match kind {
         "not_found" => "no such file or directory",
         "permission_denied" => "permission denied",

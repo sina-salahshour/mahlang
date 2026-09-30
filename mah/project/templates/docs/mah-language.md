@@ -657,7 +657,7 @@ are global across all imported files and need no `export`.
 
 Standard library modules are imported as `"std:<name>"`, the same two ways
 as a file: `std:math`, `std:path`, `std:json`, `std:csv`, `std:random`,
-`std:collections`, `std:regex`, `std:time`, `std:async`, `std:fs` (and
+`std:collections`, `std:regex`, `std:time`, `std:async`, `std:fs`, `std:process` (and
 `std:test`, below).
 
 ```mah
@@ -862,6 +862,36 @@ parents = false)`, `remove(path, recursive = false)`, `rename(from, to)`,
 `copy(from, to)`, and a File's `read_line()` (`none` at the end),
 `read_all()` and `write(text)`.
 
+`std:process`: the program's arguments and environment, and running other
+programs. `args()` is what follows `--` in `mah run FILE -- ARGS...` (also
+`mah runc`); `exit(code = 0)` ends the program at once (0 to 255): output is
+flushed, but pending `defer`s don't run and no `try`/`catch` can stop it.
+`env_get(name)` is an `Option<String>`; `env_set`, `env_remove` and `env()`
+(a Map sorted by name) work on the program's own copy of the environment,
+taken at start, which the programs it runs inherit. `run(program, args = [],
+cwd = none, env = none, stdin = "")` starts a program directly (no shell) and
+waits for it; `shell(command, ...)` runs a command line through `/bin/sh -c`.
+Both give an `Output { code, stdout, stderr }` (`ok()` is `code == 0`; a
+signal N gives `128 + N`) and throw `ProcessError { kind, command,
+description }` (`"not_found"`, `"permission_denied"` or `"other"`) only when
+the program can't be started; a non-zero exit is not an error. Also `cwd()`,
+`pid()` and `platform()` (`"linux"`, `"macos"`, `"windows"`).
+
+```mah
+import process from "std:process"
+print(process.args())                            # [] (or the words after `--`)
+let port = process.env_get("PORT").unwrap_or("8080")
+print("port", port)                              # port 8080 (unless PORT is set)
+try {
+    let out = process.run("sh", ["-c", "printf hi; exit 3"], env: some(["X": "1"]))
+    print(out.ok(), out.code, out.stdout)        # false 3 hi
+    print(process.shell("echo a | tr a b").stdout.trim())   # b
+    process.run("no-such-program")
+} catch {
+    e: ProcessError => { print(e.kind) }         # not_found
+}
+```
+
 ## Errors
 
 `throw` raises a value -- any struct/enum that `impl`s the built-in `Error`
@@ -991,8 +1021,8 @@ test "not ready yet" {
 - `&&`, `||`, `+=`, `++`, ternary `?:`.
 - Type-checking trait-typed values, bounds, and the prelude's iterator methods (the checker skips these for now); classes/inheritance.
 - Variadic parameters (`*args`, `**kwargs`); only `print` takes any number of arguments.
-- Network or process access, binary file data, and every other planned
+- Network access, spawning a process to stream from, binary file data, and every other planned
   `std:` module besides `std:math`, `std:path`, `std:json`, `std:csv`,
   `std:random`, `std:collections`, `std:regex`, `std:time`, `std:async`,
-  `std:fs` and `std:test`. Time zones (`std:time` is UTC only).
+  `std:fs`, `std:process` and `std:test`. Time zones (`std:time` is UTC only).
 - `null`/`nil`/`undefined`: use `none`.

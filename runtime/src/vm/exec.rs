@@ -471,6 +471,12 @@ pub struct Vm<'p> {
     io: IoHub,
     /// M34: when this VM started, for `time.monotonic_ms`.
     started: Instant,
+    /// M36 (std:process): the program's arguments, its environment table
+    /// (a snapshot taken at start; sorted by name), and whether this is a
+    /// `mah test` run (where `exit` fails the test instead).
+    pub args: Vec<String>,
+    pub env: std::collections::BTreeMap<String, String>,
+    test_mode: bool,
 }
 
 /// M33: blocking operations run on worker threads, which only report back
@@ -572,6 +578,19 @@ impl<'p> Vm<'p> {
     /// M35: run `job` off the VM's thread; its result settles `promise`.
     pub fn submit(&mut self, promise: Rc<RefCell<PromiseData>>, job: Box<dyn FnOnce() -> super::fs::IoValue + Send>) {
         self.io.submit(promise, job);
+    }
+
+    /// M36: `process.exit` -- flush stdout and end the program at once
+    /// (pending defers, tasks, timers and I/O are abandoned). In a test run
+    /// the test fails instead, reported as `main.rs`'s `load_and_test` does.
+    pub fn exit_program(&mut self, code: i32) -> ! {
+        self.flush_stdout();
+        if self.test_mode {
+            let outcome = TestOutcome::new("failed", format!("the test called exit({code})"));
+            eprint!("{}", outcome.format());
+            std::process::exit(0);
+        }
+        std::process::exit(code);
     }
 
     /// M35: the open-file table (std:fs).
@@ -1838,21 +1857,21 @@ impl<'a> Vm<'a> {
     }
 }
 
-pub fn execute(linked: &LinkedProgram) -> RResult<()> {
-    run(linked, None).map(|_| ())
+pub fn execute(linked: &LinkedProgram, args: &[String]) -> RResult<()> {
+    run(linked, None, args).map(|_| ())
 }
 
 /// M28: run the test in main-frame slot `slot` after the file's own
 /// top-level code (docs/MAHC_FORMAT.md #6.10).
 pub fn execute_test(linked: &LinkedProgram, slot: usize) -> RResult<TestOutcome> {
-    match run(linked, Some(slot)) {
+    match run(linked, Some(slot), &[]) {
         Ok(outcome) => Ok(outcome.expect("a test run always has an outcome")),
         // The file's own top-level code failed before the test ran.
         Err(e) => Ok(TestOutcome::new("failed", e.message)),
     }
 }
 
-fn run(linked: &LinkedProgram, test_slot: Option<usize>) -> RResult<Option<TestOutcome>> {
+fn run(linked: &LinkedProgram, test_slot: Option<usize>, args: &[String]) -> RResult<Option<TestOutcome>> {
     let names = BuiltinTypeNames::new();
     let method_table = build_initial_method_table(&names);
     if linked.functions.is_empty() {
@@ -1880,6 +1899,9 @@ fn run(linked: &LinkedProgram, test_slot: Option<usize>) -> RResult<Option<TestO
         regex_cache: HashMap::new(),
         io: IoHub::new(),
         started: Instant::now(),
+        args: args.to_vec(),
+        env: super::process::snapshot_environment(),
+        test_mode: test_slot.is_some(),
     };
     vm.drive(main_task, None)?;
 

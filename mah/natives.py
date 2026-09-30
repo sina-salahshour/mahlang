@@ -542,3 +542,8 @@ NATIVES: dict[str, tuple[int, object]] = {
 from .fs_natives import NATIVES as _FS_NATIVES  # noqa: E402
 
 NATIVES.update(_FS_NATIVES)
+
+# M36 (1.13): std:process -- mah/process_natives.py.
+from .process_natives import NATIVES as _PROCESS_NATIVES  # noqa: E402
+
+NATIVES.update(_PROCESS_NATIVES)

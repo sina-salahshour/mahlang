@@ -15,7 +15,7 @@ use mah_vm::vm::{self, VmError};
 const STACK_SIZE: usize = 1 << 30;
 
 fn usage() -> ! {
-    eprintln!("usage: mah-vm --version | mah-vm run <path> | mah-vm test <path> <index>");
+    eprintln!("usage: mah-vm --version | mah-vm run <path> [args...] | mah-vm test <path> <index>");
     std::process::exit(2);
 }
 
@@ -31,7 +31,7 @@ fn read_file_bytes(path: &str) -> Result<Vec<u8>, i32> {
 
 /// `bundle::split` first, then `decode` (which itself skips a leading
 /// shebang) -- see the spec's "Loading any file" note.
-fn load_and_run(path: &str) -> i32 {
+fn load_and_run(path: &str, args: &[String]) -> i32 {
     let data = match read_file_bytes(path) {
         Ok(d) => d,
         Err(code) => return code,
@@ -44,7 +44,7 @@ fn load_and_run(path: &str) -> i32 {
             return 2;
         }
     };
-    match vm::run_bytes(mahc) {
+    match vm::run_bytes(mahc, args) {
         Ok(()) => 0,
         Err(VmError::Format(msg)) => {
             eprintln!("error: invalid .mahc file: {msg}");
@@ -105,7 +105,7 @@ fn run_cli(args: Vec<String>) -> i32 {
             let _ = std::io::stdout().flush();
             0
         }
-        [cmd, path] if cmd == "run" => load_and_run(path),
+        [cmd, path, rest @ ..] if cmd == "run" => load_and_run(path, rest),
         [cmd, path, index] if cmd == "test" => load_and_test(path, index),
         _ => usage(),
     }

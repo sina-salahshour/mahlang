@@ -1,0 +1,32 @@
+# std:process (M36): program arguments, environment variables, and running
+# other programs. Try `mah run examples/process.mh -- one "two words"`.
+
+import process from "std:process"
+
+# What follows `--` on the command line.
+print("arguments:", process.args())
+
+# Configuration from the environment, with a default.
+let name = process.env_get("MAH_DEMO_NAME").unwrap_or("world")
+print("hello,", name)
+
+fn demo() throws ProcessError {
+    # Run a program (no shell) and use what it wrote.
+    let out = process.run("echo", ["from", "echo"])
+    print(out.stdout.trim(), "- exit code", out.code)
+
+    # Variables set here are seen by the programs we run.
+    process.env_set("MAH_DEMO_NAME", "child")
+    print(process.shell("echo hi $MAH_DEMO_NAME | tr a-z A-Z").stdout.trim())
+
+    # A non-zero exit isn't an error...
+    let failed = process.run("sh", ["-c", "echo oops 1>&2; exit 2"])
+    print(failed.ok(), failed.code, failed.stderr.trim())
+
+    # ...a program that can't be started is.
+    process.run("no-such-program-mah")
+}
+
+try { demo() } catch {
+    e: ProcessError => { print(e.kind + ": " + e.message()) }
+}

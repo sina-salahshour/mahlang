@@ -406,6 +406,129 @@ def analyze_module(tokens: list) -> ModuleInfo:
     return ModuleInfo(exported=exported, top_level=top_level)
 
 
+_DECLARATION_WORDS = frozenset({"struct", "enum", "trait", "impl", "let", "export", "extern", "test"})
+
+
+def _shadowed_params(tokens: list, names) -> set:
+    """M36: indices of the `id` tokens that must NOT be renamed because they
+    are a function parameter spelled like one of the module's top-level
+    `names`: the parameter's declaration and every use of it in the
+    function's body. (Renaming them consistently would compile, but the
+    parameter's name is also what callers write in `f(name: value)`.) Only
+    `fn NAME?(params) ... { body }` with such a parameter is looked at."""
+    out: set = set()
+    count = len(tokens)
+
+    def punct(k: int, ch: str) -> bool:
+        return k < count and tokens[k].kind == "punct" and tokens[k].value == ch
+
+    for i, tok in enumerate(tokens):
+        if not (tok.kind == "id" and tok.value == "fn"):
+            continue
+        j = i + 1
+        if j < count and tokens[j].kind == "id":
+            j += 1
+        while j < count and not punct(j, "(") and not punct(j, "{") and not punct(j, ";"):
+            j += 1  # generic parameters
+            if j - i > 40:
+                break
+        if not punct(j, "("):
+            continue
+        # the parameter list
+        depth = 0
+        params: list = []
+        k = j
+        while k < count:
+            if tokens[k].kind == "punct" and tokens[k].value in "([{":
+                depth += 1
+            elif tokens[k].kind == "punct" and tokens[k].value in ")]}":
+                depth -= 1
+                if depth == 0:
+                    break
+            elif (
+                depth == 1
+                and tokens[k].kind == "id"
+                and tokens[k].value in names
+                and (punct(k - 1, "(") or punct(k - 1, ","))
+                and k + 1 < count
+                and tokens[k + 1].kind == "punct"
+                and tokens[k + 1].value in ":,)="
+            ):
+                params.append(k)
+            k += 1
+        if not params or k >= count:
+            continue
+        # the body: the first `{` after the signature, unless a declaration starts first
+        m = k + 1
+        body = None
+        while m < count:
+            t = tokens[m]
+            if punct(m, "{"):
+                body = m
+                break
+            if punct(m, "=") or punct(m, ";") or punct(m, "}"):
+                break
+            if t.kind == "id" and (
+                t.value in _DECLARATION_WORDS
+                or (t.value == "fn" and m + 1 < count and tokens[m + 1].kind == "id")
+            ):
+                break
+            m += 1
+        if body is None:
+            continue
+        pnames = {tokens[p].value for p in params}
+        out.update(params)
+        depth = 0
+        for m in range(body, count):
+            if punct(m, "{"):
+                depth += 1
+            elif punct(m, "}"):
+                depth -= 1
+                if depth == 0:
+                    break
+            elif tokens[m].kind == "id" and tokens[m].value in pnames:
+                out.add(m)
+    return out
+
+
+def _call_labels(tokens: list, names) -> set:
+    """M36: indices of the labels spelled like one of `names`: keyword-
+    argument labels in calls, `f(a, name: v)` (the callee's parameter
+    name), and field labels inside braces, `struct S { name: T }` and
+    `S { name: v }` (a field name). Neither is a reference, so neither is
+    renamed. (A shorthand field, `S { name }`, is still a reference.)"""
+    out: set = set()
+    stack: list = []  # (bracket, is_call) for every open bracket
+    count = len(tokens)
+    for i, tok in enumerate(tokens):
+        if tok.kind != "punct":
+            if (
+                tok.kind == "id"
+                and tok.value in names
+                and stack
+                and (stack[-1][0] == "{" or (stack[-1][0] == "(" and stack[-1][1]))
+                and tokens[i - 1].kind == "punct"
+                and tokens[i - 1].value in "({,"
+                and i + 1 < count
+                and tokens[i + 1].kind == "punct"
+                and tokens[i + 1].value == ":"
+            ):
+                out.add(i)
+            continue
+        if tok.value in "([{":
+            is_call = False
+            if tok.value == "(" and i > 0:
+                prev = tokens[i - 1]
+                before = tokens[i - 2] if i > 1 else None
+                is_call = (prev.kind == "id" and prev.value != "fn" and not (before is not None and before.kind == "id" and before.value == "fn")) or (
+                    prev.kind == "punct" and prev.value in ")]"
+                )
+            stack.append((tok.value, is_call))
+        elif tok.value in ")]}" and stack:
+            stack.pop()
+    return out
+
+
 def _is_extern_fn(tokens: list, i: int) -> bool:
     """M27: whether tokens[i:] start `extern fn` (`extern` is contextual)."""
     return (
@@ -533,6 +656,18 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
         if not is_entry:
             for name in info.top_level:
                 name_rewrite[name] = module_name(idx, name)
+        # M36: ids that spell a rewritten name but aren't references to it
+        # (parameters, keyword-argument labels) -- recomputed when a flat
+        # import adds names.
+        shadowed: set = set()
+
+        def recompute_shadowed() -> None:
+            nonlocal shadowed
+            shadowed = (
+                _shadowed_params(tokens, name_rewrite) | _call_labels(tokens, name_rewrite) if name_rewrite else set()
+            )
+
+        recompute_shadowed()
 
         # Filled as import directives are encountered (imports precede use):
         #   flat alias:      bare name -> mangled name in target module
@@ -645,6 +780,7 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
                                 name_rewrite.setdefault(
                                     name, module_name(target_idx, name)
                                 )
+                            recompute_shadowed()
                         # Separator so tokens can't merge across the splice.
                         emit("\n", fpath, str_tok.start, 0, root_record)
 
@@ -740,7 +876,13 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
                 and tokens[i - 1].value == "fn"
             )
 
-            if tok.kind == "id" and tok.value in name_rewrite and not prev_is_dot and not prev_is_method_decl_name:
+            if (
+                tok.kind == "id"
+                and tok.value in name_rewrite
+                and not prev_is_dot
+                and not prev_is_method_decl_name
+                and i not in shadowed
+            ):
                 emit_gap(tok.start)
                 emit(name_rewrite[tok.value], fpath, tok.start, len(tok.value), root)
                 cursor = tok.end

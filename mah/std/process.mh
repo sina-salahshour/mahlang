@@ -1,0 +1,129 @@
+# std:process -- the running program and the programs it runs
+# (docs/STDLIB.md).
+#
+#   import process from "std:process"
+#   let port = process.env_get("PORT").unwrap_or("8080")
+#   for let arg in process.args() { ... }     # after `mah run FILE --`
+#   let out = process.run("git", ["status", "--short"])
+#   if out.ok() { print(out.stdout) } else { print(out.stderr) }
+#   let sorted = process.shell("sort | uniq", stdin: "b\na\nb\n")
+#   process.exit(2)                           # ends the program at once
+#
+# `run` starts a program directly (no shell) and waits for it, off the
+# program's own thread like std:fs; a program that can't be started throws
+# ProcessError, while one that exits non-zero is just an Output with that
+# `code`. The environment functions work on the VM's own copy of the
+# environment, taken when the program started: `env_set` never changes the
+# real one, but children started by `run` see it.
+
+extern fn native_args() -> Vector<String> = "process.args"
+extern fn native_exit(code: Number) -> Never = "process.exit"
+extern fn native_env_get(name: String) -> Unknown = "process.env_get"
+extern fn native_env_set(name: String, value: String) = "process.env_set"
+extern fn native_env_remove(name: String) = "process.env_remove"
+extern fn native_env_all() -> Map<String, String> = "process.env_all"
+extern fn native_cwd() -> String = "process.cwd"
+extern fn native_pid() -> Number = "process.pid"
+extern fn native_platform() -> String = "process.platform"
+extern fn native_run(
+    program: String,
+    args: Vector<String>,
+    cwd: Unknown,
+    env: Unknown,
+    stdin: String
+) -> Promise<Vector<Unknown>> = "process.run"
+
+# A program that couldn't be started: `kind` is "not_found",
+# "permission_denied" or "other"; `command` the program's name (for
+# `shell`, the command line).
+struct ProcessError { kind: String, command: String, description: String }
+
+impl Error for ProcessError {
+    fn message(self) -> String { self.command + ": " + self.description }
+}
+
+# What a finished program left: its exit code (128 plus the signal number if
+# a signal killed it) and what it wrote, decoded as UTF-8 (invalid bytes
+# become U+FFFD).
+struct Output { code: Number, stdout: String, stderr: String }
+
+impl Output {
+    # Whether it exited with code 0.
+    fn ok(self) -> Bool { self.code == 0 }
+}
+
+# The program's arguments: what follows `--` in `mah run FILE -- ARGS`.
+export fn args() -> Vector<String> { native_args() }
+
+# Ends the program at once with this exit code (0 to 255): output written so
+# far is flushed, but pending `defer`s don't run, detached tasks, timers and
+# I/O are abandoned, and no `try`/`catch` can intercept it.
+export fn exit(code: Number = 0) -> Never { native_exit(code) }
+
+# The environment variable's value, or `none` if it isn't set.
+export fn env_get(name: String) -> Option<String> {
+    let value = native_env_get(name)
+    if value == none { none } else { some(value) }
+}
+
+# Sets a variable (for this program and the programs it runs).
+export fn env_set(name: String, value: String) { native_env_set(name, value) }
+
+# Removes a variable (nothing happens if it isn't set).
+export fn env_remove(name: String) { native_env_remove(name) }
+
+# Every variable, sorted by name.
+export fn env() -> Map<String, String> { native_env_all() }
+
+# The current directory, as an absolute path.
+export fn cwd() -> String { native_cwd() }
+
+# This program's process id.
+export fn pid() -> Number { native_pid() }
+
+# "linux", "macos", "windows", or else the operating system's own name.
+export fn platform() -> String { native_platform() }
+
+fn start(
+    program: String,
+    args: Vector<String>,
+    cwd: Option<String>,
+    env: Option<Map<String, String>>,
+    stdin: String,
+    command: String
+) -> Output throws ProcessError {
+    let r = native_run(program, args, cwd.unwrap_or(none), env.unwrap_or(none), stdin).await
+    if r[0] {
+        let o = r[1]
+        return Output { code: o[0], stdout: o[1], stderr: o[2] }
+    }
+    throw ProcessError { kind: r[1], command: command, description: r[2] }
+}
+
+# Runs `program` (looked up in PATH, no shell) with `args`, waits for it and
+# returns what it wrote. `cwd` is its directory (default: this program's),
+# `env` variables added to the environment it gets, `stdin` its input.
+export fn run(
+    program: String,
+    args: Vector<String> = [],
+    cwd: Option<String> = none,
+    env: Option<Map<String, String>> = none,
+    stdin: String = ""
+) -> Output throws ProcessError {
+    start(program, args, cwd, env, stdin, program)
+}
+
+# Runs a command line with the system shell (`/bin/sh -c`, or `cmd /C` on
+# Windows). A command the shell can't find is just a non-zero exit code.
+export fn shell(
+    command: String,
+    cwd: Option<String> = none,
+    env: Option<Map<String, String>> = none,
+    stdin: String = ""
+) -> Output throws ProcessError {
+    if platform() == "windows" {
+        start("cmd", ["/C", command], cwd, env, stdin, command)
+    } else {
+        start("/bin/sh", ["-c", command], cwd, env, stdin, command)
+    }
+}

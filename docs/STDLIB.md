@@ -9,7 +9,7 @@ first module; **M29 landed the String methods** (Phase 1's first item);
 **M33 made `input` async** (Phase 0 step 7, and step 4's I/O half);
 **M34 landed `std:time` and `std:async`** (Phase 2, with step 4's
 cancellable timers); **M35 landed `std:fs`** (with Phase 0 step 3,
-handles). The rest is design. Agreed 2026-09-28. Depends on
+handles); **M36 landed `std:process`**. The rest is design. Agreed 2026-09-28. Depends on
 [`ERRORS.md`](ERRORS.md) (every failure below is a thrown, typed error)
 and on the static checker in [`TYPES.md`](TYPES.md).
 
@@ -526,14 +526,45 @@ arithmetic, `format(time, pattern)` and `parse(text, pattern)`.
 
 ### `std:process`
 
-- `run(cmd, args = [], cwd =, env =, stdin =)` takes an argv list (no
-  shell) and returns `{ code, stdout, stderr }`. Throws `ProcessError`
-  (for failing to start; a non-zero exit is just `code`).
-- `shell(cmdline)`: runs through the system shell. Named separately so
-  shell use is explicit.
-- `spawn(...)` returns a `Process` handle for streaming.
-- `args()`, `exit(code)`, `env_get(name)`, `env_set(name, value)`,
-  `cwd()`.
+✅ **Landed (M36)**, in `mah/std/process.mh`, with these decisions:
+
+- **Surface**: `args()`, `exit(code = 0)`, `env_get(name)` (an
+  `Option<String>`), `env_set`, `env_remove`, `env()` (a Map, sorted by
+  name), `cwd()`, `pid()`, `platform()`, `run(program, args = [], cwd =
+  none, env = none, stdin = "")` and `shell(command, cwd =, env =, stdin
+  =)`, both returning `Output { code, stdout, stderr }` with `ok()`.
+  Ten 1.13 `process.*` natives; `run` is async like std:fs's (a worker
+  thread, awaited by the std module), the rest are synchronous.
+- **The environment is a table per VM run**: a snapshot of the process
+  environment taken at start (entries that aren't valid Unicode are
+  skipped). `env_get`/`env_set`/`env_remove`/`env` touch only that table,
+  never the real environment, and the programs `run` starts get exactly
+  the table plus the call's `env` overrides. Names must be non-empty
+  Strings without `=` or NUL, values Strings without NUL (else an
+  ArgumentError, with the same text on both VMs).
+- **`run` starts a program directly** (no shell, found through `PATH`)
+  with its input piped in (always, even for `""`) and its output
+  captured. Failing to start throws `ProcessError { kind, command,
+  description }` (`not_found`, `permission_denied` or `other`); a non-zero
+  exit is just a `code`. A child killed by signal N has code `128 + N`.
+  stdout and stderr are decoded as UTF-8 leniently (invalid bytes become
+  U+FFFD).
+- **`shell(command)`** is `run("/bin/sh", ["-c", command])`, or `cmd /C`
+  on Windows, and a failure to start names the command line. It is a
+  separate function so shell use is explicit; a command the shell can't
+  find is just exit code 127.
+- **`exit(code)`** takes a whole number from 0 to 255. It ends the
+  program at once: stdout is flushed, but pending `defer`s don't run,
+  detached tasks, timers and pending I/O are abandoned, and no Mah
+  `try`/`catch` can intercept it. In a `mah test` run it fails the test
+  ("the test called exit(N)") instead of ending the run.
+- **Program arguments** are what follows the first `--` of `mah run [FILE]
+  -- ARGS...` or `mah runc FILE -- ARGS...` (and `mah-vm run PATH
+  [ARGS...]`, and a self-contained executable's own command line); `mah
+  test` passes none.
+- **Later**: `spawn(...)` (a `Process` handle for streaming), signals and
+  a way to change the working directory wait for a `Bytes` type and the
+  network work.
 
 ## Phase 4: network
 

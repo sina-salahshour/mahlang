@@ -25,11 +25,12 @@ Run these from the project directory (or any subdirectory):
 ```sh
 mah run                     # compile and run the entry point
 mah run other.mh            # run a specific file instead
+mah run -- a "b c"          # everything after `--` is the program's arguments (std:process `args()`)
 mah build                   # write every [[target]] from mah-project.toml
 mah build --target release  # write one target
 mah check                   # run the static type checker and print its diagnostics
 mah test                    # run every test (*.test.mh); `mah test NAME` runs the matching ones
-mah runc build/{{name}}.mahc   # run a compiled file (or just ./build/{{name}}.mahc)
+mah runc build/{{name}}.mahc   # run a compiled file (or just ./build/{{name}}.mahc; `-- ARGS` works here too)
 mah dis build/{{name}}.mahc    # show the compiled bytecode
 mah run --vm rust           # run on the native Rust runtime (if it's installed)
 mah build --self-contained  # make every target standalone (runs without mah, same OS/CPU)

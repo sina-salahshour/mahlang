@@ -554,5 +554,15 @@ pub fn call_native(vm: &mut Vm, native: NativeFn, args: &[Value]) -> Result<Valu
         NativeFn::FsReadAll => super::fs::read_all(vm, args),
         NativeFn::FsWrite => super::fs::write(vm, args),
         NativeFn::FsClose => super::fs::close(vm, args),
+        NativeFn::ProcessArgs => super::process::args(vm),
+        NativeFn::ProcessExit => super::process::exit(vm, args),
+        NativeFn::ProcessEnvGet => super::process::env_get(vm, args),
+        NativeFn::ProcessEnvSet => super::process::env_set(vm, args),
+        NativeFn::ProcessEnvRemove => super::process::env_remove(vm, args),
+        NativeFn::ProcessEnvAll => super::process::env_all(vm),
+        NativeFn::ProcessCwd => super::process::cwd(),
+        NativeFn::ProcessPid => super::process::pid(),
+        NativeFn::ProcessPlatform => super::process::platform(),
+        NativeFn::ProcessRun => super::process::run(vm, args),
     }
 }

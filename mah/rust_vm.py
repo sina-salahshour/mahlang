@@ -83,22 +83,23 @@ def check_supports(vm: str, max_minor: int, needed_minor: int) -> None:
         )
 
 
-def run_file(path: str) -> int:
+def run_file(path: str, args=()) -> int:
     """Run a `.mahc` file (or bundle) with the Rust VM, sharing this
     process's stdin/stdout/stderr; returns its exit code (0, 1 for a
-    runtime error, 2 for an invalid file -- the same codes `mah runc` uses)."""
+    runtime error, 2 for an invalid file -- the same codes `mah runc` uses).
+    `args` are the program's arguments (`process.args()`)."""
     vm = find_vm()
     sys.stdout.flush()
     sys.stderr.flush()
-    return subprocess.run([vm, "run", path]).returncode
+    return subprocess.run([vm, "run", path, *args]).returncode
 
 
-def run_bytes(data: bytes) -> int:
+def run_bytes(data: bytes, args=()) -> int:
     """`run_file` for bytes compiled in memory (`mah run --vm rust`)."""
     fd, path = tempfile.mkstemp(suffix=".mahc", prefix="mah-")
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
-        return run_file(path)
+        return run_file(path, args)
     finally:
         os.unlink(path)

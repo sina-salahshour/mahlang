@@ -60,6 +60,7 @@ from .bytecode.format import MahcFormatError
 from .bytecode.program import Program
 from . import string_methods
 from .natives import NATIVES, NativeContext
+from .process_natives import snapshot_environment
 from .test_outcome import TestOutcome
 from .runtime_values import (
     BUILTIN_TYPE_NAMES,
@@ -841,16 +842,29 @@ def _write(frame: Frame, addr, value) -> None:
 # Execution
 # ---------------------------------------------------------------------------
 
-def run_bytes(data: bytes):
+def run_bytes(data: bytes, args=()):
     """Decode `data` as a `.mahc` file and run it -- `decode` performs the
     full structural validation of docs/MAHC_FORMAT.md #3/#4 before this
-    even gets called."""
-    return run_program(decode(data))
+    even gets called. M36: `args` are the program's arguments
+    (`process.args()`)."""
+    return run_program(decode(data), args)
 
 
-def run_program(program: Program):
+def run_program(program: Program, args=()):
     linked = _link(program)  # raises MahcFormatError for an unsupported native, before anything runs
-    _execute(linked)
+    _execute(linked, args=args)
+
+
+class ProgramExit(BaseException):
+    """M36: `process.exit(code)` -- ends the program at once. A
+    `BaseException`, so nothing in the step loop (which wraps every
+    `Exception` as a Mah RuntimeError) or a Mah `try`/`catch` can catch it;
+    pending `defer`s, timers and I/O are abandoned. The CLI turns it into
+    the process's exit status, `run_test_bytes` into a failed test."""
+
+    def __init__(self, code: int):
+        super().__init__(code)
+        self.code = code
 
 
 class _Timeout(BaseException):
@@ -874,6 +888,8 @@ def run_test_bytes(data: bytes, index: int, timeout: float | None = None) -> Tes
         return _execute(linked, test_slot=program.tests[index].slot, deadline=deadline)
     except _Timeout:
         return TestOutcome("timeout", f"took longer than {timeout:g}s")
+    except ProgramExit as exit_:
+        return TestOutcome("failed", f"the test called exit({exit_.code})")
     except MahRuntimeError as exc:
         # The file's own top-level code failed before the test ran.
         return TestOutcome("failed", str(exc))
@@ -910,7 +926,11 @@ class _IoHub:
     while any is. Standard input has one reader thread, so lines are handed
     out in the order `input` asked for them."""
 
-    def __init__(self):
+    def __init__(self, args=()):
+        # M36 (std:process): the program's arguments, and its environment
+        # table -- a snapshot of the process's environment (mah/process_natives.py).
+        self.args = list(args)
+        self.env = snapshot_environment()
         # (promise, "line", the line or None at end of input) from the stdin
         # reader, or (promise, "value", a Mah value) from a job (M35)
         self.done: queue.Queue = queue.Queue()
@@ -976,8 +996,8 @@ class _IoHub:
         self.files.clear()
 
 
-def _execute(linked: LinkedProgram, test_slot: int | None = None, deadline: float | None = None):
-    io = _IoHub()
+def _execute(linked: LinkedProgram, test_slot: int | None = None, deadline: float | None = None, args=()):
+    io = _IoHub(args)
     try:
         return _execute_with(linked, io, test_slot, deadline)
     finally:

@@ -90,7 +90,7 @@ if [ ! -x "$vm" ]; then
         exit 126
     }}
 fi
-exec "$vm" run "$0"
+exec "$vm" run "$0" "$@"
 exit 127
 """.encode("ascii")
 

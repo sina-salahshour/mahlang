@@ -501,6 +501,22 @@ print(try { fs.remove(dir + "/sub") } catch { e: FsError => { e.kind } }, try { 
 fs.remove(dir, recursive: true)
 print(fs.exists(dir))
 """, b""),
+    # M36: std:process -- running programs, the environment table, errors.
+    ("std_process", """
+import process from "std:process"
+let o = process.run("sh", ["-c", "printf out; printf err 1>&2; exit 3"])
+print(o.code, o.stdout, o.stderr, o.ok())
+print(process.run("cat", stdin: "in\\n").stdout, process.args().len())
+process.env_set("MAH_DIFF", "1")
+print(process.env_get("MAH_DIFF").unwrap(), process.env_get("MAH_DIFF_NOPE") == none)
+print(process.shell("printf %s \\"$MAH_DIFF$MAH_EXTRA\\"", env: some(["MAH_EXTRA": "x"])).stdout)
+process.env_remove("MAH_DIFF")
+print(process.shell("printf %s \\"[$MAH_DIFF]\\"").stdout, process.env().keys().len() > 0)
+print(process.run("sh", ["-c", "kill -9 $$"]).code, process.shell("echo a | tr a b").stdout.trim())
+print(try { process.run("definitely-not-a-program-mah") } catch { e: ProcessError => { e.kind + " " + e.message() } })
+print(try { process.env_set("A=B", "x") } catch { e: RuntimeError => { e.message() } })
+process.exit(3)
+""", b""),
     ("std_csv", """
 import csv from "std:csv"
 print(csv.parse("a,\\"b,c\\"\\r\\n\\n\\"q\\"\\"x\\",\\n"), csv.parse_records("n,v\\nx,1\\n"))

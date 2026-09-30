@@ -74,6 +74,17 @@ pub enum NativeFn {
     FsReadAll,
     FsWrite,
     FsClose,
+    /// M36 (1.13): std:process (runtime/src/vm/process.rs).
+    ProcessArgs,
+    ProcessExit,
+    ProcessEnvGet,
+    ProcessEnvSet,
+    ProcessEnvRemove,
+    ProcessEnvAll,
+    ProcessCwd,
+    ProcessPid,
+    ProcessPlatform,
+    ProcessRun,
 }
 
 /// Whether this VM implements a native of that name (any arity) -- for
@@ -132,6 +143,16 @@ fn native_by_name(name: &str) -> Option<(u64, NativeFn)> {
         "fs.read_all" => Some((1, NativeFn::FsReadAll)),
         "fs.write" => Some((2, NativeFn::FsWrite)),
         "fs.close" => Some((1, NativeFn::FsClose)),
+        "process.args" => Some((0, NativeFn::ProcessArgs)),
+        "process.exit" => Some((1, NativeFn::ProcessExit)),
+        "process.env_get" => Some((1, NativeFn::ProcessEnvGet)),
+        "process.env_set" => Some((2, NativeFn::ProcessEnvSet)),
+        "process.env_remove" => Some((1, NativeFn::ProcessEnvRemove)),
+        "process.env_all" => Some((0, NativeFn::ProcessEnvAll)),
+        "process.cwd" => Some((0, NativeFn::ProcessCwd)),
+        "process.pid" => Some((0, NativeFn::ProcessPid)),
+        "process.platform" => Some((0, NativeFn::ProcessPlatform)),
+        "process.run" => Some((5, NativeFn::ProcessRun)),
         _ => None,
     }
 }

@@ -13,6 +13,7 @@ mod fs;
 mod link;
 mod methods;
 mod natives;
+mod process;
 mod value;
 
 pub use error::RuntimeError;
@@ -43,10 +44,10 @@ impl From<RuntimeError> for VmError {
 }
 
 /// Decode `data` as a `.mahc` file (including a possible leading shebang)
-/// and run it.
-pub fn run_bytes(data: &[u8]) -> Result<(), VmError> {
+/// and run it. M36: `args` are the program's arguments (`process.args()`).
+pub fn run_bytes(data: &[u8], args: &[String]) -> Result<(), VmError> {
     let program = decode::decode(data)?;
-    run_program(&program)
+    run_program(&program, args)
 }
 
 /// M28 (docs/MAHC_FORMAT.md #6.10): run test number `index` of a `mah
@@ -63,8 +64,8 @@ pub fn run_test_bytes(data: &[u8], index: usize) -> Result<exec::TestOutcome, Vm
 }
 
 /// Link and run an already-decoded `Program`.
-pub fn run_program(program: &decode::Program) -> Result<(), VmError> {
+pub fn run_program(program: &decode::Program, args: &[String]) -> Result<(), VmError> {
     let linked = link::link(program)?; // raises a format error for an unsupported native, before anything runs
-    exec::execute(&linked)?;
+    exec::execute(&linked, args)?;
     Ok(())
 }

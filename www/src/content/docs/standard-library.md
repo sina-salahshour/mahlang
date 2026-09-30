@@ -23,9 +23,9 @@ and in your editor, hover and go-to-definition work on its functions like
 on your own (showing locations like `std:math#20:9`).
 
 So far there are `std:math`, `std:path`, `std:json`, `std:csv`,
-`std:random`, `std:collections`, `std:regex`, `std:time`, `std:async`
-and `std:fs` (and `std:test`, see [Testing](/docs/testing)). The rest of
-the plan (process, sockets, http) is in `docs/STDLIB.md` in the
+`std:random`, `std:collections`, `std:regex`, `std:time`, `std:async`,
+`std:fs` and `std:process` (and `std:test`, see [Testing](/docs/testing)).
+The rest of the plan (sockets, http) is in `docs/STDLIB.md` in the
 repository.
 
 ## `std:math`
@@ -423,6 +423,52 @@ Errors are an `FsError` whose `kind` is `"not_found"`,
 a `description`. Text is UTF-8, read and written exactly: no newline
 conversion. Binary data waits for a future `Bytes` type.
 
+## `std:process`
+
+The program's arguments and environment, and running other programs.
+`run` waits for the program like any call, but the work happens off your
+program's thread, so `detach process.run(...)` lets other tasks and timers
+run meanwhile.
+
+```mah
+import process from "std:process"
+
+print(process.args())                        # what follows `--`: mah run app.mh -- a "b c"
+let port = process.env_get("PORT").unwrap_or("8080")
+
+try {
+    let out = process.run("git", ["status", "--short"], cwd: some("."))
+    if out.ok() { print(out.stdout) } else { print("git said:", out.stderr) }
+    print(process.shell("ls | wc -l").stdout.trim())
+    process.run("no-such-program")
+} catch {
+    e: ProcessError => { print(e.kind, "-", e.message()) }   # not_found - no-such-program: no such file ...
+}
+```
+
+| Function | |
+|---|---|
+| `args()` | the program's arguments: everything after `--` in `mah run FILE -- ARGS...` (also `mah runc`) |
+| `exit(code = 0)` | ends the program at once (0 to 255); output is flushed, but `defer`s don't run and no `try`/`catch` can stop it |
+| `env_get(name)` | `some(value)` or `none` |
+| `env_set(name, value)`, `env_remove(name)` | change the program's own copy of the environment |
+| `env()` | a Map of every variable, sorted by name |
+| `cwd()`, `pid()`, `platform()` | the current directory; the process id; "linux", "macos" or "windows" |
+| `run(program, args = [], cwd = none, env = none, stdin = "")` | starts the program directly (no shell, found through `PATH`) and returns an `Output { code, stdout, stderr }` |
+| `shell(command, cwd = none, env = none, stdin = "")` | `run` of the command line through `/bin/sh -c` (`cmd /C` on Windows) |
+
+`Output.ok()` is `code == 0`. A non-zero exit is not an error, and a
+program killed by signal N has the code `128 + N`. Output is decoded as
+UTF-8, with invalid bytes replaced by U+FFFD. Only a program that can't be
+started throws a `ProcessError` whose `kind` is `"not_found"`,
+`"permission_denied"` or `"other"`, plus the `command` and a `description`.
+
+The environment functions work on a copy taken when the program starts:
+`env_set` never changes the real environment, but the programs `run`
+starts get the copy (plus the call's `env` entries). Names must be
+non-empty and contain no `=`; names and values can't contain a NUL
+character.
+
 ## How it's built
 
 Each module is a Mah file inside the `mah` package (`mah/std/math.mh`).
@@ -438,8 +484,8 @@ export extern fn tan(x: Number) -> Number = "math.tan"
 `std:csv` are Mah too, over a handful of natives for reading a value's
 type and fields and a String's characters. `std:random`'s generator is a
 small native, specified bit for bit so every runtime computes the same
-numbers. `std:fs` hands its work to a thread and settles a Promise
-when it's done; an open file is an id in a table, wrapped in a `File`
+numbers. `std:fs` and `std:process`'s `run` hand their work to a thread and settle
+a Promise when it's done; an open file is an id in a table, wrapped in a `File`
 struct. `std:regex` parses each pattern in Mah and hands the runtime a
 form that Python's `re` and Rust's `regex` crate read the same way.
 

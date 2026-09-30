@@ -12,6 +12,8 @@ same messages and exit codes, and reject the same malformed files.
 make vm                                   # cargo build --release -> runtime/target/release/mah-vm
 mah run --vm rust prog.mh                 # compile with Python, run on mah-vm
 mah runc --vm rust prog.mahc              # run compiled bytecode on mah-vm
+mah run --vm rust prog.mh -- a "b c"      # program arguments (process.args()) go after `--`
+mah-vm run prog.mahc a "b c"              # the same, straight on the VM: every token after PATH
 mah build --self-contained prog.mh        # one executable file with mah-vm inside
 make test-rust                            # the whole test suite, with programs run on mah-vm
 ```
@@ -33,8 +35,9 @@ self-contained = true    # this target is a standalone executable
 (`[run] vm` applies to project-mode `mah run`, not to `mah run some/file.mh`,
 which ignores the manifest like all single-file commands.)
 
-`mah-vm` itself is small: `mah-vm run FILE` runs a `.mahc` file (plain,
-shebang'd, or a self-contained bundle), `mah-vm test FILE INDEX` runs one
+`mah-vm` itself is small: `mah-vm run FILE [ARGS...]` runs a `.mahc` file (plain,
+shebang'd, or a self-contained bundle) whose program arguments
+(`std:process`'s `args()`) are every token after FILE; `mah-vm test FILE INDEX` runs one
 test of a `mah test` build and prints its outcome on stderr (M28,
 docs/MAHC_FORMAT.md §6.10; `mah test --vm rust` drives it), and `mah-vm
 --version` prints `mah-vm 0.2.0 (x86_64-linux) bytecode 1.7` -- the last
@@ -52,7 +55,7 @@ that fails with "unsupported minor version" when run.
 | file | what |
 |---|---|
 | `runtime/src/decode.rs` | port of `mah/bytecode/decode.py`, same validation and messages |
-| `runtime/src/vm/` | port of `mah/code_interpreter.py` (`exec.rs`: the step loop, scheduler and I/O hub; `link.rs`; `value.rs`) + `mah/natives.py` (`natives.rs`), `mah/string_methods.py` (`methods.rs`) and `mah/fs_natives.py` (`fs.rs`, std:fs's natives and the open-file table) |
+| `runtime/src/vm/` | port of `mah/code_interpreter.py` (`exec.rs`: the step loop, scheduler and I/O hub; `link.rs`; `value.rs`) + `mah/natives.py` (`natives.rs`), `mah/string_methods.py` (`methods.rs`), `mah/fs_natives.py` (`fs.rs`, std:fs's natives and the open-file table) and `mah/process_natives.py` (`process.rs`, std:process's natives) |
 | `runtime/src/decimal.rs`, `bigint.rs` | Mah's `Number` (below) |
 | `runtime/src/bundle.rs` | reads self-contained bundles (below) |
 | `runtime/src/main.rs` | the `mah-vm` command |
@@ -117,7 +120,7 @@ and the bytecode appended (no Rust build step involved):
 On first run the script checks the platform (`uname`), copies the runtime
 out of itself with `tail -c | head -c` into
 `${XDG_CACHE_HOME:-~/.cache}/mah/vm/<hash>/mah-vm` (falling back to
-`$TMPDIR`), and then `exec`s `mah-vm run <the file itself>`. Later runs
+`$TMPDIR`), and then `exec`s `mah-vm run <the file itself> "$@"`, passing the program's own arguments on. Later runs
 reuse the cached copy, and programs built with the same runtime share it.
 The runtime finds the bytecode through the header.
 

@@ -665,5 +665,225 @@ class FsTests(unittest.TestCase):
         self.assertEqual([d[1] for d in diagnostics if d[0] == "unhandled"], ["Unhandled error: FsError"])
 
 
+class ProcessTests(unittest.TestCase):
+    """M36: std:process -- behavior is covered by mah/std/process.test.mh on
+    both VMs; this covers what needs a real command line (program
+    arguments, the exit status, `exit` inside a test), the natives'
+    argument errors, the environment snapshot, and the checker."""
+
+    _repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.dir = self.td.name
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    def _write(self, name: str, text: str) -> str:
+        path = os.path.join(self.dir, name)
+        with open(path, "w") as f:
+            f.write(text)
+        return path
+
+    def _mah(self, *args):
+        import subprocess
+
+        return subprocess.run(
+            [sys.executable, "-m", "mah", *args], cwd=self._repo, capture_output=True, text=True, timeout=60
+        )
+
+    def _vms(self):
+        """The VMs to try: Python always, Rust when it can be found."""
+        from mah import rust_vm
+
+        vms = ["python"]
+        try:
+            rust_vm.find_vm()
+            vms.append("rust")
+        except rust_vm.RustVmNotFound:
+            pass
+        return vms
+
+    def _proc(self, body: str) -> str:
+        return run_source('import process from "std:process"\n' + body)
+
+    def test_bytecode_minor(self):
+        from mah.bytecode.decode import decode
+
+        data = compile_bytes(text='import process from "std:process"\nprint(process.pid())')
+        self.assertEqual(decode(data).minor, 13)
+
+    def test_args(self):
+        prog = self._write("prog.mh", 'import process from "std:process"\nprint(process.args())\n')
+        for vm in self._vms():
+            with self.subTest(vm=vm):
+                r = self._mah("run", prog, "--vm", vm, "--", "a", "b c", "--vm")
+                self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "[a, b c, --vm]\n", ""))
+                # `--vm` after FILE and before `--` still belongs to mah
+                r = self._mah("run", "--vm", vm, prog, "--", "x")
+                self.assertEqual((r.returncode, r.stdout), (0, "[x]\n"))
+                r = self._mah("run", prog, "--vm", vm)
+                self.assertEqual((r.returncode, r.stdout), (0, "[]\n"))
+
+    def test_args_of_runc_and_the_shorthand(self):
+        prog = self._write("prog.mh", 'import process from "std:process"\nprint(process.args())\n')
+        mahc = os.path.join(self.dir, "prog.mahc")
+        self.assertEqual(self._mah("build", prog, "-o", mahc).returncode, 0)
+        for vm in self._vms():
+            with self.subTest(vm=vm):
+                r = self._mah("runc", mahc, "--vm", vm, "--", "x")
+                self.assertEqual((r.returncode, r.stdout), (0, "[x]\n"))
+                r = self._mah("runc", mahc, "--vm", vm)
+                self.assertEqual((r.returncode, r.stdout), (0, "[]\n"))
+        self.assertEqual(self._mah(prog, "--", "z", "--").stdout, "[z, --]\n")
+        self.assertEqual(self._mah(mahc, "--", "q").stdout, "[q]\n")
+
+    def test_the_bundle_stub_passes_its_arguments_on(self):
+        from mah.bytecode import bundle
+
+        data = bundle.build(b"vm", "0.1.0", "x86_64-linux", b"mahc")
+        self.assertIn(b'exec "$vm" run "$0" "$@"\n', data)
+
+    def test_a_self_contained_executable_gets_its_arguments(self):
+        import subprocess
+
+        if "rust" not in self._vms():
+            self.skipTest("mah-vm isn't built")
+        prog = self._write("prog.mh", 'import process from "std:process"\nprint(process.args())\n')
+        out = os.path.join(self.dir, "prog")
+        self.assertEqual(self._mah("build", "--self-contained", prog, "-o", out).returncode, 0)
+        env = {"PATH": "/usr/bin:/bin", "XDG_CACHE_HOME": os.path.join(self.dir, "cache"), "HOME": self.dir}
+        r = subprocess.run([out, "a", "b c"], env=env, capture_output=True, text=True)
+        self.assertEqual((r.returncode, r.stdout), (0, "[a, b c]\n"))
+
+    def test_exit_ends_the_program_at_once(self):
+        prog = self._write(
+            "exit.mh",
+            'import process from "std:process"\n'
+            "fn f() {\n"
+            '    defer { print("deferred") }\n'
+            "    try {\n"
+            '        print("a")\n'
+            "        process.exit(3)\n"
+            '        print("not reached")\n'
+            "    } catch {\n"
+            '        e: RuntimeError => { print("caught") }\n'
+            "    }\n"
+            "}\n"
+            "f()\n"
+            'print("after")\n',
+        )
+        for vm in self._vms():
+            with self.subTest(vm=vm):
+                r = self._mah("run", prog, "--vm", vm)
+                self.assertEqual((r.returncode, r.stdout, r.stderr), (3, "a\n", ""))
+                mahc = os.path.join(self.dir, "exit.mahc")
+                self.assertEqual(self._mah("build", prog, "-o", mahc).returncode, 0)
+                self.assertEqual(self._mah("runc", mahc, "--vm", vm).returncode, 3)
+
+    def test_exit_defaults_to_zero_and_abandons_pending_work(self):
+        prog = self._write(
+            "exit0.mh",
+            'import process from "std:process"\nimport async from "std:async"\n'
+            'detach process.run("sleep", ["2"])\nasync.set_timeout(fn() { print("timer") }, 10)\n'
+            'print("x")\nprocess.exit()\n',
+        )
+        for vm in self._vms():
+            with self.subTest(vm=vm):
+                r = self._mah("run", prog, "--vm", vm)
+                self.assertEqual((r.returncode, r.stdout), (0, "x\n"), r.stderr)
+
+    def test_exit_in_a_test_fails_it(self):
+        path = self._write(
+            "exit.test.mh",
+            'import "std:test"\nimport process from "std:process"\n'
+            'test "leaves" { print("before"); process.exit(2) }\n'
+            'test "fine" { assert(true) }\n',
+        )
+        for vm in self._vms():
+            with self.subTest(vm=vm):
+                r = self._mah("test", "--file", path, "--vm", vm)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn("the test called exit(2)", r.stdout)
+                self.assertIn("1 passed; 1 failed", r.stdout)
+
+    def test_exit_argument_errors(self):
+        for value in ("256", "1.5", "-1"):
+            with self.subTest(code=value):
+                _out, exc = run_source_and_error('import process from "std:process"\nprocess.exit(' + value + ")")
+                self.assertIsInstance(exc, MahRuntimeError)
+                self.assertIn("exit code must be a whole number from 0 to 255", str(exc))
+
+    def test_argument_errors(self):
+        for body, message in [
+            ('process.env_set("", "x")', "env_set: name must not be empty"),
+            ('process.env_set("A=B", "x")', 'env_set: name must not contain "="'),
+            ('process.env_get("A\\x00")', "env_get: name must not contain a NUL character"),
+            ('process.env_remove("")', "env_remove: name must not be empty"),
+            ('process.env_set("A", "x\\x00")', "env_set: value must not contain a NUL character"),
+            ('let u: Unknown = 1\nprocess.env_get(u)', "env_get: name must be a String, got Number"),
+            ('process.run("")', "run: program must not be empty"),
+            ('process.run("a\\x00")', "run: program must not contain a NUL character"),
+            ('process.run("a", ["b\\x00"])', "run: argument must not contain a NUL character"),
+            ('process.run("a", cwd: some("\\x00"))', "run: cwd must not contain a NUL character"),
+            ('process.run("a", env: some(["": "x"]))', "run: env name must not be empty"),
+            ('process.run("a", env: some(["A=B": "x"]))', 'run: env name must not contain "="'),
+            ('process.run("a", env: some(["A": "\\x00"]))', "run: env value must not contain a NUL character"),
+            ('process.run("a", stdin: "\\x00")', "run: stdin must not contain a NUL character"),
+        ]:
+            with self.subTest(body=body):
+                _out, exc = run_source_and_error('import process from "std:process"\n' + body)
+                self.assertIsInstance(exc, MahRuntimeError)
+                self.assertEqual(str(exc).split(" at position")[0], message)
+
+    def test_the_environment_is_a_snapshot(self):
+        from unittest import mock
+
+        with mock.patch.dict(os.environ, {"MAH_TEST_INHERITED": "from the process"}):
+            out = self._proc(
+                'print(process.env_get("MAH_TEST_INHERITED").unwrap())\n'
+                'process.env_set("MAH_TEST_SET", "1")\n'
+                'process.env_remove("MAH_TEST_INHERITED")\n'
+                'print(process.env_get("MAH_TEST_INHERITED") == none, process.env()["MAH_TEST_SET"])\n'
+            )
+            self.assertEqual(out, "from the process\ntrue 1\n")
+            self.assertEqual(os.environ.get("MAH_TEST_INHERITED"), "from the process")
+        self.assertNotIn("MAH_TEST_SET", os.environ)
+
+    def test_env_is_sorted_and_a_new_map(self):
+        out = self._proc(
+            'process.env_set("MAH_B", "1")\nprocess.env_set("MAH_A", "2")\n'
+            "let e = process.env()\nlet keys = e.keys()\n"
+            "let ok = true\nfor let i in 1..keys.len() { if keys[i - 1] >= keys[i] { ok = false } }\n"
+            'e["MAH_ZZ"] = "changed"\nprint(ok, process.env_get("MAH_ZZ") == none)\n'
+        )
+        self.assertEqual(out, "true true\n")
+
+    def test_checker(self):
+        diagnostics, types = check(
+            'import process from "std:process"\nlet o = try process.run("true") else none\nlet a = process.args()\n'
+            'let v = process.env_get("X")\nlet e = process.env()\nlet p = process.pid()\nlet c = process.cwd()\n'
+            'let s = try process.shell("ls", cwd: some("/")) else none\nlet u = process.run("true")\n'
+            'let n: Number = process.exit(1)\n'
+        )
+        got = {k: types[k][-1] for k in ("a", "v", "e", "p", "c")}
+        self.assertEqual(
+            got,
+            {"a": "Vector<String>", "v": "Option<String>", "e": "Map<String, String>", "p": "Number", "c": "String"},
+        )
+        self.assertEqual([d[1] for d in diagnostics if d[0] == "unhandled"], ["Unhandled error: ProcessError"])
+        self.assertEqual([d for d in diagnostics if d[0] not in ("unhandled",)], [])
+
+    def test_flat_import_and_keyword_arguments(self):
+        out = run_source(
+            'import "std:process"\nlet o = run("sh", ["-c", "pwd"], cwd: some("/"))\nprint(o.stdout.trim(), args().len())\n'
+        )
+        self.assertEqual(out, "/ 0\n")
+        # a parameter spelled like a module-level name is still a keyword argument
+        out = self._proc('let o = process.run("cat", stdin: "hi", env: none, cwd: none, args: [])\nprint(o.stdout)\n')
+        self.assertEqual(out, "hi\n")
+
+
 if __name__ == "__main__":
     unittest.main()

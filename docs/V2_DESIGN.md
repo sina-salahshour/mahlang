@@ -3207,6 +3207,38 @@ node that resolved to it. Then:
       can't set up; permission errors when not root; argument errors;
       checker types), a `vm_diff.py` case, `examples/files.mh`.
 
+37. **M36 — `std:process`. ✅ Landed.** `docs/STDLIB.md` Phase 3's second
+    module; bytecode 1.13 (natives only) in `docs/MAHC_FORMAT.md`
+    §4.4/§7. Decisions in `STDLIB.md`.
+
+    - **Natives, both VMs**: ten `process.*` (`mah/process_natives.py`,
+      `runtime/src/vm/process.rs`). Each VM run owns an environment table
+      (a snapshot at start, on `_IoHub` in Python and on `Vm` in Rust);
+      the real environment is never written. `process.run` is a Promise
+      of a result Vector settled by a worker thread, like std:fs's
+      natives (Rust writes the child's stdin from its own thread).
+    - **`exit`**: Python raises `ProgramExit`, a `BaseException` the step
+      loop and Mah `catch` can't see, which the CLI turns into the exit
+      status and `run_test_bytes` into a failed test; Rust flushes stdout
+      and calls `std::process::exit` (in a test run it prints the outcome
+      the way `mah-vm test` does and exits 0).
+    - **Program arguments**: `mah run FILE -- ARGS...` /
+      `mah runc FILE -- ARGS...` (the CLI splits `argv` at the first `--`
+      before argparse sees it), `mah-vm run PATH [ARGS...]`, and the
+      self-contained bundle stub passes `"$@"` on.
+    - **`mah/std/process.mh`**: the functions, `Output` (with `ok()`),
+      `ProcessError`, and `shell` in Mah over `run`.
+    - **A preprocessor fix** the module needed: module-level names are
+      alpha-renamed textually, which also renamed a parameter spelled like
+      one (`run(cwd: ...)` next to `cwd()`), so callers' keyword arguments
+      no longer matched. Parameters spelled like a renamed name, their uses
+      in the function body, and keyword-argument labels are now left alone
+      (`_shadowed_params`, `_call_labels` in `mah/preprocessor.py`).
+    - Tests: `mah/std/process.test.mh` (both VMs), `ProcessTests` (the
+      command line, exit, argument errors, the snapshot, checker types),
+      keyword-argument tests for the preprocessor fix, a `vm_diff.py` case,
+      `examples/process.mh`.
+
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
 it** (`make test` must stay green) — see `docs/TESTING.md` for where
@@ -3218,51 +3250,14 @@ M1 was built and documented that way.
 
 ## Status
 
-M0 through M22 (and M21b, `mah format`) are all landed (see their entries above for what changed and
-each milestone's deliberate deviations/simplifications). `docs/NEXT_PHASES.md`
-captures what's deliberately deferred still (arrays/lists pattern matching,
-generics, the type system -- and, as of M11, sound field-*access*
-rename, which still needs the type system) and what M0–M11 need
-to keep forward-compatible with. M7 added a real symbol table to
-`compiler/resolve.py` and rebuilt go-to-definition + added rename on top
-of it, retiring the independent token-scope model
-(`_build_scopes`/`_resolve_declaration`/`_Scope`) `lsp/analysis.py` used to
-depend on; `get_hover`/`get_completions`/`get_document_symbols`/
-`get_code_actions` remain deliberately disabled/unadvertised, unchanged
-from M6, as a focused follow-up. M8 rewrote `syntax-highlight/grammar.js`
-and `highlights.scm` (stale since M0) to cover v2's actual syntax --
-structs, enums, `match`, closures, expression-blocks, `some`/`none`, field
-access, `fn` -- touching nothing under `compiler/`/`lsp/`; every
-`examples/*.mh` file now parses with zero `(ERROR)` nodes. M9 added
-block-scoped `defer` (desugared to a zero-arg closure registered on a
-runtime `defer_stack`, drained at every block exit) plus, as a
-side-finding, a fix for a pre-existing bug where `break`/`continue`
-inside a nested `fn`'s body silently corrupted execution instead of
-raising. M10 added single-threaded cooperative async (`detach`/`.await`/
-`sleep_async`), moving `defer_stack` from a single shared list onto a new
-per-`Task` object so multiple tasks can genuinely interleave without
-leaking each other's pending defers, plus fixes for two pre-existing gaps
-found while in the area: `defer` had never been added to `lsp/analysis.py`'s
-hover tables or to `syntax-highlight/grammar.js`'s grammar at all (both
-predate M9). M11 closed M7's two remaining rename gaps: cross-file
-variable/function rename (a workspace-wide reverse-import-graph search,
-not just the currently-open file's own import closure) and struct/enum
-type-name, enum variant-name, and struct/enum field-name rename in
-declarations/literals/explicit patterns (always single-file, since
-structs/enums can't be exported/imported across files at all) -- plain
-field *access* (`p.x`) rename remains deliberately refused, unsound
-without a real type system. M12 added Rust-style traits (`trait`,
-inherent and trait `impl`s, runtime method dispatch, the `Printable`
-system trait used by `print`/string `+`) -- see `docs/TRAITS.md`; M13
-added field-closure calls (`p.f()`), `detach` on method calls, and
-method-name hover/go-to-definition/completion in the LSP; M14 made the
-compiler's output a portable, versioned binary format (`.mahc`, see
-`docs/MAHC_FORMAT.md`) that the VM runs exclusively; M15 added projects
-(`mah init`, `mah-project.toml`, project-aware `run`/`build`); M16 added
-default parameter values and keyword arguments (bytecode 1.1); M17 added
-ranges, range patterns, iterators (the Mah-source prelude), and
-`!`/`<=`/`>=` (bytecode 1.2); M18 added `for` loops, `break value`, and
-loops as expressions (no bytecode change); M19 added `Vector`, `Map`, and
-`x[k]` indexing (bytecode 1.3). All
-planned milestones (M0–M19) are now complete; see `docs/NEXT_PHASES.md`
-for what's next.
+M0 through M36 (and M21b, `mah format`) have all landed; each milestone's
+entry above says what changed and where it deliberately deviates from the
+design. The language has traits, generics, typed and checked errors, a
+static type checker, projects and `mah test`, async I/O with timers, and a
+`.mahc` bytecode format (currently 1.13) run by the reference Python VM
+and the native Rust VM in `runtime/`; the standard library (`std:math`,
+`std:json`, `std:csv`, `std:path`, `std:random`, `std:collections`,
+`std:regex`, `std:time`, `std:async`, `std:fs`, `std:process`) is described
+in `docs/STDLIB.md`. What is deferred and what comes next (the network
+modules, reflection and decorators, and the rest) is in
+`docs/NEXT_PHASES.md`.

@@ -1,4 +1,4 @@
-# The `.mahc` bytecode format (version 1.12)
+# The `.mahc` bytecode format (version 1.13)
 
 `mah build prog.mh` compiles a program (its entry file plus everything it
 imports) into a single `.mahc` file; `mah runc prog.mahc` runs one. This
@@ -64,7 +64,7 @@ sections   (id u8, length varuint, payload bytes(length))*   until end of file
   version whose features it uses. *(1.5)* The reference encoder writes 4
   (every file it produces has 1.4's TYPES layout and HANDLERS section),
   or the highest `(1.x)` marker among the natives the file lists (5 for
-  the `std:math` natives, 7 for the ones behind `std:json`/`std:csv`, 8 for `std:random`'s, 9 for `std:regex`'s, 10 for `io.read_line`, 11 for `std:time`/`std:async`'s, 12 for `std:fs`'s), so a program that doesn't call newer natives
+  the `std:math` natives, 7 for the ones behind `std:json`/`std:csv`, 8 for `std:random`'s, 9 for `std:regex`'s, 10 for `io.read_line`, 11 for `std:time`/`std:async`'s, 12 for `std:fs`'s, 13 for `std:process`'s), so a program that doesn't call newer natives
   still runs on an older VM. *(1.6)* Native methods (§6.7) are called by
   name, so it also writes the minor that added any native method whose
   *name* a `callmethod`/`callmethodkw`/`detachmethod`/`detachmethodkw` in
@@ -193,6 +193,16 @@ Version 1.0 defines:
 | `fs.read_line` / `fs.read_all` | 1 | *(1.12)* `id` → the next line without its `\n` or `\r\n` (`none` at the end) / the rest of the file |
 | `fs.write` | 2 | *(1.12)* `id, text` → `none` |
 | `fs.close` | 1 | *(1.12)* `id` → `none`; closing a closed file does nothing |
+| `process.args` | 0 | *(1.13)* → a new Vector of Strings: the program's arguments (`[]` when none) |
+| `process.exit` | 1 | *(1.13)* `code` → never returns: ends the program at once with that exit code (below) |
+| `process.env_get` | 1 | *(1.13)* `name` → the variable's value in the VM's environment table, or `none` |
+| `process.env_set` | 2 | *(1.13)* `name, value` → `none`, setting it in the table |
+| `process.env_remove` | 1 | *(1.13)* `name` → `none`, removing it (no error if absent) |
+| `process.env_all` | 0 | *(1.13)* → a new Map String → String of the whole table, keys in sorted (code point) order |
+| `process.cwd` | 0 | *(1.13)* → the current directory, as an absolute path |
+| `process.pid` | 0 | *(1.13)* → this process's id |
+| `process.platform` | 0 | *(1.13)* → `"linux"`, `"macos"`, `"windows"`, or else the OS's own name |
+| `process.run` | 5 | *(1.13)* `program, args, cwd, env, stdin` → a Promise of a result (below): `[true, [code, stdout, stderr]]` |
 | `math.sin` | 1 | sine of a Number (radians); the result is computed in IEEE-754 double precision and converted to Number via its shortest round-trip decimal text |
 | `math.cos` | 1 | cosine, same rules |
 | `time.sleep_async` | 1 | returns a new pending Promise that the scheduler settles with `none` after the argument's number of milliseconds (§6.4) |
@@ -256,6 +266,38 @@ a `TypeMismatch`, `seed: expected a Number, got TYPE` (likewise `below`);
 a seed that isn't whole or is 2^64 or more in size is an `ArgumentError`,
 `seed: expected a whole number smaller than 2^64 in size`; a bound out of
 range, `below: expected a whole number from 1 to 2^64`.
+
+The `(1.13)` natives are `std:process`'s. Each VM run has an **environment
+table**, a snapshot of the process's environment taken when it starts
+(entries whose name or value isn't valid Unicode are left out);
+`process.env_*` read and write only that table, never the real environment.
+A name must be a String that is non-empty and contains neither `=` nor NUL,
+a value a String without NUL, else `RuntimeError.ArgumentError` at once
+(`NAME: name must not be empty`, `NAME: name must not contain "="`, `NAME:
+name must not contain a NUL character`, `NAME: value must not contain a NUL
+character`); a non-String is a `TypeMismatch`, `NAME: name must be a String,
+got TYPE`. **`process.exit`** takes a whole Number from 0 to 255, else
+`ArgumentError`, `exit code must be a whole number from 0 to 255`; it flushes
+standard output and ends the program with that exit status without running
+pending `defer`s, and abandons tasks, timers and I/O; a `try`/`catch` can't
+intercept it. In a test run (§6.10) the test ends as `failed` with the
+message `the test called exit(N)` instead. **`process.run`** validates its
+arguments at once (`program` a non-empty String, `args` a Vector of Strings,
+`cwd` a String or `none`, `env` a Map of Strings or `none`, `stdin` a
+String; none may contain NUL, and `env` names follow the rule above), then
+returns a pending Promise settled off the VM's thread (§6.4). The program
+is started directly (no shell; found through `PATH`) with the environment
+table plus the `env` entries as its whole environment, `cwd` as its working
+directory (`none`: this process's), and `stdin` written to a pipe that is
+then closed (always a pipe, even for `""`); its stdout and stderr are
+captured, decoded as UTF-8 with invalid bytes replaced by U+FFFD. The result
+is `[true, [code, stdout, stderr]]`, `code` being the exit code, or 128 + N
+if signal N killed it; a non-zero exit is not a failure. A program that
+can't be started gives `[false, kind, description]` with kind `not_found`
+(`no such file or directory`), `permission_denied` (`permission denied`) or
+`other` (the OS's text). Program arguments come from the command line:
+`mah run FILE -- ARGS...`, `mah runc FILE -- ARGS...` and `mah-vm run PATH
+ARGS...`.
 
 The `(1.12)` natives are `std:fs`'s. Each returns a pending Promise at once
 and does its blocking work off the VM's thread of execution, as an I/O
@@ -1098,6 +1140,8 @@ message
   (§4.4), behind `std:time` and `std:async`.
 - **1.12** added natives only: the fifteen `fs.*` natives (§4.4) behind
   `std:fs`, with open files as ids in a per-VM handle table.
+- **1.13** added natives only: the ten `process.*` natives (§4.4) behind
+  `std:process`, with a per-VM environment table.
 - Planned growth, for orientation: error-set checking (the static
   checker's `throws` inference and "unhandled error" diagnostics -- M26),
   string utilities, filesystem, networking, and process natives.

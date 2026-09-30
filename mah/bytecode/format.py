@@ -52,6 +52,9 @@ M34 bumps MINOR to 11: new natives only (`time.now_ms`/`monotonic_ms`/
 
 M35 bumps MINOR to 12: new natives only (`fs.*`, behind std:fs; open files
 are ids in the VM's handle table) -- docs/MAHC_FORMAT.md #4.4.
+
+M36 bumps MINOR to 13: new natives only (`process.*`, behind std:process)
+-- docs/MAHC_FORMAT.md #4.4.
 """
 
 from __future__ import annotations
@@ -64,7 +67,7 @@ MAGIC = b"MAHC"
 # `.mahc` extension).
 SHEBANG = b"#!/usr/bin/env -S mah runc\n"
 MAJOR = 1
-MINOR = 12
+MINOR = 13
 
 # -- section ids (docs/MAHC_FORMAT.md #3) -----------------------------------
 SEC_STRINGS = 0x01
@@ -200,6 +203,17 @@ NATIVE_ARITIES = {
     "fs.read_all": 1,
     "fs.write": 2,
     "fs.close": 1,
+    # M36 (1.13): std:process.
+    "process.args": 0,
+    "process.exit": 1,
+    "process.env_get": 1,
+    "process.env_set": 2,
+    "process.env_remove": 1,
+    "process.env_all": 0,
+    "process.cwd": 0,
+    "process.pid": 0,
+    "process.platform": 0,
+    "process.run": 5,
 }
 
 # M16: which minor version introduced each 1.1+ native -- a 1.0 file
@@ -250,6 +264,16 @@ NATIVE_SINCE_MINOR = {
     "fs.read_all": 12,
     "fs.write": 12,
     "fs.close": 12,
+    "process.args": 13,
+    "process.exit": 13,
+    "process.env_get": 13,
+    "process.env_set": 13,
+    "process.env_remove": 13,
+    "process.env_all": 13,
+    "process.cwd": 13,
+    "process.pid": 13,
+    "process.platform": 13,
+    "process.run": 13,
 }
 
 # M29: native inherent methods added after 1.0, by the minor that added

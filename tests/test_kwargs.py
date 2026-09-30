@@ -288,5 +288,45 @@ class VerificationProbeTests(unittest.TestCase):
         self.assertEqual(run_source('fn f(n, msg = "bye " + n) { defer print(msg); n }\nprint(f(2))'), "bye 2\n2\n")
 
 
+class ModuleParameterNameTests(unittest.TestCase):
+    """M36: a module's parameter may be spelled like one of its own top-level
+    names (std:process has `cwd()` and `run(cwd: ...)`) and is still a
+    keyword argument -- with a namespaced or a flat import."""
+
+    def _run(self, importer: str) -> str:
+        import tempfile
+
+        from tests.support import run_file
+
+        with tempfile.TemporaryDirectory() as td:
+            with open(os.path.join(td, "m.mh"), "w") as f:
+                f.write(
+                    'export fn where() { "top" }\n'
+                    'fn helper(where: String, n: Number) { where + n }\n'
+                    'export fn go(where: String = "d", n: Number = 1) { helper(where, n: n) }\n'
+                )
+            entry = os.path.join(td, "main.mh")
+            with open(entry, "w") as f:
+                f.write(importer)
+            return run_file(entry)
+
+    def test_namespaced_import(self):
+        self.assertEqual(self._run('import m from "./m"\nprint(m.go(where: "x", n: 2))\nprint(m.go())\nprint(m.where())'), "x2\nd1\ntop\n")
+
+    def test_flat_import(self):
+        self.assertEqual(self._run('import "./m"\nprint(go(n: 3, where: "y"))\nprint(where())'), "y3\ntop\n")
+
+    def test_field_labels_are_not_renamed(self):
+        # A flat import brings `where` into scope; a struct field of that
+        # name is still a field in declarations and literals.
+        self.assertEqual(
+            self._run(
+                'import "./m"\nstruct S { where: String, n: Number }\n'
+                'let s = S { where: where(), n: 1 }\nprint(s.where + s.n)'
+            ),
+            "top1\n",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
