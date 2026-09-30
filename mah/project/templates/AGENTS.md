@@ -50,7 +50,7 @@ it).
 Check your changes with `mah test`. Tests live in `*.test.mh` files next to
 the code they test: `test "name" { ... }` blocks using `assert`/`assert_eq`/
 ... from `std:test` (see "Testing" in `docs/mah-language.md`). A test file
-`x.test.mh` can call `x.mh`'s non-exported functions too. Add or update a
+`x.test.mh` can use `x.mh`'s non-exported functions and types too. Add or update a
 test with every change, and make sure `mah test` passes.
 
 ## `mah-project.toml`
@@ -73,9 +73,12 @@ test with every change, and make sure `mah test` passes.
 
 ## Writing Mah here
 
-- Split code into files with `export fn` / `export let` and `import
-  "file.mh"` (or `import name from "file"` for namespaced access). Paths are
-  relative to the importing file. The standard library is imported the same
+- Split code into files with `export fn` / `export let` / `export struct` /
+  `export enum` / `export trait` and `import "file.mh"` (or `import name
+  from "file"` for namespaced access, where a type is `name.Point`). Types
+  are module-scoped like functions: only exported ones are visible, and two
+  modules may each declare a `Request`. Paths are relative to the importing
+  file. The standard library is imported the same
   way, as `"std:<name>"`: `std:math`, `std:path`, `std:json`, `std:csv`,
   `std:random`, `std:collections`, `std:regex`, `std:time`, `std:async`,
   `std:fs`, `std:process`, `std:reflect` (types and `##` docs at run time,

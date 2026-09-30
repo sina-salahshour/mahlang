@@ -144,7 +144,19 @@ module.exports = grammar({
       ),
 
     export_stmt: ($) =>
-      seq("export", choice($.let_stmt, $.fn_stmt, $.extern_fn_stmt, $.identifier)),
+      seq(
+        "export",
+        choice(
+          $.let_stmt,
+          $.fn_stmt,
+          $.extern_fn_stmt,
+          // M41s: types can be exported too.
+          $.struct_decl,
+          $.enum_decl,
+          $.trait_decl,
+          $.identifier,
+        ),
+      ),
 
     // M28 (docs/MAH_TEST.md): `test "name" { body }` in a `*.test.mh`
     // file. `test` is contextual in the real parser (a keyword only right
@@ -197,8 +209,16 @@ module.exports = grammar({
 
     _type: ($) => choice($.named_type, $.function_type, seq("(", $._type, ")")),
 
+    // M41s: a namespaced import's type is `lib.Point` (the preprocessor
+    // rewrites it; see docs/V2_DESIGN.md's M41s milestone).
     named_type: ($) =>
-      prec.right(seq(field("name", $.identifier), optional($.type_arguments))),
+      prec.right(
+        seq(
+          optional(seq(field("namespace", $.identifier), ".")),
+          field("name", $.identifier),
+          optional($.type_arguments),
+        ),
+      ),
 
     function_type: ($) =>
       prec.right(
@@ -313,10 +333,16 @@ module.exports = grammar({
       seq(
         "impl",
         optional($.type_parameters),
+        optional(seq(field("namespace", $.identifier), ".")),
         field("name", $.identifier),
         optional($.type_arguments),
         optional(
-          seq("for", field("target", $.identifier), optional($.type_arguments)),
+          seq(
+            "for",
+            optional(seq(field("target_namespace", $.identifier), ".")),
+            field("target", $.identifier),
+            optional($.type_arguments),
+          ),
         ),
         "{",
         repeat($.impl_item),
@@ -539,6 +565,7 @@ module.exports = grammar({
 
     enum_pattern: ($) =>
       seq(
+        optional(seq(field("namespace", $.identifier), ".")),
         field("type", $.identifier),
         ".",
         field("variant", $.identifier),
@@ -777,6 +804,7 @@ module.exports = grammar({
     // `identifier '.' identifier` prefix, not out-rank it.
     enum_literal: ($) =>
       seq(
+        optional(seq(field("namespace", $.identifier), ".")),
         field("type", $.identifier),
         ".",
         field("variant", $.identifier),
@@ -843,6 +871,7 @@ module.exports = grammar({
       seq(
         field("name", choice($.identifier, $.wildcard_pattern)),
         ":",
+        optional(seq(field("namespace", $.identifier), ".")),
         field("type", $.identifier),
       ),
 

@@ -65,7 +65,7 @@ A new project from `mah init` already has one, `src/main.test.mh`.
 | `skip(reason = "")` | stops the test and reports it as skipped |
 
 A failing assertion throws an `AssertionError`, and `skip` throws
-`SkipTest`. A test body can throw anything else too: any other error
+`SkipTest` (both exported by `std:test`). A test body can throw anything else too: any other error
 fails the test and is reported with its message and a Mah stack trace.
 `assert_eq` compares with `==`, which compares Vectors, Maps, structs and
 enums by identity, so `assert_eq([1], [1])` fails. Compare their parts

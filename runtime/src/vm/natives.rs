@@ -165,7 +165,7 @@ fn value_type_name(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
         Value::None => Rc::from("None"),
         other => super::value::type_name_of(other, &vm.names),
     };
-    Ok(Value::Str(name))
+    Ok(Value::Str(Rc::from(super::value::display_name(&name))))
 }
 
 /// A struct, or an enum value other than none/Promise, as `(fields, variant)`.

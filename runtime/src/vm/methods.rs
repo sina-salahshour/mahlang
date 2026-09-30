@@ -13,7 +13,7 @@ use crate::decimal::Decimal;
 
 use super::error::{ErrorKind, RResult, RuntimeError};
 use super::value::{
-    map_key, type_name_of, BuiltinTypeNames, EnumData, MapData, MapKey, MapRef, StructData,
+    display_name, map_key, type_name_of, BuiltinTypeNames, EnumData, MapData, MapKey, MapRef, StructData,
     Value, VectorRef,
 };
 
@@ -45,7 +45,7 @@ pub fn format_value(val: &Value, recurse: &mut dyn FnMut(&Value) -> RResult<Stri
             for (k, v) in &b.fields {
                 parts.push(format!("{k}: {}", recurse(v)?));
             }
-            format!("{} {{ {} }}", b.type_name, parts.join(", "))
+            format!("{} {{ {} }}", display_name(&b.type_name), parts.join(", "))
         }
         Value::Enum(e) => {
             let b = e.borrow();
@@ -57,9 +57,9 @@ pub fn format_value(val: &Value, recurse: &mut dyn FnMut(&Value) -> RResult<Stri
                 for (k, v) in &b.fields {
                     parts.push(format!("{k}: {}", recurse(v)?));
                 }
-                format!("{}.{} {{ {} }}", b.type_name, b.variant, parts.join(", "))
+                format!("{}.{} {{ {} }}", display_name(&b.type_name), b.variant, parts.join(", "))
             } else {
-                format!("{}.{}", b.type_name, b.variant)
+                format!("{}.{}", display_name(&b.type_name), b.variant)
             }
         }
         Value::Promise(p) => {
@@ -92,7 +92,7 @@ pub fn format_value(val: &Value, recurse: &mut dyn FnMut(&Value) -> RResult<Stri
                 format!("[{}]", parts.join(", "))
             }
         }
-        Value::Type(t) => t.name.to_string(),
+        Value::Type(t) => display_name(&t.name).to_string(),
         Value::Absent => "<absent>".to_string(),
     })
 }

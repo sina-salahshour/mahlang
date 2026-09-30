@@ -31,9 +31,9 @@ print(
     )
 )
 
-# A deadline: `timeout` throws TimeoutError when the job takes too long.
+# A deadline: `timeout` throws async.TimeoutError when the job takes too long.
 let deploy = try { async.timeout(detach run_job(Job { name: "deploy", ms: 500 }), 50) } catch {
-    e: TimeoutError => { "deploy gave up: " + e.message() }
+    e: async.TimeoutError => { "deploy gave up: " + e.message() }
 }
 print(deploy)
 

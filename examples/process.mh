@@ -10,7 +10,7 @@ print("arguments:", process.args())
 let name = process.env_get("MAH_DEMO_NAME").unwrap_or("world")
 print("hello,", name)
 
-fn demo() throws ProcessError {
+fn demo() throws process.ProcessError {
     # Run a program (no shell) and use what it wrote.
     let out = process.run("echo", ["from", "echo"])
     print(out.stdout.trim(), "- exit code", out.code)
@@ -28,5 +28,5 @@ fn demo() throws ProcessError {
 }
 
 try { demo() } catch {
-    e: ProcessError => { print(e.kind + ": " + e.message()) }
+    e: process.ProcessError => { print(e.kind + ": " + e.message()) }
 }

@@ -9,7 +9,7 @@ checker infers the rest: most code needs no annotations at all.
 Annotations never change how a program runs, and the checker never
 affects the compiled code: the program's behavior is the same whatever the
 checker concludes. (The annotations a program *wrote*, and its `##` doc
-comments, are kept as metadata that [`std:reflect`](/docs/standard-library#stdreflect)
+comments, are kept as metadata that [`std:reflect`](/docs/standard-library)
 can read; nothing acts on them.) An unknown type name or a wrong number of
 `<...>` arguments is always a compile error.
 

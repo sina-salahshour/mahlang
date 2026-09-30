@@ -12,7 +12,7 @@ use crate::decode::{FnMeta, TypeMeta, TypeMetaBody, TypeRef};
 use super::error::{ErrorKind, RuntimeError};
 use super::exec::{Callable, Vm};
 use super::link::{TypeInfo, TypeKind};
-use super::value::{type_name_of, EnumData, StructData, TypeData, Value, PRIMITIVE_TYPE_NAMES};
+use super::value::{display_name, type_name_of, EnumData, StructData, TypeData, Value, PRIMITIVE_TYPE_NAMES};
 
 type R = Result<Value, RuntimeError>;
 
@@ -79,7 +79,11 @@ fn ref_value(vm: &Vm, r: &TypeRef) -> Value {
             throws_value(vm, throws),
         ]),
         TypeRef::Param(name) => vec_value(vec![number(3), s(vm, *name)]),
-        TypeRef::Trait { name, args } => vec_value(vec![number(6), s(vm, *name), refs_value(vm, args)]),
+        TypeRef::Trait { name, args } => vec_value(vec![
+            number(6),
+            str_value(display_name(&vm.linked.strings[*name])),
+            refs_value(vm, args),
+        ]),
     }
 }
 
@@ -271,7 +275,7 @@ pub fn methods(vm: &mut Vm, args: &[Value]) -> R {
         out.push(vec_value(vec![Value::Str(name), f, Value::Bool(is_method), Value::None]));
     }
     for (trait_name, name, f, is_method) in traited {
-        out.push(vec_value(vec![Value::Str(name), f, Value::Bool(is_method), Value::Str(trait_name)]));
+        out.push(vec_value(vec![Value::Str(name), f, Value::Bool(is_method), str_value(display_name(&trait_name))]));
     }
     Ok(vec_value(out))
 }
@@ -288,7 +292,7 @@ pub fn implements(vm: &mut Vm, args: &[Value]) -> R {
         ));
     };
     for ((type_name, _method), entry) in vm.method_table.iter() {
-        if type_name.as_ref() == t.name.as_ref() && entry.traits.contains_key(trait_name.as_ref()) {
+        if type_name.as_ref() == t.name.as_ref() && entry.traits.keys().any(|k| display_name(k) == trait_name.as_ref()) {
             return Ok(Value::Bool(true));
         }
     }
@@ -344,10 +348,10 @@ pub fn construct(vm: &mut Vm, args: &[Value]) -> R {
     else {
         return Ok(vec_value(vec![
             Value::Bool(false),
-            Value::Str(Rc::from(format!("can't construct {}: it isn't a struct", t.name).as_str())),
+            Value::Str(Rc::from(format!("can't construct {}: it isn't a struct", display_name(&t.name)).as_str())),
         ]));
     };
-    match build(&t.name, names, &given) {
+    match build(display_name(&t.name), names, &given) {
         Err(message) => Ok(failure(message)),
         Ok(fields) => {
             let value = Value::Struct(Rc::new(RefCell::new(StructData {
@@ -375,15 +379,15 @@ pub fn construct_variant(vm: &mut Vm, args: &[Value]) -> R {
     let given = field_entries(vm, "reflect.construct_variant", &args[2])?;
     let info = if t.kind == 0 { Some(&vm.linked.types[t.index]) } else { None };
     let Some(TypeInfo { name, kind: TypeKind::Enum(variants) }) = info else {
-        return Ok(failure(format!("can't construct a variant of {}: it isn't an enum", t.name)));
+        return Ok(failure(format!("can't construct a variant of {}: it isn't an enum", display_name(&t.name))));
     };
     if name.as_ref() == "Promise" {
         return Ok(failure("can't construct a Promise".to_string()));
     }
     let Some((_, declared)) = variants.iter().find(|(v, _)| v.as_ref() == variant.as_ref()) else {
-        return Ok(failure(format!("{} has no variant '{variant}'", t.name)));
+        return Ok(failure(format!("{} has no variant '{variant}'", display_name(&t.name))));
     };
-    match build(&format!("{}.{variant}", t.name), declared, &given) {
+    match build(&format!("{}.{variant}", display_name(&t.name)), declared, &given) {
         Err(message) => Ok(failure(message)),
         Ok(fields) => {
             let value = if name.as_ref() == "Option" && variant.as_ref() == "none" {

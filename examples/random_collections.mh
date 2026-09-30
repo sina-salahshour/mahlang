@@ -5,7 +5,7 @@ import random from "std:random"
 import "std:collections"
 
 # Seeded, so every run (and both VMs) deals the same hands.
-let rng = Rng.new(2024)
+let rng = random.Rng.new(2024)
 
 let deck = []
 for let suit in ["S", "H", "D", "C"] {

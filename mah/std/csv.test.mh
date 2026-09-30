@@ -89,7 +89,7 @@ test "stringify_records" {
 
 struct Person { name: String, age: Number }
 
-impl FromCsvRow for Person {
+impl csv.FromCsvRow for Person {
     fn from_csv_row(row) {
         Person { name: csv.column(row, "name"), age: csv.column(row, "age").to_number() }
     }

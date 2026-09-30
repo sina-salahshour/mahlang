@@ -28,7 +28,7 @@ from ..compiler.parser import Parser  # noqa: E402
 from ..compiler.resolve import Resolver  # noqa: E402
 from ..compiler import typecheck  # noqa: E402
 from ..compiler.types import TCon, TFn, prune as prune_type, show as show_type, show_throws  # noqa: E402
-from ..preprocessor import BUFFER_PATH, STD_DIR, STD_PREFIX, demangle_message, preprocess, source_label  # noqa: E402
+from ..preprocessor import BUFFER_PATH, PRELUDE_PATH, STD_DIR, STD_PREFIX, demangle_message, preprocess, source_label  # noqa: E402
 from ..project.manifest import check_level_for  # noqa: E402
 from ..runtime_values import BUILTIN_TYPE_NAMES  # noqa: E402
 
@@ -1571,7 +1571,7 @@ def get_hover(text: str, line: int, character: int, path: Optional[str] = None) 
         return None
 
     return {
-        "contents": {"kind": "markdown", "value": value},
+        "contents": {"kind": "markdown", "value": demangle_message(value)},
         "range": token_range,
     }
 
@@ -2438,6 +2438,82 @@ def _rename_variable_cross_file(found, new_name: str, entry_text: str) -> Option
     return {"changes": all_edits}
 
 
+def _type_decl_position(resolver, kind: str, name: str) -> Optional[int]:
+    table = {
+        "struct": resolver.struct_decl_positions,
+        "enum": resolver.enum_decl_positions,
+        "trait": resolver.trait_decl_positions,
+    }.get(kind)
+    return table.get(name) if table is not None else None
+
+
+def _rename_type_cross_file(pp, resolver, kind: str, name: str, new_name: str, entry_text: str) -> Optional[dict]:
+    """M41s: struct/enum/trait rename across files, the way
+    `_rename_variable_cross_file` does it for functions (M11): the file that
+    declares the type plus every file that directly imports it (an exported
+    type is `lib.Point`/bare `Point` there) are each re-resolved, and every
+    type-namespace occurrence whose declaration is the target's is edited.
+    Refuses (`None`) if the type is declared in the standard library or the
+    prelude, or if any relevant file fails to preprocess/parse/resolve."""
+    decl_pos = _type_decl_position(resolver, kind, name)
+    if decl_pos is None:
+        return None
+    decl_path, decl_offset = pp.map_to_source(decl_pos)
+    if decl_path == PRELUDE_PATH or os.path.dirname(decl_path) == STD_DIR:
+        return None
+
+    root = _find_workspace_root(decl_path)
+    importers: set = set()
+    if root is not None:
+        graph = _build_reverse_import_graph(_find_mh_files(root))
+        importers = graph.get(decl_path, set())
+    files_to_scan = {decl_path, pp.entry_path} | importers
+
+    all_edits: dict = {}
+    seen_positions: set = set()
+    for fpath in files_to_scan:
+        if fpath == pp.entry_path:
+            fsource = entry_text
+            preprocess_path = None if pp.entry_path == BUFFER_PATH else fpath
+        else:
+            try:
+                with open(fpath, encoding="utf-8") as f:
+                    fsource = f.read()
+            except OSError:
+                return None
+            preprocess_path = fpath
+        fpp = preprocess(preprocess_path, fsource)
+        if fpp.errors:
+            return None
+        fparser = Parser(Lexer(fpp.text), allow_tests=_is_test_path(preprocess_path))
+        fprogram = fparser.parse_program()
+        if fparser.errors:
+            return None
+        fresolver = Resolver(prelude_start=fpp.prelude_start)
+        try:
+            fresolver.resolve_program(fprogram)
+        except Exception:  # noqa: BLE001
+            return None
+        for pos, entry in fresolver.type_position_index.items():
+            if entry[0] == "variant" or entry[0] != kind:
+                continue
+            fdecl = _type_decl_position(fresolver, kind, entry[1])
+            if fdecl is None or fpp.map_to_source(fdecl) != (decl_path, decl_offset):
+                continue
+            src_path, src_offset = fpp.map_to_source(pos)
+            if (src_path, src_offset) in seen_positions:
+                continue
+            seen_positions.add((src_path, src_offset))
+            source_text = fsource if src_path == fpath else fpp.files.get(src_path, "")
+            length = _identifier_length_at(source_text, src_offset) or len(demangle_message(name))
+            all_edits.setdefault(src_path, []).append(
+                {"range": make_range(source_text, src_offset, src_offset + length), "newText": new_name}
+            )
+    if not all_edits:
+        return None
+    return {"changes": all_edits}
+
+
 def get_rename_edits(
     text: str,
     line: int,
@@ -2486,8 +2562,9 @@ def get_rename_edits(
     if found is not None:
         return _rename_variable_cross_file(found, new_name, text)
 
-    # 2. Struct/enum type name or enum variant name -- single-file only,
-    # since structs/enums can't cross files at all (see docstring above).
+    # 2. Struct/enum/trait type name (M41s: cross-file, since exported types
+    # can be imported -- see `_rename_type_cross_file`) or enum variant name
+    # (single-file only).
     type_found = _type_symbol_at_position(text, line, character, path)
     if type_found is not None:
         resolver, kind, payload = type_found
@@ -2495,7 +2572,9 @@ def get_rename_edits(
         if result is None:
             return None
         pp, _resolver2, _tokens = result
-        target = ("variant", payload[0], payload[1]) if kind == "variant" else (kind, payload)
+        if kind != "variant":
+            return _rename_type_cross_file(pp, resolver, kind, payload, new_name, text)
+        target = ("variant", payload[0], payload[1])
         edits = []
         for pos, entry in resolver.type_position_index.items():
             if entry != target:
@@ -2503,8 +2582,7 @@ def get_rename_edits(
             src_path, src_offset = pp.map_to_source(pos)
             if src_path != pp.entry_path:
                 return None
-            fallback_name = payload[1] if kind == "variant" else payload
-            length = _identifier_length_at(text, src_offset) or len(fallback_name)
+            length = _identifier_length_at(text, src_offset) or len(payload[1])
             edits.append(
                 {
                     "range": make_range(text, src_offset, src_offset + length),

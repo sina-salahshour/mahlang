@@ -678,9 +678,41 @@ import m from "mathlib"              # or namespaced (the .mh is optional)
 print(square(3), m.answer)
 ```
 
-Only `fn`/`let` names marked `export` are visible to importers. Paths are
-relative to the importing file. `struct`, `enum`, and `trait` declarations
-are global across all imported files and need no `export`.
+Only names marked `export` are visible to importers. Paths are relative to
+the importing file. `struct`, `enum` and `trait` names are module-scoped just
+like `fn` and `let` names: an imported module's types are private unless
+exported (`export struct Point { ... }`, `export enum`, `export trait`, or
+`export Point` for one declared elsewhere), so two modules (or a module and
+your program) can each declare their own `Request` without clashing. A
+namespaced import reaches a type as `lib.Point` wherever a type name is
+written; a flat import brings the bare name:
+
+```mah
+# geometry.mh
+export struct Point { x: Number, y: Number }
+export enum Shape { Circle { r: Number }, Empty }
+export trait Named { fn name(self) -> String }
+export fn origin() -> Point { Point { x: 0, y: 0 } }
+
+# main.mh
+import geo from "geometry"
+struct Mine { a: Number }                          # your own names never clash
+impl geo.Named for Mine { fn name(self) -> String { "mine" } }
+let p: geo.Point = geo.Point { x: 1, y: 2 }        # annotation and literal
+let s = geo.Shape.Circle { r: 2 }
+match s {
+    geo.Shape.Circle { r } => { print(r) }         # pattern (variants: geo.Shape.Empty)
+    _ => { }
+}
+print(geo.Point, p, geo.origin())                  # Point Point { x: 1, y: 2 } Point { x: 0, y: 0 }
+```
+
+Types print (and appear in error messages) under the name they were
+declared with, never the module-private one. A type or trait *name* is only
+looked up by string in `reflect.implements(T, "Trait")`, which compares the
+declared name. The prelude's types and traits (`Range`, `Iterator`,
+`Iterable`, `Printable`, `Error`, ...) stay global; a module may declare its
+own type with such a name.
 
 ## Standard library
 
@@ -722,15 +754,15 @@ print(path.join_all(["a", "b", "c"]))                            # a/b/c (no var
 `std:json`: `parse(text)` gives Maps, Vectors, Numbers, Strings, Bools and
 `none` (typed `Unknown`); `stringify(value, indent = 0)` also writes
 structs (as objects) and enums (`"Unit"` or `{"Variant": {fields}}`). Both
-throw `JsonError` (`.Syntax { message, line, column }` or `.Shape {
-message }`). Read into a struct by implementing `FromJson` with the
+throw `json.JsonError` (`.Syntax { message, line, column }` or `.Shape {
+message }`). Read into a struct by implementing `json.FromJson` with the
 helpers `field`, `as_number`, `as_string`, `as_bool`, `as_vector`, `as_map`
 -- or let `decode` do it from the struct's declaration (see below):
 
 ```mah
 import json from "std:json"
 struct Point { x: Number, y: Number }
-impl FromJson for Point {
+impl json.FromJson for Point {
     fn from_json(value) {
         Point { x: json.as_number(json.field(value, "x")), y: json.as_number(json.field(value, "y")) }
     }
@@ -747,8 +779,8 @@ reads a parsed value as a declared type `T`, checking it against the
 annotations: `Number`, `String`, `Bool`, `Vector<X>`, `Map<String, X>`,
 `Option<X>` (a missing key is `none`), other structs and enums (an enum reads
 what `stringify` writes), and takes an unannotated field, `Unknown` or a type
-parameter as it is. A type with a `FromJson` impl is read by that. It throws
-`JsonError.Shape` saying where: `expected a Number for User.age, got String`,
+parameter as it is. A type with a `json.FromJson` impl is read by that. It throws
+`json.JsonError.Shape` saying where: `expected a Number for User.age, got String`,
 `missing field 'name' for User`, `expected a String for User.tags[0], got Number`.
 
 ```mah
@@ -760,11 +792,11 @@ print(try json.parse_as(User, "{\"name\": 1}") else "shape")   # shape
 try {
     json.parse_as(User, "{\"name\": \"a\", \"age\": \"old\", \"tags\": []}")
 } catch {
-    e: JsonError => { print(e.message()) }    # expected a Number for User.age, got String
+    e: json.JsonError => { print(e.message()) }    # expected a Number for User.age, got String
 }
 ```
 
-`std:csv` (RFC 4180; every field is a String; throws `CsvError { message,
+`std:csv` (RFC 4180; every field is a String; throws `csv.CsvError { message,
 line }`):
 
 ```mah
@@ -778,7 +810,7 @@ print(try csv.stringify([["a", "b,c"], ["1", ""]]) else "")     # a,"b,c" then 1
 ```
 
 `csv.stringify_records(records, columns = none)` writes Maps with a header
-row, and `FromCsvRow` / `csv.column(row, name)` work like `FromJson`.
+row, and `csv.FromCsvRow` / `csv.column(row, name)` work like `FromJson`.
 
 `std:random` (the same generator on every VM, so a seeded run is
 repeatable; not for cryptography). Bad arguments throw
@@ -791,12 +823,12 @@ print(random.randint(1, 6), random.random() < 1)  # 1 true (randint includes bot
 let deck = ["A", "K", "Q"]
 random.shuffle(deck)                             # in place; shuffled(v) returns a copy
 print(random.choice(deck) != "", random.sample(deck, 2).len())   # true 2
-let rng = Rng.new(7)                             # an independent generator
+let rng = random.Rng.new(7)                             # an independent generator
 print(rng.uniform(0, 10) < 10)                   # true
 ```
 
-`std:collections` has `Set`, `Deque` and `PriorityQueue`, global types
-available once imported (flat is idiomatic). All three are Iterable and
+`std:collections` exports `Set`, `Deque` and `PriorityQueue` (a flat
+import is idiomatic, so they are written bare). All three are Iterable and
 print like `Set[1, 2]`:
 
 ```mah
@@ -836,13 +868,13 @@ print(date.replace_all("2026-09 2027-01", "$m/$y"))             # 09/2026 01/202
 print(regex.must_compile("\\s*,\\s*").split("a , b,c"))           # [a, b, c]
 print(date.find_all("2026-09 2027-01").len())                   # 2
 let user_pattern = "(oops"
-print(try { regex.compile(user_pattern) } catch { e: RegexError => { e.message() } })
-# missing ) at position 0 in "(oops" -- compile throws RegexError; use it for patterns from input
+print(try { regex.compile(user_pattern) } catch { e: regex.RegexError => { e.message() } })
+# missing ) at position 0 in "(oops" -- compile throws regex.RegexError; use it for patterns from input
 ```
 
 Also `replace` (first match only), `replace_all(text, fn(m) { ... })`,
 `split(text, limit)`, `regex.escape(text)` for a literal, and
-`Match.groups`/`end`. A group the pattern lacks (`m.group(9)`) throws
+`regex.Match`'s `groups`/`end`. A group the pattern lacks (`m.group(9)`) throws
 `RuntimeError.ArgumentError`.
 
 `std:time`: times and durations are Numbers of **seconds** (so `t + 90`
@@ -854,7 +886,7 @@ let start = time.monotonic()                     # seconds since the program sta
 let d = time.utc(1790597925)                     # a DateTime from seconds since 1970 (time.now() is now)
 print(d, d.year, d.weekday())                    # 2026-09-28T12:18:45Z 2026 1 (Monday = 1)
 print(time.format(d, "%a %d %b %Y %H:%M"))       # Mon 28 Sep 2026 12:18
-let due = try time.parse("2026-10-05", "%Y-%m-%d") else d   # parse/date throw TimeError
+let due = try time.parse("2026-10-05", "%Y-%m-%d") else d   # parse/date throw time.TimeError
 print(time.duration_text(due.timestamp() - d.timestamp()))  # 6d 11h 41m 15s
 print(time.duration_text(time.monotonic() - start) != "")   # true
 ```
@@ -872,7 +904,7 @@ import async from "std:async"
 fn job(ms: Number, name: String) -> String { sleep_async(ms); name }
 print(async.all([detach job(30, "a"), detach job(10, "b")]))   # [a, b] (in order)
 print(async.race([detach job(30, "slow"), detach job(5, "fast")]))  # fast
-print(try async.timeout(detach job(500, "x"), 20) else "too slow")  # too slow (TimeoutError)
+print(try async.timeout(detach job(500, "x"), 20) else "too slow")  # too slow (async.TimeoutError)
 let count = [0]
 let ticker = async.set_interval(fn() { count[0] = count[0] + 1 }, 10)
 sleep_async(55)
@@ -884,7 +916,7 @@ print(count[0] > 0)                              # true
 `fn() throws never`: handle errors inside them.
 
 `std:fs`: files and directories. Every function waits like a call (`detach`
-one to run it alongside other work) and throws `FsError { kind, op, path,
+one to run it alongside other work) and throws `fs.FsError { kind, op, path,
 description }`, `kind` being `"not_found"`, `"permission_denied"`,
 `"already_exists"`, `"is_a_directory"`, `"not_a_directory"`,
 `"directory_not_empty"`, `"invalid_utf8"`, `"closed"` or `"other"`. Text
@@ -905,11 +937,11 @@ try {
     print(fs.glob(dir + "/*.txt").len())         # 1 (* ? [abc], and ** across directories)
     fs.read_text(dir + "/nope")
 } catch {
-    e: FsError => { print(e.kind) }              # not_found
+    e: fs.FsError => { print(e.kind) }              # not_found
 }
 ```
 
-Also `info(path)` (`FileInfo { kind, size, modified }`), `mkdir(path,
+Also `info(path)` (`fs.FileInfo { kind, size, modified }`), `mkdir(path,
 parents = false)`, `remove(path, recursive = false)`, `rename(from, to)`,
 `copy(from, to)`, and a File's `read_line()` (`none` at the end),
 `read_all()` and `write(text)`.
@@ -923,8 +955,8 @@ flushed, but pending `defer`s don't run and no `try`/`catch` can stop it.
 taken at start, which the programs it runs inherit. `run(program, args = [],
 cwd = none, env = none, stdin = "")` starts a program directly (no shell) and
 waits for it; `shell(command, ...)` runs a command line through `/bin/sh -c`.
-Both give an `Output { code, stdout, stderr }` (`ok()` is `code == 0`; a
-signal N gives `128 + N`) and throw `ProcessError { kind, command,
+Both give a `process.Output { code, stdout, stderr }` (`ok()` is `code == 0`; a
+signal N gives `128 + N`) and throw `process.ProcessError { kind, command,
 description }` (`"not_found"`, `"permission_denied"` or `"other"`) only when
 the program can't be started; a non-zero exit is not an error. Also `cwd()`,
 `pid()` and `platform()` (`"linux"`, `"macos"`, `"windows"`).
@@ -940,7 +972,7 @@ try {
     print(process.shell("echo a | tr a b").stdout.trim())   # b
     process.run("no-such-program")
 } catch {
-    e: ProcessError => { print(e.kind) }         # not_found
+    e: process.ProcessError => { print(e.kind) }         # not_found
 }
 ```
 
@@ -957,7 +989,7 @@ the type `Type<User>`.
 A `##` comment above a declaration is its **documentation**; `std:reflect`
 reads it, and the written annotations, defaults and `throws` clause, at run
 time. It reports what the source *wrote*, never what was inferred, so an
-unannotated parameter's type is `TypeRef.Unknown`:
+unannotated parameter's type is `reflect.TypeRef.Unknown`:
 
 ```mah
 import reflect from "std:reflect"
@@ -980,11 +1012,11 @@ let sig = reflect.signature(add)
 print(sig.name, sig.doc)                     # add Adds two numbers.
 print(sig.params[1].has_default, sig.params[1].default)   # true some(1)
 match sig.params[0].type {
-    TypeRef.Named { type: t, args: args } => { print(t == Number) }     # true
+    reflect.TypeRef.Named { type: t, args: args } => { print(t == Number) }     # true
     _ => { }
 }
 match reflect.schema(User) {
-    some(Schema.Struct { type: t, doc: doc, type_params: tps, fields: fields, decorators: ds }) => {
+    some(reflect.Schema.Struct { type: t, doc: doc, type_params: tps, fields: fields, decorators: ds }) => {
         print(doc, fields.len(), fields[0].doc)         # A user. 2 Their name.
     }
     _ => { }
@@ -998,19 +1030,20 @@ print(reflect.implements(User, "Printable"), reflect.call(add, [1], ["b": 5]))  
   `type_params`, `params` -- each with `name`, `type`, `doc`, `has_default`,
   and `default`, `some(value)` when the default is a literal -- `returns`,
   `throws`, an `Option` that is `none` when there's no `throws` clause),
-  `schema(T)` (`Schema.Struct { type, doc, type_params, fields, decorators }`
-  or `Schema.Enum { ..., variants }`; `none` for a primitive), `methods(T)`
-  (`Method { name, function, is_method, trait_name }`, inherent ones first;
+  `schema(T)` (`reflect.Schema.Struct { type, doc, type_params, fields, decorators }`
+  or `reflect.Schema.Enum { ..., variants }`; `none` for a primitive), `methods(T)`
+  (`reflect.Method { name, function, is_method, trait_name }`, inherent ones first;
   the built-in types' native methods aren't listed), `implements(T,
-  "Trait")`, `call(f, args = [], kwargs = [:])` (`f(...args, **kwargs)`),
+  "Trait")` (matching the trait's declared name, whichever module declares
+  it), `call(f, args = [], kwargs = [:])` (`f(...args, **kwargs)`),
   `construct(T, fields)` and `construct_variant(T, "Variant", fields)`
-  (throw `ReflectError` for a missing or unknown field).
-- A `TypeRef` is `Unknown`, `Named { type, args }`, `Fn { params, returns,
+  (throw `reflect.ReflectError` for a missing or unknown field).
+- A `reflect.TypeRef` is `Unknown`, `Named { type, args }`, `Fn { params, returns,
   throws }`, `Param { name }`, `SelfType`, `Never` or `Trait { name, args }`.
   `decorators` fields are empty for now.
 - `Signature`, `Param`, `Field`, `Variant`, `Schema`, `Method`, `TypeRef` and
-  `ReflectError` are global names once `std:reflect` (or `std:json`, which
-  uses it) is imported.
+  `ReflectError` are exported by `std:reflect`: write `reflect.TypeRef`,
+  `reflect.Schema.Struct { ... }`, `reflect.ReflectError`, ...
 
 ## Errors
 

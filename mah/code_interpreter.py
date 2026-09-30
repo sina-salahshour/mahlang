@@ -78,6 +78,7 @@ from .runtime_values import (
     TypeValue,
     VectorValue,
     map_key,
+    display_name,
     type_name_of,
 )
 from .reflect_natives import ReflectData
@@ -864,11 +865,11 @@ def _format_value(val: Any, recurse) -> str:
             return f"some({recurse(val.fields['value'])})"
         if val.fields:
             inner = ", ".join(f"{k}: {recurse(v)}" for k, v in val.fields.items())
-            return f"{val.type_name}.{val.variant} {{ {inner} }}"
-        return f"{val.type_name}.{val.variant}"
+            return f"{display_name(val.type_name)}.{val.variant} {{ {inner} }}"
+        return f"{display_name(val.type_name)}.{val.variant}"
     if isinstance(val, StructInstance):
         inner = ", ".join(f"{k}: {recurse(v)}" for k, v in val.fields.items())
-        return f"{val.type_name} {{ {inner} }}"
+        return f"{display_name(val.type_name)} {{ {inner} }}"
     if isinstance(val, VectorValue):
         return "[" + ", ".join(recurse(v) for v in val.items) + "]"
     if isinstance(val, MapValue):
@@ -880,7 +881,7 @@ def _format_value(val: Any, recurse) -> str:
     if isinstance(val, str):
         return val
     if isinstance(val, TypeValue):
-        return val.name
+        return display_name(val.name)
     return str(val)
 
 
@@ -1473,7 +1474,7 @@ def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, dead
         else:
             tname = type_name_of(value)
             m = _uncaught_message(value)
-            base = f"Uncaught {tname}" if m is None else f"Uncaught {tname}: {m}"
+            base = f"Uncaught {display_name(tname)}" if m is None else f"Uncaught {display_name(tname)}: {m}"
         pc = report_pc(value)
         return base if pc is None else locate(pc, base)
 
@@ -1904,16 +1905,16 @@ def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, dead
             )
         promise.observed = True
         error = promise.fields["error"]
-        if isinstance(error, StructInstance) and error.type_name == "SkipTest":
+        if isinstance(error, StructInstance) and display_name(error.type_name) == "SkipTest":
             reason = error.fields.get("reason", "")
             return TestOutcome("skipped", reason if isinstance(reason, str) else to_str(reason), leftover=leftover)
-        if isinstance(error, StructInstance) and error.type_name == "AssertionError":
+        if isinstance(error, StructInstance) and display_name(error.type_name) == "AssertionError":
             message = _uncaught_message(error) or "assertion failed"
         elif isinstance(error, EnumInstance) and error.type_name == "RuntimeError":
             message = error.fields.get("message", "")
         else:
             m = _uncaught_message(error)
-            message = f"Uncaught {type_name_of(error)}" + ("" if m is None else f": {m}")
+            message = f"Uncaught {display_name(type_name_of(error))}" + ("" if m is None else f": {m}")
         return TestOutcome("failed", message, frames_of(error), leftover)
 
     if not linked.functions:

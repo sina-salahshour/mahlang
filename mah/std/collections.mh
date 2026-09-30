@@ -14,7 +14,7 @@
 
 # Distinct values, in the order they were first added. Values must be
 # usable as Map keys: Strings, Numbers or Bools.
-struct Set<T> { items: Map<T, Bool> }
+export struct Set<T> { items: Map<T, Bool> }
 
 impl<T> Set<T> {
     fn new() -> Set<T> { Set { items: [:] } }
@@ -102,7 +102,7 @@ impl<T> Printable for Set<T> {
 
 # A double-ended queue: push and pop at both ends in constant time. Items
 # live at keys `head` to `tail - 1` of a Map.
-struct Deque<T> { items: Map<Number, T>, head: Number, tail: Number }
+export struct Deque<T> { items: Map<Number, T>, head: Number, tail: Number }
 
 impl<T> Deque<T> {
     fn new() -> Deque<T> { Deque { items: [:], head: 0, tail: 0 } }
@@ -210,7 +210,7 @@ fn entry_before(a: __PqEntry<Unknown>, b: __PqEntry<Unknown>) -> Bool {
 # else by the items themselves, compared with `<` (so Numbers or Strings).
 # Equal ones come out in the order they went in. For largest first, give
 # a key that negates: `PriorityQueue.new(fn(x) { 0 - x })`. A binary heap.
-struct PriorityQueue<T> { heap: Vector<__PqEntry<T>>, key: Unknown, pushed: Number }
+export struct PriorityQueue<T> { heap: Vector<__PqEntry<T>>, key: Unknown, pushed: Number }
 
 impl<T> PriorityQueue<T> {
     fn new(key: Unknown = none) -> PriorityQueue<T> {

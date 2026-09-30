@@ -96,7 +96,7 @@ class TypeValueTests(unittest.TestCase):
         self.assertEqual(run_source(src), "Map keys must be a String, Number, or Bool, got Type\n")
 
     def test_json_stringify_rejects_a_type(self):
-        src = JSON + 'print(try { json.stringify(Number) } catch { e: JsonError => { e.message() } })\n'
+        src = JSON + 'print(try { json.stringify(Number) } catch { e: json.JsonError => { e.message() } })\n'
         self.assertEqual(run_source(src), "stringify: can't write a Type as JSON\n")
 
     def test_type_values_survive_a_deep_copy(self):
@@ -319,19 +319,19 @@ class SignatureTests(unittest.TestCase):
         out = run_source(
             self.SIG
             + "match s.params[0].type {\n"
-            + "  TypeRef.Named { type: t, args: args } => { print(t == Number, args.len()) }\n"
+            + "  reflect.TypeRef.Named { type: t, args: args } => { print(t == Number, args.len()) }\n"
             + "  _ => { print(\"?\") }\n}\n"
-            + "match s.params[2].type {\n  TypeRef.Unknown => { print(\"Unknown\") }\n  _ => { print(\"?\") }\n}\n"
+            + "match s.params[2].type {\n  reflect.TypeRef.Unknown => { print(\"Unknown\") }\n  _ => { print(\"?\") }\n}\n"
         )
         self.assertEqual(out, "true 0\nUnknown\n")
 
     def test_returns_and_throws(self):
         out = run_source(
             self.SIG
-            + "match s.returns {\n  TypeRef.Named { type: t, args: args } => { print(t == Number) }\n  _ => { print(\"?\") }\n}\n"
+            + "match s.returns {\n  reflect.TypeRef.Named { type: t, args: args } => { print(t == Number) }\n  _ => { print(\"?\") }\n}\n"
             + "match s.throws {\n  some(list) => { print(list.len()) }\n  none => { print(\"no clause\") }\n}\n"
             + "match reflect.signature(foo).throws {\n  some(list) => { print(list.len()) }\n  none => { print(\"no clause\") }\n}\n"
-            + "match reflect.signature(foo).returns {\n  TypeRef.Unknown => { print(\"unwritten\") }\n  _ => { print(\"?\") }\n}\n"
+            + "match reflect.signature(foo).returns {\n  reflect.TypeRef.Unknown => { print(\"unwritten\") }\n  _ => { print(\"?\") }\n}\n"
         )
         self.assertEqual(out, "true\n1\nno clause\nunwritten\n")
 
@@ -359,14 +359,14 @@ class SignatureTests(unittest.TestCase):
             + "fn first<T>(v: Vector<T>) -> T { v[0] }\nfn g(f: fn(Number) -> String) { }\n"
             + "let s = reflect.signature(first)\nprint(s.type_params)\n"
             + "match s.params[0].type {\n"
-            + "  TypeRef.Named { type: t, args: args } => {\n"
+            + "  reflect.TypeRef.Named { type: t, args: args } => {\n"
             + "    print(t == Vector, args.len())\n"
-            + "    match args[0] {\n      TypeRef.Param { name } => { print(name) }\n      _ => { print(\"?\") }\n    }\n"
+            + "    match args[0] {\n      reflect.TypeRef.Param { name } => { print(name) }\n      _ => { print(\"?\") }\n    }\n"
             + "  }\n  _ => { print(\"?\") }\n}\n"
-            + "match s.returns {\n  TypeRef.Param { name } => { print(name) }\n  _ => { print(\"?\") }\n}\n"
+            + "match s.returns {\n  reflect.TypeRef.Param { name } => { print(name) }\n  _ => { print(\"?\") }\n}\n"
             + "match reflect.signature(g).params[0].type {\n"
-            + "  TypeRef.Fn { params, returns, throws } => {\n    print(params.len())\n"
-            + "    match returns {\n      TypeRef.Named { type: t, args: a } => { print(t == String) }\n      _ => { print(\"?\") }\n    }\n  }\n"
+            + "  reflect.TypeRef.Fn { params, returns, throws } => {\n    print(params.len())\n"
+            + "    match returns {\n      reflect.TypeRef.Named { type: t, args: a } => { print(t == String) }\n      _ => { print(\"?\") }\n    }\n  }\n"
             + "  _ => { print(\"?\") }\n}\n"
         )
         self.assertEqual(out, "[T]\ntrue 1\nT\nT\n1\ntrue\n")
@@ -376,9 +376,9 @@ class SignatureTests(unittest.TestCase):
             REFLECT
             + "trait Shape { fn area(self) -> Number }\nstruct Sq { n }\nimpl Sq { fn twin(self) -> Self { self } }\n"
             + "fn take(s: Shape) -> Never { throw 1 }\n"
-            + "match reflect.signature(take).params[0].type {\n  TypeRef.Trait { name, args } => { print(name) }\n  _ => { print(\"?\") }\n}\n"
-            + "match reflect.signature(take).returns {\n  TypeRef.Never => { print(\"Never\") }\n  _ => { print(\"?\") }\n}\n"
-            + "match reflect.signature(reflect.methods(Sq)[0].function).returns {\n  TypeRef.SelfType => { print(\"Self\") }\n  _ => { print(\"?\") }\n}\n"
+            + "match reflect.signature(take).params[0].type {\n  reflect.TypeRef.Trait { name, args } => { print(name) }\n  _ => { print(\"?\") }\n}\n"
+            + "match reflect.signature(take).returns {\n  reflect.TypeRef.Never => { print(\"Never\") }\n  _ => { print(\"?\") }\n}\n"
+            + "match reflect.signature(reflect.methods(Sq)[0].function).returns {\n  reflect.TypeRef.SelfType => { print(\"Self\") }\n  _ => { print(\"?\") }\n}\n"
         )
         self.assertEqual(out, "Shape\nNever\nSelf\n")
 
@@ -409,7 +409,7 @@ class SchemaTests(unittest.TestCase):
         out = run_source(
             self.S
             + "match reflect.schema(User) {\n"
-            + "  some(Schema.Struct { type: t, doc: doc, type_params: tps, fields: fields, decorators: ds }) => {\n"
+            + "  some(reflect.Schema.Struct { type: t, doc: doc, type_params: tps, fields: fields, decorators: ds }) => {\n"
             + "    print(t == User, doc, tps.len(), fields.len())\n"
             + "    for let f in fields { print(f.name, \"|\", f.doc, \"|\", f.type) }\n"
             + "  }\n  _ => { print(\"?\") }\n}\n"
@@ -427,7 +427,7 @@ class SchemaTests(unittest.TestCase):
             REFLECT
             + "## Shapes.\nenum Shape<T> {\n    ## Round.\n    Circle { r: Number, tag: T },\n    Empty\n}\n"
             + "match reflect.schema(Shape) {\n"
-            + "  some(Schema.Enum { type: t, doc: doc, type_params: tps, variants: vs, decorators: ds }) => {\n"
+            + "  some(reflect.Schema.Enum { type: t, doc: doc, type_params: tps, variants: vs, decorators: ds }) => {\n"
             + "    print(doc, tps, vs.len())\n"
             + "    for let v in vs {\n      print(v.name, \"|\", v.doc, \"|\", v.fields.len())\n"
             + "      for let f in v.fields { print(\"  \", f.name, f.type) }\n    }\n"
@@ -445,7 +445,7 @@ class SchemaTests(unittest.TestCase):
     def test_the_built_in_enums_have_a_schema(self):
         out = run_source(
             REFLECT
-            + "match reflect.schema(Option) {\n  some(Schema.Enum { type: t, doc: d, type_params: p, variants: vs, decorators: ds }) => { print(vs.len(), vs[1].name, vs[1].fields[0].name) }\n  _ => { print(\"?\") }\n}\n"
+            + "match reflect.schema(Option) {\n  some(reflect.Schema.Enum { type: t, doc: d, type_params: p, variants: vs, decorators: ds }) => { print(vs.len(), vs[1].name, vs[1].fields[0].name) }\n  _ => { print(\"?\") }\n}\n"
         )
         self.assertEqual(out, "2 some value\n")
 
@@ -497,10 +497,10 @@ class ConstructAndCallTests(unittest.TestCase):
     def test_construct_errors_name_the_field(self):
         out = run_source(
             self.C
-            + 'print(try { reflect.construct(User, ["name": "a", "age": 1]) } catch { e: ReflectError => { e.message() } })\n'
-            + 'print(try { reflect.construct(User, ["name": "a", "tags": [], "age": 1, "x": 1]) } catch { e: ReflectError => { e.message() } })\n'
-            + 'print(try { reflect.construct(Number, [:]) } catch { e: ReflectError => { e.message() } })\n'
-            + 'print(try { reflect.construct(Shape, [:]) } catch { e: ReflectError => { e.message() } })\n'
+            + 'print(try { reflect.construct(User, ["name": "a", "age": 1]) } catch { e: reflect.ReflectError => { e.message() } })\n'
+            + 'print(try { reflect.construct(User, ["name": "a", "tags": [], "age": 1, "x": 1]) } catch { e: reflect.ReflectError => { e.message() } })\n'
+            + 'print(try { reflect.construct(Number, [:]) } catch { e: reflect.ReflectError => { e.message() } })\n'
+            + 'print(try { reflect.construct(Shape, [:]) } catch { e: reflect.ReflectError => { e.message() } })\n'
         )
         self.assertEqual(
             out,
@@ -513,10 +513,10 @@ class ConstructAndCallTests(unittest.TestCase):
             self.C
             + 'print(reflect.construct_variant(Shape, "Circle", ["r": 2]), reflect.construct_variant(Shape, "Empty", [:]))\n'
             + 'print(reflect.construct_variant(Option, "some", ["value": 1]), reflect.construct_variant(Option, "none", [:]))\n'
-            + 'print(try { reflect.construct_variant(Shape, "Nope", [:]) } catch { e: ReflectError => { e.message() } })\n'
-            + 'print(try { reflect.construct_variant(Shape, "Circle", [:]) } catch { e: ReflectError => { e.message() } })\n'
-            + 'print(try { reflect.construct_variant(Shape, "Circle", ["r": 1, "q": 2]) } catch { e: ReflectError => { e.message() } })\n'
-            + 'print(try { reflect.construct_variant(User, "x", [:]) } catch { e: ReflectError => { e.message() } })\n'
+            + 'print(try { reflect.construct_variant(Shape, "Nope", [:]) } catch { e: reflect.ReflectError => { e.message() } })\n'
+            + 'print(try { reflect.construct_variant(Shape, "Circle", [:]) } catch { e: reflect.ReflectError => { e.message() } })\n'
+            + 'print(try { reflect.construct_variant(Shape, "Circle", ["r": 1, "q": 2]) } catch { e: reflect.ReflectError => { e.message() } })\n'
+            + 'print(try { reflect.construct_variant(User, "x", [:]) } catch { e: reflect.ReflectError => { e.message() } })\n'
         )
         self.assertEqual(
             out,
@@ -543,7 +543,7 @@ class JsonDecodeTests(unittest.TestCase):
     )
 
     def _shape_error(self, expr: str) -> str:
-        return run_source(self.D + f"print(try {{ {expr} }} catch {{ JsonError.Shape {{ message }} => {{ message }} }})\n").rstrip("\n")
+        return run_source(self.D + f"print(try {{ {expr} }} catch {{ json.JsonError.Shape {{ message }} => {{ message }} }})\n").rstrip("\n")
 
     def test_decode_a_struct(self):
         out = run_source(
@@ -591,7 +591,7 @@ class JsonDecodeTests(unittest.TestCase):
     def test_a_type_with_from_json_uses_it(self):
         out = run_source(
             self.D
-            + "struct Odd { n: Number }\nimpl FromJson for Odd { fn from_json(value: Unknown) -> Odd { Odd { n: 100 } } }\n"
+            + "struct Odd { n: Number }\nimpl json.FromJson for Odd { fn from_json(value: Unknown) -> Odd { Odd { n: 100 } } }\n"
             + "struct Holder { odd: Odd }\n"
             + 'print(json.decode(Odd, 5).n, json.decode(Holder, json.parse("{\\"odd\\": 1}")).odd.n)\n'
         )
@@ -600,7 +600,7 @@ class JsonDecodeTests(unittest.TestCase):
     def test_parse_as(self):
         out = run_source(self.D + 'print(json.parse_as(P, "{\\"x\\": 1, \\"tags\\": []}"))\n')
         self.assertEqual(out, "P { x: 1, y: none, tags: [] }\n")
-        out = run_source(self.D + 'print(try { json.parse_as(P, "{") } catch { e: JsonError => { "syntax" } })\n')
+        out = run_source(self.D + 'print(try { json.parse_as(P, "{") } catch { e: json.JsonError => { "syntax" } })\n')
         self.assertEqual(out, "syntax\n")
 
     def test_vector_and_map_without_arguments_pass_items_through(self):
@@ -615,7 +615,7 @@ class JsonDecodeTests(unittest.TestCase):
         out = run_source(
             REFLECT + JSON
             + "struct P { x: Number }\nmatch reflect.schema(P) {\n"
-            + "  some(Schema.Struct { type: t, doc: d, type_params: tp, fields: fs, decorators: ds }) => { print(json.decode_ref(fs[0].type, 5)) }\n"
+            + "  some(reflect.Schema.Struct { type: t, doc: d, type_params: tp, fields: fs, decorators: ds }) => { print(json.decode_ref(fs[0].type, 5)) }\n"
             + "  _ => { }\n}\n"
         )
         self.assertEqual(out, "5\n")
@@ -623,12 +623,12 @@ class JsonDecodeTests(unittest.TestCase):
 
 class CheckerTests(unittest.TestCase):
     def test_decode_is_typed_by_the_type_value(self):
-        src = JSON + "struct P { x: Number }\nfn load(v) -> P throws JsonError {\n    let p: P = json.decode(P, v)\n    p\n}\n"
+        src = JSON + "struct P { x: Number }\nfn load(v) -> P throws json.JsonError {\n    let p: P = json.decode(P, v)\n    p\n}\n"
         diagnostics, _ = check(src)
         self.assertEqual(diagnostics, [])
 
     def test_the_wrong_type_is_a_mismatch(self):
-        src = JSON + "struct P { x: Number }\nfn load(v) -> Number throws JsonError {\n    let n: Number = json.decode(P, v)\n    n\n}\n"
+        src = JSON + "struct P { x: Number }\nfn load(v) -> Number throws json.JsonError {\n    let n: Number = json.decode(P, v)\n    n\n}\n"
         diagnostics, _ = check(src)
         self.assertEqual([m for k, m, _l in diagnostics if k == "mismatch"], ["Type mismatch: expected Number, found P"])
 
@@ -686,10 +686,10 @@ class MetaTests(unittest.TestCase):
             REFLECT
             + "struct User { name: String }\n## Adds.\nfn add(a: Number, b: Number = 1) -> Number { a + b }\n"
             + "let s = reflect.signature(add)\n"
-            + "match s.params[0].type {\n  TypeRef.Unknown => { print(\"Unknown\") }\n  _ => { print(\"?\") }\n}\n"
+            + "match s.params[0].type {\n  reflect.TypeRef.Unknown => { print(\"Unknown\") }\n  _ => { print(\"?\") }\n}\n"
             + "print(s.name, s.params[0].name, s.params[1].has_default, s.params[1].default, s.doc == \"\")\n"
-            + "match reflect.schema(User) {\n  some(Schema.Struct { type: t, doc: d, type_params: tp, fields: fs, decorators: ds }) => {\n"
-            + "    print(fs[0].name)\n    match fs[0].type {\n      TypeRef.Unknown => { print(\"Unknown\") }\n      _ => { print(\"?\") }\n    }\n  }\n  _ => { }\n}\n"
+            + "match reflect.schema(User) {\n  some(reflect.Schema.Struct { type: t, doc: d, type_params: tp, fields: fs, decorators: ds }) => {\n"
+            + "    print(fs[0].name)\n    match fs[0].type {\n      reflect.TypeRef.Unknown => { print(\"Unknown\") }\n      _ => { print(\"?\") }\n    }\n  }\n  _ => { }\n}\n"
         )
         self.assertEqual(_run(self._without_meta(src), ""), "Unknown\nadd a true none true\nname\nUnknown\n")
         self.assertIn(b"\x82", compile_bytes(text=src))

@@ -17,7 +17,7 @@
 
 use std::fmt;
 
-use super::value::Value;
+use super::value::{demangle_text, Value};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
@@ -61,14 +61,14 @@ pub struct RuntimeError {
 
 impl RuntimeError {
     pub fn new(msg: impl Into<String>) -> Self {
-        RuntimeError { message: msg.into(), located: false, kind: ErrorKind::Internal, thrown: None }
+        RuntimeError { message: demangle_text(msg.into()), located: false, kind: ErrorKind::Internal, thrown: None }
     }
 
     /// Same as `new`, with an explicit M25 classification (docs/MAHC_FORMAT.md
     /// #4.5) -- every raise site that has one should use this instead of
     /// leaving the default `Internal`.
     pub fn with_kind(msg: impl Into<String>, kind: ErrorKind) -> Self {
-        RuntimeError { message: msg.into(), located: false, kind, thrown: None }
+        RuntimeError { message: demangle_text(msg.into()), located: false, kind, thrown: None }
     }
 
     /// M25: a Mah *value* being thrown across a Rust boundary -- `exec.rs`'s

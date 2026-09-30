@@ -241,6 +241,11 @@ would fail at runtime today, or resolve some of them statically.
   (there's no receiver); call it on the concrete type. Two traits providing
   the same static fn name on one type make `Type.f()` ambiguous, with no way
   to qualify it.
-- Traits, like structs and enums, are global across imported files and
-  need no `export`.
+- Traits, like structs and enums, are module-scoped since M41s: an imported
+  module's trait is private unless it is `export`ed, and is written
+  `lib.Named` (namespaced import) or `Named` (flat) in an `impl` header, e.g.
+  `impl lib.Named for Mine`. The prelude's traits (`Printable`, `Iterable`,
+  `Iterator`, `Index`, `IndexAssign`, `Error`, ...) stay global. Method
+  dispatch is unaffected; `reflect.implements(T, "Named")` matches the
+  trait's declared name.
 - No bound-method values (`let f = p.area` is a field access, and fails).

@@ -43,6 +43,7 @@ from .runtime_values import (
     TypeValue,
     VectorValue,
     map_key,
+    display_name,
     type_name_of,
 )
 
@@ -110,7 +111,7 @@ def _ref_value(data: ReflectData, ref):
         )
     if tag == 3:
         return _vec([Decimal(3), data.strings[ref.name]])
-    return _vec([Decimal(6), data.strings[ref.name], _vec(_ref_value(data, a) for a in ref.args)])
+    return _vec([Decimal(6), display_name(data.strings[ref.name]), _vec(_ref_value(data, a) for a in ref.args)])
 
 
 def _throws_value(data: ReflectData, throws):
@@ -248,7 +249,7 @@ def _methods(ctx, args):
     inherent.sort(key=lambda m: m[0])
     traited.sort(key=lambda m: (m[0], m[1]))
     out = [_vec([m, fn, bool(is_method), NONE_VALUE]) for m, fn, is_method in inherent]
-    out += [_vec([m, fn, bool(is_method), trait]) for trait, m, fn, is_method in traited]
+    out += [_vec([m, fn, bool(is_method), display_name(trait)]) for trait, m, fn, is_method in traited]
     return _vec(out)
 
 
@@ -261,7 +262,7 @@ def _implements(ctx, args):
             f"reflect.implements: the trait name must be a String, got {type_name_of(trait)}", kind="TypeMismatch"
         )
     for (type_name, _method), entry in data.method_table.items():
-        if type_name == t.name and trait in entry["traits"]:
+        if type_name == t.name and any(display_name(k) == trait for k in entry["traits"]):
             return True
     return False
 
@@ -300,9 +301,9 @@ def _construct(ctx, args):
     t = _type_arg("reflect.construct", t)
     given = _field_map("reflect.construct", fields)
     if t.kind == 1 or data.types[t.index].kind != 0:
-        return _failure(f"can't construct {t.name}: it isn't a struct")
+        return _failure(f"can't construct {display_name(t.name)}: it isn't a struct")
     info = data.types[t.index]
-    built, message = _build(t.name, info.fields, given)
+    built, message = _build(display_name(t.name), info.fields, given)
     if message is not None:
         return _failure(message)
     return _vec([True, StructInstance(info.name, built)])
@@ -319,14 +320,14 @@ def _construct_variant(ctx, args):
         )
     given = _field_map("reflect.construct_variant", fields)
     if t.kind == 1 or data.types[t.index].kind != 1:
-        return _failure(f"can't construct a variant of {t.name}: it isn't an enum")
+        return _failure(f"can't construct a variant of {display_name(t.name)}: it isn't an enum")
     info = data.types[t.index]
     if info.name == "Promise":
         return _failure("can't construct a Promise")
     declared = dict(info.variants)
     if variant not in declared:
-        return _failure(f"{t.name} has no variant '{variant}'")
-    built, message = _build(f"{t.name}.{variant}", declared[variant], given)
+        return _failure(f"{display_name(t.name)} has no variant '{variant}'")
+    built, message = _build(f"{display_name(t.name)}.{variant}", declared[variant], given)
     if message is not None:
         return _failure(message)
     if info.name == "Option" and variant == "none":

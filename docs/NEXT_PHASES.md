@@ -204,8 +204,10 @@ file).
 
 Landed as M11, see docs/V2_DESIGN.md -- struct/enum type-name, enum
 variant-name, and struct/enum field-name rename in declarations/literals/
-explicit patterns, always single-file (structs/enums can't be exported/
-imported across files at all). Field-*access* rename (`p.x`) remains
+explicit patterns. Type-name rename was single-file until M41s made types
+exportable; it is now cross-file the way function rename is (see
+docs/V2_DESIGN.md's M41s milestone), while variant and field rename stay
+single-file. Field-*access* rename (`p.x`) remains
 deliberately refused, unsound without a real type system -- still waits
 on `docs/NEXT_PHASES.md`'s own "The type system" section above.
 

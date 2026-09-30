@@ -9,7 +9,7 @@ fn scratch() -> String { fs.temp_dir() }
 fn error_of(f: fn() -> Unknown) -> String {
     let e = assert_throws(f)
     match e {
-        FsError { kind, op, path, description } => { kind + " " + op + ": " + description }
+        fs.FsError { kind, op, path, description } => { kind + " " + op + ": " + description }
         _ => { "not an FsError: " + e.message() }
     }
 }

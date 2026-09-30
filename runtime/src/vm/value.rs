@@ -361,6 +361,58 @@ impl Default for BuiltinTypeNames {
 /// The runtime type name `impl`/method dispatch sees `v` as -- docs/
 /// MAHC_FORMAT.md #5/#6.7. A `Struct`/`Enum` instance reports its own
 /// `type_name`; everything else reports its fixed built-in name.
+/// M41s (docs/MAHC_FORMAT.md #4.3): a type or trait name of the form
+/// `__mah_m<digits>_<rest>` (a module-scoped name, renamed by the
+/// preprocessor) displays as `<rest>`. Dispatch keeps the full name.
+pub fn display_name(name: &str) -> &str {
+    match mangled_len(name.as_bytes()) {
+        Some(n) => &name[n..],
+        None => name,
+    }
+}
+
+/// Length of a leading `__mah_m<digits>_` in `b`, if there is one (and
+/// something follows it).
+fn mangled_len(b: &[u8]) -> Option<usize> {
+    const PREFIX: &[u8] = b"__mah_m";
+    if !b.starts_with(PREFIX) {
+        return None;
+    }
+    let mut i = PREFIX.len();
+    let digits = i;
+    while i < b.len() && b[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == digits || i >= b.len() || b[i] != b'_' || i + 1 >= b.len() {
+        return None;
+    }
+    Some(i + 1)
+}
+
+/// `display_name` applied to every mangled name inside a message.
+pub fn demangle_text(text: String) -> String {
+    if !text.contains("__mah_m") {
+        return text;
+    }
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    let mut last = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'_' {
+            if let Some(n) = mangled_len(&bytes[i..]) {
+                out.push_str(&text[last..i]);
+                i += n;
+                last = i;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out.push_str(&text[last..]);
+    out
+}
+
 pub fn type_name_of(v: &Value, names: &BuiltinTypeNames) -> Rc<str> {
     match v {
         Value::None => names.option.clone(),

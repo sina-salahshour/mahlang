@@ -32,7 +32,7 @@ from mah.compiler.types import (  # noqa: E402
     Unifier,
     show,
 )
-from mah.preprocessor import preprocess  # noqa: E402
+from mah.preprocessor import demangle_message, preprocess  # noqa: E402
 from tests.support import EXAMPLES_DIR, compile_bytes  # noqa: E402
 
 
@@ -52,7 +52,7 @@ def check(src: str):
     pp, program, resolver = _front_end(src)
     checker = Checker(resolver)
     diagnostics = checker.check(program)
-    out = [(d.kind, d.message, line_col(pp.text, d.position)[0]) for d in diagnostics]
+    out = [(d.kind, demangle_message(d.message), line_col(pp.text, d.position)[0]) for d in diagnostics]
     types: dict = {}
     for position, t in sorted(checker.decl_types.items()):
         if pp.prelude_start is not None and position >= pp.prelude_start:
@@ -60,7 +60,7 @@ def check(src: str):
         symbol = resolver.position_index.get(position)
         # A method name isn't a variable: take its name from the source.
         name = symbol.name if symbol is not None else pp.text[position:].split("(")[0].split()[0]
-        types.setdefault(name, []).append(show(t))
+        types.setdefault(name, []).append(demangle_message(show(t)))
     return out, types
 
 

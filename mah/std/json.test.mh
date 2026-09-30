@@ -39,7 +39,7 @@ test "syntax errors say where" {
     assert_eq(syntax_error("1e999999"), "number out of range at line 1, column 1")
     let e = assert_throws(fn() { json.parse("[") })
     match e {
-        JsonError.Syntax { message, line, column } => {
+        json.JsonError.Syntax { message, line, column } => {
             assert_eq([message, line, column].join("|"), "expected a value, found end of input|1|2")
         }
         _ => { fail("not a JsonError.Syntax") }
@@ -103,7 +103,7 @@ test "round trip" {
     assert_eq(json.stringify(json.parse(json.stringify(json.parse(text), indent: 4))), text)
 }
 
-impl FromJson for Point {
+impl json.FromJson for Point {
     fn from_json(value) {
         Point {
             x: json.as_number(json.field(value, "x"), "x"),

@@ -422,7 +422,7 @@ class RandomAndCollectionsTests(unittest.TestCase):
             'import "std:collections"\nimport random from "std:random"\n'
             'let s = Set.of([1, 2])\nlet d = Deque.of(["a"])\nlet f = d.pop_front()\n'
             'let q = PriorityQueue.of([3])\nlet r = random.randint(1, 6)\nlet c = random.choice(["x"])\n'
-            'let g = Rng.new(1)'
+            'let g = random.Rng.new(1)'
         )
         self.assertEqual([d for d in diagnostics if d[0] != "implicit"], [])
         got = {k: types[k][-1] for k in ("s", "d", "f", "q", "r", "c", "g")}
@@ -623,9 +623,9 @@ class FsTests(unittest.TestCase):
         with open(path, "wb") as f:
             f.write(b"ok\nbad \xff\n")
         src = (
-            f'print(try {{ fs.read_text("{path}") }} catch {{ e: FsError => {{ e.kind + " " + e.description }} }})\n'
+            f'print(try {{ fs.read_text("{path}") }} catch {{ e: fs.FsError => {{ e.kind + " " + e.description }} }})\n'
             f'let f = fs.open("{path}")\nprint(f.read_line())\n'
-            'print(try { f.read_line() } catch { e: FsError => { e.kind } })\n'
+            'print(try { f.read_line() } catch { e: fs.FsError => { e.kind } })\n'
         )
         self.assertEqual(self._fs(src), "invalid_utf8 not valid UTF-8 text\nok\ninvalid_utf8\n")
 
@@ -635,7 +635,7 @@ class FsTests(unittest.TestCase):
         with open(path, "w") as f:
             f.write("x")
         os.chmod(path, 0)
-        src = f'print(try {{ fs.read_text("{path}") }} catch {{ e: FsError => {{ e.kind }} }})\n'
+        src = f'print(try {{ fs.read_text("{path}") }} catch {{ e: fs.FsError => {{ e.kind }} }})\n'
         self.assertEqual(self._fs(src), "permission_denied\n")
 
     def test_bytes_are_written_exactly(self):

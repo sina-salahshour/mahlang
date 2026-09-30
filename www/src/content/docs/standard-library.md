@@ -22,6 +22,12 @@ from inside a standard library function is reported at your call to it,
 and in your editor, hover and go-to-definition work on its functions like
 on your own (showing locations like `std:math#20:9`).
 
+A module's types are exported and reached like its functions: with a
+namespaced import, `json.JsonError`, `fs.FsError`, `process.Output`,
+`regex.Regex`; the ones in a flat import (`import "std:collections"`) are
+written bare (`Set`). They are module-scoped, so your own `struct Field` or
+`struct Match` never clashes with a module's.
+
 So far there are `std:math`, `std:path`, `std:json`, `std:csv`,
 `std:random`, `std:collections`, `std:regex`, `std:time`, `std:async`,
 `std:fs`, `std:process` and `std:reflect` (and `std:test`, see
@@ -116,27 +122,27 @@ structs, as objects of their fields, and enum values: a unit variant is
 its name (`"Empty"`), any other an object holding one key, the variant's
 name (`{"Circle": {"r": 2}}`). `some(x)` is written as `x`.
 
-Both throw `JsonError`: `JsonError.Syntax { message, line, column }` when
-the text isn't JSON, and `JsonError.Shape { message }` for a value JSON
+Both throw `json.JsonError`: `json.JsonError.Syntax { message, line, column }` when
+the text isn't JSON, and `json.JsonError.Shape { message }` for a value JSON
 can't hold (a function, or a Vector that contains itself).
 
 ```mah
 import json from "std:json"
 
-print(try { json.parse("[1, 2,]") } catch { e: JsonError => { e.message() } })
+print(try { json.parse("[1, 2,]") } catch { e: json.JsonError => { e.message() } })
 # expected a value, found ']' at line 1, column 7
 ```
 
-To read JSON into your own types, implement `FromJson`. The helpers
+To read JSON into your own types, implement `json.FromJson`. The helpers
 `field(object, name)`, `as_number`, `as_string`, `as_bool`, `as_vector`
-and `as_map` check the shape as they go, throwing `JsonError.Shape`:
+and `as_map` check the shape as they go, throwing `json.JsonError.Shape`:
 
 ```mah
 import json from "std:json"
 
 struct Point { x: Number, y: Number }
 
-impl FromJson for Point {
+impl json.FromJson for Point {
     fn from_json(value) {
         Point { x: json.as_number(json.field(value, "x"), "x"), y: json.as_number(json.field(value, "y"), "y") }
     }
@@ -144,18 +150,18 @@ impl FromJson for Point {
 
 let p = try Point.from_json(json.parse("{\"x\": 1, \"y\": 2}")) else Point { x: 0, y: 0 }
 print(p.x + p.y)                                               # 3
-print(try { Point.from_json(json.parse("{\"x\": 1}")) } catch { e: JsonError => { e.message() } })
+print(try { Point.from_json(json.parse("{\"x\": 1}")) } catch { e: json.JsonError => { e.message() } })
 # missing field 'y'
 ```
 
 Or let `decode` read it from the struct's declaration. `decode(T, value)`
 (and `parse_as(T, text)`, which is `decode(T, parse(text))`) checks a
 parsed value against the annotations and builds the struct, through
-[`std:reflect`](#stdreflect). It handles `Number`, `String`, `Bool`,
+`std:reflect` (below). It handles `Number`, `String`, `Bool`,
 `Vector<X>`, `Map<String, X>`, `Option<X>` (a missing key is `none`), other
 structs, and enums (the way `stringify` writes them). A field without an
 annotation takes the value as it is, and a type that implements
-`FromJson` is read by its own `from_json`. Errors say where:
+`json.FromJson` is read by its own `from_json`. Errors say where:
 
 ```mah
 import json from "std:json"
@@ -168,9 +174,9 @@ print(u.name, u.age + 1, u.email, u.tags)     # ada 37 none [x]
 try {
     json.parse_as(User, "{\"name\": \"a\", \"age\": \"old\", \"tags\": []}")
 } catch {
-    e: JsonError => { print(e.message()) }    # expected a Number for User.age, got String
+    e: json.JsonError => { print(e.message()) }    # expected a Number for User.age, got String
 }
-print(try { json.parse_as(User, "{}") } catch { e: JsonError => { e.message() } })
+print(try { json.parse_as(User, "{}") } catch { e: json.JsonError => { e.message() } })
 # missing field 'name' for User
 ```
 
@@ -201,12 +207,12 @@ print(try csv.stringify([["a", "b,c"], ["1", "say \"hi\""]]) else "")
 | `parse_records(text, delimiter = ",")` | `Vector<Map<String, String>>`, keyed by the first row |
 | `stringify(rows, delimiter = ",")` | quotes only the fields that need it; `none` is an empty field |
 | `stringify_records(records, delimiter = ",", columns = none)` | a header row (`columns`, or the first record's keys), then one row per Map |
-| `column(row, name)` | `row[name]`, for `FromCsvRow` impls |
+| `column(row, name)` | `row[name]`, for `csv.FromCsvRow` impls |
 
 Every field is read as a String (convert with `to_number()`). Lines end
-with `\n` or `\r\n`, and blank lines are skipped. Errors are a `CsvError
+with `\n` or `\r\n`, and blank lines are skipped. Errors are a `csv.CsvError
 { message, line }`, such as a quote that's never closed or a record with
-the wrong number of fields. `FromCsvRow` works like `FromJson`, with
+the wrong number of fields. `csv.FromCsvRow` works like `json.FromJson`, with
 `from_csv_row(row)` taking a record from `parse_records`.
 
 ## `std:random`
@@ -235,15 +241,15 @@ print(deck, random.sample(deck, 2))
 Every VM uses the same generator (xoshiro256**), so a seeded program
 prints the same numbers on the Python and the Rust runtime. Without a
 seed, it starts from the operating system's randomness. It isn't meant
-for cryptography. `Rng.new(seed)` makes an independent generator with the
+for cryptography. `random.Rng.new(seed)` makes an independent generator with the
 same methods, which is handy when one part of a program needs repeatable
 numbers and the rest doesn't:
 
 ```mah
 import "std:random"
 
-let a = Rng.new(7)
-let b = Rng.new(7)
+let a = random.Rng.new(7)
+let b = random.Rng.new(7)
 print(a.randint(1, 100) == b.randint(1, 100))    # true
 ```
 
@@ -319,14 +325,14 @@ pattern that uses them is an error rather than something that behaves
 differently depending on where it runs. Remember that a Mah String has
 its own escapes, so the pattern `\d+` is written `"\\d+"`.
 
-A `Regex` has `is_match`, `find` (an `Option<Match>`), `find_all`,
+A `regex.Regex` has `is_match`, `find` (an `Option<regex.Match>`), `find_all`,
 `replace` and `replace_all` (with `$1`, `$name`, `${name}`, `$$`, or a
-function of the Match), and `split(text, limit = none)`. A `Match` has
+function of the Match), and `split(text, limit = none)`. A `regex.Match` has
 `text`, `start`, `end` (positions count characters), and `group(n)` or
 `group(name)`, which gives `none` for a group that didn't take part.
 `regex.escape(text)` makes a pattern that matches `text` literally.
 
-`regex.compile` throws a `RegexError` saying what's wrong and where, so
+`regex.compile` throws a `regex.RegexError` saying what's wrong and where, so
 use it for patterns that come from outside the program. `must_compile`
 is for patterns written into the program: a mistake there is a bug, so
 it throws a `RuntimeError` the checker doesn't ask you to handle.
@@ -335,7 +341,7 @@ it throws a `RuntimeError` the checker doesn't ask you to handle.
 import regex from "std:regex"
 
 let pattern = "(\\d+"
-print(try { regex.compile(pattern) } catch { e: RegexError => { e.message() } })
+print(try { regex.compile(pattern) } catch { e: regex.RegexError => { e.message() } })
 # missing ) at position 0 in "(\d+"
 ```
 
@@ -357,7 +363,7 @@ the program started (use it to measure how long something takes). Both,
 and every duration, are Numbers of seconds with milliseconds, so ordinary
 arithmetic works on them.
 
-A `DateTime` has `year`, `month`, `day`, `hour`, `minute`, `second` and
+A `time.DateTime` has `year`, `month`, `day`, `hour`, `minute`, `second` and
 `millisecond`, plus `timestamp()`, `weekday()` (Monday is 1) and
 `day_of_year()`. Make one with `time.utc(seconds)` or `time.date(year,
 month, day, hour = 0, ...)`. It prints in ISO 8601, which `time.iso` and
@@ -371,7 +377,7 @@ month, day, hour = 0, ...)`. It prints in ISO 8601, which `time.iso` and
 | `%H` | hour, 00–23 | `%j` | day of the year |
 | `%B` `%b` | month name, full / 3 letters | `%A` `%a` | weekday name, full / 3 letters |
 
-`parse` and `date` throw `TimeError` for text that doesn't match or an
+`parse` and `date` throw `time.TimeError` for text that doesn't match or an
 impossible date (February 30). Everything is UTC for now: time zones
 aren't supported yet.
 
@@ -390,7 +396,7 @@ fn job(ms: Number, name: String) -> String {
 
 print(async.all([detach job(30, "a"), detach job(10, "b")]))           # [a, b]
 print(async.race([detach job(30, "slow"), detach job(5, "fast")]))     # fast
-print(try { async.timeout(detach job(500, "x"), 20) } catch { e: TimeoutError => { e.message() } })   # timed out after 20 ms
+print(try { async.timeout(detach job(500, "x"), 20) } catch { e: async.TimeoutError => { e.message() } })   # timed out after 20 ms
 
 let ticks = [0]
 let ticker = async.set_interval(fn() { ticks[0] = ticks[0] + 1 }, 10)
@@ -400,7 +406,7 @@ async.set_timeout(fn() { async.clear_interval(ticker) }, 55)
 - `all(promises)` gives every value, in order, once all are done, and
   throws as soon as any fails. `race(promises)` gives whichever settles
   first. `timeout(promise, ms)` gives the value if it comes in time and
-  throws `TimeoutError` otherwise. The type checker knows each one's
+  throws `async.TimeoutError` otherwise. The type checker knows each one's
   result type and what it can throw.
 - These wait like any call; `detach` them to keep going meanwhile.
 - `set_timeout(f, ms)` calls `f` once, and `set_interval(f, ms)` calls it
@@ -430,7 +436,7 @@ try {
     print(fs.list_dir(dir), fs.info(dir + "/todo.txt").size)   # [todo.txt] 27
     fs.read_text(dir + "/missing.txt")
 } catch {
-    e: FsError => { print(e.kind, "-", e.message()) }       # not_found - read_text: no such file ...
+    e: fs.FsError => { print(e.kind, "-", e.message()) }       # not_found - read_text: no such file ...
 }
 ```
 
@@ -438,16 +444,16 @@ try {
 |---|---|
 | `read_text(path)`, `write_text(path, text)`, `append_text(path, text)` | a whole file at once |
 | `exists`, `is_file`, `is_dir(path)` | Bools, never throwing |
-| `info(path)` | `FileInfo { kind, size, modified }`: "file", "dir" or "other"; bytes; seconds since 1970 |
+| `info(path)` | `fs.FileInfo { kind, size, modified }`: "file", "dir" or "other"; bytes; seconds since 1970 |
 | `list_dir(path)` | the names in a directory, sorted |
 | `mkdir(path, parents = false)` | `parents` also makes missing directories above it |
 | `remove(path, recursive = false)` | a file or an empty directory, or with `recursive` a whole tree |
 | `rename(from, to)`, `copy(from, to)` | replacing a file at `to` |
 | `glob(pattern)` | matching paths, sorted: `*`, `?`, `[abc]` in a name, `**` across directories |
 | `temp_dir()` | a new, empty temporary directory |
-| `open(path, mode = "r")` | a `File` (mode "r", "w" or "a") with `read_line()` (`none` at the end), `lines()`, `read_all()`, `write(text)` and `close()` |
+| `open(path, mode = "r")` | a `fs.File` (mode "r", "w" or "a") with `read_line()` (`none` at the end), `lines()`, `read_all()`, `write(text)` and `close()` |
 
-Errors are an `FsError` whose `kind` is `"not_found"`,
+Errors are an `fs.FsError` whose `kind` is `"not_found"`,
 `"permission_denied"`, `"already_exists"`, `"is_a_directory"`,
 `"not_a_directory"`, `"directory_not_empty"`, `"invalid_utf8"`,
 `"closed"` (using a closed File) or `"other"`, plus the `op`, `path`, and
@@ -473,7 +479,7 @@ try {
     print(process.shell("ls | wc -l").stdout.trim())
     process.run("no-such-program")
 } catch {
-    e: ProcessError => { print(e.kind, "-", e.message()) }   # not_found - no-such-program: no such file ...
+    e: process.ProcessError => { print(e.kind, "-", e.message()) }   # not_found - no-such-program: no such file ...
 }
 ```
 
@@ -485,13 +491,13 @@ try {
 | `env_set(name, value)`, `env_remove(name)` | change the program's own copy of the environment |
 | `env()` | a Map of every variable, sorted by name |
 | `cwd()`, `pid()`, `platform()` | the current directory; the process id; "linux", "macos" or "windows" |
-| `run(program, args = [], cwd = none, env = none, stdin = "")` | starts the program directly (no shell, found through `PATH`) and returns an `Output { code, stdout, stderr }` |
+| `run(program, args = [], cwd = none, env = none, stdin = "")` | starts the program directly (no shell, found through `PATH`) and returns a `process.Output { code, stdout, stderr }` |
 | `shell(command, cwd = none, env = none, stdin = "")` | `run` of the command line through `/bin/sh -c` (`cmd /C` on Windows) |
 
-`Output.ok()` is `code == 0`. A non-zero exit is not an error, and a
+`process.Output.ok()` is `code == 0`. A non-zero exit is not an error, and a
 program killed by signal N has the code `128 + N`. Output is decoded as
 UTF-8, with invalid bytes replaced by U+FFFD. Only a program that can't be
-started throws a `ProcessError` whose `kind` is `"not_found"`,
+started throws a `process.ProcessError` whose `kind` is `"not_found"`,
 `"permission_denied"` or `"other"`, plus the `command` and a `description`.
 
 The environment functions work on a copy taken when the program starts:
@@ -508,7 +514,7 @@ it runs. A bare type name is a value: `Number`, `String`, `User`, `Vector`
 directly above a `fn`, `struct`, `enum`, method, field, variant or parameter
 is its documentation, and `std:reflect` reads it together with the
 annotations, defaults and `throws` clause the source *wrote* (never what the
-checker inferred, so an unannotated parameter's type is `TypeRef.Unknown`).
+checker inferred, so an unannotated parameter's type is `reflect.TypeRef.Unknown`).
 
 ```mah
 import reflect from "std:reflect"
@@ -528,7 +534,7 @@ print(sig.name, sig.doc)                                  # add Adds two numbers
 print(sig.params[1].has_default, sig.params[1].default)   # true some(1)
 
 match reflect.schema(User) {
-    some(Schema.Struct { type: t, doc: doc, type_params: tps, fields: fields, decorators: ds }) => {
+    some(reflect.Schema.Struct { type: t, doc: doc, type_params: tps, fields: fields, decorators: ds }) => {
         print(doc, fields[0].name, fields[0].doc)         # A user. name Their name.
     }
     _ => { }
@@ -541,14 +547,14 @@ print(reflect.call(add, [1], ["b": 5]))                   # 6
 | Function | |
 |---|---|
 | `type_of(value)` | the value's type (`type_of(none)` is `None`) |
-| `signature(f)` | a `Signature { name, doc, type_params, params, returns, throws, decorators }`; each `Param` has `name`, `type`, `doc`, `has_default` and `default` (`some(value)` when it's a literal) |
+| `signature(f)` | a `reflect.Signature { name, doc, type_params, params, returns, throws, decorators }`; each `reflect.Param` has `name`, `type`, `doc`, `has_default` and `default` (`some(value)` when it's a literal) |
 | `schema(T)` | `some(Schema.Struct { ... fields })` or `some(Schema.Enum { ... variants })`; `none` for `Number`, `String` and the other primitives |
-| `methods(T)` | the `Method { name, function, is_method, trait_name }` written in `impl`s: inherent first, then trait methods by trait and name |
+| `methods(T)` | the `reflect.Method { name, function, is_method, trait_name }` written in `impl`s: inherent first, then trait methods by trait and name |
 | `implements(T, "Trait")` | whether the type has methods for that trait, native ones included |
 | `call(f, args = [], kwargs = [:])` | `f(...args, **kwargs)` |
-| `construct(T, fields)`, `construct_variant(T, "Variant", fields)` | a new struct or enum value from exactly its fields; a missing or unknown field throws `ReflectError` naming it |
+| `construct(T, fields)`, `construct_variant(T, "Variant", fields)` | a new struct or enum value from exactly its fields; a missing or unknown field throws `reflect.ReflectError` naming it |
 
-A type annotation comes back as a `TypeRef`: `Unknown`, `Named { type,
+A type annotation comes back as a `reflect.TypeRef`: `Unknown`, `Named { type,
 args }`, `Fn { params, returns, throws }`, `Param { name }`, `SelfType`,
 `Never` or `Trait { name, args }`.
 
@@ -559,9 +565,10 @@ arguments, a Map into keyword arguments: `f(...args, k: 1, **more)`) exist so
 
 The natives behind it read the `.mahc` file's structure, so they need
 bytecode 1.14 (and so does any program that imports `std:json`, whose
-`decode` is written over it). `std:reflect`'s type names (`TypeRef`,
-`Param`, `Signature`, `Field`, `Variant`, `Schema`, `Method`) are global like
-any struct's.
+`decode` is written over it). `std:reflect` exports its types (`TypeRef`, `Param`, `Signature`, `Field`,
+`Variant`, `Schema`, `Method`, `ReflectError`), reached as `reflect.TypeRef`
+and so on; like every module's types they are module-scoped, so your own
+`Field` or `Method` struct never clashes with them.
 
 ## How it's built
 
@@ -579,7 +586,7 @@ export extern fn tan(x: Number) -> Number = "math.tan"
 type and fields and a String's characters. `std:random`'s generator is a
 small native, specified bit for bit so every runtime computes the same
 numbers. `std:fs` and `std:process`'s `run` hand their work to a thread and settle
-a Promise when it's done; an open file is an id in a table, wrapped in a `File`
+a Promise when it's done; an open file is an id in a table, wrapped in a `fs.File`
 struct. `std:regex` parses each pattern in Mah and hands the runtime a
 form that Python's `re` and Rust's `regex` crate read the same way.
 

@@ -77,9 +77,10 @@ reflect.type_of(3) == Number   # true
   arguments in expression position, as TYPES.md already rules). Type
   *descriptors* (below) carry arguments.
 - `==` compares identity (same declared type). `type_name_of` a Type is
-  `"Type"`. `to_string` is the type's name (demangled). Types aren't Map
+  `"Type"`. `to_string` is the type's declared name (a module-scoped type's
+  `__mah_m<i>_` prefix is dropped, docs/MAHC_FORMAT.md §4.3). Types aren't Map
   keys (keys stay String/Number/Bool) and `json.stringify` rejects them
-  (`JsonError.Shape`).
+  (`json.JsonError.Shape`).
 - Checker: the expression `User` has type `Type<User>` (a new built-in
   generic; for a generic struct, `Type<Pair<?, ?>>` with fresh inference
   variables). This is what lets `json.decode<T>(t: Type<T>, v) -> T`
@@ -175,7 +176,10 @@ opcodes only when a call contains a spread; other calls compile as today.
 ### `std:reflect`
 
 The module's natives return plain Vectors/Maps; `mah/std/reflect.mh`
-turns them into these types:
+turns them into these types (each is `export`ed; write `reflect.Schema` etc.
+outside the module). Type and trait names they carry (`Method.trait_name`,
+`TypeRef.Trait`'s `name`, the `Type` values) are display names: a
+module-scoped `__mah_m<i>_Named` shows as `Named`.
 
 ```mah
 enum TypeRef {
@@ -227,7 +231,7 @@ Functions:
 | `signature(f: Function) -> Signature` | from META (names only without it) |
 | `schema(t: Type<Unknown>) -> Option<Schema>` | `none` for a primitive |
 | `methods(t: Type<Unknown>) -> Vector<Method>` | every method registered for the type (inherent first, then trait methods by trait name, each by method name, sorted) |
-| `implements(t: Type<Unknown>, trait_name: String) -> Bool` | whether the type has any method registered under that trait |
+| `implements(t: Type<Unknown>, trait_name: String) -> Bool` | whether the type has any method registered under a trait whose *display* name is `trait_name` (M41s: a module's `lib.Named` is `"Named"`; two traits of that name in different modules both match) |
 | `call(f, args = [], kwargs = [:])` | `f(...args, **kwargs)` |
 | `construct(t, fields: Map<String, Unknown>) -> Unknown throws ReflectError` | a struct from exactly its fields (a missing or unknown field is an error naming it) |
 | `construct_variant(t, variant: String, fields: Map<String, Unknown>) -> Unknown throws ReflectError` | an enum value |
@@ -281,12 +285,14 @@ either unspecified or forced):
   throws `ReflectError`. docs/MAHC_FORMAT.md §4.4 has them all.
 - **`reflect.mh` uses `Unknown` where the design says `Function`**
   (`signature(f)`, `Method.function`, `call(f, ...)`): `Function` can't be
-  written as a type annotation (TYPES.md). Its structs and enums are global
-  names like every struct: `TypeRef`, `Param`, `Signature`, `Field`,
-  `Variant`, `Schema`, `Method` and `ReflectError` exist in any program that
-  imports `std:reflect` **or `std:json`**, which imports it for `decode`, so
-  a program that also declares one of those names, and imports either module,
-  gets the usual "already declared" error.
+  written as a type annotation (TYPES.md). Its structs and enums are
+  exported by the module and, like every module's types since M41s, reached
+  as `reflect.TypeRef`, `reflect.Param`, `reflect.Signature`, `reflect.Field`,
+  `reflect.Variant`, `reflect.Schema`, `reflect.Method` and
+  `reflect.ReflectError` (or bare, with a flat `import "std:reflect"`).
+  Before M41s they were global names, so a program that imported
+  `std:reflect` **or `std:json`** (which imports it) and declared a `Field`
+  of its own got "already declared"; that clash is gone.
 - **`std:json` now needs 1.14**: `json.mh` imports `std:reflect`, whose
   natives are 1.14, so every program that imports `std:json` is written at
   minor 14 (it used to be 7).

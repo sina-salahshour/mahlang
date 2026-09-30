@@ -58,7 +58,7 @@ struct Wrapper { p: P, extra: Map<String, Number> }
 
 struct Odd { n: Number }
 
-impl FromJson for Odd {
+impl json.FromJson for Odd {
     fn from_json(value: Unknown) -> Odd { Odd { n: 100 } }
 }
 
@@ -94,14 +94,14 @@ test "signatures" {
     assert(s.params[2].has_default)
     assert_eq(s.params[2].default, none)
     match s.params[0].type {
-        TypeRef.Named { type: t, args: args } => {
+        reflect.TypeRef.Named { type: t, args: args } => {
             assert_eq(t, Number)
             assert_eq(args.len(), 0)
         }
         _ => { fail("expected Named") }
     }
     match s.params[2].type {
-        TypeRef.Unknown => { }
+        reflect.TypeRef.Unknown => { }
         _ => { fail("expected Unknown") }
     }
     match s.throws {
@@ -116,10 +116,10 @@ test "generic and function types" {
     let g = reflect.signature(first)
     assert_eq("" + g.type_params, "[T]")
     match g.params[0].type {
-        TypeRef.Named { type: t, args: args } => {
+        reflect.TypeRef.Named { type: t, args: args } => {
             assert_eq(t, Vector)
             match args[0] {
-                TypeRef.Param { name } => { assert_eq(name, "T") }
+                reflect.TypeRef.Param { name } => { assert_eq(name, "T") }
                 _ => { fail("expected Param") }
             }
         }
@@ -127,10 +127,10 @@ test "generic and function types" {
     }
     let h = reflect.signature(takes)
     match h.params[0].type {
-        TypeRef.Fn { params, returns, throws } => {
+        reflect.TypeRef.Fn { params, returns, throws } => {
             assert_eq(params.len(), 1)
             match returns {
-                TypeRef.Named { type: t, args: args } => { assert_eq(t, String) }
+                reflect.TypeRef.Named { type: t, args: args } => { assert_eq(t, String) }
                 _ => { fail("expected Named") }
             }
         }
@@ -141,7 +141,13 @@ test "generic and function types" {
 test "schemas" {
     match reflect.schema(User) {
         some(
-            Schema.Struct { type: t, doc: doc, type_params: tps, fields: fields, decorators: ds }
+            reflect.Schema.Struct {
+                type: t,
+                doc: doc,
+                type_params: tps,
+                fields: fields,
+                decorators: ds
+            }
         ) => {
             assert_eq(t, User)
             assert_eq(doc, "A user.")
@@ -150,7 +156,7 @@ test "schemas" {
             assert_eq(fields[0].doc, "The name.")
             assert_eq(fields[1].doc, "")
             match fields[2].type {
-                TypeRef.Unknown => { }
+                reflect.TypeRef.Unknown => { }
                 _ => { fail("expected Unknown") }
             }
         }
@@ -158,7 +164,13 @@ test "schemas" {
     }
     match reflect.schema(Shape) {
         some(
-            Schema.Enum { type: t, doc: doc, type_params: tps, variants: variants, decorators: ds }
+            reflect.Schema.Enum {
+                type: t,
+                doc: doc,
+                type_params: tps,
+                variants: variants,
+                decorators: ds
+            }
         ) => {
             assert_eq(doc, "A shape.")
             assert_eq(variants.len(), 2)

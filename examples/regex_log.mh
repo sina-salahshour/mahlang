@@ -30,5 +30,5 @@ let word = regex.must_compile("\\bretry\\b|\\blocked\\b", "i")
 print(word.replace_all("Retry, then LOCKED", fn(m) { "<" + m.text.to_upper() + ">" }))
 
 # `must_compile` is for fixed patterns like these; a pattern from outside
-# goes through `compile`, whose RegexError says what's wrong and where.
-print(try { regex.compile("(\\d+") } catch { e: RegexError => { e.message() } })
+# goes through `compile`, whose regex.RegexError says what's wrong and where.
+print(try { regex.compile("(\\d+") } catch { e: regex.RegexError => { e.message() } })

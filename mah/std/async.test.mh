@@ -49,7 +49,7 @@ test "timeout" {
     let e = assert_throws(fn() { async.timeout(detach after(500, "late"), 20) })
     assert_eq(e.message(), "timed out after 20 ms")
     match e {
-        TimeoutError { ms } => { assert_eq(ms, 20) }
+        async.TimeoutError { ms } => { assert_eq(ms, 20) }
         _ => { fail("not a TimeoutError") }
     }
     assert_eq(assert_throws(fn() { async.timeout(detach fails_after(5), 500) }).message(), "boom 5")

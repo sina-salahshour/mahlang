@@ -15,7 +15,7 @@ use super::link::{LinkedInstr, LinkedProgram, TypeInfo, TypeKind};
 use super::methods::{self, call_native_method, NativeMethodKind};
 use super::natives;
 use super::value::{
-    self, is_number, map_key, truthy, type_name_of, values_equal, BuiltinTypeNames, ClosureData, Continuation,
+    self, display_name, is_number, map_key, truthy, type_name_of, values_equal, BuiltinTypeNames, ClosureData, Continuation,
     EnumData, FrameRef, MapData, PromiseData, StructData, TaskRef, Value,
 };
 
@@ -767,8 +767,8 @@ impl<'p> Vm<'p> {
                 let tname = type_name_of(value, &self.names);
                 let m = self.uncaught_message(value);
                 let base = match m {
-                    Some(m) => format!("Uncaught {tname}: {m}"),
-                    None => format!("Uncaught {tname}"),
+                    Some(m) => format!("Uncaught {}: {m}", display_name(&tname)),
+                    None => format!("Uncaught {}", display_name(&tname)),
                 };
                 let thrown_at = match value {
                     Value::Struct(s) => s.borrow().thrown_at,
@@ -1937,7 +1937,7 @@ impl<'a> Vm<'a> {
     fn failed_outcome(&mut self, error: &Value) -> RResult<TestOutcome> {
         let tname = type_name_of(error, &self.names);
         if let Value::Struct(s) = error {
-            if tname.as_ref() == "SkipTest" {
+            if display_name(&tname) == "SkipTest" {
                 let reason = s.borrow().get("reason").cloned().unwrap_or(Value::Str(Rc::from("")));
                 let text = match reason {
                     Value::Str(r) => r.to_string(),
@@ -1947,7 +1947,7 @@ impl<'a> Vm<'a> {
             }
         }
         let message = match error {
-            Value::Struct(_) if tname.as_ref() == "AssertionError" => {
+            Value::Struct(_) if display_name(&tname) == "AssertionError" => {
                 self.uncaught_message(error).unwrap_or_else(|| "assertion failed".to_string())
             }
             Value::Enum(e) if tname.as_ref() == "RuntimeError" => match e.borrow().get("message") {
@@ -1955,8 +1955,8 @@ impl<'a> Vm<'a> {
                 _ => String::new(),
             },
             _ => match self.uncaught_message(error) {
-                Some(m) => format!("Uncaught {tname}: {m}"),
-                None => format!("Uncaught {tname}"),
+                Some(m) => format!("Uncaught {}: {m}", display_name(&tname)),
+                None => format!("Uncaught {}", display_name(&tname)),
             },
         };
         let mut outcome = TestOutcome::new("failed", message);

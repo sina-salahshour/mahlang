@@ -25,7 +25,7 @@ fn argument_error(message: String) -> Unknown {
 fn is_whole(n: Number) -> Bool { n == n // 1 }
 
 # A generator. `state` is its four 64-bit words; leave it alone.
-struct Rng { state: Vector<Number> }
+export struct Rng { state: Vector<Number> }
 
 impl Rng {
     # A generator seeded with the whole Number `seed` (any size below

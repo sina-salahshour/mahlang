@@ -3298,6 +3298,88 @@ node that resolved to it. Then:
       bytecode/stdlib tests' minor numbers. The "annotations compile to
       identical bytecode" test now ignores META.
 
+39. **M41s — module-scoped type names. ✅ Landed.**
+    **A breaking change.** Until now a module's `fn`/`let` names were
+    alpha-renamed (`__mah_m{idx}_{name}`) but `struct`/`enum`/`trait` names
+    were global across the whole combined program. Once `std:json` imported
+    `std:reflect`, a program that imported it and declared its own `Field`,
+    `Param`, `Method`, `TypeRef`, ... failed with "Struct 'Field' is already
+    declared", and a framework written in Mah would collide with user code on
+    `Request`/`Response`/`Route`. Types are now module-scoped, exactly like
+    functions.
+
+    - **Renaming** (`mah/preprocessor.py`): in every imported module (not
+      the entry file, not the prelude) a top-level `struct`, `enum` or
+      `trait` name goes into the same `name_rewrite` table as `fn`/`let`
+      names, so every reference is renamed: annotations, generics, struct
+      literals, patterns, `impl` targets and trait names, `Name.Variant`,
+      type values (`print(Name)`), catch arms. `Self` is untouched, the
+      M12/M36 exceptions (a method's declared name, a parameter, a
+      keyword-argument or field label) apply unchanged, and a new one keeps
+      an enum body's *variant declarations* (`enum TypeRef { Param { ... } }`
+      next to `struct Param`) from being renamed. The prelude stays global
+      and unrenamed (the VMs and compiler know `Range`, `Iterator`,
+      `Iterable`, `Printable`, `Error`, `EndOfInput`, ... by name); a module
+      may declare a type with a prelude type's name, and its own wins inside
+      the module. The "does this file need the prelude" trigger now ignores
+      a name only in the file that declares it.
+    - **Exporting**: `export struct`, `export enum`, `export trait` (and
+      `export Name` for a type declared elsewhere, like `export helper`).
+      Only exported types are visible to importers; a private one used from
+      outside gives the same clean error a non-exported fn does
+      (`Undefined struct type 'Hidden (not exported)'`, `Unknown type ...`,
+      `Undefined trait ...`).
+    - **Importing**: the same textual rewrite `math.answer` already got.
+      `import lib from "./lib"`: `lib.Point` everywhere a type or a value is
+      written (`p: lib.Point`, `Vector<lib.Point>`, `lib.Point { x: 1 }`,
+      `lib.Shape.Circle { r }`, `lib.Shape.Empty`, `impl lib.Named for Mine`,
+      `reflect.schema(lib.Point)`, `e: lib.Oops`); `lib.Shape.Circle` rewrites
+      only the `lib.Shape` part. Flat `import "./lib"`: bare `Point`.
+    - **Display names** (docs/MAHC_FORMAT.md §4.3): a type or trait name of
+      the form `__mah_m<digits>_<rest>` displays as `<rest>`. One rule, both
+      VMs (`display_name`/`demangle_text` in `mah/runtime_values.py`,
+      `value.rs` for Rust): `print` of structs, enums and Type values; every
+      runtime error message (the error constructors demangle their text, so
+      a missed call site can't leak a mangled name); uncaught-error reports;
+      `value.type_name` (so `json.decode`'s "expected a Number for Point.x,
+      got String" is right); `reflect` results; `mah test` output. Method
+      dispatch and the method table keep the *full* name, so two modules'
+      `Request` types stay distinct. The disassembler shows the full name.
+      No bytecode change or version bump: an old VM just shows the mangled
+      name. The compiler side was already covered by `demangle_message`; the
+      checker's raw messages are now demangled in the test helper and by
+      every real reporter (driver, LSP).
+    - **By-name lookups**: `reflect.implements(T, "Named")` matches a trait's
+      *display* name (so `json.mh`'s `implements(t, "FromJson")` keeps
+      working); `Method.trait_name` and `TypeRef.Trait`'s name are display
+      names. The VMs' `mah test` runner recognizes `std:test`'s
+      `AssertionError`/`SkipTest` by display name. No native builds a struct
+      by a std-module type's name (`EndOfInput` and `RuntimeError` are
+      prelude/built-in), so none needed to move.
+    - **Std modules**: every public type of `mah/std/*.mh` is `export`ed
+      (`JsonError`, `FromJson`, `FsError`, `FileInfo`, `File`,
+      `ProcessError`, `Output`, `DateTime`, `TimeError`, `Regex`, `Match`,
+      `RegexError`, `Set`, `Deque`, `PriorityQueue`, `Rng`, `TimeoutError`,
+      `TimerId`, `CsvError`, `FromCsvRow`, `AssertionError`, `SkipTest`,
+      reflect's eight); helpers stay private. `json.mh` writes
+      `reflect.TypeRef` etc. Everything that named a std type bare now
+      qualifies it (with a namespaced import): the `*.test.mh` files, six
+      `examples/*.mh`, `tests/test_reflection.py`/`test_stdlib.py`, the docs.
+    - **Tooling**: the checker needed nothing (it runs on the combined
+      source). LSP go-to-definition on `lib.Point` or a flat `Point` lands in
+      the module file; hover/completion/diagnostics demangle; **rename** of
+      a struct/enum/trait name is now cross-file, the way M11 did functions
+      (`_rename_type_cross_file`: the declaring file, the open buffer and
+      every file that imports the declaring one, each re-resolved), refusing
+      types declared in the standard library or prelude; variant and field
+      rename stay single-file. Tree-sitter accepts `export struct/enum/
+      trait` and `lib.Point` in type position, literals, patterns, `impl`
+      headers and catch arms (parser regenerated); the formatter reads
+      `export struct ...` and `lib.Point` (it blanks the `lib.` prefix for
+      the parser).
+    - Tests: `tests/test_module_types.py` (both VMs where it matters), the
+      existing suites updated as listed in the milestone's report.
+
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
 it** (`make test` must stay green) — see `docs/TESTING.md` for where
@@ -3309,7 +3391,7 @@ M1 was built and documented that way.
 
 ## Status
 
-M0 through M41a (and M21b, `mah format`) have all landed; each milestone's
+M0 through M41a and M41s (and M21b, `mah format`) have all landed; each milestone's
 entry above says what changed and where it deliberately deviates from the
 design. The language has traits, generics, typed and checked errors, a
 static type checker, projects and `mah test`, async I/O with timers, and a
@@ -3319,6 +3401,8 @@ and the native Rust VM in `runtime/`; the standard library (`std:math`,
 `std:regex`, `std:time`, `std:async`, `std:fs`, `std:process`, `std:reflect`)
 is described in `docs/STDLIB.md`. Type values, `##` docs, spread calls and
 reflection landed with M41a (`docs/REFLECTION.md`); decorators and hook
-traits (M41b, M41c) are designed there but not started. What else is
+traits (M41b, M41c) are designed there but not started. M41s made
+struct/enum/trait names module-scoped (a breaking change: export the types a
+module shares, write `lib.Point` to use one). What else is
 deferred and what comes next (the network modules, and the rest) is in
 `docs/NEXT_PHASES.md`.

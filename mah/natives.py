@@ -28,6 +28,7 @@ from .runtime_values import (
     StructInstance,
     VectorValue,
     map_key,
+    display_name,
     type_name_of,
 )
 
@@ -172,7 +173,7 @@ def _float_math(name: str, fn):
 def _value_type_name(ctx: NativeContext, args) -> object:
     """The value's runtime type name, with `none` as "None" (not "Option")."""
     (value,) = args
-    return "None" if value is NONE_VALUE else type_name_of(value)
+    return "None" if value is NONE_VALUE else display_name(type_name_of(value))
 
 
 def _is_record(value) -> bool:

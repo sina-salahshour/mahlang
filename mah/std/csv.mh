@@ -24,7 +24,7 @@ extern fn chars(s: String) -> Vector<String> = "string.chars"
 
 # What went wrong, and the line it went wrong on (counting from 1; 0 when
 # it isn't about a line, like a bad delimiter).
-struct CsvError { message: String, line: Number }
+export struct CsvError { message: String, line: Number }
 
 impl Error for CsvError {
     fn message(self) -> String {
@@ -34,7 +34,7 @@ impl Error for CsvError {
 
 # Implemented by types that can be read from one record of
 # `parse_records`: `Person.from_csv_row(row)`.
-trait FromCsvRow {
+export trait FromCsvRow {
     fn from_csv_row(row: Map<String, String>) -> Self
 }
 

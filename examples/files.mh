@@ -10,7 +10,7 @@ defer {
     try fs.remove(root, recursive: true) else none
 }
 
-fn setup(root: String) throws FsError {
+fn setup(root: String) throws fs.FsError {
     fs.mkdir(path.join(root, "src/util"), parents: true)
     fs.write_text(path.join(root, "src/main.mh"), "import \"util/math\"\nprint(square(4))\n")
     fs.write_text(path.join(root, "src/util/math.mh"), "export fn square(n) { n * n }\n")
@@ -23,7 +23,7 @@ fn setup(root: String) throws FsError {
 }
 
 try { setup(root) } catch {
-    e: FsError => { print("setup failed:", e.message()) }
+    e: fs.FsError => { print("setup failed:", e.message()) }
 }
 
 # Every .mh file, with its line count, read concurrently.
@@ -51,5 +51,5 @@ for let name in try fs.list_dir(root) else [] {
 
 # Errors say what went wrong, and where.
 print(try { fs.read_text(path.join(root, "missing.txt")) } catch {
-    e: FsError => { e.kind + ": " + e.description }
+    e: fs.FsError => { e.kind + ": " + e.description }
 })

@@ -17,7 +17,7 @@ extern fn now_ms() -> Number = "time.now_ms"
 extern fn monotonic_ms() -> Number = "time.monotonic_ms"
 
 # `parse` couldn't read the text with the pattern (or a pattern is bad).
-struct TimeError { message: String }
+export struct TimeError { message: String }
 
 impl Error for TimeError {
     fn message(self) -> String { self.message }
@@ -63,7 +63,7 @@ fn days_in_month(year: Number, month: Number) -> Number {
 
 # A moment as a calendar date and time of day, in UTC. `weekday` counts
 # from Monday = 1 to Sunday = 7 (ISO 8601).
-struct DateTime {
+export struct DateTime {
     year: Number,
     month: Number,
     day: Number,

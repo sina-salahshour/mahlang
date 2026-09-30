@@ -24,7 +24,17 @@ import "std:math"            # flat import works too
 - **`std:` modules.** Every standard library module is imported as
   `"std:<name>"`. The prefix is reserved.
 - **Errors are thrown**, never returned (see `ERRORS.md`). Each module
-  has its own error enum (`FsError`, `JsonError`, ...).
+  has its own error type (`FsError`, `JsonError`, ...).
+- **Module types are module-scoped and exported** (M41s). A standard
+  library module's public structs, enums and traits are `export`ed and
+  reached like its functions: `json.JsonError`, `fs.FsError`,
+  `process.Output`, `reflect.TypeRef`, `regex.Regex`, `time.DateTime`,
+  `random.Rng`, `async.TimeoutError`, `csv.FromCsvRow`, `json.FromJson`
+  (bare, with a flat `import "std:collections"`: `Set`, `Deque`,
+  `PriorityQueue`; `import "std:test"`: `AssertionError`, `SkipTest`). Helper
+  types (`__Reader`, ...) are private. They still print and appear in
+  messages under their plain names. This prose names each type by its
+  declared name; prefix it with the module's namespace in code.
 - **All I/O is async.** fs, process, socket, http and `input` return
   Promises. A bare call auto-awaits, like `sleep_async`, and `detach`
   runs it in the background. Pure modules (json, csv, regex, math, path,
@@ -333,9 +343,10 @@ these decisions:
   for Q.tags[0], got Number`, `expected a Number for Q.m["k"], got String`,
   `missing field 'x' for P.p`, `unknown variant 'Nope' for Shape`.
 - `std:json` now imports `std:reflect`, so a program that imports it is
-  written at bytecode 1.14 (it was 1.7), and gets `std:reflect`'s
-  global type names (`TypeRef`, `Param`, `Signature`, `Field`, `Variant`,
-  `Schema`, `Method`, `ReflectError`).
+  written at bytecode 1.14 (it was 1.7). Since M41s `std:reflect`'s types
+  (`TypeRef`, `Param`, `Signature`, `Field`, `Variant`, `Schema`, `Method`,
+  `ReflectError`) are module-scoped, so a program of its own with a `Field`
+  struct can import `std:json` freely.
 
 ### `std:csv`
 
@@ -415,7 +426,8 @@ methods, so bytecode 1.6), with these decisions:
   `clear`, `to_vector` (in order, leaving the queue alone), and `of(values,
   key = none)`. Iterating goes in priority order without consuming.
 - Each prints as its name then its items (`Set[1, 2]`). The types are
-  global names, like every struct; helper types start with `__`.
+  exported by the module (a flat import writes them bare); helper types
+  start with `__` and stay private.
 
 ### `std:regex`
 

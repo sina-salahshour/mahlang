@@ -129,6 +129,11 @@ def _blank_module_syntax(text: str, toks: list):
     chars = list(text)
     starts = set()
     blanked = set()
+    # M41s: `ns.Type` -- a namespaced type name (`p: lib.Point`,
+    # `lib.Point { x: 1 }`, `impl lib.Trait for T`, `lib.Shape.Circle { r }`)
+    # is more than the parser reads; its `ns` and `.` are blanked too, so
+    # the rest parses as the bare type. Indices of the `ns` tokens.
+    prefixes = set()
 
     def blank(first: int, last: int) -> None:
         for tok in toks[first : last + 1]:
@@ -160,6 +165,21 @@ def _blank_module_syntax(text: str, toks: list):
                 starts.add(i)
                 i = end + 1
                 continue
+        if (
+            tok.type is TokenType.ID
+            and not after_dot
+            and tok.text[:1].islower()
+            and i + 2 < n
+            and toks[i + 1].type is TokenType.DOT
+            and toks[i + 2].type is TokenType.ID
+            and toks[i + 2].text[:1].isupper()
+            and toks[i + 1].start == tok.end
+            and toks[i + 2].start == toks[i + 1].end
+        ):
+            blank(i, i + 1)
+            prefixes.add(tok.index)
+            i += 2
+            continue
         if tok.type is TokenType.ID and tok.text == "export" and not after_dot and i + 1 < n:
             following = toks[i + 1].type
             is_extern = (
@@ -168,7 +188,7 @@ def _blank_module_syntax(text: str, toks: list):
                 and i + 2 < n
                 and toks[i + 2].type is TokenType.FN
             )
-            if following in (TokenType.FN, TokenType.LET) or is_extern:  # M27: `export extern fn`
+            if following in (TokenType.FN, TokenType.LET, TokenType.STRUCT, TokenType.ENUM, TokenType.TRAIT) or is_extern:  # M27: `export extern fn`
                 blank(i, i)
                 starts.add(i)
             elif following is TokenType.ID:
@@ -180,7 +200,7 @@ def _blank_module_syntax(text: str, toks: list):
                 i = end + 1
                 continue
         i += 1
-    return "".join(chars), starts, blanked
+    return "".join(chars), starts, blanked, prefixes
 
 
 def _parse(text: str, original: str) -> list:
@@ -263,7 +283,7 @@ class _Facts:
     chain_blocks: set = field(default_factory=set)
 
 
-def _facts(program: list, toks: list, module_starts: set) -> _Facts:
+def _facts(program: list, toks: list, module_starts: set, prefixes: set = frozenset()) -> _Facts:
     by_pos = {tok.start: tok.index for tok in toks}
     facts = _Facts()
 
@@ -280,6 +300,8 @@ def _facts(program: list, toks: list, module_starts: set) -> _Facts:
         # can only be part of that statement.
         while idx is not None and idx > 0 and toks[idx - 1].type is TokenType.PAREN_OPEN:
             idx -= 1
+        if idx is not None and idx >= 2 and idx - 2 in prefixes:
+            idx -= 2  # `lib.Point { ... }`: the statement starts at `lib`
         return idx
 
     def next_brace(after_index):
@@ -740,9 +762,9 @@ def _align_trailing_comments(lines: list) -> list:
 def _render(text: str, options: FormatOptions):
     toks = _lex(text)
     trivia = _trivia(text, toks)
-    parse_text, module_starts, _blanked = _blank_module_syntax(text, toks)
+    parse_text, module_starts, _blanked, prefixes = _blank_module_syntax(text, toks)
     program = _parse(parse_text, text)
-    facts = _facts(program, toks, module_starts)
+    facts = _facts(program, toks, module_starts, prefixes)
     root = _tree(toks, facts)
     doc = _Builder(text, toks, trivia, facts, options).program(root)
     lines = print_doc(doc, options.line_width, " " * options.indent)
@@ -774,7 +796,7 @@ def _verify(original: str, formatted: str, toks: list, trivia: list, program: li
         fail("tokens changed")
     if _comment_texts(_trivia(formatted, new_toks)) != _comment_texts(trivia):
         fail("comments changed")
-    parse_text, _starts, _blanked = _blank_module_syntax(formatted, new_toks)
+    parse_text, _starts, _blanked, _prefixes = _blank_module_syntax(formatted, new_toks)
     try:
         new_program = _parse(parse_text, formatted)
     except FormatError:

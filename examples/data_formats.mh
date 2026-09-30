@@ -13,7 +13,7 @@ bo,78,blue
 
 struct Player { name: String, score: Number, team: String }
 
-impl FromCsvRow for Player {
+impl csv.FromCsvRow for Player {
     fn from_csv_row(row) {
         Player {
             name: csv.column(row, "name"),
@@ -26,7 +26,7 @@ impl FromCsvRow for Player {
 let players = try {
     csv.parse_records(text).map(fn(row) { Player.from_csv_row(row) }).reduce()
 } catch {
-    e: CsvError => {
+    e: csv.CsvError => {
         print("bad CSV:", e.message())
         []
     }

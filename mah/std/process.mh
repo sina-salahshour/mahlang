@@ -36,7 +36,7 @@ extern fn native_run(
 ## A program that couldn't be started: `kind` is "not_found",
 ## "permission_denied" or "other"; `command` the program's name (for
 ## `shell`, the command line).
-struct ProcessError { kind: String, command: String, description: String }
+export struct ProcessError { kind: String, command: String, description: String }
 
 impl Error for ProcessError {
     fn message(self) -> String { self.command + ": " + self.description }
@@ -45,7 +45,7 @@ impl Error for ProcessError {
 ## What a finished program left: its exit code (128 plus the signal number if
 ## a signal killed it) and what it wrote, decoded as UTF-8 (invalid bytes
 ## become U+FFFD).
-struct Output { code: Number, stdout: String, stderr: String }
+export struct Output { code: Number, stdout: String, stderr: String }
 
 impl Output {
     ## Whether it exited with code 0.

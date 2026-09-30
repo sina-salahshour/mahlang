@@ -527,7 +527,7 @@ class DocsSanityTests(unittest.TestCase):
         checked = 0
         failures = []
         for block in blocks:
-            if "match value {" in block or "obj.method" in block or block.startswith("# mathlib.mh"):
+            if "match value {" in block or "obj.method" in block or block.startswith(("# mathlib.mh", "# geometry.mh")):
                 continue
             checked += 1
             try:

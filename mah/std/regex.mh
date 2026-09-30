@@ -38,7 +38,7 @@ extern fn chars(s: String) -> Vector<String> = "string.chars"
 # where (a code-point position in `pattern`). Misusing a compiled Regex --
 # a group it doesn't have, a bad replacement template -- is a
 # RuntimeError.ArgumentError instead, like other programming mistakes.
-struct RegexError { message: String, pattern: String, position: Number }
+export struct RegexError { message: String, pattern: String, position: Number }
 
 impl Error for RegexError {
     fn message(self) -> String {
@@ -627,7 +627,7 @@ impl __RegexParser {
 
 # A compiled pattern. `source` is its canonical form; `groups` counts the
 # capture groups and `names` numbers the named ones.
-struct Regex {
+export struct Regex {
     pattern: String,
     flags: String,
     source: String,
@@ -637,7 +637,7 @@ struct Regex {
 
 # One match: its text and code-point span, and every group's text (`none`
 # for a group that took no part).
-struct Match {
+export struct Match {
     text: String,
     start: Number,
     end: Number,

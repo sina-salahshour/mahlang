@@ -22,6 +22,7 @@ nothing from it, but the interpreter's `callmethod`/`to_str` do) and
 code_interpreter.py.
 """
 
+import re
 from decimal import Decimal
 
 # M12: names of the built-in types, as seen by `impl` and method dispatch.
@@ -59,6 +60,23 @@ SYSTEM_TRAIT_NATIVE_TYPES = {
 # M41a (docs/MAHC_FORMAT.md #5, `loadtype`): the primitive types a `Type` can
 # be, by code -- `loadtype 1, code`.
 PRIMITIVE_TYPE_NAMES = ("Number", "String", "Bool", "Function", "Vector", "Map", "None", "Type")
+
+
+_MANGLED = re.compile(r"__mah_m\d+_(?=\w)")
+_MANGLED_NAME = re.compile(r"__mah_m\d+_(\w+)")
+
+
+def display_name(name: str) -> str:
+    """M41s (docs/MAHC_FORMAT.md #4.3): a type or trait name of the form
+    `__mah_m<digits>_<rest>` (a module-scoped name, renamed by the
+    preprocessor) displays as `<rest>`. Dispatch keeps the full name."""
+    m = _MANGLED_NAME.fullmatch(name)
+    return m.group(1) if m else name
+
+
+def demangle_text(text: str) -> str:
+    """`display_name` applied to every mangled name inside a message."""
+    return _MANGLED.sub("", text) if "__mah_m" in text else text
 
 
 class TypeValue:
@@ -311,7 +329,7 @@ class MahRuntimeError(Exception):
     located: bool = False
 
     def __init__(self, message: str, kind: str = "Internal"):
-        super().__init__(message)
+        super().__init__(demangle_text(message))
         self.kind = kind
 
 

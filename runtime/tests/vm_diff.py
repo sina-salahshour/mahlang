@@ -378,11 +378,11 @@ print(random.random(), random.uniform(0 - 1, 1), random.randint(1, 1000000), ran
 let v = [1, 2, 3, 4, 5, 6, 7, 8, 9]
 random.shuffle(v)
 print(v, random.sample(v, 4), random.choice(["a", "b", "c"]), random.shuffled(["a", "b", "c", "d"]))
-let r = Rng.new(0 - 12345)
-print(r.random(), r.randint(0 - 3, 3), Rng.new(18446744073709551615).random())
+let r = random.Rng.new(0 - 12345)
+print(r.random(), r.randint(0 - 3, 3), random.Rng.new(18446744073709551615).random())
 print(try { random.randint(3, 1) } catch { e => { e.message } })
 print(try { random.seed(1.5) } catch { e => { e.message } })
-print(try { Rng { state: [1, 2, 3] }.random() } catch { e => { e.message } })
+print(try { random.Rng { state: [1, 2, 3] }.random() } catch { e => { e.message } })
 """, b""),
     ("std_random_uncaught", """
 import random from "std:random"
@@ -464,7 +464,7 @@ for let ts in [0, 951782400, 1790597925.318, 0 - 86400.5, 253402300799] {
     print(d, d.weekday(), d.day_of_year(), time.format(d, "%a %d %b %Y %H:%M:%S.%f"))
 }
 print(time.parse("Thu, 29 Feb 2024 13:05", "%a, %d %b %Y %H:%M"), time.parse_iso("2024-02-29T13:05:09.007Z").timestamp())
-print(try { time.parse("2023-02-29", "%Y-%m-%d") } catch { e: TimeError => { e.message() } }, time.duration_text(10807))
+print(try { time.parse("2023-02-29", "%Y-%m-%d") } catch { e: time.TimeError => { e.message() } }, time.duration_text(10807))
 """, b""),
     ("std_async", """
 import async from "std:async"
@@ -473,7 +473,7 @@ fn after(ms: Number, value: Unknown) -> Unknown {
     value
 }
 print(async.all([detach after(30, "a"), detach after(5, "b")]), async.race([detach after(40, 1), detach after(5, 2)]))
-print(try { async.timeout(detach after(200, "late"), 10) } catch { e: TimeoutError => { e.message() } })
+print(try { async.timeout(detach after(200, "late"), 10) } catch { e: async.TimeoutError => { e.message() } })
 let log = []
 async.set_timeout(fn() { log.push("b") }, 20)
 async.set_timeout(fn() { log.push("a") }, 5)
@@ -495,9 +495,9 @@ f.close()
 print(fs.list_dir(dir), fs.info(dir + "/sub/deep/x.mh").size, fs.is_dir(dir + "/sub"), fs.exists(dir + "/zz"))
 print(fs.glob(dir + "/**/*.*").map(fn(p) { p[dir.len()..] }).reduce())
 for let path in [dir + "/zz", dir + "/sub", dir + "/a.txt/x"] {
-    print(try { fs.read_text(path) } catch { e: FsError => { e.kind + " " + e.op + ": " + e.description } })
+    print(try { fs.read_text(path) } catch { e: fs.FsError => { e.kind + " " + e.op + ": " + e.description } })
 }
-print(try { fs.remove(dir + "/sub") } catch { e: FsError => { e.kind } }, try { f.read_line() } catch { e: FsError => { e.kind } })
+print(try { fs.remove(dir + "/sub") } catch { e: fs.FsError => { e.kind } }, try { f.read_line() } catch { e: fs.FsError => { e.kind } })
 fs.remove(dir, recursive: true)
 print(fs.exists(dir))
 """, b""),
@@ -513,7 +513,7 @@ print(process.shell("printf %s \\"$MAH_DIFF$MAH_EXTRA\\"", env: some(["MAH_EXTRA
 process.env_remove("MAH_DIFF")
 print(process.shell("printf %s \\"[$MAH_DIFF]\\"").stdout, process.env().keys().len() > 0)
 print(process.run("sh", ["-c", "kill -9 $$"]).code, process.shell("echo a | tr a b").stdout.trim())
-print(try { process.run("definitely-not-a-program-mah") } catch { e: ProcessError => { e.kind + " " + e.message() } })
+print(try { process.run("definitely-not-a-program-mah") } catch { e: process.ProcessError => { e.kind + " " + e.message() } })
 print(try { process.env_set("A=B", "x") } catch { e: RuntimeError => { e.message() } })
 process.exit(3)
 """, b""),
@@ -564,10 +564,10 @@ print(reflect.methods(User)[0].function(u), reflect.implements(User, "Printable"
 print(reflect.type_of(3) == Number, reflect.type_of("a") == String, reflect.type_of(u) == User, reflect.type_of(none), reflect.type_of([1]) == Vector, reflect.type_of(some(1)) == Option, reflect.type_of(User), Type, Function, None)
 print(reflect.construct(User, ["name": "a", "tags": [], "age": 1]), reflect.construct_variant(Shape, "Circle", ["r": 2]), reflect.construct_variant(Option, "none", [:]))
 for let bad in [["name": "a"], ["name": "a", "tags": [], "age": 1, "x": 0]] {
-    print(try { reflect.construct(User, bad) } catch { e: ReflectError => { e.message() } })
+    print(try { reflect.construct(User, bad) } catch { e: reflect.ReflectError => { e.message() } })
 }
-print(try { reflect.construct_variant(Shape, "Nope", [:]) } catch { e: ReflectError => { e.message() } })
-print(try { reflect.construct(Number, [:]) } catch { e: ReflectError => { e.message() } })
+print(try { reflect.construct_variant(Shape, "Nope", [:]) } catch { e: reflect.ReflectError => { e.message() } })
+print(try { reflect.construct(Number, [:]) } catch { e: reflect.ReflectError => { e.message() } })
 print(reflect.call(add, [1], ["b": 5]), reflect.call(add, [1]))
 fn f(a, b = 2, c = 3) { a + b + c }
 print(f(...[1, 10]), f(1, **["c": 100]), f(...[1], b: 5, **["c": 0]), u.greet(...[]))
@@ -577,10 +577,10 @@ for let bad in [fn() { f(1, b: 1, **["b": 2]) }, fn() { f(...3) }, fn() { f(**3)
 struct P { x: Number, y: Option<Number>, tags: Vector<String>, inner: Option<P> }
 print(json.decode(P, json.parse("{\\"x\\": 1, \\"tags\\": [\\"a\\"], \\"inner\\": {\\"x\\": 2, \\"tags\\": []}}")))
 for let text in ["{\\"x\\": \\"1\\", \\"tags\\": []}", "{\\"tags\\": []}", "{\\"x\\": 1, \\"tags\\": [1]}", "[]"] {
-    print(try { json.parse_as(P, text) } catch { e: JsonError => { e.message() } })
+    print(try { json.parse_as(P, text) } catch { e: json.JsonError => { e.message() } })
 }
 print(json.decode(Shape, json.parse(json.stringify(Shape.Circle { r: 2 }))), json.decode(Shape, "Empty"), json.decode(Vector, [1, "a"]))
-print(try { json.stringify(User) } catch { e: JsonError => { e.message() } })
+print(try { json.stringify(User) } catch { e: json.JsonError => { e.message() } })
 print(try { [User: 1] } catch { e: RuntimeError => { e.message() } })
 print(User == User, User == Shape, User != Number, [User, Number].copy(deep: true))
 """, b""),

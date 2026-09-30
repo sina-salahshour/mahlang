@@ -31,7 +31,7 @@ for let p in sig.params {
 
 # ...and about a struct.
 match reflect.schema(User) {
-    some(Schema.Struct { type: t, doc: doc, type_params: tps, fields: fields, decorators: ds }) => {
+    some(reflect.Schema.Struct { type: t, doc: doc, type_params: tps, fields: fields, decorators: ds }) => {
         print(t, "-", doc)
         for let f in fields { print(" ", f.name, "-", f.doc) }
     }
@@ -49,7 +49,7 @@ fn load(text: String) {
         let u = json.parse_as(User, text)
         print(u.name, u.age + 1, u.email)
     } catch {
-        e: JsonError => { print("bad user:", e.message()) }
+        e: json.JsonError => { print("bad user:", e.message()) }
     }
 }
 load("{\"name\": \"ada\", \"age\": 36}")

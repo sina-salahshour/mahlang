@@ -41,7 +41,7 @@ extern fn native_construct_variant(
 ) -> Vector<Unknown> = "reflect.construct_variant"
 
 ## What went wrong in `construct`/`construct_variant`.
-struct ReflectError { message: String }
+export struct ReflectError { message: String }
 
 impl Error for ReflectError {
     fn message(self) -> String { self.message }
@@ -52,7 +52,7 @@ impl Error for ReflectError {
 ## with `type` `Vector` and one argument); `Param` a type parameter (`T`);
 ## `Trait` a trait used as a type; `Unknown` an annotation that isn't there
 ## (or is written `Unknown`).
-enum TypeRef {
+export enum TypeRef {
     Unknown,
     Named { type: Type<Unknown>, args: Vector<TypeRef> },
     Fn { params: Vector<TypeRef>, returns: TypeRef, throws: Option<Vector<TypeRef>> },
@@ -63,7 +63,7 @@ enum TypeRef {
 }
 
 ## One parameter of a function.
-struct Param {
+export struct Param {
     name: String,
     type: TypeRef,
     ## The `##` comment above the parameter, "" when there is none.
@@ -77,7 +77,7 @@ struct Param {
 }
 
 ## A function's declared shape.
-struct Signature {
+export struct Signature {
     ## "" for an anonymous function.
     name: String,
     doc: String,
@@ -90,13 +90,18 @@ struct Signature {
 }
 
 ## A field of a struct or enum variant.
-struct Field { name: String, type: TypeRef, doc: String, decorators: Vector<Unknown> }
+export struct Field { name: String, type: TypeRef, doc: String, decorators: Vector<Unknown> }
 
 ## A variant of an enum.
-struct Variant { name: String, doc: String, fields: Vector<Field>, decorators: Vector<Unknown> }
+export struct Variant {
+    name: String,
+    doc: String,
+    fields: Vector<Field>,
+    decorators: Vector<Unknown>
+}
 
 ## A struct's or enum's declared shape.
-enum Schema {
+export enum Schema {
     Struct {
         type: Type<Unknown>,
         doc: String,
@@ -116,7 +121,12 @@ enum Schema {
 ## A method registered for a type with `impl`. `is_method` is false for a
 ## static function (`fn new(...)` without `self`); `trait_name` is `none` for
 ## an inherent method.
-struct Method { name: String, function: Unknown, is_method: Bool, trait_name: Option<String> }
+export struct Method {
+    name: String,
+    function: Unknown,
+    is_method: Bool,
+    trait_name: Option<String>
+}
 
 # -- reading what the natives return -----------------------------------------------
 

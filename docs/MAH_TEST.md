@@ -196,8 +196,10 @@ tests, leftover-timer warnings, filter and exit codes, on both VMs.
   `1` differ). There's no `location` field: the VM's **backtrace** gives
   the runner the failing line instead (see below). `assert_throws` returns
   `Unknown`, not the typed `E`: the checker can't yet turn an error set
-  into a type. `AssertionError`/`SkipTest` are global struct names, like
-  every struct.
+  into a type. `AssertionError`/`SkipTest` are exported by `std:test`
+  (`import "std:test"` brings them in bare). Since M41s that module's types
+  are renamed (`__mah_m<i>_AssertionError`), so the runner recognizes them by
+  their *display* name (docs/MAHC_FORMAT.md §4.3).
 - **Backtraces**: both VMs record, when a value is first thrown, that pc
   and every enclosing call site in the task (`docs/MAHC_FORMAT.md`
   §6.10). The runner reports an assertion at the innermost frame in the

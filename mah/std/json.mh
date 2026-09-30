@@ -49,7 +49,7 @@ extern fn from_code_point(n: Number) -> String = "string.from_code_point"
 # `Syntax`: the text isn't JSON; `line` and `column` count from 1.
 # `Shape`: a value doesn't have the shape asked for (`stringify` got
 # something JSON can't hold, or a `FromJson` helper got the wrong type).
-enum JsonError {
+export enum JsonError {
     Syntax { message: String, line: Number, column: Number },
     Shape { message: String }
 }
@@ -67,7 +67,7 @@ impl Error for JsonError {
 
 # Implemented by types that can be read from a parsed JSON value:
 # `Point.from_json(json.parse(text))`.
-trait FromJson {
+export trait FromJson {
     fn from_json(value: Unknown) -> Self
 }
 
@@ -518,9 +518,9 @@ export fn as_map(value: Unknown, what: String = "the value") -> Map<
 # -- decoding into declared types ---------------------------------------------
 
 # Whether an annotation is `Option<...>` (so a missing key is fine).
-fn is_option(r: TypeRef) -> Bool {
+fn is_option(r: reflect.TypeRef) -> Bool {
     match r {
-        TypeRef.Named { type: t, args: _ } => { t == Option }
+        reflect.TypeRef.Named { type: t, args: _ } => { t == Option }
         _ => { false }
     }
 }
@@ -545,7 +545,7 @@ fn construct_shape(t: Type<Unknown>, fields: Map<String, Unknown>) -> Unknown th
     try {
         reflect.construct(t, fields)
     } catch {
-        e: ReflectError => { throw JsonError.Shape { message: e.message() } }
+        e: reflect.ReflectError => { throw JsonError.Shape { message: e.message() } }
     }
 }
 
@@ -557,14 +557,14 @@ fn construct_variant_shape(
     try {
         reflect.construct_variant(t, variant, fields)
     } catch {
-        e: ReflectError => { throw JsonError.Shape { message: e.message() } }
+        e: reflect.ReflectError => { throw JsonError.Shape { message: e.message() } }
     }
 }
 
 # `value` read as the type `r` describes, `path` saying where it is.
-fn read(r: TypeRef, value: Unknown, path: String) -> Unknown throws JsonError {
+fn read(r: reflect.TypeRef, value: Unknown, path: String) -> Unknown throws JsonError {
     match r {
-        TypeRef.Named { type: t, args: args } => {
+        reflect.TypeRef.Named { type: t, args: args } => {
             if t == Number { return as_number(value, path) }
             if t == String { return as_string(value, path) }
             if t == Bool { return as_bool(value, path) }
@@ -605,7 +605,7 @@ fn read(r: TypeRef, value: Unknown, path: String) -> Unknown throws JsonError {
             let declared = reflect.schema(t)
             match declared {
                 some(
-                    Schema.Struct {
+                    reflect.Schema.Struct {
                         type: _,
                         doc: _,
                         type_params: _,
@@ -629,7 +629,7 @@ fn read(r: TypeRef, value: Unknown, path: String) -> Unknown throws JsonError {
                     return construct_shape(t, out)
                 }
                 some(
-                    Schema.Enum {
+                    reflect.Schema.Enum {
                         type: _,
                         doc: _,
                         type_params: _,
@@ -686,12 +686,12 @@ fn read(r: TypeRef, value: Unknown, path: String) -> Unknown throws JsonError {
 # or `Number`, `String`, `Bool`, `Vector<...>`, ... -- checking it against
 # the declaration. Throws `JsonError.Shape` naming where it doesn't fit.
 export fn decode<T>(t: Type<T>, value: Unknown) -> T throws JsonError {
-    read(TypeRef.Named { type: t, args: [] }, value, "" + t)
+    read(reflect.TypeRef.Named { type: t, args: [] }, value, "" + t)
 }
 
 # `value` read as the type an annotation describes (a `TypeRef` from
 # std:reflect, e.g. one field's `type`).
-export fn decode_ref(r: TypeRef, value: Unknown) -> Unknown throws JsonError {
+export fn decode_ref(r: reflect.TypeRef, value: Unknown) -> Unknown throws JsonError {
     read(r, value, "the value")
 }
 

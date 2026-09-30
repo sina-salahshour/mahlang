@@ -14,6 +14,7 @@ Only names a file marks with ``export`` are visible to importers:
 
     export fn square(n) { return n ** 2 }
     export let answer = 42
+    export struct Point { x: Number }   # M41s: types too (enum, trait)
     export helper                       # export a name declared elsewhere
 
 How scoping is enforced against Mah's single flat global scope:
@@ -38,17 +39,28 @@ enabling cross-file diagnostics and go-to-definition.
 Dependency-free -- it has its own tolerant scanner (below) and never
 imports the ``compiler`` package.
 
-M12 adds two rewrite-avoidance fixes that traits/impl/method calls expose
-(struct/enum/trait/impl names are global and never renamed -- that stays
-unchanged -- but a module's own top-level `fn`/`let` names ARE still
-alpha-renamed, and this is where the two new blind spots showed up): an
-``id`` immediately preceded by a ``.`` is always a field/method NAME, never
-a variable reference, so it's never rewritten even if it happens to spell
-some unrelated top-level binding; and a method's own declared name (the
+M41s: struct/enum/trait names ARE renamed too. In every imported module
+(not the entry file, and not the prelude, whose types stay global) a
+top-level ``struct``/``enum``/``trait`` name goes through the same rewrite as
+a ``fn``/``let`` name -- declaration, annotations, struct literals, patterns,
+``impl`` targets and trait names, ``Name.Variant``, type values -- and
+``export struct``/``export enum``/``export trait`` (or ``export Name``) make
+one visible to importers, who write ``lib.Point`` (namespaced) or ``Point``
+(flat) exactly like ``math.answer``. ``lib.Shape.Circle`` rewrites only the
+``lib.Shape`` part. Runtime-visible type names show the declared name again
+(docs/MAHC_FORMAT.md #4.3: ``__mah_m<digits>_<rest>`` displays as ``<rest>``).
+
+M12 added rewrite-avoidance fixes that traits/impl/method calls expose (a
+module's names are alpha-renamed, and this is where the blind spots showed
+up): an ``id`` immediately preceded by a ``.`` is always a field/method NAME,
+never a variable reference, so it's never rewritten even if it happens to
+spell some unrelated top-level binding; and a method's own declared name (the
 ``id`` right after ``fn`` directly inside a top-level ``trait``/``impl``
 block body) is similarly never rewritten, so it can't be corrupted into
 some other top-level binding's mangled name just because the two happen to
-share a spelling.
+share a spelling. M41s adds the third of the kind: a variant's own declared
+name directly inside an ``enum`` body (``enum TypeRef { Param { ... } }`` next
+to a ``struct Param``).
 """
 
 from __future__ import annotations
@@ -199,14 +211,15 @@ def _uses_prelude(token_lists: list) -> bool:
     without the prelude, whose own `Taken` would otherwise clash with it;
     if the program also iterates, the clash is reported as a clear
     "built-in name" error by the resolver. A lone `.` is never a trigger."""
-    declared = set()
     for tokens in token_lists:
+        # M41s: per file -- a module's own `struct Range` is renamed, so it
+        # only stops *that* file's `Range` tokens from being a trigger.
+        declared = set()
         for i in range(1, len(tokens)):
             prev, tok = tokens[i - 1], tokens[i]
             if tok.kind == "id" and prev.kind == "id" and prev.value in ("struct", "enum", "trait"):
                 declared.add(tok.value)
-    triggers = PRELUDE_TRIGGERS - declared
-    for tokens in token_lists:
+        triggers = PRELUDE_TRIGGERS - declared
         for tok in tokens:
             if tok.kind == "id" and tok.value in triggers:
                 return True
@@ -283,6 +296,8 @@ class Segment:
 class ModuleInfo:
     exported: set = field(default_factory=set)
     top_level: set = field(default_factory=set)
+    # M41s: the `struct`/`enum`/`trait` names among `top_level`.
+    types: set = field(default_factory=set)
 
     @property
     def private(self) -> set:
@@ -352,6 +367,12 @@ def _next_meaningful(tokens: list, i: int) -> Optional[int]:
     return i + 1 if i + 1 < len(tokens) else None
 
 
+# M41s: the declaration keywords whose NAME is a top-level name (and can be
+# exported); the last three declare types.
+_TYPE_DECLS = frozenset({"struct", "enum", "trait"})
+_EXPORTABLE_DECLS = frozenset({"fn", "let"}) | _TYPE_DECLS
+
+
 def analyze_module(tokens: list) -> ModuleInfo:
     """Determine a file's exported and top-level names via a token scan.
 
@@ -359,6 +380,7 @@ def analyze_module(tokens: list) -> ModuleInfo:
     """
     exported: set = set()
     top_level: set = set()
+    types: set = set()
 
     depth = 0
     i = 0
@@ -376,11 +398,13 @@ def analyze_module(tokens: list) -> ModuleInfo:
 
         if depth == 0 and tok.kind == "id" and tok.value == "export":
             nxt = tokens[i + 1] if i + 1 < count else None
-            if nxt is not None and nxt.kind == "id" and nxt.value in ("fn", "let"):
+            if nxt is not None and nxt.kind == "id" and nxt.value in _EXPORTABLE_DECLS:
                 if i + 2 < count and tokens[i + 2].kind == "id":
                     name = tokens[i + 2].value
                     exported.add(name)
                     top_level.add(name)
+                    if nxt.value in _TYPE_DECLS:
+                        types.add(name)
                 i += 1
                 continue
             if _is_extern_fn(tokens, i + 1):
@@ -397,13 +421,15 @@ def analyze_module(tokens: list) -> ModuleInfo:
             i += 1
             continue
 
-        if depth == 0 and tok.kind == "id" and tok.value in ("fn", "let"):
+        if depth == 0 and tok.kind == "id" and tok.value in _EXPORTABLE_DECLS:
             if i + 1 < count and tokens[i + 1].kind == "id":
                 top_level.add(tokens[i + 1].value)
+                if tok.value in _TYPE_DECLS:
+                    types.add(tokens[i + 1].value)
 
         i += 1
 
-    return ModuleInfo(exported=exported, top_level=top_level)
+    return ModuleInfo(exported=exported, top_level=top_level, types=types)
 
 
 _DECLARATION_WORDS = frozenset({"struct", "enum", "trait", "impl", "let", "export", "extern", "test"})
@@ -653,8 +679,12 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
         # References to this module's own top-level names get mangled (unless
         # this is the entry file, whose names stay as the user wrote them).
         name_rewrite: dict[str, str] = {}
+        # M41s: types are renamed too -- except the prelude's, which stay
+        # global (the VMs and the compiler know some of them by name).
         if not is_entry:
             for name in info.top_level:
+                if fpath == PRELUDE_PATH and name in info.types:
+                    continue
                 name_rewrite[name] = module_name(idx, name)
         # M36: ids that spell a rewritten name but aren't references to it
         # (parameters, keyword-argument labels) -- recomputed when a flat
@@ -693,6 +723,11 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
         # to `None` once that block's closing `}` is reached.
         pending_trait_impl = False
         trait_impl_body_depth = None
+        # M41s: the same for an `enum` body -- a variant's own declared NAME
+        # (`enum TypeRef { Param { ... } }`) is never a reference to a
+        # top-level type that happens to share its spelling (`struct Param`).
+        pending_enum = False
+        enum_body_depth = None
 
         def emit_gap(upto: int) -> None:
             nonlocal cursor
@@ -805,7 +840,7 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
             # -- export keyword (depth 0) -----------------------------------
             if depth == 0 and tok.kind == "id" and tok.value == "export":
                 nxt = tokens[i + 1] if i + 1 < count else None
-                if (nxt is not None and nxt.kind == "id" and nxt.value in ("fn", "let")) or _is_extern_fn(tokens, i + 1):
+                if (nxt is not None and nxt.kind == "id" and nxt.value in _EXPORTABLE_DECLS) or _is_extern_fn(tokens, i + 1):
                     emit_gap(tok.start)
                     cursor = tok.end  # drop the `export` keyword only
                     i += 1
@@ -845,16 +880,23 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
             # -- ordinary token ---------------------------------------------
             if tok.kind == "id" and tok.value in ("trait", "impl") and depth == 0:
                 pending_trait_impl = True
+            if tok.kind == "id" and tok.value == "enum" and depth == 0:
+                pending_enum = True
 
             if tok.kind == "punct" and tok.value == "{":
                 depth += 1
                 if pending_trait_impl and trait_impl_body_depth is None:
                     trait_impl_body_depth = depth
                     pending_trait_impl = False
+                if pending_enum and enum_body_depth is None:
+                    enum_body_depth = depth
+                    pending_enum = False
             elif tok.kind == "punct" and tok.value == "}":
                 depth = max(0, depth - 1)
                 if trait_impl_body_depth is not None and depth < trait_impl_body_depth:
                     trait_impl_body_depth = None
+                if enum_body_depth is not None and depth < enum_body_depth:
+                    enum_body_depth = None
 
             # M12 fix 1: an `id` immediately preceded by a `dot` is always a
             # field/method NAME (`p.field`, `p.method(...)`), never a
@@ -876,11 +918,20 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
                 and tokens[i - 1].value == "fn"
             )
 
+            prev_is_variant_decl_name = (
+                enum_body_depth is not None
+                and depth == enum_body_depth
+                and i > 0
+                and tokens[i - 1].kind == "punct"
+                and tokens[i - 1].value in "{,"
+            )
+
             if (
                 tok.kind == "id"
                 and tok.value in name_rewrite
                 and not prev_is_dot
                 and not prev_is_method_decl_name
+                and not prev_is_variant_decl_name
                 and i not in shadowed
             ):
                 emit_gap(tok.start)

@@ -38,7 +38,7 @@ extern fn native_close(id: Number) -> Promise<Vector<Unknown>> = "fs.close"
 # "already_exists", "is_a_directory", "not_a_directory",
 # "directory_not_empty", "invalid_utf8", "closed" (a closed File) or
 # "other"; `op` the function; `path` the path it was given.
-struct FsError { kind: String, op: String, path: String, description: String }
+export struct FsError { kind: String, op: String, path: String, description: String }
 
 impl Error for FsError {
     fn message(self) -> String { self.op + ": " + self.description + ": " + self.path }
@@ -72,7 +72,7 @@ export fn append_text(path: String, text: String) throws FsError {
 
 # What `info` tells: `kind` is "file", "dir" or "other"; `size` in bytes;
 # `modified` in seconds since 1970 (like std:time's `now()`).
-struct FileInfo { kind: String, size: Number, modified: Number }
+export struct FileInfo { kind: String, size: Number, modified: Number }
 
 # About the file or directory at `path` (following symbolic links).
 export fn info(path: String) -> FileInfo throws FsError {
@@ -133,7 +133,7 @@ export fn temp_dir() -> String throws FsError {
 
 # An open file, for reading or writing it a piece at a time. Close it when
 # done (`defer f.close()`).
-struct File { id: Number, path: String, mode: String }
+export struct File { id: Number, path: String, mode: String }
 
 # Opens the file at `path` with `mode` "r" (read), "w" (write, replacing
 # what it held) or "a" (append).

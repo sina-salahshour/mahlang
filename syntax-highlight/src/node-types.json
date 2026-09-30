@@ -441,6 +441,16 @@
           }
         ]
       },
+      "namespace": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
       "type": {
         "multiple": false,
         "required": true,
@@ -479,6 +489,16 @@
     "fields": {
       "name": {
         "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "namespace": {
+        "multiple": false,
         "required": false,
         "types": [
           {
@@ -598,6 +618,10 @@
       "required": true,
       "types": [
         {
+          "type": "enum_decl",
+          "named": true
+        },
+        {
           "type": "extern_fn_stmt",
           "named": true
         },
@@ -611,6 +635,14 @@
         },
         {
           "type": "let_stmt",
+          "named": true
+        },
+        {
+          "type": "struct_decl",
+          "named": true
+        },
+        {
+          "type": "trait_decl",
           "named": true
         }
       ]
@@ -1188,7 +1220,27 @@
           }
         ]
       },
+      "namespace": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
       "target": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "target_namespace": {
         "multiple": false,
         "required": false,
         "types": [
@@ -1564,6 +1616,16 @@
       "name": {
         "multiple": false,
         "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "namespace": {
+        "multiple": false,
+        "required": false,
         "types": [
           {
             "type": "identifier",
@@ -2365,6 +2427,16 @@
           },
           {
             "type": "wildcard_pattern",
+            "named": true
+          }
+        ]
+      },
+      "namespace": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
             "named": true
           }
         ]

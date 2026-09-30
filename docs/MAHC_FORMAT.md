@@ -159,6 +159,26 @@ variant = name str, nfields varuint, nfields × str
 
 A struct and an enum may share a name; they're still distinct types.
 
+**Display names** *(M41s, no format change)*. The compiler renames an
+imported module's types and traits so that two modules can each declare a
+`Request` (`__mah_m<index>_Request`, docs/V2_DESIGN.md's M41s milestone), so
+a type name in this section (and a trait name in a `defmethod`, §6.7) may be
+such a mangled name. **Rule: a type or trait name of the form
+`__mah_m<digits>_<rest>` *displays* as `<rest>`.** Both VMs apply it
+wherever a type or trait name reaches the user or Mah code: `to_string` of a
+struct, enum or Type value (§5, §6.6), runtime error messages (§6.8) and
+uncaught-error reports, `value.type_name`, what `std:reflect` returns (a
+`Method`'s `trait_name`, a `TypeRef.Trait`'s `name`, `construct`'s
+failures), `mah test` output, and `reflect.implements(T, "Name")`, which
+compares a trait's display name. **Dispatch never uses it**: the method table
+(§6.7), struct/enum equality of types, `matchstruct`/`matchenum` and
+`throw`'s `Error` lookup all use the full name, so two modules' `Request`
+types stay distinct. The rule only strips a prefix, so a file written before
+M41s still runs on a newer VM, and an older VM merely shows the mangled name;
+the version is unchanged. A disassembler shows the full name (it is a
+debugging tool). The prelude's types and traits, and the built-ins, are never
+renamed.
+
 ### 4.4 NATIVES (`0x04`)
 
 The host functions this program uses — the extension point for everything

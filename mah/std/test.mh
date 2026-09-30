@@ -12,14 +12,14 @@
 
 # A failed assertion. `message` is the whole report: what failed, plus the
 # values involved.
-struct AssertionError { message: String }
+export struct AssertionError { message: String }
 
 impl Error for AssertionError {
     fn message(self) { self.message }
 }
 
 # Thrown by `skip`: the runner reports the test as skipped, with `reason`.
-struct SkipTest { reason: String }
+export struct SkipTest { reason: String }
 
 impl Error for SkipTest {
     fn message(self) { "skipped: " + self.reason }

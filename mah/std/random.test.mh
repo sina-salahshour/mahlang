@@ -15,20 +15,20 @@ test "a seed fixes the sequence, on every VM" {
 }
 
 test "Rng instances are independent" {
-    let r = Rng.new(7)
-    let s = Rng.new(7)
+    let r = random.Rng.new(7)
+    let s = random.Rng.new(7)
     assert_eq(r.random(), s.random())
     r.random()
     let next_r = r.random()
     s.random()
     assert_eq(s.random(), next_r)
-    assert_ne(Rng.new(8).random(), Rng.new(7).random())
+    assert_ne(random.Rng.new(8).random(), random.Rng.new(7).random())
     # a negative seed is taken modulo 2^64
-    assert_eq(Rng.new(0 - 1).random(), Rng.new(18446744073709551615).random())
+    assert_eq(random.Rng.new(0 - 1).random(), random.Rng.new(18446744073709551615).random())
 }
 
 test "values stay in range" {
-    let r = Rng.new(1)
+    let r = random.Rng.new(1)
     let seen = [:]
     for let i in 0..300 {
         let x = r.random()
@@ -47,7 +47,7 @@ test "values stay in range" {
 }
 
 test "choice, shuffle, shuffled, sample" {
-    let r = Rng.new(3)
+    let r = random.Rng.new(3)
     let items = [1, 2, 3, 4, 5, 6]
     let c = r.choice(items)
     assert(c >= 1 & c <= 6)
@@ -84,5 +84,8 @@ test "bad arguments throw ArgumentError" {
         message(fn() { random.seed(0.5) }),
         "seed: expected a whole number smaller than 2^64 in size"
     )
-    assert_eq(message(fn() { Rng { state: [0, 0, 0, 0] }.random() }), "next: not a generator state")
+    assert_eq(
+        message(fn() { random.Rng { state: [0, 0, 0, 0] }.random() }),
+        "next: not a generator state"
+    )
 }

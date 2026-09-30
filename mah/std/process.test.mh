@@ -56,7 +56,7 @@ test "working directory" {
 test "a program that can't be started" {
     let e = assert_throws(fn() { process.run("definitely-not-a-program-mah") })
     match e {
-        ProcessError { kind, command, description } => {
+        process.ProcessError { kind, command, description } => {
             assert_eq(kind, "not_found")
             assert_eq(command, "definitely-not-a-program-mah")
             assert_eq(description, "no such file or directory")
@@ -72,7 +72,7 @@ test "a program that isn't executable" {
     fs.write_text(dir + "/plain", "not a program")
     let e = assert_throws(fn() { process.run(dir + "/plain") })
     match e {
-        ProcessError { kind, command, description } => {
+        process.ProcessError { kind, command, description } => {
             assert_eq(kind + ": " + description, "permission_denied: permission denied")
         }
         _ => { assert(false) }

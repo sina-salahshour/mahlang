@@ -20,7 +20,7 @@ extern fn settle(promise: Promise<Unknown>, value: Unknown) -> Bool = "promise.r
 extern fn cancel(promise: Promise<Unknown>) -> Bool = "time.cancel"
 
 # `timeout`'s: the Promise didn't settle within `ms` milliseconds.
-struct TimeoutError { ms: Number }
+export struct TimeoutError { ms: Number }
 
 impl Error for TimeoutError {
     fn message(self) -> String { "timed out after " + self.ms + " ms" }
@@ -107,7 +107,7 @@ export fn timeout<T>(promise: Promise<T>, ms: Number) -> T {
 # -- timers ---------------------------------------------------------------------
 
 # A running timeout or interval, for clear_timeout/clear_interval.
-struct TimerId { timer: Promise<Unknown>, active: Bool }
+export struct TimerId { timer: Promise<Unknown>, active: Bool }
 
 fn fire_once(id: TimerId, f: fn() -> Unknown throws never) {
     id.timer.await

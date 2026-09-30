@@ -3,7 +3,7 @@
 import "std:test"
 import regex from "./regex"
 
-fn texts(ms: Vector<Match>) -> String { ms.map(fn(m) { m.text }).reduce().join("|") }
+fn texts(ms: Vector<regex.Match>) -> String { ms.map(fn(m) { m.text }).reduce().join("|") }
 
 fn compile_error(pattern: String, flags: String = "") -> String {
     assert_throws(fn() { regex.compile(pattern, flags) }).message()
