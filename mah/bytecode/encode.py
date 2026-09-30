@@ -16,6 +16,7 @@ from .format import (
     SEC_TESTS,
     SEC_FUNCTIONS,
     SEC_HANDLERS,
+    SEC_META,
     SEC_NATIVES,
     SEC_PARAMS,
     SEC_STRINGS,
@@ -79,6 +80,69 @@ def _encode_instr(instr) -> bytes:
     out = bytearray(_u8(code))
     for kind, value in zip(kinds, instr.args):
         out += _encode_operand(kind, value)
+    return bytes(out)
+
+
+def _encode_typeref(ref) -> bytes:
+    """M41a: docs/MAHC_FORMAT.md #4.10's `typeref`."""
+    out = bytearray(_u8(ref.tag))
+    if ref.tag == 1:
+        out += _u8(ref.kind) + write_varuint(ref.index) + write_varuint(len(ref.args))
+        for arg in ref.args:
+            out += _encode_typeref(arg)
+    elif ref.tag == 2:
+        out += write_varuint(len(ref.args))
+        for param in ref.args:
+            out += _encode_typeref(param)
+        out += _encode_typeref(ref.ret)
+        out += _encode_throws(ref.throws)
+    elif ref.tag == 3:
+        out += _str_index(ref.name)
+    elif ref.tag == 6:
+        out += _str_index(ref.name) + write_varuint(len(ref.args))
+        for arg in ref.args:
+            out += _encode_typeref(arg)
+    return bytes(out)
+
+
+def _encode_throws(throws) -> bytes:
+    if throws is None:
+        return _u8(0)
+    out = bytearray(_u8(1) + write_varuint(len(throws)))
+    for t in throws:
+        out += _encode_typeref(t)
+    return bytes(out)
+
+
+def _encode_meta(meta, types) -> bytes:
+    """M41a: the META payload (docs/MAHC_FORMAT.md #4.10)."""
+    out = bytearray(write_varuint(len(meta.functions)))
+    for fn in meta.functions:
+        if not fn.has_meta:
+            out += _u8(0)
+            continue
+        out += _u8(1) + _opt_str_index(fn.doc) + write_varuint(len(fn.type_params))
+        for name in fn.type_params:
+            out += _str_index(name)
+        out += write_varuint(len(fn.params))
+        for param in fn.params:
+            out += _encode_typeref(param.type) + _opt_str_index(param.doc) + _u8(param.default)
+            if param.default == 2:
+                out += write_varuint(param.const)
+        out += _encode_typeref(fn.returns) + _encode_throws(fn.throws)
+    out += write_varuint(len(meta.types))
+    for decl, tm in zip(types, meta.types):
+        out += _opt_str_index(tm.doc) + write_varuint(len(tm.type_params))
+        for name in tm.type_params:
+            out += _str_index(name)
+        if decl.kind == 0:
+            for ref, doc in tm.body:
+                out += _encode_typeref(ref) + _opt_str_index(doc)
+        else:
+            for doc, refs in tm.body:
+                out += _opt_str_index(doc)
+                for ref in refs:
+                    out += _encode_typeref(ref)
     return bytes(out)
 
 
@@ -193,5 +257,9 @@ def encode(program: Program) -> bytes:
         for t in program.tests:
             payload += write_varuint(t.name) + write_varuint(t.slot) + write_varuint(t.line)
         out += _section(SEC_TESTS, bytes(payload))
+
+    # META (optional, M41a: annotations, docs and constant defaults)
+    if program.meta is not None:
+        out += _section(SEC_META, _encode_meta(program.meta, program.types))
 
     return bytes(out)

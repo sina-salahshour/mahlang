@@ -32,6 +32,7 @@ from .format import (
     SEC_DEBUG,
     SEC_FUNCTIONS,
     SEC_HANDLERS,
+    SEC_META,
     SEC_NATIVES,
     SEC_PARAMS,
     SEC_STRINGS,
@@ -48,7 +49,21 @@ from .format import (
 )
 from . import bundle
 from .leb128 import read_varint, read_varuint
-from .program import Const, DebugInfo, FunctionDecl, Instr, NativeRef, Program, TestEntry, TypeDecl
+from .program import (
+    Const,
+    DebugInfo,
+    FnMeta,
+    FunctionDecl,
+    Instr,
+    Meta,
+    NativeRef,
+    ParamMeta,
+    Program,
+    TestEntry,
+    TypeDecl,
+    TypeMeta,
+    TypeRef,
+)
 
 
 class _Reader:
@@ -170,6 +185,11 @@ def _read_sections(r: _Reader, minor: int) -> tuple[dict, bytes | None]:
                 if SEC_TESTS in payloads:
                     raise MahcFormatError("duplicate TESTS section")
                 payloads[SEC_TESTS] = payload
+            elif sec_id == SEC_META:
+                # M41a: kept alongside the required payloads.
+                if SEC_META in payloads:
+                    raise MahcFormatError("duplicate META section")
+                payloads[SEC_META] = payload
             # else: an unknown optional section -- already consumed, skip it.
     if expect_idx < len(required):
         raise MahcFormatError(f"missing required section 0x{required[expect_idx]:02x}")
@@ -481,6 +501,16 @@ def _parse_code(payload: bytes, ctx: dict) -> list:
                 raise MahcFormatError(
                     f"'matchenum' at instruction {i}: variant index {variant} out of range for type {t}"
                 )
+        elif op == "loadtype":
+            kind, index, _dest = instr.args
+            if kind == 0:
+                if index >= len(ctx["builtin_types"]) + ctx["ntypes"]:
+                    raise MahcFormatError(f"'loadtype' at instruction {i}: type index {index} out of range")
+            elif kind == 1:
+                if index >= 8:
+                    raise MahcFormatError(f"'loadtype' at instruction {i}: primitive type code {index} out of range")
+            else:
+                raise MahcFormatError(f"'loadtype' at instruction {i}: unknown kind {kind}")
         elif op == "map":
             items, _dest = instr.args
             if len(items) % 2 != 0:
@@ -556,6 +586,122 @@ def _parse_handlers(payload: bytes, ncode: int) -> list:
         handlers.append((start, end, handler, slot))
     _check_consumed(pr, "HANDLERS")
     return handlers
+
+
+def _parse_meta(payload: bytes, functions: list, types: list, ctx: dict) -> Meta:
+    """M41a (docs/MAHC_FORMAT.md #4.10): the META section -- one entry per
+    function (FUNCTIONS order) and per user type (TYPES order, built-ins
+    excluded), each validated against what it describes."""
+    pr = _Reader(payload)
+    nstrings = ctx["nstrings"]
+    nbuiltin = len(ctx["builtin_types"])
+    ntypes_total = nbuiltin + len(types)
+
+    def str_idx() -> int:
+        idx = pr.varuint()
+        if idx >= nstrings:
+            raise MahcFormatError(f"META: string index {idx} out of range")
+        return idx
+
+    def opt_str() -> int | None:
+        v = pr.varuint()
+        if v == 0:
+            return None
+        if v - 1 >= nstrings:
+            raise MahcFormatError(f"META: string index {v - 1} out of range")
+        return v - 1
+
+    def count() -> int:
+        n = pr.varuint()
+        if n > pr.remaining():
+            raise MahcFormatError("META: count larger than the remaining payload")
+        return n
+
+    def throws_clause():
+        flag = pr.u8()
+        if flag == 0:
+            return None
+        if flag != 1:
+            raise MahcFormatError(f"META: invalid throws flag {flag}")
+        return [typeref() for _ in range(count())]
+
+    def typeref() -> TypeRef:
+        tag = pr.u8()
+        if tag in (0, 4, 5):
+            return TypeRef(tag)
+        if tag == 1:
+            kind = pr.u8()
+            index = pr.varuint()
+            if kind == 0:
+                if index >= ntypes_total:
+                    raise MahcFormatError(f"META: type index {index} out of range")
+            elif kind == 1:
+                if index >= 8:
+                    raise MahcFormatError(f"META: primitive type code {index} out of range")
+            else:
+                raise MahcFormatError(f"META: unknown named-type kind {kind}")
+            return TypeRef(1, kind=kind, index=index, args=[typeref() for _ in range(count())])
+        if tag == 2:
+            params = [typeref() for _ in range(count())]
+            ret = typeref()
+            return TypeRef(2, args=params, ret=ret, throws=throws_clause())
+        if tag == 3:
+            return TypeRef(3, name=str_idx())
+        if tag == 6:
+            name = str_idx()
+            return TypeRef(6, name=name, args=[typeref() for _ in range(count())])
+        raise MahcFormatError(f"META: unknown type tag {tag}")
+
+    nfunctions = pr.varuint()
+    if nfunctions != len(functions):
+        raise MahcFormatError(f"META: describes {nfunctions} function(s) but FUNCTIONS declares {len(functions)}")
+    fn_metas = []
+    for fn in functions:
+        flags = pr.u8()
+        if flags & ~1:
+            raise MahcFormatError(f"META: invalid flags byte {flags} (only bit 0 is defined)")
+        if not flags & 1:
+            fn_metas.append(FnMeta())
+            continue
+        doc = opt_str()
+        type_params = [str_idx() for _ in range(count())]
+        nparams = pr.varuint()
+        if nparams != fn.param_count:
+            raise MahcFormatError(
+                f"META: function declares {fn.param_count} parameter(s) but META lists {nparams}"
+            )
+        params = []
+        for _ in range(nparams):
+            ptype = typeref()
+            pdoc = opt_str()
+            default = pr.u8()
+            const = None
+            if default == 2:
+                const = pr.varuint()
+                if const >= ctx["nconsts"]:
+                    raise MahcFormatError(f"META: constant index {const} out of range")
+            elif default not in (0, 1):
+                raise MahcFormatError(f"META: invalid default flag {default}")
+            params.append(ParamMeta(ptype, pdoc, default, const))
+        returns = typeref()
+        fn_metas.append(FnMeta(True, doc, type_params, params, returns, throws_clause()))
+    ntypes = pr.varuint()
+    if ntypes != len(types):
+        raise MahcFormatError(f"META: describes {ntypes} type(s) but TYPES declares {len(types)}")
+    type_metas = []
+    for decl in types:
+        doc = opt_str()
+        type_params = [str_idx() for _ in range(count())]
+        if decl.kind == 0:
+            body = [(typeref(), opt_str()) for _ in decl.fields]
+        else:
+            body = []
+            for _vname, vfields in decl.variants:
+                vdoc = opt_str()
+                body.append((vdoc, [typeref() for _ in vfields]))
+        type_metas.append(TypeMeta(doc, type_params, body))
+    _check_consumed(pr, "META")
+    return Meta(fn_metas, type_metas)
 
 
 def _parse_tests(payload: bytes, nstrings: int, nslots: int) -> list:
@@ -663,6 +809,18 @@ def decode(data: bytes) -> Program:
             raise MahcFormatError("TESTS section in a file with no functions")
         tests = _parse_tests(payloads[SEC_TESTS], len(strings), functions[0].slot_count)
 
+    meta = _parse_meta(payloads[SEC_META], functions, types, ctx) if SEC_META in payloads else None
+
     return Program(
-        strings, constants, types, natives, functions, code, debug, minor=minor, handlers=handlers, tests=tests
+        strings,
+        constants,
+        types,
+        natives,
+        functions,
+        code,
+        debug,
+        minor=minor,
+        handlers=handlers,
+        tests=tests,
+        meta=meta,
     )

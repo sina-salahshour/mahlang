@@ -226,8 +226,10 @@ methods**, **M30 `std:path`, `std:json` and `std:csv`**, and **M31
 **M32 `std:regex`**, which completes Phase 1, and **M33 an async `input`**
 (with I/O in the scheduler), and **M34 `std:time`/`std:async`** (with
 cancellable timers), and **M35 `std:fs`** (with handles), and **M36
-`std:process`** (arguments, environment, running programs, `exit`). Next:
-the reflection and decorators work, then the network modules per
-`STDLIB.md`, each with Mah-level tests.
+`std:process`** (arguments, environment, running programs, `exit`), and
+**M41a type values, `##` docs, spread calls, `std:reflect` and
+`json.decode`** ([`REFLECTION.md`](REFLECTION.md)). Next: decorators and
+hook traits (M41b, M41c), then the network modules per `STDLIB.md`, each with
+Mah-level tests.
 `std:test` and the `mah test` runner ([`MAH_TEST.md`](MAH_TEST.md)) come
 right after errors and `std:` resolution.

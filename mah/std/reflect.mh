@@ -1,0 +1,278 @@
+# std:reflect -- what a program can find out about its own functions, types
+# and values while it runs (docs/REFLECTION.md).
+#
+#   import reflect from "std:reflect"
+#
+#   ## Adds two numbers.
+#   fn add(a: Number, b: Number = 1) -> Number { a + b }
+#
+#   let sig = reflect.signature(add)
+#   sig.name                              # "add"
+#   sig.doc                               # "Adds two numbers."
+#   sig.params[1].default                 # some(1)
+#   reflect.type_of(3) == Number          # true
+#   struct User { name: String }
+#   match reflect.schema(User) {
+#       some(Schema.Struct { fields }) => { print(fields[0].name) }   # name
+#       _ => { }
+#   }
+#   reflect.construct(User, ["name": "ada"])   # User { name: ada }
+#
+# A bare type name (`User`, `Number`, `Vector`) is a value of type `Type`.
+# What the descriptors report is what the source *wrote*: annotations
+# resolved to the types they name, `##` doc comments and constant default
+# values. It never records what the checker inferred, so an unannotated
+# parameter's type is `TypeRef.Unknown`. A program built without that
+# information (an older compiler's output) still reports names and
+# `has_default`, with every type Unknown and no docs.
+
+extern fn native_type_of(value: Unknown) -> Type<Unknown> = "reflect.type_of"
+extern fn native_signature(f: Unknown) -> Vector<Unknown> = "reflect.signature"
+extern fn native_schema(t: Type<Unknown>) -> Unknown = "reflect.schema"
+extern fn native_methods(t: Type<Unknown>) -> Vector<Unknown> = "reflect.methods"
+extern fn native_implements(t: Type<Unknown>, trait_name: String) -> Bool = "reflect.implements"
+extern fn native_construct(t: Type<Unknown>, fields: Map<String, Unknown>) -> Vector<
+    Unknown
+> = "reflect.construct"
+extern fn native_construct_variant(
+    t: Type<Unknown>,
+    variant: String,
+    fields: Map<String, Unknown>
+) -> Vector<Unknown> = "reflect.construct_variant"
+
+## What went wrong in `construct`/`construct_variant`.
+struct ReflectError { message: String }
+
+impl Error for ReflectError {
+    fn message(self) -> String { self.message }
+}
+
+## A written type annotation, resolved to the declaration it names.
+## `Named` is a struct, enum or built-in type (`Vector<String>` is `Named`
+## with `type` `Vector` and one argument); `Param` a type parameter (`T`);
+## `Trait` a trait used as a type; `Unknown` an annotation that isn't there
+## (or is written `Unknown`).
+enum TypeRef {
+    Unknown,
+    Named { type: Type<Unknown>, args: Vector<TypeRef> },
+    Fn { params: Vector<TypeRef>, returns: TypeRef, throws: Option<Vector<TypeRef>> },
+    Param { name: String },
+    SelfType,
+    Never,
+    Trait { name: String, args: Vector<TypeRef> }
+}
+
+## One parameter of a function.
+struct Param {
+    name: String,
+    type: TypeRef,
+    ## The `##` comment above the parameter, "" when there is none.
+    doc: String,
+    has_default: Bool,
+    ## `some(value)` for a default that is a literal (a Number, String, Bool,
+    ## `none`, or `-` and a Number); `none` for no default or one that
+    ## isn't a constant.
+    default: Option<Unknown>,
+    decorators: Vector<Unknown>
+}
+
+## A function's declared shape.
+struct Signature {
+    ## "" for an anonymous function.
+    name: String,
+    doc: String,
+    type_params: Vector<String>,
+    params: Vector<Param>,
+    returns: TypeRef,
+    ## `none` when no `throws` clause was written.
+    throws: Option<Vector<TypeRef>>,
+    decorators: Vector<Unknown>
+}
+
+## A field of a struct or enum variant.
+struct Field { name: String, type: TypeRef, doc: String, decorators: Vector<Unknown> }
+
+## A variant of an enum.
+struct Variant { name: String, doc: String, fields: Vector<Field>, decorators: Vector<Unknown> }
+
+## A struct's or enum's declared shape.
+enum Schema {
+    Struct {
+        type: Type<Unknown>,
+        doc: String,
+        type_params: Vector<String>,
+        fields: Vector<Field>,
+        decorators: Vector<Unknown>
+    },
+    Enum {
+        type: Type<Unknown>,
+        doc: String,
+        type_params: Vector<String>,
+        variants: Vector<Variant>,
+        decorators: Vector<Unknown>
+    }
+}
+
+## A method registered for a type with `impl`. `is_method` is false for a
+## static function (`fn new(...)` without `self`); `trait_name` is `none` for
+## an inherent method.
+struct Method { name: String, function: Unknown, is_method: Bool, trait_name: Option<String> }
+
+# -- reading what the natives return -----------------------------------------------
+
+fn typeref(v: Vector<Unknown>) -> TypeRef {
+    # (top-level functions can't call each other before they're declared)
+    fn refs(items: Vector<Unknown>) -> Vector<TypeRef> {
+        let out = []
+        for let item in items { out.push(typeref(item)) }
+        out
+    }
+    let tag = v[0]
+    if tag == 1 { return TypeRef.Named { type: v[1], args: refs(v[2]) } }
+    if tag == 2 {
+        let throws = if v[3] == none { none } else { some(refs(v[3])) }
+        return TypeRef.Fn { params: refs(v[1]), returns: typeref(v[2]), throws: throws }
+    }
+    if tag == 3 { return TypeRef.Param { name: v[1] } }
+    if tag == 4 { return TypeRef.SelfType }
+    if tag == 5 { return TypeRef.Never }
+    if tag == 6 { return TypeRef.Trait { name: v[1], args: refs(v[2]) } }
+    TypeRef.Unknown
+}
+
+fn refs_of(v: Vector<Unknown>) -> Vector<TypeRef> {
+    let out = []
+    for let item in v { out.push(typeref(item)) }
+    out
+}
+
+fn fields_of(v: Vector<Unknown>) -> Vector<Field> {
+    let out = []
+    for let f in v {
+        out.push(Field { name: f[0], type: typeref(f[1]), doc: f[2], decorators: [] })
+    }
+    out
+}
+
+# `[true, value]` or `[false, message]` from `construct`.
+fn built(r: Vector<Unknown>) -> Unknown throws ReflectError {
+    if r[0] { return r[1] }
+    throw ReflectError { message: r[1] }
+}
+
+# -- the API --------------------------------------------------------------------
+
+## The runtime type of a value: `type_of(3) == Number`, `type_of(none)` is
+## `None`, `type_of(some(1))` is `Option`.
+export fn type_of(value: Unknown) -> Type<Unknown> { native_type_of(value) }
+
+## The declared shape of a function: its name, doc, type parameters,
+## parameters (names, types, docs, defaults), return type and `throws` list.
+export fn signature(f: Unknown) -> Signature {
+    let r = native_signature(f)
+    let params = []
+    for let p in r[3] {
+        params.push(
+            Param {
+                name: p[0],
+                type: typeref(p[1]),
+                doc: p[2],
+                has_default: p[3],
+                default: if p[4] { some(p[5]) } else { none },
+                decorators: []
+            }
+        )
+    }
+    Signature {
+        name: if r[0] == none { "" } else { r[0] },
+        doc: r[1],
+        type_params: r[2],
+        params: params,
+        returns: typeref(r[4]),
+        throws: if r[5] == none { none } else { some(refs_of(r[5])) },
+        decorators: []
+    }
+}
+
+## The declared shape of a struct or enum, or `none` for a built-in
+## primitive (`Number`, `String`, ...).
+export fn schema(t: Type<Unknown>) -> Option<Schema> {
+    let r = native_schema(t)
+    if r == none { return none }
+    if r[0] == "struct" {
+        return some(
+            Schema.Struct {
+                type: r[1],
+                doc: r[2],
+                type_params: r[3],
+                fields: fields_of(r[4]),
+                decorators: []
+            }
+        )
+    }
+    let variants = []
+    for let v in r[4] {
+        variants.push(Variant { name: v[0], doc: v[1], fields: fields_of(v[2]), decorators: [] })
+    }
+    some(
+        Schema.Enum {
+            type: r[1],
+            doc: r[2],
+            type_params: r[3],
+            variants: variants,
+            decorators: []
+        }
+    )
+}
+
+## Every method written in an `impl` for the type: the inherent ones by name,
+## then the trait ones by trait name and method name. (The natively
+## implemented methods of the built-in types aren't functions, so they
+## aren't listed.)
+export fn methods(t: Type<Unknown>) -> Vector<Method> {
+    let out = []
+    for let m in native_methods(t) {
+        out.push(
+            Method {
+                name: m[0],
+                function: m[1],
+                is_method: m[2],
+                trait_name: if m[3] == none { none } else { some(m[3]) }
+            }
+        )
+    }
+    out
+}
+
+## Whether the type implements the trait (has a method registered under
+## its name), natively or with an `impl`: `implements(Number, "Printable")`.
+export fn implements(t: Type<Unknown>, trait_name: String) -> Bool {
+    native_implements(t, trait_name)
+}
+
+## `f(...args, **kwargs)`.
+export fn call(
+    f: Unknown,
+    args: Vector<Unknown> = [],
+    kwargs: Map<String, Unknown> = [:]
+) -> Unknown {
+    # (typed, so the checker sees a call it can follow; `f` is whatever the
+    # caller passes: the annotation can't say "any arity")
+    let target: fn() -> Unknown = f
+    target(...args, **kwargs)
+}
+
+## A new struct value from exactly its fields. A missing or unknown field
+## is a ReflectError naming it.
+export fn construct(t: Type<Unknown>, fields: Map<String, Unknown>) -> Unknown throws ReflectError {
+    built(native_construct(t, fields))
+}
+
+## A new enum value: the variant's name and exactly its fields.
+export fn construct_variant(
+    t: Type<Unknown>,
+    variant: String,
+    fields: Map<String, Unknown>
+) -> Unknown throws ReflectError {
+    built(native_construct_variant(t, variant, fields))
+}

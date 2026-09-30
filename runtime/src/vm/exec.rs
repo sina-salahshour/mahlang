@@ -71,6 +71,7 @@ fn build_initial_method_table(names: &BuiltinTypeNames) -> HashMap<(Rc<str>, Rc<
         &names.promise,
         &names.vector,
         &names.map_,
+        &names.type_,
     ] {
         let entry = table.entry((tn.clone(), to_string.clone())).or_insert_with(MethodEntry::empty);
         entry.traits.insert(printable.clone(), (Callable::Native(NativeMethodKind::ToString), true));
@@ -443,6 +444,9 @@ pub enum StepControl {
 }
 
 pub struct Vm<'p> {
+    /// M41a: the whole linked program, for `std:reflect` (types, functions,
+    /// constants, META).
+    pub(super) linked: &'p LinkedProgram,
     code: &'p [LinkedInstr],
     types: &'p [TypeInfo],
     /// M25 (docs/MAHC_FORMAT.md #4.8): `(start, end, handler, slot)`, in
@@ -450,7 +454,7 @@ pub struct Vm<'p> {
     handlers: &'p [HandlerEntry],
     debug: Option<&'p super::link::DebugIndex>,
     pub names: BuiltinTypeNames,
-    method_table: HashMap<(Rc<str>, Rc<str>), MethodEntry>,
+    pub(super) method_table: HashMap<(Rc<str>, Rc<str>), MethodEntry>,
     return_register: Value,
     timers: BinaryHeap<TimerEntry>,
     timer_seq: u64,
@@ -1451,6 +1455,43 @@ impl<'p> Vm<'p> {
                     }
                 }
             }
+            LinkedInstr::CallSpread { callee, args, kwargs } => {
+                let closure_val = rd(*callee)?;
+                let Value::Function(c) = &closure_val else {
+                    return Err(RuntimeError::with_kind(
+                        format!("Tried to call a non-function value ({})", type_name_of(&closure_val, &self.names)),
+                        ErrorKind::TypeMismatch,
+                    ));
+                };
+                let label = match &c.func.name {
+                    Some(n) => format!("'{n}'"),
+                    None => "function".to_string(),
+                };
+                let (values, kwargs) = spread_arguments(&rd(*args)?, &rd(*kwargs)?);
+                let bound = bind_params(c.func.param_count, c.func.params.as_deref(), values, kwargs, &label)?;
+                let c = c.clone();
+                self.enter_closure(task, &c, bound);
+            }
+            LinkedInstr::CallMethodSpread { recv, name, args, kwargs, trait_ } => {
+                let recv_v = rd(*recv)?;
+                let (target, include_self) = self.find_method(&recv_v, name, trait_.as_ref())?;
+                let (values, kwargs) = spread_arguments(&rd(*args)?, &rd(*kwargs)?);
+                let bound = bind_method_call(recv_v, &target, include_self, name, values, kwargs)?;
+                match &target {
+                    Callable::Closure(c) => {
+                        let c = c.clone();
+                        self.enter_closure(task, &c, bound);
+                    }
+                    Callable::Native(kind) => {
+                        let r = call_native_method(*kind, &bound, self)?;
+                        self.return_register = r;
+                    }
+                }
+            }
+            LinkedInstr::Spread { target, source, keyword } => {
+                spread(&rd(*target)?, &rd(*source)?, *keyword, &self.names)?;
+            }
+            LinkedInstr::LoadType { value, dest } => wr!(*dest, value.clone()),
             LinkedInstr::Defmethod { closure, type_name, trait_, name, is_method } => {
                 let closure_v = rd(*closure)?;
                 let Value::Function(c) = &closure_v else {
@@ -1727,6 +1768,73 @@ impl<'p> Vm<'p> {
     }
 }
 
+/// M41a: the argument lists a `callspread`/`callmethodspread` binds -- the
+/// items of the positional Vector and the entries of the keyword Map (whose
+/// keys `spread` already checked are Strings), in order. The two values are
+/// always the VM-built Vector and Map codegen made.
+fn spread_arguments(args: &Value, kwargs: &Value) -> (Vec<Value>, Vec<(Rc<str>, Value)>) {
+    let values = match args {
+        Value::Vector(v) => v.borrow().clone(),
+        _ => Vec::new(),
+    };
+    let mut pairs = Vec::new();
+    if let Value::Map(m) = kwargs {
+        for (k, v) in m.borrow().iter_ordered() {
+            if let Value::Str(name) = k {
+                pairs.push((name.clone(), v.clone()));
+            }
+        }
+    }
+    (values, pairs)
+}
+
+/// M41a `spread` (docs/MAHC_FORMAT.md #6.1): append the items of the Vector
+/// `source` to the Vector `target` (the positional arguments of a spread
+/// call), or merge the entries of the Map `source` into the Map `target` (its
+/// keyword arguments). Anything else is an ArgumentError, as is a non-String
+/// key or a keyword that's already in `target`. Mirrors `_spread` in
+/// `code_interpreter.py`, messages included.
+fn spread(target: &Value, source: &Value, keyword: bool, names: &BuiltinTypeNames) -> RResult<()> {
+    if !keyword {
+        let Value::Vector(items) = source else {
+            return Err(RuntimeError::with_kind(
+                format!("'...' needs a Vector, got {}", type_name_of(source, names)),
+                ErrorKind::ArgumentError,
+            ));
+        };
+        if let Value::Vector(t) = target {
+            let extra = items.borrow().clone();
+            t.borrow_mut().extend(extra);
+        }
+        return Ok(());
+    }
+    let Value::Map(entries) = source else {
+        return Err(RuntimeError::with_kind(
+            format!("'**' needs a Map, got {}", type_name_of(source, names)),
+            ErrorKind::ArgumentError,
+        ));
+    };
+    let Value::Map(t) = target else { return Ok(()) };
+    let pairs: Vec<(Value, Value)> = entries.borrow().iter_ordered().map(|(k, v)| (k.clone(), v.clone())).collect();
+    for (key, value) in pairs {
+        let Value::Str(text) = &key else {
+            return Err(RuntimeError::with_kind(
+                format!("'**' needs String keys, got a {} key", type_name_of(&key, names)),
+                ErrorKind::ArgumentError,
+            ));
+        };
+        let mk = map_key(&key).expect("a String is a Map key");
+        if t.borrow().entries.contains_key(&mk) {
+            return Err(RuntimeError::with_kind(
+                format!("keyword argument '{text}' given more than once"),
+                ErrorKind::ArgumentError,
+            ));
+        }
+        t.borrow_mut().index_assign(mk, key.clone(), value);
+    }
+    Ok(())
+}
+
 fn repeat_str(s: &Rc<str>, n: &crate::decimal::Decimal) -> Value {
     let count = n.to_i64().unwrap_or(0);
     if count > 0 {
@@ -1882,6 +1990,7 @@ fn run(linked: &LinkedProgram, test_slot: Option<usize>, args: &[String]) -> RRe
     let main_promise = PromiseData::new_pending();
     let main_task = value::new_task(main_fn.entry, main_frame.clone(), Some(main_promise.clone()));
     let mut vm = Vm {
+        linked,
         code: &linked.code,
         types: &linked.types,
         handlers: &linked.handlers,

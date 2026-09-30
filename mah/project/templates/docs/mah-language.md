@@ -11,7 +11,10 @@ another language.
 
 - A program is a sequence of statements, run top to bottom. There's no
   `main` function: the entry file's top-level code *is* the program.
-- Comments start with `#` and run to end of line.
+- Comments start with `#` and run to end of line. A run of full-line comments
+  starting with `##` directly above a `fn`, `struct`, `enum`, `trait`, method,
+  field, variant or parameter is its **documentation** (see "Type values and
+  reflection"); it's still just a comment to the program.
 - Newlines separate statements; `;` is optional between most statements and
   **required** in one case: an expression statement that isn't a call, a
   block (`if`/`match`/`{}`), or an assignment must be followed by `;` when
@@ -47,6 +50,7 @@ let y = {
 | `Vector` | `[1, 2, 3]`, `[]` | growable zero-indexed list, by reference; see Vectors and Maps |
 | `Map` | `["a": 1, "b": 2]`, `[:]` | String/Number/Bool keys, insertion-ordered, by reference; see Vectors and Maps |
 | `Range`, `FromRange`, `ToRange` | `5..10`, `1..`, `..10` | built-in structs, see Ranges |
+| `Type` | `Number`, `User`, `Vector` (a bare type name) | a type as a value; `==` compares them, `print` shows the name; see Type values and reflection |
 
 **Truthiness**: `false`, `none`, `0`, and `""` are falsy; everything else is
 truthy.
@@ -186,6 +190,29 @@ print("no newline", end: "")
   the impl).
 - A top-level `fn` can only call functions **declared above it** (except
   inside `impl` blocks, see Traits).
+
+### Spread calls
+
+`...xs` in an argument list expands a Vector into positional arguments, and
+`**m` expands a Map with String keys into keyword arguments:
+
+```mah
+fn f(a, b = 2, c = 3) { a + b + c }
+let args = [1, 10]
+print(f(...args))                    # 14
+print(f(1, **["c": 100]))            # 103
+print(f(...[1], b: 5, **["c": 0]))   # 6    any number of each, mixed with ordinary arguments
+print("a-b".split(...["-"]))         # [a, b]   method calls take them too
+```
+
+- Positional arguments (plain or `...`) come before keyword ones (`name: v`
+  or `**`). Items are evaluated left to right.
+- A keyword given twice (by name, or through a Map), a non-Vector after
+  `...`, and a non-Map (or a non-String key) after `**` are
+  `RuntimeError.ArgumentError`s.
+- `**` is still the exponent operator anywhere else (`2 ** 3`). `print` and
+  `sleep_async` take no spread arguments, and `detach f(...xs)` isn't allowed
+  yet. In `Trait.m(x, ...)`/`Type.m(x, ...)` the receiver `x` can't be a spread.
 
 ## Structs and enums
 
@@ -577,7 +604,8 @@ print(n + 1)
 
 Declarations can carry optional types. An unknown type name or a wrong
 number of `<...>` arguments is always a compile error. Annotations never
-change how the program runs -- they're erased before codegen -- but they
+change how the program runs (the program can read the ones it *wrote*, and
+`##` docs, through `std:reflect`, but nothing acts on them), and they
 are checked, by `mah check` and by the editor: whether a mismatch is just
 a warning or a compile error, and whether an inferred type is allowed to
 stay unannotated, depends on `[types] check` in `mah-project.toml`:
@@ -627,7 +655,8 @@ print(add(label.len()), scale(4), first([5]), show(Pair { left: 1, right: "x" }.
 ```
 
 - Types: `Number`, `String`, `Bool`, `Vector<T>`, `Map<K, V>`, `Option<T>`,
-  `Promise<T>`, your structs/enums/traits (with their `<...>` arguments),
+  `Promise<T>`, `Type<T>` (the type of the value `T`, see Type values and
+  reflection), your structs/enums/traits (with their `<...>` arguments),
   a type parameter, `fn(A, B) -> R` (no `->` means it returns `none`),
   `Self` (inside `trait`/`impl`), `None` (the type of `none`), `Never`,
   and `Unknown` (anything).
@@ -657,8 +686,8 @@ are global across all imported files and need no `export`.
 
 Standard library modules are imported as `"std:<name>"`, the same two ways
 as a file: `std:math`, `std:path`, `std:json`, `std:csv`, `std:random`,
-`std:collections`, `std:regex`, `std:time`, `std:async`, `std:fs`, `std:process` (and
-`std:test`, below).
+`std:collections`, `std:regex`, `std:time`, `std:async`, `std:fs`, `std:process`,
+`std:reflect` (and `std:test`, below).
 
 ```mah
 import math from "std:math"
@@ -695,7 +724,8 @@ print(path.join_all(["a", "b", "c"]))                            # a/b/c (no var
 structs (as objects) and enums (`"Unit"` or `{"Variant": {fields}}`). Both
 throw `JsonError` (`.Syntax { message, line, column }` or `.Shape {
 message }`). Read into a struct by implementing `FromJson` with the
-helpers `field`, `as_number`, `as_string`, `as_bool`, `as_vector`, `as_map`:
+helpers `field`, `as_number`, `as_string`, `as_bool`, `as_vector`, `as_map`
+-- or let `decode` do it from the struct's declaration (see below):
 
 ```mah
 import json from "std:json"
@@ -710,6 +740,28 @@ print(data["y"][0], try json.stringify(data) else "")         # true {"x":1,"y":
 let p = try Point.from_json(json.parse("{\"x\": 1, \"y\": 2}")) else Point { x: 0, y: 0 }
 let pretty = try json.stringify(p, indent: 2) else ""
 print(p.x + p.y, pretty.lines().len())                          # 3 4
+```
+
+`json.decode(T, value)` (and `json.parse_as(T, text)`, `decode(T, parse(text))`)
+reads a parsed value as a declared type `T`, checking it against the
+annotations: `Number`, `String`, `Bool`, `Vector<X>`, `Map<String, X>`,
+`Option<X>` (a missing key is `none`), other structs and enums (an enum reads
+what `stringify` writes), and takes an unannotated field, `Unknown` or a type
+parameter as it is. A type with a `FromJson` impl is read by that. It throws
+`JsonError.Shape` saying where: `expected a Number for User.age, got String`,
+`missing field 'name' for User`, `expected a String for User.tags[0], got Number`.
+
+```mah
+import json from "std:json"
+struct User { name: String, age: Number, email: Option<String>, tags: Vector<String> }
+let u = json.parse_as(User, "{\"name\": \"ada\", \"age\": 36, \"tags\": [\"x\"]}")
+print(u.name, u.age + 1, u.email, u.tags)                     # ada 37 none [x]
+print(try json.parse_as(User, "{\"name\": 1}") else "shape")   # shape
+try {
+    json.parse_as(User, "{\"name\": \"a\", \"age\": \"old\", \"tags\": []}")
+} catch {
+    e: JsonError => { print(e.message()) }    # expected a Number for User.age, got String
+}
 ```
 
 `std:csv` (RFC 4180; every field is a String; throws `CsvError { message,
@@ -892,6 +944,74 @@ try {
 }
 ```
 
+### Type values and reflection
+
+A bare type name in an expression is a **`Type` value**: `Number`, `String`,
+`Bool`, `Function`, `Vector`, `Map`, `Option`, `Promise`, `RuntimeError`,
+`None`, `Type`, or any struct or enum. A variable in scope with that name
+wins, exactly like an enum's unit variant. Types have no type arguments in a
+value (`Vector`, not `Vector<User>`), compare with `==` (same declared type),
+print as their name, and aren't Map keys or JSON. The checker gives `User`
+the type `Type<User>`.
+
+A `##` comment above a declaration is its **documentation**; `std:reflect`
+reads it, and the written annotations, defaults and `throws` clause, at run
+time. It reports what the source *wrote*, never what was inferred, so an
+unannotated parameter's type is `TypeRef.Unknown`:
+
+```mah
+import reflect from "std:reflect"
+
+## Adds two numbers.
+fn add(a: Number, b: Number = 1) -> Number { a + b }
+
+## A user.
+struct User {
+    ## Their name.
+    name: String,
+    tags: Vector<String>
+}
+
+impl User {
+    fn greet(self) -> String { "hi " + self.name }
+}
+
+let sig = reflect.signature(add)
+print(sig.name, sig.doc)                     # add Adds two numbers.
+print(sig.params[1].has_default, sig.params[1].default)   # true some(1)
+match sig.params[0].type {
+    TypeRef.Named { type: t, args: args } => { print(t == Number) }     # true
+    _ => { }
+}
+match reflect.schema(User) {
+    some(Schema.Struct { type: t, doc: doc, type_params: tps, fields: fields, decorators: ds }) => {
+        print(doc, fields.len(), fields[0].doc)         # A user. 2 Their name.
+    }
+    _ => { }
+}
+let u = reflect.construct(User, ["name": "ada", "tags": []])
+print(reflect.type_of(u) == User, reflect.type_of(3), reflect.methods(User)[0].name)   # true Number greet
+print(reflect.implements(User, "Printable"), reflect.call(add, [1], ["b": 5]))         # false 6
+```
+
+- `type_of(v)` (`type_of(none)` is `None`), `signature(f)` (`name`, `doc`,
+  `type_params`, `params` -- each with `name`, `type`, `doc`, `has_default`,
+  and `default`, `some(value)` when the default is a literal -- `returns`,
+  `throws`, an `Option` that is `none` when there's no `throws` clause),
+  `schema(T)` (`Schema.Struct { type, doc, type_params, fields, decorators }`
+  or `Schema.Enum { ..., variants }`; `none` for a primitive), `methods(T)`
+  (`Method { name, function, is_method, trait_name }`, inherent ones first;
+  the built-in types' native methods aren't listed), `implements(T,
+  "Trait")`, `call(f, args = [], kwargs = [:])` (`f(...args, **kwargs)`),
+  `construct(T, fields)` and `construct_variant(T, "Variant", fields)`
+  (throw `ReflectError` for a missing or unknown field).
+- A `TypeRef` is `Unknown`, `Named { type, args }`, `Fn { params, returns,
+  throws }`, `Param { name }`, `SelfType`, `Never` or `Trait { name, args }`.
+  `decorators` fields are empty for now.
+- `Signature`, `Param`, `Field`, `Variant`, `Schema`, `Method`, `TypeRef` and
+  `ReflectError` are global names once `std:reflect` (or `std:json`, which
+  uses it) is imported.
+
 ## Errors
 
 `throw` raises a value -- any struct/enum that `impl`s the built-in `Error`
@@ -1020,9 +1140,12 @@ test "not ready yet" {
   `pad_start`, and friends).
 - `&&`, `||`, `+=`, `++`, ternary `?:`.
 - Type-checking trait-typed values, bounds, and the prelude's iterator methods (the checker skips these for now); classes/inheritance.
-- Variadic parameters (`*args`, `**kwargs`); only `print` takes any number of arguments.
+- Variadic *parameters* (`*args`, `...rest`, `**kwargs`): a function has a fixed
+  parameter list (a call can spread a Vector or Map into it, see Spread calls);
+  only `print` takes any number of arguments. Decorators (`@name`) and
+  hooks.
 - Network access, spawning a process to stream from, binary file data, and every other planned
   `std:` module besides `std:math`, `std:path`, `std:json`, `std:csv`,
   `std:random`, `std:collections`, `std:regex`, `std:time`, `std:async`,
-  `std:fs`, `std:process` and `std:test`. Time zones (`std:time` is UTC only).
+  `std:fs`, `std:process`, `std:reflect` and `std:test`. Time zones (`std:time` is UTC only).
 - `null`/`nil`/`undefined`: use `none`.

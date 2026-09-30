@@ -1,9 +1,10 @@
 # Reflection, decorators, and hooks
 
-Status: **designed 2026-09-30, not started.** Three milestones, in order:
-M41a (type values, metadata, spread calls, `std:reflect`, `json.decode`),
-M41b (decorators as metadata), M41c (hook traits, function-item impls,
-rest parameters). Bytecode 1.14, 1.15 and 1.16 respectively.
+Status: **designed 2026-09-30; M41a landed** (type values, metadata, spread
+calls, `std:reflect`, `json.decode`; bytecode 1.14). M41b (decorators as
+metadata, bytecode 1.15) and M41c (hook traits, function-item impls, rest
+parameters, bytecode 1.16) are not started. See "M41a: what landed" below for
+where the implementation differs from or adds to this design.
 
 The motivating user is a backend web framework written in Mah, in the
 style of NestJS and FastAPI:
@@ -258,6 +259,62 @@ JsonError` (`decode(t, parse(text))`). Written in Mah over `std:reflect`:
 - `Unknown`, a type parameter, `Self`, a trait, a function type: passed
   through unchanged.
 - Errors say where: "expected a Number for user.age, got String".
+
+### M41a: what landed
+
+Everything above, as specified, with these additions and choices (each was
+either unspecified or forced):
+
+- **A helper opcode, `spread`** (`0x3C`, operands target `A`, source `A`,
+  keyword `B`). The spec says codegen builds the positional Vector and the
+  keyword Map but names no way to append/merge; `spread` is it (append a
+  Vector's items to a Vector, merge a Map into a Map), and the run-time
+  checks the spec lists (a non-Vector after `...`, a non-Map or non-String
+  key after `**`, a keyword given twice) live in it. Minor 14, like the
+  other two. `loadtype`'s two operands are encoded as `varuint`s (`N`), which
+  for kinds 0/1 and primitive codes 0-7 are the same bytes as a `u8`.
+- **The natives' shapes.** They return plain Vectors: a type descriptor is
+  `[tag, ...]`; `signature` is `[name or none, doc, type_params, params,
+  returns, throws or none]` with parameters `[name, type, doc, has_default,
+  is_constant, constant]`; `construct`/`construct_variant` return `[true,
+  value]` or `[false, message]` (like std:fs's results) and reflect.mh
+  throws `ReflectError`. docs/MAHC_FORMAT.md §4.4 has them all.
+- **`reflect.mh` uses `Unknown` where the design says `Function`**
+  (`signature(f)`, `Method.function`, `call(f, ...)`): `Function` can't be
+  written as a type annotation (TYPES.md). Its structs and enums are global
+  names like every struct: `TypeRef`, `Param`, `Signature`, `Field`,
+  `Variant`, `Schema`, `Method` and `ReflectError` exist in any program that
+  imports `std:reflect` **or `std:json`**, which imports it for `decode`, so
+  a program that also declares one of those names, and imports either module,
+  gets the usual "already declared" error.
+- **`std:json` now needs 1.14**: `json.mh` imports `std:reflect`, whose
+  natives are 1.14, so every program that imports `std:json` is written at
+  minor 14 (it used to be 7).
+- **`reflect.methods` lists only Mah-code methods**: a native target (the
+  built-in types' `Printable`, `len`, ...) is not a Function value, so
+  `methods(Number)` is empty while `implements(Number, "Printable")` is true.
+  A trait implemented with no methods registers nothing, so `implements` is
+  false for such a marker trait.
+- **`Type` joins `BUILTIN_TYPE_NAMES`**: a program can't declare a struct,
+  enum or trait called `Type` (it could before, if nothing else used it).
+  `Type<T>` needs exactly one argument in an annotation.
+- **`Self` in expression position** inside an impl is that impl's type (a
+  Type value), like `Self` in `Self { ... }`.
+- **Docs need the declaration to be first on its line**: a `##` run above
+  `struct S { a, b }` documents `S`, not `a`. A blank line or a plain `#`
+  comment ends the run. `##` comments are kept in a lexer side table
+  (`Lexer.doc_comments`, `doc_above`); the parser reads them, and the token
+  stream is unchanged. The LSP's hover text drops the `##` marker.
+- **The checker** gives a bare type name `Type<T>` and skips arity checks for
+  a call with spread arguments (it still checks each spread expression, and
+  the call's errors). `SpreadArg` (in `Call.args`, or `(None, SpreadArg,
+  pos)` in `kwargs`) is the AST node; the formatter prints it tight.
+- **`std:reflect` has no `find`**: it's the M41b decorator lookup.
+- **`type_name_of`**, which the M41a test list mentions, isn't a Mah
+  function; the tests use `reflect.type_of(x)` printing `Type`.
+- **`annotations compile to identical bytecode`** (tests/test_type_syntax.py)
+  became "identical code, functions, types, natives, handlers and minor,
+  ignoring META and the tables it adds to": the bytes differ by META now.
 
 ---
 

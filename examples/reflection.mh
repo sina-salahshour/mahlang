@@ -1,0 +1,57 @@
+# Type values, `##` docs, spread calls and std:reflect (M41a): a program
+# reading its own declarations, and JSON read into a struct from its
+# annotations.
+
+import reflect from "std:reflect"
+import json from "std:json"
+
+## A registered account.
+struct User {
+    ## The login name.
+    name: String,
+    age: Number,
+    ## Optional: a missing key decodes to `none`.
+    email: Option<String>
+}
+
+## Greets someone.
+fn greet(name: String, greeting: String = "hello", punctuation = "!") -> String {
+    greeting + ", " + name + punctuation
+}
+
+# A bare type name is a value.
+print(User, Number, User == User, User == Number)
+
+# What the source wrote about a function...
+let sig = reflect.signature(greet)
+print(sig.name, "-", sig.doc)
+for let p in sig.params {
+    print(" ", p.name, "has a default:", p.has_default, "constant default:", p.default)
+}
+
+# ...and about a struct.
+match reflect.schema(User) {
+    some(Schema.Struct { type: t, doc: doc, type_params: tps, fields: fields, decorators: ds }) => {
+        print(t, "-", doc)
+        for let f in fields { print(" ", f.name, "-", f.doc) }
+    }
+    _ => { }
+}
+
+# Spread calls: a Vector into positional arguments, a Map into keyword ones.
+let args = ["ada"]
+print(greet(...args, **["greeting": "welcome"]))
+print(reflect.call(greet, ["bo"], ["punctuation": "?"]))
+
+# JSON read into a struct, checked against its annotations.
+fn load(text: String) {
+    try {
+        let u = json.parse_as(User, text)
+        print(u.name, u.age + 1, u.email)
+    } catch {
+        e: JsonError => { print("bad user:", e.message()) }
+    }
+}
+load("{\"name\": \"ada\", \"age\": 36}")
+load("{\"name\": \"ada\", \"age\": \"old\"}")
+load("{\"age\": 1}")

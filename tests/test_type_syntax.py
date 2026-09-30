@@ -11,6 +11,8 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from mah.bytecode.decode import decode
+from mah.bytecode.disasm import disassemble
 from mah.compiler.ast_nodes import FnType, ForStmt, ImplDecl, LetStmt, NamedType, NumberLit, TraitDecl
 from mah.compiler.lexer import Lexer, TokenType
 from mah.lsp import analysis
@@ -220,10 +222,22 @@ print(x, p.show(3), f(4))
 
 class RuntimeUnchangedTests(unittest.TestCase):
     def test_annotations_compile_to_identical_bytecode(self):
-        self.assertEqual(
-            compile_bytes(text=_ANNOTATED, target="release"),
-            compile_bytes(text=_PLAIN, target="release"),
-        )
+        # M41a: written annotations are kept as metadata (the optional META
+        # section, docs/MAHC_FORMAT.md #4.10) -- so the files differ there,
+        # and in the string/constant tables META adds to -- but nothing the
+        # VM runs changes: the same code, functions, types, natives and
+        # handlers, at the same minor version. (Compared as disassembly,
+        # which resolves string indices, minus META and the table sizes.)
+        annotated = decode(compile_bytes(text=_ANNOTATED, target="release"))
+        plain = decode(compile_bytes(text=_PLAIN, target="release"))
+        self.assertIsNotNone(annotated.meta)
+        self.assertEqual(annotated.minor, plain.minor)
+
+        def what_runs(program) -> str:
+            program.meta = None
+            return "\n".join(disassemble(program).splitlines()[2:])
+
+        self.assertEqual(what_runs(annotated), what_runs(plain))
 
     def test_annotated_program_runs(self):
         self.assertEqual(run_source(_ANNOTATED), "1 0\n2 1\n3 13 4\n")

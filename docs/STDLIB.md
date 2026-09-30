@@ -9,7 +9,8 @@ first module; **M29 landed the String methods** (Phase 1's first item);
 **M33 made `input` async** (Phase 0 step 7, and step 4's I/O half);
 **M34 landed `std:time` and `std:async`** (Phase 2, with step 4's
 cancellable timers); **M35 landed `std:fs`** (with Phase 0 step 3,
-handles); **M36 landed `std:process`**. The rest is design. Agreed 2026-09-28. Depends on
+handles); **M36 landed `std:process`**; **M41a landed `std:reflect`** and `json.decode`
+(see [`REFLECTION.md`](REFLECTION.md)). The rest is design. Agreed 2026-09-28. Depends on
 [`ERRORS.md`](ERRORS.md) (every failure below is a thrown, typed error)
 and on the static checker in [`TYPES.md`](TYPES.md).
 
@@ -276,8 +277,9 @@ the exact rules; `mah/string_methods.py` is the reference):
   Bool, `none`, and structs/enums by field name.
 - `trait FromJson { fn from_json(value) -> Self }`, implemented per
   struct and called as `Point.from_json(json.parse(text))`. It throws
-  `JsonError` on a shape mismatch. (A `decode(text, Point)` form waits
-  for types as runtime values.)
+  `JsonError` on a shape mismatch.
+- `decode(t, value)`, `decode_ref(r, value)` and `parse_as(t, text)`
+  read a value into a declared type (below, M41a).
 
 ✅ **Landed (M30)**, in `mah/std/json.mh`, with these decisions:
 
@@ -304,6 +306,36 @@ the exact rules; `mah/string_methods.py` is the reference):
   (`value.type_name`, `value.fields`, `value.variant`) and characters
   (`string.chars`, `string.code_point`, `string.from_code_point`). They're
   private to std modules (`extern fn`).
+
+✅ **`decode` landed (M41a)**, in `mah/std/json.mh` over `std:reflect`, with
+these decisions:
+
+- `decode<T>(t: Type<T>, value: Unknown) -> T throws JsonError` reads a
+  parsed value as the type `t` (a bare type name is a value now,
+  docs/REFLECTION.md), `parse_as(t, text)` is `decode(t, parse(text))`, and
+  `decode_ref(r, value)` reads a `TypeRef` from `std:reflect` (a field's
+  `type`, say).
+- By annotation: `Number`, `String`, `Bool` (checked), `Vector<T>` and
+  `Map<String, V>` (each item/value read as `T`/`V`; without arguments the
+  items pass through), `Option<T>` (`none` stays `none`, anything else is
+  `some(read T)`), a struct (a Map; each declared field read by its
+  annotation), an enum (a String for a unit variant, or a one-key Map
+  `{"Circle": {"r": 2}}`, the inverse of `stringify`). `Unknown`, an
+  unannotated field, a type parameter, `Self`, a trait or a function type
+  take the value as it is. A type that implements `FromJson` is read by its
+  own `from_json`, found through `reflect.methods`, so a hand-written
+  decoder still wins.
+- A missing key is `none` for an `Option` field and `JsonError.Shape`
+  `missing field 'x' for P` otherwise; keys the struct doesn't declare are
+  ignored.
+- **Errors say where**, with the root type's name then `.field`, `[i]` or
+  `["key"]`: `expected a Number for P.x, got String`, `expected a String
+  for Q.tags[0], got Number`, `expected a Number for Q.m["k"], got String`,
+  `missing field 'x' for P.p`, `unknown variant 'Nope' for Shape`.
+- `std:json` now imports `std:reflect`, so a program that imports it is
+  written at bytecode 1.14 (it was 1.7), and gets `std:reflect`'s
+  global type names (`TypeRef`, `Param`, `Signature`, `Field`, `Variant`,
+  `Schema`, `Method`, `ReflectError`).
 
 ### `std:csv`
 
@@ -565,6 +597,27 @@ arithmetic, `format(time, pattern)` and `parse(text, pattern)`.
 - **Later**: `spawn(...)` (a `Process` handle for streaming), signals and
   a way to change the working directory wait for a `Bytes` type and the
   network work.
+
+### `std:reflect`
+
+✅ **Landed (M41a)**, in `mah/std/reflect.mh`. The design, the API and every
+decision are in [`REFLECTION.md`](REFLECTION.md) (its "M41a: what landed"
+section lists where the implementation adds to it); the byte-level side is
+docs/MAHC_FORMAT.md §4.4 (seven 1.14 `reflect.*` natives), §4.10 (the META
+section) and §5 (the `Type` value). In short:
+
+- `type_of(value)`, `signature(f)` (name, `##` doc, type parameters,
+  parameters with their written types, docs and constant defaults, return
+  type, `throws`), `schema(t)` (a struct's fields or an enum's variants,
+  with types and docs; `none` for a primitive), `methods(t)`, `implements(t,
+  trait_name)`, `call(f, args = [], kwargs = [:])`, `construct(t, fields)`
+  and `construct_variant(t, variant, fields)` (throwing `ReflectError`).
+- It reports what the source *wrote*, never what the checker inferred; an
+  unannotated parameter's type is `TypeRef.Unknown`.
+- Bare type names are values (`User`, `Number`), spread calls
+  (`f(...xs, **m)`) exist so `call` can be written in Mah, and `##` comments
+  above a declaration are its documentation. The standard library's own
+  exported functions carry `##` docs, which the editor's hover shows too.
 
 ## Phase 4: network
 

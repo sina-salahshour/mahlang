@@ -76,6 +76,7 @@ from .ast_nodes import (
     RangePat,
     ReturnStmt,
     SleepAsyncExpr,
+    SpreadArg,
     StringLit,
     StructDecl,
     StructLit,
@@ -745,6 +746,10 @@ class Checker:
                 return scope[name]
         if name in ("Vector", "Map"):
             return TCon(name, args)
+        if name == "Type":
+            # M41a (docs/REFLECTION.md): `Type<T>`, the type of the type
+            # value `T` -- what a bare type name evaluates to.
+            return TCon(name, args if len(args) == 1 else [self._fresh()])
         info = self.structs.get(name) or self.enums.get(name)
         if info is not None:
             if len(args) != len(info.params):
@@ -1111,6 +1116,10 @@ class Checker:
         if instance is not None:
             self._try_unify(var, instance)
 
+    @staticmethod
+    def _has_spread(args, kwargs) -> bool:
+        return any(isinstance(a, SpreadArg) for a in args) or any(name is None for name, _v, _p in kwargs)
+
     def _check_args_only(self, args, kwargs) -> None:
         for arg in args:
             self._escape(self._check_expr(arg), arg.position)
@@ -1323,7 +1332,14 @@ class Checker:
         if isinstance(expr, BoolLit):
             return BOOL
         if isinstance(expr, Ident):
+            if expr.type_value is not None:
+                return self._type_value_type(expr.type_value)
             return self._ident_type(expr)
+        if isinstance(expr, SpreadArg):
+            # M41a: `...xs` / `**m` -- checked as the expression it wraps;
+            # what it expands to isn't tracked.
+            self._check_expr(expr.value)
+            return _unchecked()
         if isinstance(expr, Unary):
             operand = self._check_expr(expr.operand)
             if expr.op == "-":
@@ -1400,6 +1416,26 @@ class Checker:
             return _unchecked()
         return _unchecked()
 
+    def _type_value_type(self, type_value):
+        """M41a: a bare type name is a value of type `Type<T>`; a generic
+        type gets fresh inference variables for its arguments (`Type<Pair<?,
+        ?>>`)."""
+        kind, name = type_value
+        if kind == "prim":
+            if name in PRIMITIVES:
+                inner = PRIMITIVES[name]
+            elif name == "Vector":
+                inner = TCon("Vector", [self._fresh()])
+            elif name == "Map":
+                inner = TCon("Map", [self._fresh(), self._fresh()])
+            elif name == "Type":
+                inner = TCon("Type", [self._fresh()])
+            else:
+                inner = _unchecked()  # Function
+        else:
+            inner = self._convert(NamedType(name=name, args=[], position=0))
+        return TCon("Type", [inner])
+
     def _ident_type(self, ident: Ident):
         symbol = self._sym(ident.position)
         if symbol is None:
@@ -1459,6 +1495,13 @@ class Checker:
     def _apply(self, callee: TFn, args, kwargs, position: int):
         """Match arguments to a function type's parameters by position and
         keyword, check each, and give the return type."""
+        if self._has_spread(args, kwargs):
+            # M41a: `f(...xs, **m)` -- how many arguments and which keywords
+            # there are is only known at run time, so nothing is matched to
+            # parameters; the call's own errors still count.
+            self._check_args_only(args, kwargs)
+            self._raise(callee.throws, position)
+            return callee.ret
         params = callee.params
         pairs = []  # (argument expression, parameter type or None)
         filled = set()

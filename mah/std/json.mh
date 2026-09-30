@@ -20,6 +20,24 @@
 #           Point { x: json.as_number(json.field(value, "x")), y: ... }
 #       }
 #   }
+#
+# Or let `decode` do it from the type's declaration (through std:reflect):
+#
+#   struct User { name: String, age: Number, email: Option<String> }
+#   let u = json.parse_as(User, "{\"name\": \"ada\", \"age\": 36}")
+#   u.email                             # none
+#
+# `decode(t, value)` reads a parsed value as `t`, checking each field
+# against its written annotation (`Number`, `String`, `Bool`, `Vector<T>`,
+# `Map<String, V>`, `Option<T>`, other structs and enums; an unannotated
+# field, `Unknown` or a type parameter takes the value as it is) and saying
+# where it went wrong: "expected a Number for User.age, got String". A
+# missing key is `none` for an `Option` field and an error otherwise; keys
+# the struct doesn't declare are ignored. An enum reads what `stringify`
+# writes (a unit variant's name, or {"Circle": {"r": 2}}). A type that
+# implements `FromJson` is read by its own `from_json`.
+
+import reflect from "std:reflect"
 
 extern fn type_name(value: Unknown) -> String = "value.type_name"
 extern fn fields(value: Unknown) -> Unknown = "value.fields"
@@ -495,4 +513,189 @@ export fn as_map(value: Unknown, what: String = "the value") -> Map<
 > throws JsonError {
     if type_name(value) != "Map" { shape(what, "an object", value) }
     value
+}
+
+# -- decoding into declared types ---------------------------------------------
+
+# Whether an annotation is `Option<...>` (so a missing key is fine).
+fn is_option(r: TypeRef) -> Bool {
+    match r {
+        TypeRef.Named { type: t, args: _ } => { t == Option }
+        _ => { false }
+    }
+}
+
+# A `from_json` written for the type, if it has one.
+fn own_from_json(t: Type<Unknown>) -> Option<Unknown> {
+    if !reflect.implements(t, "FromJson") { return none }
+    for let m in reflect.methods(t) {
+        if m.name == "from_json" {
+            match m.trait_name {
+                some(trait_name) => {
+                    if trait_name == "FromJson" { return some(m.function) }
+                }
+                none => { }
+            }
+        }
+    }
+    none
+}
+
+fn construct_shape(t: Type<Unknown>, fields: Map<String, Unknown>) -> Unknown throws JsonError {
+    try {
+        reflect.construct(t, fields)
+    } catch {
+        e: ReflectError => { throw JsonError.Shape { message: e.message() } }
+    }
+}
+
+fn construct_variant_shape(
+    t: Type<Unknown>,
+    variant: String,
+    fields: Map<String, Unknown>
+) -> Unknown throws JsonError {
+    try {
+        reflect.construct_variant(t, variant, fields)
+    } catch {
+        e: ReflectError => { throw JsonError.Shape { message: e.message() } }
+    }
+}
+
+# `value` read as the type `r` describes, `path` saying where it is.
+fn read(r: TypeRef, value: Unknown, path: String) -> Unknown throws JsonError {
+    match r {
+        TypeRef.Named { type: t, args: args } => {
+            if t == Number { return as_number(value, path) }
+            if t == String { return as_string(value, path) }
+            if t == Bool { return as_bool(value, path) }
+            if t == Vector {
+                let items = as_vector(value, path)
+                if args.len() == 0 { return items }
+                let out = []
+                let i = 0
+                for let item in items {
+                    out.push(read(args[0], item, path + "[" + i + "]"))
+                    i = i + 1
+                }
+                return out
+            }
+            if t == Map {
+                let entries = as_map(value, path)
+                if args.len() < 2 { return entries }
+                let out = [:]
+                for let key in entries {
+                    out[key] = read(args[1], entries[key], path + "[\"" + key + "\"]")
+                }
+                return out
+            }
+            if t == Option {
+                if value == none { return none }
+                if args.len() == 0 { return some(value) }
+                return some(read(args[0], value, path))
+            }
+            if t == None {
+                if value != none { shape(path, "null", value) }
+                return none
+            }
+            let own = own_from_json(t)
+            if own != none {
+                let from_json: fn(Unknown) -> Unknown throws JsonError = own.unwrap()
+                return from_json(value)
+            }
+            let declared = reflect.schema(t)
+            match declared {
+                some(
+                    Schema.Struct {
+                        type: _,
+                        doc: _,
+                        type_params: _,
+                        fields: declared_fields,
+                        decorators: _
+                    }
+                ) => {
+                    let object = as_map(value, path)
+                    let out = [:]
+                    for let f in declared_fields {
+                        if object.has(f.name) {
+                            out[f.name] = read(f.type, object[f.name], path + "." + f.name)
+                        } elif is_option(f.type) {
+                            out[f.name] = none
+                        } else {
+                            throw JsonError.Shape {
+                                message: "missing field '" + f.name + "' for " + path
+                            }
+                        }
+                    }
+                    return construct_shape(t, out)
+                }
+                some(
+                    Schema.Enum {
+                        type: _,
+                        doc: _,
+                        type_params: _,
+                        variants: declared_variants,
+                        decorators: _
+                    }
+                ) => {
+                    let kind = type_name(value)
+                    let name = ""
+                    let body = [:]
+                    if kind == "String" {
+                        name = value
+                    } elif kind == "Map" {
+                        let entries = as_map(value, path)
+                        if entries.len() != 1 {
+                            shape(path, "an object with one key", value)
+                        }
+                        name = entries.keys()[0]
+                        body = as_map(entries[name], path + "." + name)
+                    } else {
+                        shape(path, "a String or an object", value)
+                    }
+                    for let v in declared_variants {
+                        if v.name == name {
+                            let out = [:]
+                            for let f in v.fields {
+                                if body.has(f.name) {
+                                    out[f.name] = read(
+                                        f.type,
+                                        body[f.name],
+                                        path + "." + name + "." + f.name
+                                    )
+                                } elif is_option(f.type) {
+                                    out[f.name] = none
+                                } else {
+                                    throw JsonError.Shape {
+                                        message: "missing field '" + f.name + "' for " + path + "." + name
+                                    }
+                                }
+                            }
+                            return construct_variant_shape(t, name, out)
+                        }
+                    }
+                    throw JsonError.Shape { message: "unknown variant '" + name + "' for " + path }
+                }
+                none => { return value }
+            }
+        }
+        _ => { return value }
+    }
+}
+
+# `value` (from `parse`) read as a `t` -- a struct or enum declared in Mah,
+# or `Number`, `String`, `Bool`, `Vector<...>`, ... -- checking it against
+# the declaration. Throws `JsonError.Shape` naming where it doesn't fit.
+export fn decode<T>(t: Type<T>, value: Unknown) -> T throws JsonError {
+    read(TypeRef.Named { type: t, args: [] }, value, "" + t)
+}
+
+# `value` read as the type an annotation describes (a `TypeRef` from
+# std:reflect, e.g. one field's `type`).
+export fn decode_ref(r: TypeRef, value: Unknown) -> Unknown throws JsonError {
+    read(r, value, "the value")
+}
+
+# `decode(t, parse(text))`.
+export fn parse_as<T>(t: Type<T>, text: String) -> T throws JsonError {
+    decode(t, parse(text))
 }

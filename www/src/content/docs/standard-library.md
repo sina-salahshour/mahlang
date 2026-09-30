@@ -24,7 +24,8 @@ on your own (showing locations like `std:math#20:9`).
 
 So far there are `std:math`, `std:path`, `std:json`, `std:csv`,
 `std:random`, `std:collections`, `std:regex`, `std:time`, `std:async`,
-`std:fs` and `std:process` (and `std:test`, see [Testing](/docs/testing)).
+`std:fs`, `std:process` and `std:reflect` (and `std:test`, see
+[Testing](/docs/testing)).
 The rest of the plan (sockets, http) is in `docs/STDLIB.md` in the
 repository.
 
@@ -146,6 +147,36 @@ print(p.x + p.y)                                               # 3
 print(try { Point.from_json(json.parse("{\"x\": 1}")) } catch { e: JsonError => { e.message() } })
 # missing field 'y'
 ```
+
+Or let `decode` read it from the struct's declaration. `decode(T, value)`
+(and `parse_as(T, text)`, which is `decode(T, parse(text))`) checks a
+parsed value against the annotations and builds the struct, through
+[`std:reflect`](#stdreflect). It handles `Number`, `String`, `Bool`,
+`Vector<X>`, `Map<String, X>`, `Option<X>` (a missing key is `none`), other
+structs, and enums (the way `stringify` writes them). A field without an
+annotation takes the value as it is, and a type that implements
+`FromJson` is read by its own `from_json`. Errors say where:
+
+```mah
+import json from "std:json"
+
+struct User { name: String, age: Number, email: Option<String>, tags: Vector<String> }
+
+let u = try json.parse_as(User, "{\"name\": \"ada\", \"age\": 36, \"tags\": [\"x\"]}") else none
+print(u.name, u.age + 1, u.email, u.tags)     # ada 37 none [x]
+
+try {
+    json.parse_as(User, "{\"name\": \"a\", \"age\": \"old\", \"tags\": []}")
+} catch {
+    e: JsonError => { print(e.message()) }    # expected a Number for User.age, got String
+}
+print(try { json.parse_as(User, "{}") } catch { e: JsonError => { e.message() } })
+# missing field 'name' for User
+```
+
+The path in a message is the type's name, then `.field`, `[i]` or
+`["key"]`. `json.decode(Vector, [1, "a"])` (no type arguments) passes the
+items through untouched.
 
 ## `std:csv`
 
@@ -468,6 +499,69 @@ The environment functions work on a copy taken when the program starts:
 starts get the copy (plus the call's `env` entries). Names must be
 non-empty and contain no `=`; names and values can't contain a NUL
 character.
+
+## `std:reflect`
+
+What a program can find out about its own functions, types and values while
+it runs. A bare type name is a value: `Number`, `String`, `User`, `Vector`
+(a `Type`; `==` compares them and `print` shows the name). A `##` comment
+directly above a `fn`, `struct`, `enum`, method, field, variant or parameter
+is its documentation, and `std:reflect` reads it together with the
+annotations, defaults and `throws` clause the source *wrote* (never what the
+checker inferred, so an unannotated parameter's type is `TypeRef.Unknown`).
+
+```mah
+import reflect from "std:reflect"
+
+## Adds two numbers.
+fn add(a: Number, b: Number = 1) -> Number { a + b }
+
+## A user.
+struct User {
+    ## Their name.
+    name: String,
+    tags: Vector<String>
+}
+
+let sig = reflect.signature(add)
+print(sig.name, sig.doc)                                  # add Adds two numbers.
+print(sig.params[1].has_default, sig.params[1].default)   # true some(1)
+
+match reflect.schema(User) {
+    some(Schema.Struct { type: t, doc: doc, type_params: tps, fields: fields, decorators: ds }) => {
+        print(doc, fields[0].name, fields[0].doc)         # A user. name Their name.
+    }
+    _ => { }
+}
+let u = reflect.construct(User, ["name": "ada", "tags": []])
+print(reflect.type_of(u) == User, reflect.type_of(3))     # true Number
+print(reflect.call(add, [1], ["b": 5]))                   # 6
+```
+
+| Function | |
+|---|---|
+| `type_of(value)` | the value's type (`type_of(none)` is `None`) |
+| `signature(f)` | a `Signature { name, doc, type_params, params, returns, throws, decorators }`; each `Param` has `name`, `type`, `doc`, `has_default` and `default` (`some(value)` when it's a literal) |
+| `schema(T)` | `some(Schema.Struct { ... fields })` or `some(Schema.Enum { ... variants })`; `none` for `Number`, `String` and the other primitives |
+| `methods(T)` | the `Method { name, function, is_method, trait_name }` written in `impl`s: inherent first, then trait methods by trait and name |
+| `implements(T, "Trait")` | whether the type has methods for that trait, native ones included |
+| `call(f, args = [], kwargs = [:])` | `f(...args, **kwargs)` |
+| `construct(T, fields)`, `construct_variant(T, "Variant", fields)` | a new struct or enum value from exactly its fields; a missing or unknown field throws `ReflectError` naming it |
+
+A type annotation comes back as a `TypeRef`: `Unknown`, `Named { type,
+args }`, `Fn { params, returns, throws }`, `Param { name }`, `SelfType`,
+`Never` or `Trait { name, args }`.
+
+`...xs` and `**m` in a call's argument list (a Vector into positional
+arguments, a Map into keyword arguments: `f(...args, k: 1, **more)`) exist so
+`call` can be written in Mah; see
+[Functions & closures](/docs/functions-closures).
+
+The natives behind it read the `.mahc` file's structure, so they need
+bytecode 1.14 (and so does any program that imports `std:json`, whose
+`decode` is written over it). `std:reflect`'s type names (`TypeRef`,
+`Param`, `Signature`, `Field`, `Variant`, `Schema`, `Method`) are global like
+any struct's.
 
 ## How it's built
 

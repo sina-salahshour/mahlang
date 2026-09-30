@@ -176,6 +176,10 @@
         {
           "type": "keyword_argument",
           "named": true
+        },
+        {
+          "type": "spread_argument",
+          "named": true
         }
       ]
     }
@@ -1682,6 +1686,10 @@
         {
           "type": "keyword_argument",
           "named": true
+        },
+        {
+          "type": "spread_argument",
+          "named": true
         }
       ]
     }
@@ -1898,6 +1906,22 @@
           "named": true
         }
       ]
+    }
+  },
+  {
+    "type": "spread_argument",
+    "named": true,
+    "fields": {
+      "value": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "expr",
+            "named": true
+          }
+        ]
+      }
     }
   },
   {
@@ -2467,6 +2491,10 @@
   },
   {
     "type": "..",
+    "named": false
+  },
+  {
+    "type": "...",
     "named": false
   },
   {

@@ -10,11 +10,11 @@ use std::rc::Rc;
 
 use crate::decimal::Decimal;
 use crate::decode::{
-    self, Addr, BinOp, Const, FunctionDecl, HandlerEntry, NativeRef, Program, RawInstr, TypeBody, TypeDecl,
+    self, Addr, BinOp, Const, FunctionDecl, HandlerEntry, Meta, NativeRef, Program, RawInstr, TypeBody, TypeDecl,
     RUNTIME_ERROR_VARIANTS,
 };
 
-use super::value::{FunctionInfo, Value};
+use super::value::{FunctionInfo, TypeData, Value, PRIMITIVE_TYPE_NAMES};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NativeFn {
@@ -85,6 +85,14 @@ pub enum NativeFn {
     ProcessPid,
     ProcessPlatform,
     ProcessRun,
+    /// M41a (1.14): std:reflect (runtime/src/vm/reflect.rs).
+    ReflectTypeOf,
+    ReflectSignature,
+    ReflectSchema,
+    ReflectMethods,
+    ReflectImplements,
+    ReflectConstruct,
+    ReflectConstructVariant,
 }
 
 /// Whether this VM implements a native of that name (any arity) -- for
@@ -153,6 +161,13 @@ fn native_by_name(name: &str) -> Option<(u64, NativeFn)> {
         "process.pid" => Some((0, NativeFn::ProcessPid)),
         "process.platform" => Some((0, NativeFn::ProcessPlatform)),
         "process.run" => Some((5, NativeFn::ProcessRun)),
+        "reflect.type_of" => Some((1, NativeFn::ReflectTypeOf)),
+        "reflect.signature" => Some((1, NativeFn::ReflectSignature)),
+        "reflect.schema" => Some((1, NativeFn::ReflectSchema)),
+        "reflect.methods" => Some((1, NativeFn::ReflectMethods)),
+        "reflect.implements" => Some((2, NativeFn::ReflectImplements)),
+        "reflect.construct" => Some((2, NativeFn::ReflectConstruct)),
+        "reflect.construct_variant" => Some((3, NativeFn::ReflectConstructVariant)),
         _ => None,
     }
 }
@@ -207,6 +222,10 @@ pub enum LinkedInstr {
     Retval { dest: Addr },
     CallMethod { recv: Addr, name: Rc<str>, args: Vec<Addr>, trait_: Option<Rc<str>> },
     CallMethodKw { recv: Addr, name: Rc<str>, args: Vec<Addr>, kwnames: Vec<Rc<str>>, trait_: Option<Rc<str>> },
+    CallSpread { callee: Addr, args: Addr, kwargs: Addr },
+    CallMethodSpread { recv: Addr, name: Rc<str>, args: Addr, kwargs: Addr, trait_: Option<Rc<str>> },
+    Spread { target: Addr, source: Addr, keyword: bool },
+    LoadType { value: Value, dest: Addr },
     Defmethod { closure: Addr, type_name: Rc<str>, trait_: Option<Rc<str>>, name: Rc<str>, is_method: bool },
     Detach { callee: Addr, args: Vec<Addr>, dest: Addr },
     DetachKw { callee: Addr, args: Vec<Addr>, kwnames: Vec<Rc<str>>, dest: Addr },
@@ -247,6 +266,12 @@ pub enum LinkedInstr {
 }
 
 pub struct LinkedProgram {
+    /// M41a: what `std:reflect` reads -- the constants, strings, META and the
+    /// number of built-in types (user types follow them in `types`).
+    pub constants: Vec<Value>,
+    pub strings: Vec<Rc<str>>,
+    pub meta: Option<Meta>,
+    pub builtin_type_count: usize,
     pub types: Vec<TypeInfo>,
     pub functions: Vec<Rc<FunctionInfo>>,
     pub code: Vec<LinkedInstr>,
@@ -336,13 +361,15 @@ fn validate_natives(native_refs: &[NativeRef], strings: &[String]) -> decode::FR
 fn build_functions(decls: &[FunctionDecl], interned: &[Rc<str>]) -> Vec<Rc<FunctionInfo>> {
     decls
         .iter()
-        .map(|fd| {
+        .enumerate()
+        .map(|(index, fd)| {
             let name = fd.name.map(|i| interned[i].clone());
             let params = fd
                 .params
                 .as_ref()
                 .map(|ps| ps.iter().map(|&(i, has_default)| (interned[i].clone(), has_default)).collect());
             Rc::new(FunctionInfo {
+                index,
                 entry: fd.entry as usize,
                 slot_count: fd.slot_count as usize,
                 param_count: fd.param_count as usize,
@@ -360,6 +387,7 @@ fn link_instr(
     constants: &[Value],
     functions: &[Rc<FunctionInfo>],
     natives: &[NativeFn],
+    types: &[TypeInfo],
 ) -> LinkedInstr {
     let s = |i: usize| interned[i].clone();
     let s_opt = |i: Option<usize>| i.map(s);
@@ -391,6 +419,26 @@ fn link_instr(
             kwnames: s_list(kwnames),
             trait_: s_opt(*trait_),
         },
+        RawInstr::CallSpread { callee, args, kwargs } => {
+            LinkedInstr::CallSpread { callee: *callee, args: *args, kwargs: *kwargs }
+        }
+        RawInstr::CallMethodSpread { recv, name, args, kwargs, trait_ } => LinkedInstr::CallMethodSpread {
+            recv: *recv,
+            name: s(*name),
+            args: *args,
+            kwargs: *kwargs,
+            trait_: s_opt(*trait_),
+        },
+        RawInstr::Spread { target, source, keyword } => {
+            LinkedInstr::Spread { target: *target, source: *source, keyword: *keyword }
+        }
+        RawInstr::LoadType { kind, index, dest } => {
+            let name: Rc<str> = if *kind == 0 { types[*index].name.clone() } else { Rc::from(PRIMITIVE_TYPE_NAMES[*index]) };
+            LinkedInstr::LoadType {
+                value: Value::Type(Rc::new(TypeData { kind: *kind, index: *index, name })),
+                dest: *dest,
+            }
+        }
         RawInstr::Defmethod { closure, type_name, trait_, name, is_method } => LinkedInstr::Defmethod {
             closure: *closure,
             type_name: s(*type_name),
@@ -465,11 +513,22 @@ pub fn link(program: &Program) -> decode::FResult<LinkedProgram> {
     let natives = validate_natives(&program.natives, &program.strings)?;
     let functions = build_functions(&program.functions, &interned);
     let code: Vec<LinkedInstr> =
-        program.code.iter().map(|i| link_instr(i, &interned, &constants, &functions, &natives)).collect();
+        program.code.iter().map(|i| link_instr(i, &interned, &constants, &functions, &natives, &types)).collect();
     let debug = program.debug.as_ref().map(|d| DebugIndex {
         pcs: d.runs.iter().map(|r| r.0).collect(),
         runs: d.runs.iter().map(|r| (r.1, r.2, r.3)).collect(),
         file_paths: d.files.iter().map(|&i| interned[i].clone()).collect(),
     });
-    Ok(LinkedProgram { types, functions, code, debug, handlers: program.handlers.clone() })
+    let builtin_type_count = types.len() - program.types.len();
+    Ok(LinkedProgram {
+        constants,
+        strings: interned,
+        meta: program.meta.clone(),
+        builtin_type_count,
+        types,
+        functions,
+        code,
+        debug,
+        handlers: program.handlers.clone(),
+    })
 }

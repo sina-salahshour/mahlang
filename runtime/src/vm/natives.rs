@@ -564,5 +564,12 @@ pub fn call_native(vm: &mut Vm, native: NativeFn, args: &[Value]) -> Result<Valu
         NativeFn::ProcessPid => super::process::pid(),
         NativeFn::ProcessPlatform => super::process::platform(),
         NativeFn::ProcessRun => super::process::run(vm, args),
+        NativeFn::ReflectTypeOf => super::reflect::type_of(vm, args),
+        NativeFn::ReflectSignature => super::reflect::signature(vm, args),
+        NativeFn::ReflectSchema => super::reflect::schema(vm, args),
+        NativeFn::ReflectMethods => super::reflect::methods(vm, args),
+        NativeFn::ReflectImplements => super::reflect::implements(vm, args),
+        NativeFn::ReflectConstruct => super::reflect::construct(vm, args),
+        NativeFn::ReflectConstructVariant => super::reflect::construct_variant(vm, args),
     }
 }

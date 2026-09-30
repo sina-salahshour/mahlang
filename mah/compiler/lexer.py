@@ -27,6 +27,9 @@ class TokenType(Enum):
     # single `.` (and `..=` before `..`) in `get_next_token`.
     DOTDOT = ".."
     DOTDOT_EQ = "..="
+    # M41a: `...` -- a spread argument in a call's argument list
+    # (`f(...xs)`). Checked before `..=`/`..` in `get_next_token`.
+    ELLIPSIS = "..."
     # M21: `->` -- function return types / fn-type in type position (see
     # docs/TYPES.md). Nothing valid in Mah wrote `->` before this, so no
     # existing program's meaning changes.
@@ -170,6 +173,11 @@ class Lexer:
     def __init__(self, input_str: str) -> None:
         self.input_str = input_str
         self.position = 0
+        # M41a (docs/REFLECTION.md, "Doc comments"): the full-line `##`
+        # comments seen so far, by the position of their `##` -- a side
+        # table, never tokens, so the parser's token stream is unchanged.
+        # `doc_above` reads it.
+        self.doc_comments: dict[int, str] = {}
 
     def _skip_trivia(self) -> None:
         text = self.input_str
@@ -179,10 +187,44 @@ class Lexer:
             if ch.isspace():
                 self.position += 1
             elif ch == "#":
+                start = self.position
                 while self.position < n and text[self.position] != "\n":
                     self.position += 1
+                if text.startswith("##", start) and start not in self.doc_comments:
+                    line_start = text.rfind("\n", 0, start) + 1
+                    if not text[line_start:start].strip():
+                        body = text[start + 2 : self.position].rstrip()
+                        if body.startswith(" "):
+                            body = body[1:]
+                        self.doc_comments[start] = body
             else:
                 break
+
+    def doc_above(self, position: int):
+        """M41a: the doc comment (a run of full-line `##` comments directly
+        above the line `position` starts, nothing but whitespace before it
+        on that line) as text -- lines joined with `\n` -- or `None`. A
+        blank line or a plain `#` comment ends the run, so a `#` comment
+        never becomes documentation."""
+        text = self.input_str
+        line_start = text.rfind("\n", 0, position) + 1
+        if text[line_start:position].strip():
+            return None
+        lines = []
+        end = line_start
+        while end > 0:
+            prev_start = text.rfind("\n", 0, end - 1) + 1
+            line = text[prev_start : end - 1]
+            comment_at = prev_start + len(line) - len(line.lstrip())
+            doc = self.doc_comments.get(comment_at)
+            if doc is None:
+                break
+            lines.append(doc)
+            end = prev_start
+        if not lines:
+            return None
+        lines.reverse()
+        return "\n".join(lines)
 
     def peek_token(self) -> Token:
         """M16: look at the next token without consuming it -- used by the
@@ -242,6 +284,9 @@ class Lexer:
         # digit run never continues into a second `.`), so `1..5` still
         # lexes as NUMBER `1`, DOTDOT, NUMBER `5`.
         three = text[start : start + 3]
+        if three == "...":
+            self.position += 3
+            return Token(TokenType.ELLIPSIS, three, start)
         if three == "..=":
             self.position += 3
             return Token(TokenType.DOTDOT_EQ, three, start)

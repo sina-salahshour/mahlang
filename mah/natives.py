@@ -33,9 +33,9 @@ from .runtime_values import (
 
 
 class NativeContext:
-    __slots__ = ("_to_string", "_schedule_timer", "_read_line", "_cancel_timer", "_started", "io")
+    __slots__ = ("_to_string", "_schedule_timer", "_read_line", "_cancel_timer", "_started", "io", "reflect")
 
-    def __init__(self, to_string, schedule_timer, read_line=None, cancel_timer=None, io=None):
+    def __init__(self, to_string, schedule_timer, read_line=None, cancel_timer=None, io=None, reflect=None):
         import time
 
         self._to_string = to_string
@@ -46,6 +46,9 @@ class NativeContext:
         # M35: code_interpreter's `_IoHub` -- `submit(promise, job)` and the
         # open-file table (mah/fs_natives.py).
         self.io = io
+        # M41a: mah/reflect_natives.py's `ReflectData` -- the program's
+        # types, functions, META and method table, for `std:reflect`.
+        self.reflect = reflect
 
     def to_string(self, value) -> str:
         return self._to_string(value)
@@ -547,3 +550,8 @@ NATIVES.update(_FS_NATIVES)
 from .process_natives import NATIVES as _PROCESS_NATIVES  # noqa: E402
 
 NATIVES.update(_PROCESS_NATIVES)
+
+# M41a (1.14): std:reflect -- mah/reflect_natives.py.
+from .reflect_natives import NATIVES as _REFLECT_NATIVES  # noqa: E402
+
+NATIVES.update(_REFLECT_NATIVES)

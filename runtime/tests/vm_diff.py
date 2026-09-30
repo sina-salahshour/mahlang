@@ -517,6 +517,73 @@ print(try { process.run("definitely-not-a-program-mah") } catch { e: ProcessErro
 print(try { process.env_set("A=B", "x") } catch { e: RuntimeError => { e.message() } })
 process.exit(3)
 """, b""),
+    # M41a: type values, `##` docs and META through std:reflect, spread
+    # calls, and json.decode -- including their error messages.
+    ("std_reflect", """
+import reflect from "std:reflect"
+import json from "std:json"
+struct MyErr { m: String }
+impl Error for MyErr { fn message(self) { self.m } }
+fn foo() { 1 }
+## Adds.
+## Twice.
+fn add(
+    a: Number,
+    ## the second
+    b: Number = 1,
+    c = foo()
+) -> Number throws MyErr { a + b }
+fn first<T>(v: Vector<T>) -> T { v[0] }
+fn g(f: fn(Number) -> String) { }
+let s = reflect.signature(add)
+print(s.name, s.doc, s.params.len(), s.params[1].doc, s.params[1].default, s.params[2].type, s.returns, s.throws)
+print(reflect.signature(first).type_params, reflect.signature(first).params[0].type, reflect.signature(g).params[0].type)
+print(reflect.signature(fn(x) { x }).name == "", reflect.signature(reflect.call).params.len())
+## A user.
+struct User {
+    ## The name.
+    name: String,
+    tags: Vector<String>,
+    age
+}
+enum Shape {
+    ## A circle.
+    Circle { r: Number },
+    Empty
+}
+impl User {
+    fn new(n: String) -> User { User { name: n, tags: [], age: 1 } }
+    fn greet(self) -> String { "hi " + self.name }
+}
+impl Printable for User { fn to_string(self) { "User!" } }
+print(reflect.schema(User))
+print(reflect.schema(Shape), reflect.schema(Number), reflect.schema(Option))
+let u = User.new("a")
+for let m in reflect.methods(User) { print(m.name, m.is_method, m.trait_name) }
+print(reflect.methods(User)[0].function(u), reflect.implements(User, "Printable"), reflect.implements(User, "FromJson"), reflect.implements(Number, "Printable"))
+print(reflect.type_of(3) == Number, reflect.type_of("a") == String, reflect.type_of(u) == User, reflect.type_of(none), reflect.type_of([1]) == Vector, reflect.type_of(some(1)) == Option, reflect.type_of(User), Type, Function, None)
+print(reflect.construct(User, ["name": "a", "tags": [], "age": 1]), reflect.construct_variant(Shape, "Circle", ["r": 2]), reflect.construct_variant(Option, "none", [:]))
+for let bad in [["name": "a"], ["name": "a", "tags": [], "age": 1, "x": 0]] {
+    print(try { reflect.construct(User, bad) } catch { e: ReflectError => { e.message() } })
+}
+print(try { reflect.construct_variant(Shape, "Nope", [:]) } catch { e: ReflectError => { e.message() } })
+print(try { reflect.construct(Number, [:]) } catch { e: ReflectError => { e.message() } })
+print(reflect.call(add, [1], ["b": 5]), reflect.call(add, [1]))
+fn f(a, b = 2, c = 3) { a + b + c }
+print(f(...[1, 10]), f(1, **["c": 100]), f(...[1], b: 5, **["c": 0]), u.greet(...[]))
+for let bad in [fn() { f(1, b: 1, **["b": 2]) }, fn() { f(...3) }, fn() { f(**3) }, fn() { f(**[1: 2]) }, fn() { f(1, **["a": 2]) }] {
+    print(try { bad() } catch { e: RuntimeError => { e.message() } })
+}
+struct P { x: Number, y: Option<Number>, tags: Vector<String>, inner: Option<P> }
+print(json.decode(P, json.parse("{\\"x\\": 1, \\"tags\\": [\\"a\\"], \\"inner\\": {\\"x\\": 2, \\"tags\\": []}}")))
+for let text in ["{\\"x\\": \\"1\\", \\"tags\\": []}", "{\\"tags\\": []}", "{\\"x\\": 1, \\"tags\\": [1]}", "[]"] {
+    print(try { json.parse_as(P, text) } catch { e: JsonError => { e.message() } })
+}
+print(json.decode(Shape, json.parse(json.stringify(Shape.Circle { r: 2 }))), json.decode(Shape, "Empty"), json.decode(Vector, [1, "a"]))
+print(try { json.stringify(User) } catch { e: JsonError => { e.message() } })
+print(try { [User: 1] } catch { e: RuntimeError => { e.message() } })
+print(User == User, User == Shape, User != Number, [User, Number].copy(deep: true))
+""", b""),
     ("std_csv", """
 import csv from "std:csv"
 print(csv.parse("a,\\"b,c\\"\\r\\n\\n\\"q\\"\\"x\\",\\n"), csv.parse_records("n,v\\nx,1\\n"))
@@ -573,6 +640,11 @@ def build_malformed_cases(tmpdir: str) -> list[tuple[str, bytes]]:
     std_body = bytearray(std[std.index(b"\n") + 1 :].replace(b"math.tan", b"math.zzz"))
     std_body[6:8] = (7).to_bytes(2, "little")
     cases.append(("newer_minor_names_missing_natives", bytes(std_body)))
+    # M41a: a META section that doesn't describe this file's functions --
+    # both VMs must say so the same way; a duplicate is refused too.
+    meta_body = bytes(body[:7]) + bytes([14]) + bytes(body[8:])
+    cases.append(("meta_wrong_function_count", meta_body + bytes([0x82, 1, 5])))
+    cases.append(("meta_duplicate", meta_body + bytes([0x82, 1, 5, 0x82, 1, 5])))
     cases.append(("truncated_at_10_bytes", body[:10]))
     cases.append(("truncated_at_magic", body[:2]))
     cases.append(("empty_file", b""))

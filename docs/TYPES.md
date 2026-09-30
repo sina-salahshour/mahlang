@@ -2,9 +2,9 @@
 
 Status: **M21 (syntax) and M22 (the core checker) landed, plus a first slice of M23 (method calls) and M24 (hover types); the rest of M23 (trait types, bounds, the standard library) and M24 (completion from checker types) are next.** See `docs/V2_DESIGN.md`'s M22 entry for where the implementation deviates from this design. Error sets (`throws`, M26) are a separate layer on top of this, designed in `docs/ERRORS.md`. This replaces `docs/NEXT_PHASES.md`'s
 "The type system" sketch for now. That sketch treated types as runtime
-values. This design is purely static, so nothing about it runs. Types can
-still become runtime values later (for `match`-on-type narrowing), and
-nothing here gets in the way of that.
+values. This design is purely static, so nothing about it runs. (M41a later
+made a bare type name a runtime value, `Type<T>`, and kept the written
+annotations as readable metadata: `docs/REFLECTION.md`.)
 
 ## Goals
 
@@ -22,14 +22,19 @@ nothing here gets in the way of that.
 4. **Three strictness levels**, set per project. Types are advisory by
    default. They can be made compile errors in both `mah run`/`mah build`
    and the LSP.
-5. **Zero runtime cost, zero runtime change.** Annotations are erased
-   before codegen. The `.mahc` format, the VM, and every program's
-   behavior stay exactly as they are. A program that runs today still
-   runs, whatever the checker says about it.
+5. **Zero runtime cost, zero runtime change.** Annotations never change
+   what a program does, and the checker never feeds codegen. A program that
+   runs today still runs, whatever the checker says about it. (Since M41a
+   the *written* annotations, and `##` doc comments, are also kept as
+   metadata a program can read through `std:reflect`, and nothing in the
+   VM acts on them: see the "Annotations still never change behavior"
+   principle in `docs/REFLECTION.md`. What the checker infers is still
+   never recorded.)
 
 Non-goals for now: narrowing (`if x is Number`), union types, type
 aliases, explicit type arguments at call sites, nullability checking
-(see "none" below), and types as runtime values.
+(see "none" below), and narrowing on runtime types (M41a made a bare type
+name a runtime value, `Type<T>`, but nothing narrows on it).
 
 ## Syntax
 
@@ -101,6 +106,7 @@ for_binding := "let" NAME [":" type]
 |---|---|
 | `Number`, `String`, `Bool` | as today |
 | `Vector<T>`, `Map<K, V>`, `Option<T>`, `Promise<T>` | built-in generic types |
+| `Type<T>` | *(M41a)* the type of a type value: a bare type name in expression position (`User`, `Number`) has type `Type<User>`, `Type<Number>`; a generic type gets fresh arguments (`Type<Pair<?, ?>>`). Lets `json.decode<T>(t: Type<T>, ...) -> T` return a typed value |
 | `Range`, `FromRange`, `ToRange` | the prelude's range structs (Number bounds) |
 | `fn(A, B) -> R` | function type. `fn(A)` with no `->` returns `None` |
 | `None` | the type of `none` (see below) |

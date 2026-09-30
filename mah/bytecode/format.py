@@ -55,6 +55,13 @@ are ids in the VM's handle table) -- docs/MAHC_FORMAT.md #4.4.
 
 M36 bumps MINOR to 13: new natives only (`process.*`, behind std:process)
 -- docs/MAHC_FORMAT.md #4.4.
+
+M41a bumps MINOR to 14: type values (`loadtype`), spread calls (`callspread`/
+`callmethodspread`, plus `spread`, which builds their argument Vector and
+Map), the `reflect.*` natives behind std:reflect, and the optional META
+section (0x82: written annotations, doc comments and constant defaults --
+older VMs skip it, so a file whose only 1.14 content is META keeps its old
+minor) -- docs/MAHC_FORMAT.md #4.4/#4.6/#4.10.
 """
 
 from __future__ import annotations
@@ -67,7 +74,7 @@ MAGIC = b"MAHC"
 # `.mahc` extension).
 SHEBANG = b"#!/usr/bin/env -S mah runc\n"
 MAJOR = 1
-MINOR = 13
+MINOR = 14
 
 # -- section ids (docs/MAHC_FORMAT.md #3) -----------------------------------
 SEC_STRINGS = 0x01
@@ -80,6 +87,7 @@ SEC_PARAMS = 0x07  # M16 (1.1): required iff minor >= 1 -- docs/MAHC_FORMAT.md #
 SEC_HANDLERS = 0x08  # M25 (1.4): required iff minor >= 4 -- docs/MAHC_FORMAT.md #4.8
 SEC_DEBUG = 0x80
 SEC_TESTS = 0x81  # M28: optional -- only in `mah test` builds, docs/MAHC_FORMAT.md #4.9
+SEC_META = 0x82  # M41a: optional -- annotations/docs/defaults, docs/MAHC_FORMAT.md #4.10
 
 REQUIRED_SECTIONS = (SEC_STRINGS, SEC_CONSTANTS, SEC_TYPES, SEC_NATIVES, SEC_FUNCTIONS, SEC_CODE)
 # M16: PARAMS joins the required-section list only for minor >= 1 files --
@@ -214,6 +222,14 @@ NATIVE_ARITIES = {
     "process.pid": 0,
     "process.platform": 0,
     "process.run": 5,
+    # M41a (1.14): std:reflect.
+    "reflect.type_of": 1,
+    "reflect.signature": 1,
+    "reflect.schema": 1,
+    "reflect.methods": 1,
+    "reflect.implements": 2,
+    "reflect.construct": 2,
+    "reflect.construct_variant": 3,
 }
 
 # M16: which minor version introduced each 1.1+ native -- a 1.0 file
@@ -274,6 +290,13 @@ NATIVE_SINCE_MINOR = {
     "process.pid": 13,
     "process.platform": 13,
     "process.run": 13,
+    "reflect.type_of": 14,
+    "reflect.signature": 14,
+    "reflect.schema": 14,
+    "reflect.methods": 14,
+    "reflect.implements": 14,
+    "reflect.construct": 14,
+    "reflect.construct_variant": 14,
 }
 
 # M29: native inherent methods added after 1.0, by the minor that added
@@ -292,7 +315,7 @@ NATIVE_METHOD_SINCE_MINOR = {
 }
 
 # The opcodes that call a method by name: operand 1 is the method's name.
-METHOD_CALL_OPCODES = ("callmethod", "callmethodkw", "detachmethod", "detachmethodkw")
+METHOD_CALL_OPCODES = ("callmethod", "callmethodkw", "detachmethod", "detachmethodkw", "callmethodspread")
 
 # -- opcodes (docs/MAHC_FORMAT.md #4.6) --------------------------------------
 # name -> (code, operand_kinds); operand kinds use the letters of #4.6's
@@ -330,6 +353,8 @@ OPCODES: dict[str, tuple[int, tuple[str, ...]]] = {
     "callmethod": (0x24, ("A", "S", "A*", "S?")),
     "defmethod": (0x25, ("A", "S", "S?", "S", "B")),
     "callmethodkw": (0x27, ("A", "S", "A*", "S*", "S?")),  # M16 (1.1)
+    "callspread": (0x2D, ("A", "A", "A")),  # M41a (1.14): callee, positional Vector, keyword Map
+    "callmethodspread": (0x2E, ("A", "S", "A", "A", "S?")),  # M41a (1.14): recv, name, Vector, Map, trait
     "detach": (0x28, ("A", "A*", "A")),
     "detachmethod": (0x29, ("A", "S", "A*", "S?", "A")),
     "await": (0x2A, ("A", "A")),
@@ -346,6 +371,8 @@ OPCODES: dict[str, tuple[int, tuple[str, ...]]] = {
     "vector": (0x38, ("A*", "A")),  # M19 (1.3)
     "map": (0x39, ("A*", "A")),  # M19 (1.3)
     "matchtype": (0x3A, ("A", "T", "A")),  # M25 (1.4)
+    "loadtype": (0x3B, ("N", "N", "A")),  # M41a (1.14): kind (0 TYPES index, 1 primitive), index, dest
+    "spread": (0x3C, ("A", "A", "B")),  # M41a (1.14): target, source, keyword?
     "deferpush": (0x40, ()),
     "deferadd": (0x41, ("A",)),
     "deferpeek": (0x42, ("A",)),
@@ -380,4 +407,8 @@ OPCODE_SINCE_MINOR: dict[str, int] = {
     "deferdepth": 4,
     "deferabove": 4,
     "throw": 4,
+    "callspread": 14,
+    "callmethodspread": 14,
+    "loadtype": 14,
+    "spread": 14,
 }

@@ -351,7 +351,9 @@ def _facts(program: list, toks: list, module_starts: set) -> _Facts:
             if if_idx is not None and None not in opens:
                 facts.if_chains[if_idx] = opens[-1]
                 facts.chain_blocks.update(opens)
-        elif isinstance(node, ast.Unary):
+        elif isinstance(node, (ast.Unary, ast.SpreadArg)):
+            # M41a: `...xs` and `**m` in an argument list print tight, like a
+            # prefix operator.
             facts.unary.add(index_of(node.position))
         elif isinstance(node, ast.NumberLit) and node.value < 0:
             facts.unary.add(index_of(node.position))  # a negative literal pattern: `-1`

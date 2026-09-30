@@ -18,10 +18,38 @@ from __future__ import annotations
 import os
 from decimal import Decimal
 
+from ..compiler.ast_nodes import BoolLit, EnumLit, FnType, NamedType, NumberLit, StringLit, Unary
 from ..preprocessor import BUFFER_PATH, PRELUDE_PATH, demangle_message, source_label, std_module_name
-from ..runtime_values import NONE_VALUE
-from .format import METHOD_CALL_OPCODES, MINOR, NATIVE_ARITIES, NATIVE_METHOD_SINCE_MINOR, NATIVE_SINCE_MINOR, TAG_DEC, TAG_FALSE, TAG_INT, TAG_NONE, TAG_STR, TAG_TRUE
-from .program import Const, DebugInfo, FunctionDecl, Instr, NativeRef, Program, TestEntry, TypeDecl
+from ..runtime_values import NONE_VALUE, PRIMITIVE_TYPE_NAMES
+from .format import (
+    METHOD_CALL_OPCODES,
+    MINOR,
+    NATIVE_ARITIES,
+    NATIVE_METHOD_SINCE_MINOR,
+    NATIVE_SINCE_MINOR,
+    OPCODE_SINCE_MINOR,
+    TAG_DEC,
+    TAG_FALSE,
+    TAG_INT,
+    TAG_NONE,
+    TAG_STR,
+    TAG_TRUE,
+)
+from .program import (
+    Const,
+    DebugInfo,
+    FnMeta,
+    FunctionDecl,
+    Instr,
+    Meta,
+    NativeRef,
+    ParamMeta,
+    Program,
+    TestEntry,
+    TypeDecl,
+    TypeMeta,
+    TypeRef,
+)
 
 # IR op -> bytecode op, for the binary/comparison ops whose bytecode
 # mnemonic differs from the IR's own operator spelling (M14_SPEC.md's
@@ -66,6 +94,12 @@ class _Lowerer:
 
         self.functions: list[FunctionDecl] = [FunctionDecl(0, buf.global_slot_count, 0, None, params=[])]
         self._closure_function_index: dict[int, int] = {}
+        # M41a: what each function's META entry is built from -- function
+        # index -> (FnExpr, type parameter names in scope); function 0 (the
+        # main program) has none.
+        self._fn_meta_sources: dict[int, tuple] = {}
+        # M41a: `("struct" | "enum", name)` per entry of `self.types`.
+        self._type_keys: list = []
 
         self.code: list[Instr] = []
 
@@ -157,12 +191,14 @@ class _Lowerer:
         for name, fields in self.resolver.struct_decls.items():
             self.struct_index[name] = next_idx
             next_idx += 1
+            self._type_keys.append(("struct", name))
             self.types.append(TypeDecl(0, self.intern_str(name), [self.intern_str(f) for f in fields], None))
         for name, variants in self.resolver.enum_decls.items():
             if name in skip:
                 continue
             self.enum_index[name] = next_idx
             next_idx += 1
+            self._type_keys.append(("enum", name))
             variant_list = [
                 (self.intern_str(vname), [self.intern_str(f) for f in vfields])
                 for vname, vfields in variants.items()
@@ -186,7 +222,7 @@ class _Lowerer:
     # -- FUNCTIONS / CODE ------------------------------------------------
 
     def _function_index_for(
-        self, code_addr: int, slot_count: int, param_count: int, name, param_names, has_defaults
+        self, code_addr: int, slot_count: int, param_count: int, name, param_names, has_defaults, meta_source=None
     ) -> int:
         idx = self._closure_function_index.get(code_addr)
         if idx is not None:
@@ -201,6 +237,8 @@ class _Lowerer:
         ]
         idx = len(self.functions)
         self.functions.append(FunctionDecl(code_addr, slot_count, param_count, name_idx, params=params))
+        if meta_source is not None:
+            self._fn_meta_sources[idx] = meta_source
         self._closure_function_index[code_addr] = idx
         return idx
 
@@ -243,14 +281,33 @@ class _Lowerer:
         if op == "not":
             return Instr("not", (a1, a3))
         if op == "closure":
-            slot_count, param_count, name, param_names, has_defaults = a2
-            fn_idx = self._function_index_for(a1, slot_count, param_count, name, param_names, has_defaults)
+            slot_count, param_count, name, param_names, has_defaults, meta_source = a2
+            fn_idx = self._function_index_for(
+                a1, slot_count, param_count, name, param_names, has_defaults, meta_source
+            )
             return Instr("closure", (fn_idx, a3))
         if op == "call":
             return Instr("call", (a1, a2))
         if op == "callkw":
             arg_addrs, kw_names = a2
             return Instr("callkw", (a1, arg_addrs, tuple(self.intern_str(n) for n in kw_names)))
+        if op == "callspread":
+            vec, kw_map = a2
+            return Instr("callspread", (a1, vec, kw_map))
+        if op == "callmethodspread":
+            name, vec, kw_map, trait, _pos = a2
+            return Instr(
+                "callmethodspread",
+                (a1, self.intern_str(name), vec, kw_map, self.intern_str(trait) if trait is not None else None),
+            )
+        if op == "spread":
+            return Instr("spread", (a1, a2, bool(a3)))
+        if op == "loadtype":
+            what, name = a1
+            if what == "prim":
+                return Instr("loadtype", (1, PRIMITIVE_TYPE_NAMES.index(name), a3))
+            index = self.struct_index[name] if what == "struct" else self.enum_index[name]
+            return Instr("loadtype", (0, index, a3))
         if op == "ret":
             return Instr("ret", (a1,))
         if op == "retval":
@@ -386,6 +443,138 @@ class _Lowerer:
             return Instr("native", (self.intern_native("time.sleep_async"), (a1,), a3))
         raise AssertionError(f"unhandled IR op {op!r}")
 
+    # -- META (docs/MAHC_FORMAT.md #4.10) -------------------------------------
+
+    def _type_ref(self, texpr, scope) -> TypeRef:
+        """A written annotation as META records it: resolved to the
+        declaration it names, never inferred. Anything that doesn't resolve
+        (a misspelt name the checker flags) is `unknown` -- metadata never
+        fails a compilation."""
+        if texpr is None:
+            return TypeRef(0)
+        if isinstance(texpr, FnType):
+            ret = self._type_ref(texpr.ret, scope) if texpr.ret is not None else TypeRef(1, kind=1, index=6)
+            return TypeRef(
+                2,
+                args=[self._type_ref(p, scope) for p in texpr.params],
+                ret=ret,
+                throws=self._throws_refs(texpr.throws, scope),
+            )
+        if not isinstance(texpr, NamedType):
+            return TypeRef(0)
+        name = texpr.name
+        if name == "Unknown":
+            return TypeRef(0)
+        if name == "Never":
+            return TypeRef(5)
+        if name == "Self":
+            return TypeRef(4)
+        if name in scope:
+            return TypeRef(3, name=self.intern_str(name))
+        args = [self._type_ref(a, scope) for a in texpr.args]
+        if name in self.struct_index:
+            return TypeRef(1, kind=0, index=self.struct_index[name], args=args)
+        if name in self.enum_index:
+            return TypeRef(1, kind=0, index=self.enum_index[name], args=args)
+        if name in PRIMITIVE_TYPE_NAMES:
+            return TypeRef(1, kind=1, index=PRIMITIVE_TYPE_NAMES.index(name), args=args)
+        if name in self.resolver.trait_decls:
+            return TypeRef(6, name=self.intern_str(name), args=args)
+        return TypeRef(0)
+
+    def _throws_refs(self, throws, scope):
+        if throws is None:
+            return None
+        return [self._type_ref(t, scope) for t in throws]
+
+    def _constant_default(self, expr) -> int | None:
+        """The CONSTANTS index of a parameter default that is a literal
+        Number, String, Bool or `none`, or `-` applied to a Number literal;
+        None for anything else."""
+        if isinstance(expr, (NumberLit, StringLit, BoolLit)):
+            return self.intern_const(expr.value)
+        if isinstance(expr, EnumLit) and expr.type_name == "Option" and expr.variant == "none" and not expr.fields:
+            return self.intern_const(NONE_VALUE)
+        if isinstance(expr, Unary) and expr.op == "-" and isinstance(expr.operand, NumberLit):
+            return self.intern_const(-expr.operand.value)
+        return None
+
+    def _fn_meta(self, fn, scope) -> FnMeta:
+        params = []
+        interesting = bool(fn.doc) or bool(fn.type_params) or fn.return_type is not None or fn.throws is not None
+        for i in range(len(fn.params)):
+            ptype = fn.param_types[i] if i < len(fn.param_types) else None
+            pdoc = fn.param_docs[i] if i < len(fn.param_docs) else None
+            default = fn.defaults[i] if i < len(fn.defaults) else None
+            const = None
+            if default is None:
+                flag = 0
+            else:
+                const = self._constant_default(default)
+                flag = 2 if const is not None else 1
+            if ptype is not None or pdoc or default is not None:
+                interesting = True
+            params.append(
+                ParamMeta(
+                    self._type_ref(ptype, scope),
+                    self.intern_str(pdoc) if pdoc else None,
+                    flag,
+                    const,
+                )
+            )
+        if not interesting:
+            return FnMeta()
+        return FnMeta(
+            True,
+            self.intern_str(fn.doc) if fn.doc else None,
+            [self.intern_str(tp.name) for tp in fn.type_params],
+            params,
+            self._type_ref(fn.return_type, scope),
+            self._throws_refs(fn.throws, scope),
+        )
+
+    def _type_meta(self, key) -> TypeMeta:
+        kind, name = key
+        if kind == "struct":
+            decl = self.buf.struct_asts.get(name)
+            fields = self.resolver.struct_decls[name]
+            if decl is None:
+                return TypeMeta(None, [], [(TypeRef(0), None) for _ in fields])
+            scope = frozenset(tp.name for tp in decl.type_params)
+            body = []
+            for i in range(len(fields)):
+                ftype = decl.field_types[i] if i < len(decl.field_types) else None
+                fdoc = decl.field_docs[i] if i < len(decl.field_docs) else None
+                body.append((self._type_ref(ftype, scope), self.intern_str(fdoc) if fdoc else None))
+        else:
+            decl = self.buf.enum_asts.get(name)
+            variants = self.resolver.enum_decls[name]
+            if decl is None:
+                return TypeMeta(None, [], [(None, [TypeRef(0) for _ in vf]) for vf in variants.values()])
+            scope = frozenset(tp.name for tp in decl.type_params)
+            body = []
+            for i, (_vname, vfields) in enumerate(decl.variants):
+                types = decl.variant_field_types[i] if i < len(decl.variant_field_types) else []
+                vdoc = decl.variant_docs[i] if i < len(decl.variant_docs) else None
+                body.append(
+                    (
+                        self.intern_str(vdoc) if vdoc else None,
+                        [self._type_ref(types[j] if j < len(types) else None, scope) for j in range(len(vfields))],
+                    )
+                )
+        return TypeMeta(
+            self.intern_str(decl.doc) if decl.doc else None,
+            [self.intern_str(tp.name) for tp in decl.type_params],
+            body,
+        )
+
+    def build_meta(self) -> Meta:
+        functions = []
+        for idx in range(len(self.functions)):
+            source = self._fn_meta_sources.get(idx)
+            functions.append(FnMeta() if source is None else self._fn_meta(*source))
+        return Meta(functions, [self._type_meta(key) for key in self._type_keys])
+
     # -- DEBUG ---------------------------------------------------------
 
     def _file_idx(self, path: str) -> int:
@@ -442,6 +631,7 @@ def lower(buf, resolver, pp, target: str = "debug") -> Program:
     lowerer = _Lowerer(resolver, pp, target, buf)
     lowerer.build_types()
     lowerer.lower_code()
+    meta = lowerer.build_meta()
     debug = lowerer.build_debug() if target == "debug" else None
     return Program(
         strings=lowerer.strings,
@@ -456,6 +646,7 @@ def lower(buf, resolver, pp, target: str = "debug") -> Program:
         tests=[
             TestEntry(lowerer.intern_str(name), slot, lowerer.line_of(position)) for name, slot, position in buf.tests
         ],
+        meta=meta,
     )
 
 
@@ -478,6 +669,9 @@ def _file_minor(natives: list, strings: list, code: list, positions: list, prelu
     for ref in natives:
         minor = max(minor, NATIVE_SINCE_MINOR.get(strings[ref.name], 0))
     for pc, instr in enumerate(code):
+        # M41a: a 1.14 opcode (type values, spread calls) needs 1.14; META
+        # doesn't -- it's optional, and older VMs skip it.
+        minor = max(minor, OPCODE_SINCE_MINOR.get(instr.op, 0))
         position = positions[pc] if pc < len(positions) else None
         if prelude_start is not None and position is not None and position >= prelude_start:
             continue

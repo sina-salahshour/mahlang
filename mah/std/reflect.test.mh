@@ -1,0 +1,282 @@
+# Tests for std:reflect (and json.decode over it), run by tests/test_stdlib.py
+# (or `mah test --file mah/std/reflect.test.mh`) on both VMs.
+import "std:test"
+import reflect from "./reflect"
+import json from "./json"
+
+struct Trouble { message: String }
+
+impl Error for Trouble {
+    fn message(self) -> String { self.message }
+}
+
+fn plain() -> Number { 1 }
+
+## Adds.
+## Twice.
+fn add(
+    a: Number,
+    ## the second
+    b: Number = 1,
+    c = plain()
+) -> Number throws Trouble {
+    a + b
+}
+
+fn first<T>(v: Vector<T>) -> T { v[0] }
+
+fn takes(f: fn(Number) -> String) { }
+
+## A user.
+struct User {
+    ## The name.
+    name: String,
+    tags: Vector<String>,
+    age
+}
+
+## A shape.
+enum Shape {
+    ## A round one.
+    Circle { r: Number },
+    Empty
+}
+
+impl User {
+    fn new(n: String) -> User { User { name: n, tags: [], age: 1 } }
+
+    fn greet(self) -> String { "hi " + self.name }
+}
+
+impl Printable for User {
+    fn to_string(self) -> String { "user " + self.name }
+}
+
+struct P { x: Number, y: Option<Number>, tags: Vector<String> }
+
+struct Wrapper { p: P, extra: Map<String, Number> }
+
+struct Odd { n: Number }
+
+impl FromJson for Odd {
+    fn from_json(value: Unknown) -> Odd { Odd { n: 100 } }
+}
+
+test "type values" {
+    assert_eq(reflect.type_of(3), Number)
+    assert_eq(reflect.type_of("a"), String)
+    assert_eq(reflect.type_of(true), Bool)
+    assert_eq(reflect.type_of(User { name: "a", tags: [], age: 1 }), User)
+    assert_eq(reflect.type_of(Shape.Empty), Shape)
+    assert_eq(reflect.type_of([1]), Vector)
+    assert_eq(reflect.type_of([1: 2]), Map)
+    assert_eq(reflect.type_of(some(1)), Option)
+    assert_eq(reflect.type_of(fn() { 1 }), Function)
+    assert_eq(reflect.type_of(User), Type)
+    assert_eq("" + reflect.type_of(none), "None")
+    assert(User != Number)
+    assert(User == User)
+    assert_eq("" + User, "User")
+    assert_eq("" + Vector, "Vector")
+}
+
+test "signatures" {
+    let s = reflect.signature(add)
+    assert_eq(s.name, "add")
+    assert_eq(s.doc, "Adds.\nTwice.")
+    assert_eq(s.params.len(), 3)
+    assert_eq(s.params[0].name, "a")
+    assert_eq(s.params[1].doc, "the second")
+    assert(!s.params[0].has_default)
+    assert(s.params[1].has_default)
+    assert_eq(s.params[0].default, none)
+    assert_eq("" + s.params[1].default, "some(1)")
+    assert(s.params[2].has_default)
+    assert_eq(s.params[2].default, none)
+    match s.params[0].type {
+        TypeRef.Named { type: t, args: args } => {
+            assert_eq(t, Number)
+            assert_eq(args.len(), 0)
+        }
+        _ => { fail("expected Named") }
+    }
+    match s.params[2].type {
+        TypeRef.Unknown => { }
+        _ => { fail("expected Unknown") }
+    }
+    match s.throws {
+        some(list) => { assert_eq(list.len(), 1) }
+        none => { fail("expected a throws clause") }
+    }
+    assert_eq(reflect.signature(plain).throws, none)
+    assert_eq(reflect.signature(fn(x) { x }).name, "")
+}
+
+test "generic and function types" {
+    let g = reflect.signature(first)
+    assert_eq("" + g.type_params, "[T]")
+    match g.params[0].type {
+        TypeRef.Named { type: t, args: args } => {
+            assert_eq(t, Vector)
+            match args[0] {
+                TypeRef.Param { name } => { assert_eq(name, "T") }
+                _ => { fail("expected Param") }
+            }
+        }
+        _ => { fail("expected Named") }
+    }
+    let h = reflect.signature(takes)
+    match h.params[0].type {
+        TypeRef.Fn { params, returns, throws } => {
+            assert_eq(params.len(), 1)
+            match returns {
+                TypeRef.Named { type: t, args: args } => { assert_eq(t, String) }
+                _ => { fail("expected Named") }
+            }
+        }
+        _ => { fail("expected Fn") }
+    }
+}
+
+test "schemas" {
+    match reflect.schema(User) {
+        some(
+            Schema.Struct { type: t, doc: doc, type_params: tps, fields: fields, decorators: ds }
+        ) => {
+            assert_eq(t, User)
+            assert_eq(doc, "A user.")
+            assert_eq(fields.len(), 3)
+            assert_eq(fields[0].name, "name")
+            assert_eq(fields[0].doc, "The name.")
+            assert_eq(fields[1].doc, "")
+            match fields[2].type {
+                TypeRef.Unknown => { }
+                _ => { fail("expected Unknown") }
+            }
+        }
+        _ => { fail("expected a struct schema") }
+    }
+    match reflect.schema(Shape) {
+        some(
+            Schema.Enum { type: t, doc: doc, type_params: tps, variants: variants, decorators: ds }
+        ) => {
+            assert_eq(doc, "A shape.")
+            assert_eq(variants.len(), 2)
+            assert_eq(variants[0].name, "Circle")
+            assert_eq(variants[0].doc, "A round one.")
+            assert_eq(variants[0].fields[0].name, "r")
+            assert_eq(variants[1].fields.len(), 0)
+        }
+        _ => { fail("expected an enum schema") }
+    }
+    assert_eq(reflect.schema(Number), none)
+    assert_eq(reflect.schema(Vector), none)
+}
+
+test "methods and traits" {
+    let ms = reflect.methods(User)
+    assert_eq(ms.len(), 3)
+    assert_eq(ms[0].name, "greet")
+    assert(ms[0].is_method)
+    assert_eq(ms[0].trait_name, none)
+    assert_eq(ms[1].name, "new")
+    assert(!ms[1].is_method)
+    assert_eq(ms[2].name, "to_string")
+    assert_eq("" + ms[2].trait_name, "some(Printable)")
+    assert_eq(ms[0].function(User.new("ada")), "hi ada")
+    assert_eq(ms[1].function("bo").name, "bo")
+    assert(reflect.implements(User, "Printable"))
+    assert(!reflect.implements(User, "FromJson"))
+    assert(reflect.implements(Odd, "FromJson"))
+    assert(reflect.implements(Number, "Printable"))
+    assert(reflect.implements(Vector, "Index"))
+    assert(!reflect.implements(Number, "Index"))
+}
+
+test "construct and call" {
+    let u = reflect.construct(User, ["name": "a", "tags": ["x"], "age": 3])
+    assert_eq(u.name, "a")
+    assert_eq(reflect.type_of(u), User)
+    assert_eq(
+        assert_throws(fn() { reflect.construct(User, ["name": "a"]) }).message(),
+        "missing field 'tags' for User"
+    )
+    assert_eq(
+        assert_throws(
+            fn() { reflect.construct(User, ["name": "a", "tags": [], "age": 1, "x": 1]) }
+        ).message(),
+        "User has no field 'x'"
+    )
+    assert_eq(
+        assert_throws(fn() { reflect.construct(Number, [:]) }).message(),
+        "can't construct Number: it isn't a struct"
+    )
+    let c = reflect.construct_variant(Shape, "Circle", ["r": 2])
+    assert_eq(c.r, 2)
+    assert_eq("" + reflect.construct_variant(Shape, "Empty", [:]), "Shape.Empty")
+    assert_eq(
+        assert_throws(fn() { reflect.construct_variant(Shape, "Nope", [:]) }).message(),
+        "Shape has no variant 'Nope'"
+    )
+    assert_eq(reflect.call(add, [1], ["b": 5]), 6)
+    assert_eq(reflect.call(add, [1]), 2)
+    assert_eq(reflect.call(first, [[7, 8]]), 7)
+}
+
+test "spread calls" {
+    fn f(a, b = 2, c = 3) { a + b + c }
+    assert_eq(f(...[1, 10]), 14)
+    assert_eq(f(1, **["c": 100]), 103)
+    assert_eq(f(...[1], b: 5, **["c": 0]), 6)
+    assert_eq(f(...[], ...[1, 1], **[:]), 5)
+    let e = assert_throws(fn() { f(1, b: 1, **["b": 2]) })
+    assert_eq(e.message(), "keyword argument 'b' given more than once")
+    assert_eq(assert_throws(fn() { f(...3) }).message(), "'...' needs a Vector, got Number")
+    assert_eq(assert_throws(fn() { f(**3) }).message(), "'**' needs a Map, got Number")
+    assert_eq(User.new(...["zed"]).name, "zed")
+    let u = User.new("q")
+    assert_eq(u.greet(...[]), "hi q")
+}
+
+test "json.decode" {
+    let p = json.decode(P, json.parse("{\"x\": 1, \"tags\": [\"a\"]}"))
+    assert_eq(p.x, 1)
+    assert_eq(p.y, none)
+    assert_eq("" + p.tags, "[a]")
+    assert_eq("" + json.parse_as(P, "{\"x\": 1, \"y\": 2, \"tags\": []}").y, "some(2)")
+    let w = json.parse_as(
+        Wrapper,
+        "{\"p\": {\"x\": 1, \"tags\": []}, \"extra\": {\"a\": 1}, \"ignored\": 0}"
+    )
+    assert_eq(w.p.x, 1)
+    assert_eq(w.extra["a"], 1)
+    assert_eq(json.decode(Shape, json.parse(json.stringify(Shape.Circle { r: 2 }))).r, 2)
+    assert_eq("" + json.decode(Shape, "Empty"), "Shape.Empty")
+    assert_eq("" + json.decode(Vector, [1, "a"]), "[1, a]")
+    assert_eq(json.parse_as(Odd, "{}").n, 100)
+    assert_eq(json.decode(Number, 3), 3)
+}
+
+test "json.decode errors say where" {
+    fn message_of(t: Type<Unknown>, text: String) -> String {
+        assert_throws(fn() { json.parse_as(t, text) }).message()
+    }
+    assert_eq(
+        message_of(P, "{\"x\": \"1\", \"tags\": []}"),
+        "expected a Number for P.x, got String"
+    )
+    assert_eq(message_of(P, "{\"tags\": []}"), "missing field 'x' for P")
+    assert_eq(
+        message_of(P, "{\"x\": 1, \"tags\": [1]}"),
+        "expected a String for P.tags[0], got Number"
+    )
+    assert_eq(
+        message_of(Wrapper, "{\"p\": {\"x\": true, \"tags\": []}, \"extra\": {}}"),
+        "expected a Number for Wrapper.p.x, got Bool"
+    )
+    assert_eq(
+        message_of(Wrapper, "{\"p\": {\"x\": 1, \"tags\": []}, \"extra\": {\"k\": \"v\"}}"),
+        "expected a Number for Wrapper.extra[\"k\"], got String"
+    )
+    assert_eq(message_of(P, "[]"), "expected an object for P, got Vector")
+}

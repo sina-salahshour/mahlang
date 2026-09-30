@@ -56,6 +56,7 @@ from .ast_nodes import (
     RangePat,
     ReturnStmt,
     SleepAsyncExpr,
+    SpreadArg,
     StringLit,
     StructDecl,
     StructLit,
@@ -513,6 +514,7 @@ class Parser:
         if tok.type is TokenType.PRINT:
             self.advance()
             args, kwargs = self._parse_paren_args()
+            self._reject_spread(args, kwargs, "print", tok.position)
             sep = None
             end = None
             for name, value, name_position in kwargs:
@@ -1010,33 +1012,39 @@ class Parser:
 
     def _parse_field_decl(self):
         """M21: `NAME [":" type]` -- a struct field or enum variant field.
-        Returns `(name, position, type_or_None)`."""
+        Returns `(name, position, type_or_None, doc_or_None)` (M41a: the
+        `##` doc comment above the field)."""
         field_tok = self.expect(TokenType.ID)
+        doc = self.lexer.doc_above(field_tok.position)
         ftype = None
         if self.current.type is TokenType.COLON:
             self.advance()
             ftype = self._parse_type()
-        return field_tok.literal, field_tok.position, ftype
+        return field_tok.literal, field_tok.position, ftype, doc
 
     def _parse_struct_decl(self) -> StructDecl:
         struct_tok = self.advance()  # STRUCT
+        doc = self.lexer.doc_above(struct_tok.position)
         name_tok = self.expect(TokenType.ID)
         type_params = self._parse_type_params()
         self.expect(TokenType.BRACE_OPEN)
         fields = []
         field_positions = []
         field_types = []
+        field_docs = []
         if self.current.type is TokenType.ID:
-            fname, fpos, ftype = self._parse_field_decl()
+            fname, fpos, ftype, fdoc = self._parse_field_decl()
             fields.append(fname)
             field_positions.append(fpos)
             field_types.append(ftype)
+            field_docs.append(fdoc)
             while self.current.type is TokenType.COMMA:
                 self.advance()
-                fname, fpos, ftype = self._parse_field_decl()
+                fname, fpos, ftype, fdoc = self._parse_field_decl()
                 fields.append(fname)
                 field_positions.append(fpos)
                 field_types.append(ftype)
+                field_docs.append(fdoc)
         self.expect(TokenType.BRACE_CLOSE)
         return StructDecl(
             name=name_tok.literal,
@@ -1046,10 +1054,13 @@ class Parser:
             field_positions=field_positions,
             type_params=type_params,
             field_types=field_types,
+            doc=doc,
+            field_docs=field_docs,
         )
 
     def _parse_enum_decl(self) -> EnumDecl:
         enum_tok = self.advance()  # ENUM
+        doc = self.lexer.doc_above(enum_tok.position)
         name_tok = self.expect(TokenType.ID)
         type_params = self._parse_type_params()
         self.expect(TokenType.BRACE_OPEN)
@@ -1057,23 +1068,36 @@ class Parser:
         variant_positions = []
         variant_field_positions_list = []
         variant_field_types_list = []
+        variant_docs = []
         if self.current.type is not TokenType.BRACE_CLOSE:
-            variant_name, variant_fields, variant_pos, variant_field_positions, variant_field_types = (
-                self._parse_enum_variant()
-            )
+            (
+                variant_name,
+                variant_fields,
+                variant_pos,
+                variant_field_positions,
+                variant_field_types,
+                variant_doc,
+            ) = self._parse_enum_variant()
             variants.append((variant_name, variant_fields))
             variant_positions.append(variant_pos)
             variant_field_positions_list.append(variant_field_positions)
             variant_field_types_list.append(variant_field_types)
+            variant_docs.append(variant_doc)
             while self.current.type is TokenType.COMMA:
                 self.advance()
-                variant_name, variant_fields, variant_pos, variant_field_positions, variant_field_types = (
-                    self._parse_enum_variant()
-                )
+                (
+                    variant_name,
+                    variant_fields,
+                    variant_pos,
+                    variant_field_positions,
+                    variant_field_types,
+                    variant_doc,
+                ) = self._parse_enum_variant()
                 variants.append((variant_name, variant_fields))
                 variant_positions.append(variant_pos)
                 variant_field_positions_list.append(variant_field_positions)
                 variant_field_types_list.append(variant_field_types)
+                variant_docs.append(variant_doc)
         self.expect(TokenType.BRACE_CLOSE)
         return EnumDecl(
             name=name_tok.literal,
@@ -1084,29 +1108,32 @@ class Parser:
             variant_field_positions=variant_field_positions_list,
             type_params=type_params,
             variant_field_types=variant_field_types_list,
+            doc=doc,
+            variant_docs=variant_docs,
         )
 
     def _parse_enum_variant(self):
         name_tok = self.expect(TokenType.ID)
+        doc = self.lexer.doc_above(name_tok.position)
         if self.current.type is TokenType.BRACE_OPEN:
             self.advance()
             fields = []
             field_positions = []
             field_types = []
             if self.current.type is TokenType.ID:
-                fname, fpos, ftype = self._parse_field_decl()
+                fname, fpos, ftype, _fdoc = self._parse_field_decl()
                 fields.append(fname)
                 field_positions.append(fpos)
                 field_types.append(ftype)
                 while self.current.type is TokenType.COMMA:
                     self.advance()
-                    fname, fpos, ftype = self._parse_field_decl()
+                    fname, fpos, ftype, _fdoc = self._parse_field_decl()
                     fields.append(fname)
                     field_positions.append(fpos)
                     field_types.append(ftype)
             self.expect(TokenType.BRACE_CLOSE)
-            return (name_tok.literal, fields, name_tok.position, field_positions, field_types)
-        return (name_tok.literal, [], name_tok.position, [], [])
+            return (name_tok.literal, fields, name_tok.position, field_positions, field_types, doc)
+        return (name_tok.literal, [], name_tok.position, [], [], doc)
 
     def _parse_param_list(self) -> tuple:
         """M12: consumes `(` ... `)` and returns `(params, param_positions,
@@ -1130,24 +1157,28 @@ class Parser:
         param_positions = []
         param_types = []
         defaults = []
+        docs = []
         if self.current.type is TokenType.ID:
-            name, pos, ptype, default = self._parse_one_param()
+            name, pos, ptype, default, doc = self._parse_one_param()
             params.append(name)
             param_positions.append(pos)
             param_types.append(ptype)
             defaults.append(default)
+            docs.append(doc)
             while self.current.type is TokenType.COMMA:
                 self.advance()
-                name, pos, ptype, default = self._parse_one_param()
+                name, pos, ptype, default, doc = self._parse_one_param()
                 params.append(name)
                 param_positions.append(pos)
                 param_types.append(ptype)
                 defaults.append(default)
+                docs.append(doc)
         self.expect(TokenType.PAREN_CLOSE)
-        return params, param_positions, param_types, defaults
+        return params, param_positions, param_types, defaults, docs
 
     def _parse_one_param(self):
         param_tok = self.expect(TokenType.ID)
+        doc = self.lexer.doc_above(param_tok.position)
         ptype = None
         if self.current.type is TokenType.COLON:
             colon_tok = self.current
@@ -1159,7 +1190,7 @@ class Parser:
             self.advance()
             ptype = self._parse_type()
         default = self._parse_optional_default()
-        return param_tok.literal, param_tok.position, ptype, default
+        return param_tok.literal, param_tok.position, ptype, default, doc
 
     def _parse_optional_default(self):
         if self.current.type is TokenType.ASSIGN:
@@ -1249,6 +1280,7 @@ class Parser:
 
     def _parse_fn_expr(self) -> FnExpr:
         fn_tok = self.advance()  # FN
+        doc = self.lexer.doc_above(fn_tok.position)
         name = None
         name_position = None
         if self.current.type is TokenType.ID:
@@ -1256,7 +1288,7 @@ class Parser:
             name = name_tok.literal
             name_position = name_tok.position
         type_params = self._parse_type_params()
-        params, param_positions, param_types, defaults = self._parse_param_list()
+        params, param_positions, param_types, defaults, param_docs = self._parse_param_list()
         return_type = None
         if self.current.type is TokenType.ARROW:
             self.advance()
@@ -1275,6 +1307,8 @@ class Parser:
             param_types=param_types,
             return_type=return_type,
             throws=throws,
+            doc=doc,
+            param_docs=param_docs,
         )
 
     # -- M28: test blocks ------------------------------------------------------
@@ -1333,10 +1367,11 @@ class Parser:
         library modules may use it (the preprocessor enforces that);
         parameters can't have defaults, since a native's arity is fixed."""
         extern_tok = self.advance()  # `extern`
+        doc = self.lexer.doc_above(extern_tok.position)
         self.advance()  # FN
         name_tok = self.expect(TokenType.ID)
         type_params = self._parse_type_params()
-        params, param_positions, param_types, defaults = self._parse_param_list()
+        params, param_positions, param_types, defaults, param_docs = self._parse_param_list()
         if any(d is not None for d in defaults):
             raise SyntaxError(f"an extern fn's parameters can't have defaults at position '{name_tok.position}'")
         return_type = None
@@ -1361,6 +1396,8 @@ class Parser:
             param_types=param_types,
             return_type=return_type,
             throws=throws,
+            doc=doc,
+            param_docs=param_docs,
         )
         fn.native = native
         return LetStmt(name=fn.name, value=fn, position=extern_tok.position, name_position=name_tok.position)
@@ -1369,6 +1406,7 @@ class Parser:
 
     def _parse_trait_decl(self) -> TraitDecl:
         trait_tok = self.advance()  # TRAIT
+        doc = self.lexer.doc_above(trait_tok.position)
         name_tok = self.expect(TokenType.ID)
         type_params = self._parse_type_params()
         self.expect(TokenType.BRACE_OPEN)
@@ -1387,6 +1425,7 @@ class Parser:
             name_position=name_tok.position,
             end_position=close_tok.position,
             type_params=type_params,
+            doc=doc,
         )
 
     def _parse_impl_decl(self) -> ImplDecl:
@@ -1435,9 +1474,10 @@ class Parser:
 
     def _parse_method_decl(self, require_body: bool) -> MethodDecl:
         fn_tok = self.expect(TokenType.FN)
+        doc = self.lexer.doc_above(fn_tok.position)
         name_tok = self.expect(TokenType.ID)
         type_params = self._parse_type_params()
-        params, param_positions, param_types, defaults = self._parse_param_list()
+        params, param_positions, param_types, defaults, param_docs = self._parse_param_list()
         return_type = None
         if self.current.type is TokenType.ARROW:
             self.advance()
@@ -1457,6 +1497,8 @@ class Parser:
                 param_types=param_types,
                 return_type=return_type,
                 throws=throws,
+                doc=doc,
+                param_docs=param_docs,
             )
         elif require_body:
             raise SyntaxError(
@@ -1477,6 +1519,8 @@ class Parser:
             param_types=param_types,
             return_type=return_type,
             throws=throws,
+            doc=doc,
+            param_docs=param_docs,
         )
 
     # -- expressions (precedence chain, lowest to highest binding) --------
@@ -1924,9 +1968,17 @@ class Parser:
         parameter -- never accepts keyword arguments. (M27: `sin`/`cos`
         are ordinary calls now, checked by the resolver.)"""
         args, kwargs = self._parse_paren_args()
+        self._reject_spread(args, kwargs, label, tok.position)
         if kwargs:
             raise SyntaxError(f"'{label}' doesn't take keyword arguments at position '{tok.position}'")
         return args
+
+    @staticmethod
+    def _reject_spread(args: list, kwargs: list, label: str, position: int) -> None:
+        """M41a: `print` and `sleep_async` aren't ordinary calls, so they
+        don't take spread arguments (`f(...xs, **m)`)."""
+        if any(isinstance(a, SpreadArg) for a in args) or any(name is None for name, _v, _p in kwargs):
+            raise SyntaxError(f"'{label}' doesn't take spread arguments at position '{position}'")
 
     def _is_kwarg_start(self) -> bool:
         """M16: an argument-list item is a keyword argument exactly when
@@ -1965,6 +2017,24 @@ class Parser:
         return args, kwargs
 
     def _parse_one_arg(self, args: list, kwargs: list, seen_kwargs: set) -> None:
+        # M41a: `...expr` (positional spread) and `**expr` (keyword spread)
+        # start an argument item. `**` is the exponent operator everywhere
+        # else, but an expression can't start with it, so at the start of an
+        # item (right after `(` or `,`) it can only mean a keyword spread --
+        # decided here by position, not in the lexer.
+        if self.current.type is TokenType.ELLIPSIS:
+            tok = self.advance()
+            if kwargs:
+                raise SyntaxError(
+                    f"positional argument after a keyword argument at position '{tok.position}'"
+                )
+            args.append(SpreadArg(value=self.parse_expr(), keyword=False, position=tok.position))
+            return
+        if self.current.type is TokenType.POW:
+            tok = self.advance()
+            value = self.parse_expr()
+            kwargs.append((None, SpreadArg(value=value, keyword=True, position=tok.position), tok.position))
+            return
         if self._is_kwarg_start():
             name_tok = self.advance()
             self.expect(TokenType.COLON)

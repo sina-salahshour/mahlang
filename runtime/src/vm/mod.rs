@@ -14,6 +14,7 @@ mod link;
 mod methods;
 mod natives;
 mod process;
+mod reflect;
 mod value;
 
 pub use error::RuntimeError;

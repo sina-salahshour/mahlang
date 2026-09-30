@@ -1,4 +1,4 @@
-# The `.mahc` bytecode format (version 1.13)
+# The `.mahc` bytecode format (version 1.14)
 
 `mah build prog.mh` compiles a program (its entry file plus everything it
 imports) into a single `.mahc` file; `mah runc prog.mahc` runs one. This
@@ -43,7 +43,7 @@ recommended.
 ```
 magic      bytes(4)  = 0x4D 0x41 0x48 0x43   ("MAHC")
 major      u16       = 1
-minor      u16       = 6          (0-5 for older files; see §7)
+minor      u16       = 6          (0-5 for older files, up to 14; see §7)
 sections   (id u8, length varuint, payload bytes(length))*   until end of file
 ```
 
@@ -64,13 +64,16 @@ sections   (id u8, length varuint, payload bytes(length))*   until end of file
   version whose features it uses. *(1.5)* The reference encoder writes 4
   (every file it produces has 1.4's TYPES layout and HANDLERS section),
   or the highest `(1.x)` marker among the natives the file lists (5 for
-  the `std:math` natives, 7 for the ones behind `std:json`/`std:csv`, 8 for `std:random`'s, 9 for `std:regex`'s, 10 for `io.read_line`, 11 for `std:time`/`std:async`'s, 12 for `std:fs`'s, 13 for `std:process`'s), so a program that doesn't call newer natives
+  the `std:math` natives, 7 for the ones behind `std:json`/`std:csv`, 8 for `std:random`'s, 9 for `std:regex`'s, 10 for `io.read_line`, 11 for `std:time`/`std:async`'s, 12 for `std:fs`'s, 13 for `std:process`'s, 14 for `std:reflect`'s), so a program that doesn't call newer natives
   still runs on an older VM. *(1.6)* Native methods (§6.7) are called by
   name, so it also writes the minor that added any native method whose
   *name* a `callmethod`/`callmethodkw`/`detachmethod`/`detachmethodkw` in
   the program's own code (outside the prelude) uses, whatever the
   receiver turns out to be; the prelude's `to_number`, which relies on 1.6
-  methods, counts as one.
+  methods, counts as one. *(1.14)* It also writes 14 when the code uses
+  `loadtype`, `callspread`, `callmethodspread` or `spread`. The META
+  section (§4.10) doesn't count: it's optional, so a file whose only 1.14
+  feature is META keeps its lower minor (older VMs skip the section).
 - **Required sections**, each present exactly once and in increasing id
   order: STRINGS (`0x01`), CONSTANTS (`0x02`), TYPES (`0x03`), NATIVES
   (`0x04`), FUNCTIONS (`0x05`), CODE (`0x06`), — in files with minor ≥ 1 —
@@ -82,7 +85,9 @@ sections   (id u8, length varuint, payload bytes(length))*   until end of file
   **must** reject a file containing one it doesn't know.
 - Ids `0x80`–`0xFF` are *optional* sections, allowed after CODE in any
   order: a VM **must** skip ones it doesn't know (using `length`). `0x80` is
-  DEBUG (§4.7); `0x81` is TESTS (§4.9), written only for `mah test`.
+  DEBUG (§4.7); `0x81` is TESTS (§4.9), written only for `mah test`; `0x82`
+  is META (§4.10, *(1.14)*), written after the other optional sections by
+  every 1.14 encoder.
 - A section's payload **must** be fully consumed by its own contents
   (trailing garbage inside a section is an error), and every index anywhere
   in the file **must** be in range; VMs validate this at load time.
@@ -203,6 +208,13 @@ Version 1.0 defines:
 | `process.pid` | 0 | *(1.13)* → this process's id |
 | `process.platform` | 0 | *(1.13)* → `"linux"`, `"macos"`, `"windows"`, or else the OS's own name |
 | `process.run` | 5 | *(1.13)* `program, args, cwd, env, stdin` → a Promise of a result (below): `[true, [code, stdout, stderr]]` |
+| `reflect.type_of` | 1 | *(1.14)* `value` → the value's type as a `Type` value (§5): `none` is the primitive `None`, `some(x)` is `Option`, a struct or enum value its declared type, everything else its built-in type |
+| `reflect.signature` | 1 | *(1.14)* `f` (a Function, else `TypeMismatch`, `reflect.signature: expected a Function, got TYPE`) → `[name or none, doc, type_params, params, returns, throws or none]`, each parameter `[name, type, doc, has_default, is_constant, constant]` (below) |
+| `reflect.schema` | 1 | *(1.14)* `t` (a Type, else `TypeMismatch`, `NAME: expected a Type, got TYPE`) → `none` for a primitive, else `["struct", t, doc, type_params, fields]` (a field is `[name, type, doc]`) or `["enum", t, doc, type_params, variants]` (a variant is `[name, doc, fields]`) |
+| `reflect.methods` | 1 | *(1.14)* `t` → a new Vector of `[name, function, is_method, trait or none]`, one per Mah-code target in the method table (§6.7) under the type's name: the inherent ones sorted by name, then the trait ones sorted by trait name, then method name. Native targets (§6.7) aren't functions, so aren't listed |
+| `reflect.implements` | 2 | *(1.14)* `t, trait_name` → Bool: whether the method table has any target, native or not, under that trait name for the type's name |
+| `reflect.construct` | 2 | *(1.14)* `t, fields` (a Map with String keys) → `[true, value]` with a new struct value of type `t` whose fields, in declaration order, are `fields`' entries, or `[false, message]`: `can't construct T: it isn't a struct`, `T has no field 'f'` (checked first, in the Map's order), `missing field 'f' for T` |
+| `reflect.construct_variant` | 3 | *(1.14)* `t, variant, fields` → likewise a new enum value (`none` for `Option`'s `none`): failures `can't construct a variant of T: it isn't an enum`, `can't construct a Promise`, `T has no variant 'v'`, `T.v has no field 'f'`, `missing field 'f' for T.v` |
 | `math.sin` | 1 | sine of a Number (radians); the result is computed in IEEE-754 double precision and converted to Number via its shortest round-trip decimal text |
 | `math.cos` | 1 | cosine, same rules |
 | `time.sleep_async` | 1 | returns a new pending Promise that the scheduler settles with `none` after the argument's number of milliseconds (§6.4) |
@@ -298,6 +310,22 @@ can't be started gives `[false, kind, description]` with kind `not_found`
 `other` (the OS's text). Program arguments come from the command line:
 `mah run FILE -- ARGS...`, `mah runc FILE -- ARGS...` and `mah-vm run PATH
 ARGS...`.
+
+The `(1.14)` natives are `std:reflect`'s (docs/REFLECTION.md); they read
+the file's own structure, so they run synchronously and are the only natives
+that need the loaded program: its TYPES, FUNCTIONS, CONSTANTS, META (§4.10)
+and the method table. A **type descriptor** crosses as a Vector `[tag, ...]`
+mirroring the META `typeref`: `[0]` unknown, `[1, type, args]` named (a
+`Type` value, and a Vector of descriptors), `[2, params, returns, throws]`
+function (`throws` is `none` or a Vector), `[3, name]` type parameter, `[4]`
+`Self`, `[5]` `Never`, `[6, name, args]` trait. In a `signature` parameter,
+`is_constant` says `constant` holds the default's value (else it's `none`);
+`has_default` comes from PARAMS. **Without META**, or for a function or type
+it has no information on (`has_meta` 0), every descriptor is `[0]`, every
+doc `""`, `type_params` `[]`, `throws` `none`, and no default is constant;
+names, `has_default` and the shape of structs and enums (from TYPES) are
+still reported. `reflect.construct*` don't run hooks or validate types; the
+built-in enums `Option` and `RuntimeError` may be constructed too.
 
 The `(1.12)` natives are `std:fs`'s. Each returns a pending Promise at once
 and does its blocking work off the VM's thread of execution, as an I/O
@@ -462,6 +490,8 @@ Opcodes (semantics in §6):
 | `0x2A` | `await` | promise `A`, dest `A` |
 | `0x2B` | `detachkw` *(1.1)* | callee `A`, args `A*`, kwnames `S*`, dest `A` |
 | `0x2C` | `detachmethodkw` *(1.1)* | recv `A`, name `S`, args `A*`, kwnames `S*`, trait `S?`, dest `A` |
+| `0x2D` | `callspread` *(1.14)* | callee `A`, args `A`, kwargs `A` |
+| `0x2E` | `callmethodspread` *(1.14)* | recv `A`, name `S`, args `A`, kwargs `A`, trait `S?` |
 | `0x30` | `struct` | type `T`, values `A*` (declaration order), dest `A` |
 | `0x31` | `enum` | type `T`, variant `N`, values `A*` (declaration order), dest `A` |
 | `0x32` | `getfield` | obj `A`, field `S`, dest `A` |
@@ -473,6 +503,8 @@ Opcodes (semantics in §6):
 | `0x38` | `vector` *(1.3)* | items `A*`, dest `A` |
 | `0x39` | `map` *(1.3)* | pairs `A*` (`k1 v1 k2 v2 …`), dest `A` |
 | `0x3A` | `matchtype` *(1.4)* | value `A`, type `T`, dest `A` |
+| `0x3B` | `loadtype` *(1.14)* | kind `N`, index `N`, dest `A` |
+| `0x3C` | `spread` *(1.14)* | target `A`, source `A`, keyword `B` |
 | `0x40` | `deferpush` | — |
 | `0x41` | `deferadd` | closure `A` |
 | `0x42` | `deferpeek` | dest `A` |
@@ -487,14 +519,18 @@ All other opcode values are reserved. Opcodes, operand kinds, and natives
 marked *(1.1)* **must not** appear in a file whose minor version is 0,
 those marked *(1.2)* not in one whose minor version is below 2, those
 marked *(1.3)* not in one whose minor version is below 3, and those
-marked *(1.4)* not in one whose minor version is below 4.
+marked *(1.4)* not in one whose minor version is below 4, and those marked
+*(1.14)* not in one whose minor version is below 14.
 
 In the `*kw` opcodes, `kwnames` names the **last** `len(kwnames)` entries
 of `args`, in order; the entries before them are positional. `len(kwnames)
 ≤ len(args)`, and the names are distinct (validated at load). `native`'s `args` count **must**
 equal the native's declared arity (validated at load). `struct`/`enum`'s
 `values` count **must** equal the type's/variant's field count. `map`'s
-`pairs` count **must** be even (validated at load).
+`pairs` count **must** be even (validated at load). `loadtype`'s `kind` is
+`0` (`index` a type index `T`, in range) or `1` (`index` a primitive code,
+0-7, §5); encoded as a `varuint` each, which for these values is the same
+single byte a `u8` would be.
 
 ### 4.7 DEBUG (`0x80`, optional)
 ```
@@ -557,6 +593,64 @@ test's closure, a function of no parameters. `line` is the line of the
 `test` keyword in the entry file (0 if unknown), for tools. How a VM runs
 one entry is §6.10.
 
+### 4.10 META (`0x82`, optional) *(1.14)*
+
+What the program's source *wrote* about its functions and types: type
+annotations, doc comments and constant parameter defaults, for
+`std:reflect` (docs/REFLECTION.md). Being optional, it needs no minor
+version by itself: older VMs skip it, and a VM without it answers
+reflection with names only (§4.4, the `(1.14)` natives). Every 1.14 encoder
+writes it, after the other optional sections, in debug and release builds
+alike. It never records what a checker inferred: an unannotated parameter's
+type is `unknown`.
+
+```
+functions: count varuint (= FUNCTIONS count), count × fnmeta
+types:     count varuint (= number of user types in TYPES), count × typemeta
+
+fnmeta   = flags u8                    bit 0: has metadata (0 → nothing else follows;
+                                       all other bits must be 0)
+           doc str?
+           ntype_params varuint, ntype_params × str
+           nparams varuint             (= the function's param_count)
+           nparams × parammeta
+           returns typeref
+           throws u8 (0 = no clause; 1 = clause) [n varuint, n × typeref]
+
+parammeta = type typeref,
+            doc str?,
+            default u8 (0 = none; 1 = non-constant default; 2 = constant default, then a CONSTANTS index varuint)
+
+typemeta = doc str?, ntype_params varuint, ntype_params × str, body
+  struct: nfields × (type typeref, doc str?)            (count from TYPES)
+  enum:   nvariants × (doc str?, nfields × (type typeref))
+
+typeref = tag u8, payload
+  0 unknown                         (no annotation, or `Unknown`, or a name that resolves to nothing)
+  1 named: kind u8, index varuint, nargs varuint, nargs × typeref
+           kind 0: a type index T (the built-in enums 0-2, then user types); kind 1: a
+           primitive code -- `0` Number, `1` String, `2` Bool, `3` Function, `4` Vector,
+           `5` Map, `6` None, `7` Type (the codes of `loadtype`)
+  2 fn:    nparams varuint, nparams × typeref, returns typeref,
+           throws u8 (0 | 1 then n varuint, n × typeref)
+  3 param: name str                 (a type parameter, `T`)
+  4 self                            (`Self`)
+  5 never
+  6 trait: name str, nargs varuint, nargs × typeref   (a trait used as a type)
+```
+
+A **constant default** is a parameter default that's a literal Number,
+String, Bool or `none`, or `-` applied to a Number literal; anything else is
+"non-constant" (it's still evaluated per call, §6.1). A function whose source
+wrote nothing (no doc, no annotation, no type parameter, no `throws`, no
+default) gets `flags` 0, as do function 0 and closures the compiler makes
+itself. A `fn(A) -> B` type without `-> B` returns the primitive `None`.
+Validation at load: every string, type and constant index in range, both
+counts and each `nparams` equal what they describe, `flags` and `default`
+values as listed, the payload fully consumed. A doc is the text of the `##`
+comment lines directly above the declaration, each without its `##` and at
+most one space after it, joined by `\n` (docs/REFLECTION.md).
+
 ## 5. Values
 
 | type name | values |
@@ -570,12 +664,13 @@ one entry is §6.10.
 | `Function` | a closure: (function index, defining frame) |
 | `Vector` *(1.3)* | an ordered, growable list of values, indexed from `0`; **mutable, by reference** |
 | `Map` *(1.3)* | an insertion-ordered table from keys (Strings, Numbers, Bools) to values; **mutable, by reference** (§6.9) |
+| `Type` *(1.14)* | a type: `(kind, index)` with kind 0 a type index `T` (§4.3: the built-in enums, structs, user enums) or kind 1 a primitive code (`0` Number, `1` String, `2` Bool, `3` Function, `4` Vector, `5` Map, `6` None, `7` Type). Immutable; two Types are `==` when kind and index match; not usable as a Map key (§6.9); `to_string` is the type's name (§6.6) |
 | user struct | (type, field values in declaration order), **mutable, by reference**; *(1.4)* also a hidden `thrown_at` slot (§6.8), never visible to Mah code |
 | user enum | (type, variant, field values), mutable, by reference; *(1.4)* also a hidden `thrown_at` slot (§6.8) |
 
 The **type name** of a value (used by method dispatch): `Number`,
 `String`, `Bool`, `Function`, `Option`, `Promise`, `Vector`, `Map`,
-`RuntimeError` *(1.4)*, or the user type's name.
+`RuntimeError` *(1.4)*, `Type` *(1.14)*, or the user type's name.
 
 **Truthiness** (`jmpf`, `and`, `or`): `false`, `none`, the Number `0`, and
 the empty String are falsy; every other value is truthy.
@@ -623,13 +718,35 @@ the empty String are falsy; every other value is truthy.
   argument 'k'`, `'f' got multiple values for argument 'k'`, and
   `'f' is missing required argument 'p'`. For method calls the counts
   exclude the receiver and the label is `method 'f'`.
+- `callspread callee args kwargs` *(1.14)*: `callee` must hold a Function,
+  `args` a Vector and `kwargs` a Map with String keys (both built by the
+  encoder's code just before, with `spread` below); the Vector's items are
+  the positional values and the Map's entries, in insertion order, the
+  keyword pairs of the binding above, which then proceeds exactly as for
+  `callkw`. `callmethodspread recv name args kwargs trait` likewise follows
+  `callmethodkw` (§6.7, receiver bound first). Both are followed by
+  `retval`. Codegen uses them only for calls with `...xs`/`**m` arguments;
+  other calls compile as before.
+- `spread target source keyword` *(1.14)*: with `keyword` false, `target`
+  (a Vector) gets a copy of `source`'s items appended, and `source` must be
+  a Vector; with `keyword` true, `source` must be a Map whose keys are all
+  Strings and its entries are added to `target` (a Map), which must not
+  already have that key. Each violation is `RuntimeError.ArgumentError` with
+  the reference text `'...' needs a Vector, got TYPE`, `'**' needs a Map, got
+  TYPE`, `'**' needs String keys, got a TYPE key`, `keyword argument 'k'
+  given more than once`. The encoder builds a spread call's Vector from its
+  plain arguments (`vector`) and each `...xs` (`spread`), its Map from its
+  `name: v` arguments (`map`, `spread`) and each `**m`, evaluating
+  everything left to right; a keyword given by name and again through a Map
+  is therefore the last error above.
+- `loadtype kind index dest` *(1.14)*: `dest ←` the Type value (§5).
 - `jmpset param L`: jump to `L` if `param` (always a slot of the current
   frame) holds a bound value, i.e. anything but the absent marker.
 - `ret value`: return register ← value. If the task's return stack is empty,
   the task finishes with that value; otherwise pop `(pc, frame)` and
   continue there.
 - `retval dest`: `dest ← return register`. Encoders emit it immediately
-  after every `call`/`callkw`/`callmethod`/`callmethodkw`.
+  after every `call`/`callkw`/`callmethod`/`callmethodkw` (and *(1.14)* `callspread`/`callmethodspread`).
 - `halt`: the task finishes with `none` (ends the main program's top-level
   code).
 
@@ -781,6 +898,8 @@ Encoders drain scopes with ordinary `call`/`retval` instructions.
      `Promise.Pending`, `Promise.Settled { value: 1 }`).
    - struct: `Type { f1: v1, f2: v2 }`, fields in declaration order.
    - Function: `<fn NAME>`, or `<fn>` for an anonymous function.
+   - Type *(1.14)*: the type's name (`Number`, `User`; a struct or enum
+     is shown by the name it was declared with).
    - Vector *(1.3)*: `[` + the items' `to_string`s joined by `, ` + `]`
      (`[]` when empty).
    - Map *(1.3)*: `[` + `to_string(k) + ": " + to_string(v)` for each entry
@@ -795,9 +914,9 @@ The VM keeps a **method table** keyed by `(type name, method name)`; each
 entry holds at most one *inherent* target and at most one target per trait
 name. A target is (function value or native, `is_method`).
 - Initially: for every built-in type name (`Number`, `String`, `Bool`,
-  `Function`, `Option`, `Promise`, and *(1.3)* `Vector`, `Map`), a native
-  target for trait `Printable`, method `to_string`, `is_method` true,
-  computing §6.6 step 2.
+  `Function`, `Option`, `Promise`, and *(1.3)* `Vector`, `Map`, *(1.4)*
+  `RuntimeError`, *(1.14)* `Type`), a native target for trait `Printable`,
+  method `to_string`, `is_method` true, computing §6.6 step 2.
 - Also initially *(1.3)*, native targets for `Vector`, `Map`, and
   `String` for trait `Index`, method `index` (one argument, `key`), and for
   `Vector` and `Map` (not `String`: Strings are immutable) for trait
@@ -1142,6 +1261,14 @@ message
   `std:fs`, with open files as ids in a per-VM handle table.
 - **1.13** added natives only: the ten `process.*` natives (§4.4) behind
   `std:process`, with a per-VM environment table.
+- **1.14** added type values and reflection (docs/REFLECTION.md, M41a):
+  the `Type` value and `loadtype` (§5, §6.1), spread calls
+  (`callspread`, `callmethodspread`, and `spread`, which builds their
+  argument Vector and Map), the seven `reflect.*` natives (§4.4) behind
+  `std:reflect`, `json.decode` and `json.parse_as`, and the optional META
+  section (§4.10). Older VMs run a file that only has META (it's skipped);
+  the encoder writes 14 only for a file that uses one of the opcodes or
+  natives above (§3).
 - Planned growth, for orientation: error-set checking (the static
   checker's `throws` inference and "unhandled error" diagnostics -- M26),
   string utilities, filesystem, networking, and process natives.

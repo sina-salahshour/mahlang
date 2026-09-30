@@ -76,6 +76,14 @@ clear error names whichever case applies (no such variable and no such
 enum type/variant; or the variant exists but needs braces because it's
 struct-shaped, not unit).
 
+M41a (docs/REFLECTION.md) gives a bare type name a value: an `Ident` that isn't
+a variable in scope but names a struct, an enum or a built-in type gets
+`Ident.type_value` (`_resolve_ident`), decided exactly like the bare enum
+unit variant above -- a variable in scope always wins -- and codegen emits
+`loadtype`. `SpreadArg` (`...xs` in `Call.args`/`MethodCall.args`, `**m` as a
+`(None, SpreadArg, pos)` keyword entry) just resolves its operand; `detach`
+of a call with one is rejected here.
+
 M5 makes `if`/`match`/bare `{ }` blocks resolvable as expressions, not just
 statements: `resolve_block` now also resolves a populated `Block.tail`
 (in the same pushed scope, after the block's own statements, so the tail
@@ -212,6 +220,7 @@ from .ast_nodes import (
     RangePat,
     ReturnStmt,
     SleepAsyncExpr,
+    SpreadArg,
     StringLit,
     StructDecl,
     StructLit,
@@ -243,6 +252,7 @@ _BUILTIN_TYPE_ARITY = {
     "Option": 1,
     "Promise": 1,
     "Map": 2,
+    "Type": 1,  # M41a: `Type<T>`, the type of a type value (docs/REFLECTION.md)
 }
 _SYSTEM_TRAIT_ARITY = {"Printable": 0, "Index": 2, "IndexAssign": 2}
 
@@ -642,6 +652,37 @@ class Resolver:
         frame_level, slot = self._lookup(name, position)
         depth = self.frame_stack[-1].depth - frame_level.depth
         return (depth, slot)
+
+    # M41a (docs/REFLECTION.md, "Type values"): the built-in type names that
+    # aren't struct/enum declarations. Everything else that can be a type
+    # value (a struct, an enum -- including the built-in Option/Promise/
+    # RuntimeError -- ) is in struct_decls/enum_decls.
+    _PRIMITIVE_TYPE_VALUES = ("Number", "String", "Bool", "Function", "Vector", "Map", "None", "Type")
+
+    def _resolve_ident(self, expr: Ident) -> None:
+        """A bare identifier in expression position. A variable in scope
+        always wins (exactly like a bare enum unit variant, see the module
+        docstring); otherwise a name that is a struct, an enum or a built-in
+        type name evaluates to that type (M41a's `Type` value)."""
+        try:
+            expr.address = self._resolve_ident_address(expr.name, expr.position)
+            return
+        except NameError:
+            name = expr.name
+            if name == "Self" and self._self_type is not None:
+                self._self_positions.add(expr.position)
+                name = self._self_type
+            if name in self.struct_decls:
+                expr.type_value = ("struct", name)
+                self.type_position_index[expr.position] = ("struct", name)
+            elif name in self.enum_decls:
+                expr.type_value = ("enum", name)
+                if name not in ("Option", "Promise", "RuntimeError"):
+                    self.type_position_index[expr.position] = ("enum", name)
+            elif name in self._PRIMITIVE_TYPE_VALUES:
+                expr.type_value = ("prim", name)
+            else:
+                raise
 
     def _resolve_kwargs(self, kwargs: list) -> None:
         """M16: resolve every keyword argument's VALUE expression (the
@@ -1862,7 +1903,11 @@ class Resolver:
         if isinstance(expr, (NumberLit, StringLit, BoolLit)):
             return
         if isinstance(expr, Ident):
-            expr.address = self._resolve_ident_address(expr.name, expr.position)
+            self._resolve_ident(expr)
+            return
+        if isinstance(expr, SpreadArg):
+            # M41a: `...xs` / `**m` -- only ever a call argument.
+            self.resolve_expr(expr.value)
             return
         if isinstance(expr, Unary):
             self.resolve_expr(expr.operand)
@@ -1886,6 +1931,11 @@ class Resolver:
             self._resolve_kwargs(expr.kwargs)
             return
         if isinstance(expr, DetachExpr):
+            call = expr.call
+            if isinstance(call, (Call, MethodCall)) and (
+                any(isinstance(a, SpreadArg) for a in call.args) or any(n is None for n, _v, _p in call.kwargs)
+            ):
+                raise SyntaxError(f"spread arguments can't be detached yet at position {expr.position}")
             self.resolve_expr(expr.call)
             return
         if isinstance(expr, SleepAsyncExpr):
@@ -2107,6 +2157,8 @@ class Resolver:
         positional-argument rule the keyword forms had. M33: likewise
         `input(prompt = "")`, with at most one."""
         name = expr.callee.name
+        if any(isinstance(a, SpreadArg) for a in expr.args) or any(n is None for n, _v, _p in expr.kwargs):
+            raise SyntaxError(f"'{name}' doesn't take spread arguments at position '{expr.position}'")
         if expr.kwargs:
             raise SyntaxError(f"'{name}' doesn't take keyword arguments at position '{expr.position}'")
         if name == "input":

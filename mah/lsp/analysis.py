@@ -739,7 +739,10 @@ def _leading_doc_comment(text: str, position: int) -> str:
     collected: list[str] = []
     for raw in reversed(lines_above):
         stripped = raw.strip()
-        if stripped.startswith("#"):
+        if stripped.startswith("##"):
+            # M41a: a `##` doc comment -- both `#`s are the marker.
+            collected.append(stripped[2:].strip())
+        elif stripped.startswith("#"):
             collected.append(stripped[1:].strip())
         else:
             break

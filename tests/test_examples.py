@@ -243,6 +243,27 @@ class ExampleTests(unittest.TestCase):
             'not_found: no-such-program-mah: no such file or directory\n'
         )
 
+    def test_reflection(self):
+        # M41a: type values, `##` docs, spread calls, std:reflect, json.decode.
+        out = run_file(example_path("reflection.mh"))
+        self.assertEqual(
+            out,
+            "User Number true false\n"
+            "greet - Greets someone.\n"
+            "  name has a default: false constant default: none\n"
+            "  greeting has a default: true constant default: some(hello)\n"
+            "  punctuation has a default: true constant default: some(!)\n"
+            "User - A registered account.\n"
+            "  name - The login name.\n"
+            "  age - \n"
+            "  email - Optional: a missing key decodes to `none`.\n"
+            "welcome, ada!\n"
+            "hello, bo?\n"
+            "ada 37 none\n"
+            "bad user: expected a Number for User.age, got String\n"
+            "bad user: missing field 'name' for User\n"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

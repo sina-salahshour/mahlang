@@ -169,6 +169,23 @@ class Ident:
     # number of static_parent hops from the currently executing frame to
     # reach the frame owning `slot`.
     address: Optional[tuple] = field(default=None, repr=False)
+    # M41a (docs/REFLECTION.md, "Type values"): set by Resolver when this
+    # identifier isn't a variable in scope but names a struct, an enum or a
+    # built-in type -- `("struct" | "enum" | "prim", name)`. The expression
+    # then evaluates to that type (a `Type` value); `address` stays None.
+    type_value: Optional[tuple] = field(default=None, repr=False)
+
+
+@dataclass
+class SpreadArg:
+    """M41a: `...expr` (in `Call.args`/`MethodCall.args`: expands a Vector
+    into positional arguments) or `**expr` (in `kwargs`, as `(None, SpreadArg,
+    position)`: expands a Map into keyword arguments). Only ever a call
+    argument."""
+
+    value: object
+    keyword: bool  # False: `...expr`; True: `**expr`
+    position: int  # the `...`/`**` token
 
 
 @dataclass
@@ -266,6 +283,10 @@ class EnumDecl:
     # `variant_field_positions` -- each inner entry is that field's `: type`
     # annotation (a TypeExpr) or `None`.
     variant_field_types: list = field(default_factory=list, repr=False)
+    # M41a: `##` doc comments -- the enum's own, and one per variant
+    # (parallel to `.variants`, None entries).
+    doc: Optional[str] = field(default=None, repr=False)
+    variant_docs: list = field(default_factory=list, repr=False)
 
 
 @dataclass
@@ -534,6 +555,10 @@ class FnExpr:
     # M27: set by the parser for `extern fn ... = "native"` -- the native's
     # name (the body is then a single `NativeCall`).
     native: Optional[str] = field(default=None, repr=False)
+    # M41a: the `##` doc comment above this function (None when absent) and
+    # the ones above its parameters (parallel to `params`, None entries).
+    doc: Optional[str] = field(default=None, repr=False)
+    param_docs: list = field(default_factory=list, repr=False)
 
 
 @dataclass
@@ -556,6 +581,10 @@ class StructDecl:
     # M21: parallel to `.fields` -- each entry is that field's `: type`
     # annotation (a TypeExpr) or `None`.
     field_types: list = field(default_factory=list, repr=False)
+    # M41a: `##` doc comments -- the struct's own, and one per field
+    # (parallel to `.fields`, None entries).
+    doc: Optional[str] = field(default=None, repr=False)
+    field_docs: list = field(default_factory=list, repr=False)
 
 
 # -- M12: traits / impls / method calls ----------------------------------
@@ -593,6 +622,9 @@ class MethodDecl:
     # this exact same object (mirroring `type_params`/`param_types`/
     # `return_type` above).
     throws: Optional[list] = field(default=None, repr=False)
+    # M41a: `##` docs -- see `FnExpr.doc`/`param_docs`.
+    doc: Optional[str] = field(default=None, repr=False)
+    param_docs: list = field(default_factory=list, repr=False)
 
     @property
     def is_method(self) -> bool:
@@ -614,6 +646,8 @@ class TraitDecl:
     # generic parameter list -- list[TypeParam], `[]` when there's no
     # `<...>`.
     type_params: list = field(default_factory=list, repr=False)
+    # M41a: the `##` doc comment above the trait.
+    doc: Optional[str] = field(default=None, repr=False)
 
 
 @dataclass

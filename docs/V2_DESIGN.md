@@ -3239,6 +3239,65 @@ node that resolved to it. Then:
       keyword-argument tests for the preprocessor fix, a `vm_diff.py` case,
       `examples/process.mh`.
 
+38. **M41a — type values, metadata, spread calls, `std:reflect`. ✅ Landed.**
+    `docs/REFLECTION.md` (the design and its "M41a: what landed" list);
+    bytecode 1.14 in `docs/MAHC_FORMAT.md` §4.4/§4.6/§4.10/§5/§6.1/§7.
+    Decisions in `REFLECTION.md` and `STDLIB.md`.
+
+    - **Type values**: a bare identifier that isn't a variable in scope
+      and names a struct, enum or built-in type (`Number`, `String`, `Bool`,
+      `Function`, `Vector`, `Map`, `Option`, `Promise`, `RuntimeError`,
+      `None`, `Type`) is a `Type` value. The resolver decides it exactly
+      like `FieldAccess.enum_unit_type` (`Ident.type_value`; a variable
+      always wins) and codegen emits the new `loadtype` opcode (kind 0 a
+      TYPES index, kind 1 a primitive code). Python: `TypeValue` in
+      `mah/runtime_values.py`; Rust: `Value::Type`. Equal when kind and
+      index match, printed by name, `type_name_of` "Type", `Printable`
+      like every built-in type, not a Map key, rejected by
+      `json.stringify`. The checker types the expression `Type<T>`.
+    - **Docs**: `##` comment lines directly above a `fn`, `extern fn`,
+      `struct`, `enum`, `trait`, impl method, field, variant or parameter
+      (each the first thing on its line). The lexer keeps them in a side
+      table (`Lexer.doc_comments`/`doc_above`), the parser attaches them
+      (`doc`, `param_docs`, `field_docs`, `variant_docs` on the AST); the
+      token stream, the formatter and the preprocessor's comment
+      pass-through are unchanged.
+    - **META** (section 0x82, optional, always written): each function's
+      and user type's *written* annotations resolved to declarations,
+      docs and constant defaults. Codegen hands `lower.py` the `FnExpr`
+      (with the type parameters in scope) on each `closure`, and the
+      struct/enum declarations; `lower.py` builds `Meta`, `encode.py`/
+      `decode.py` write and validate it, `disasm.py` shows it. It never
+      records inferences, so the checker still can't affect codegen. A
+      file whose only 1.14 content is META keeps its old minor.
+    - **Spread calls**: `...expr` / `**expr` in an argument list (a
+      `...` token, lexed before `..`; `**` after `(` or `,` is decided by
+      the parser's position, not the lexer). `SpreadArg` in `Call.args` /
+      `MethodCall.args`, or `(None, SpreadArg, pos)` in `kwargs`. Codegen
+      builds the positional Vector and keyword Map (`vector`/`map`, and
+      the new helper opcode `spread` for each `...`/`**`) and emits
+      `callspread`/`callmethodspread`, which bind exactly like `callkw`.
+      `detach` of one is a compile error.
+    - **Natives, both VMs**: seven `reflect.*` (`mah/reflect_natives.py`,
+      `runtime/src/vm/reflect.rs`). They need the loaded program: Python's
+      `NativeContext.reflect` (`ReflectData`) and Rust's
+      `Vm.linked`/`method_table`. Closures now carry their FUNCTIONS index
+      (`Closure.index`, `FunctionInfo.index`), the key into META.
+    - **`mah/std/reflect.mh`**: `TypeRef`, `Param`, `Signature`, `Field`,
+      `Variant`, `Schema`, `Method`, `ReflectError` and the functions;
+      `call` is `f(...args, **kwargs)`. **`mah/std/json.mh`** gained
+      `decode`, `decode_ref` and `parse_as` over it (so `std:json` now
+      needs 1.14).
+    - **Tooling**: the formatter prints spreads tight; tree-sitter has
+      `spread_argument` (parser regenerated, `##` highlighted as
+      documentation); LSP rename/hover/go-to-definition work on a type
+      name used as a value (they were already references to it) and hover
+      drops the `##`; `mah dis` prints META and the new opcodes.
+    - Tests: `tests/test_reflection.py`, `mah/std/reflect.test.mh` (both
+      VMs), a `vm_diff.py` case (plus malformed-META files), and the
+      bytecode/stdlib tests' minor numbers. The "annotations compile to
+      identical bytecode" test now ignores META.
+
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
 it** (`make test` must stay green) — see `docs/TESTING.md` for where
@@ -3250,14 +3309,16 @@ M1 was built and documented that way.
 
 ## Status
 
-M0 through M36 (and M21b, `mah format`) have all landed; each milestone's
+M0 through M41a (and M21b, `mah format`) have all landed; each milestone's
 entry above says what changed and where it deliberately deviates from the
 design. The language has traits, generics, typed and checked errors, a
 static type checker, projects and `mah test`, async I/O with timers, and a
-`.mahc` bytecode format (currently 1.13) run by the reference Python VM
+`.mahc` bytecode format (currently 1.14) run by the reference Python VM
 and the native Rust VM in `runtime/`; the standard library (`std:math`,
 `std:json`, `std:csv`, `std:path`, `std:random`, `std:collections`,
-`std:regex`, `std:time`, `std:async`, `std:fs`, `std:process`) is described
-in `docs/STDLIB.md`. What is deferred and what comes next (the network
-modules, reflection and decorators, and the rest) is in
+`std:regex`, `std:time`, `std:async`, `std:fs`, `std:process`, `std:reflect`)
+is described in `docs/STDLIB.md`. Type values, `##` docs, spread calls and
+reflection landed with M41a (`docs/REFLECTION.md`); decorators and hook
+traits (M41b, M41c) are designed there but not started. What else is
+deferred and what comes next (the network modules, and the rest) is in
 `docs/NEXT_PHASES.md`.

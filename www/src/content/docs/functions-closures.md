@@ -83,6 +83,25 @@ print("no newline", end: "")
   and a trait's required (bodyless) methods can't declare defaults (put
   them on the impl).
 
+## Spread calls
+
+`...xs` in an argument list expands a Vector into positional arguments,
+and `**m` expands a Map with String keys into keyword arguments:
+
+```mah
+fn f(a, b = 2, c = 3) { a + b + c }
+print(f(...[1, 10]))                 # 14
+print(f(1, **["c": 100]))            # 103
+print(f(...[1], b: 5, **["c": 0]))   # 6
+print("a-b".split(...["-"]))         # [a, b]   method calls too
+```
+
+Any number of each, mixed with ordinary arguments; positional ones come
+before keyword ones. A keyword given twice (by name, or through a Map), a
+non-Vector after `...` and a non-Map after `**` are
+`RuntimeError.ArgumentError`s. `**` is still the exponent everywhere else.
+`detach f(...xs)` isn't allowed yet.
+
 ## `defer`
 
 ```mah

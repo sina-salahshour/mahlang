@@ -97,7 +97,9 @@ class RoundTripTests(unittest.TestCase):
                 minor = {
                     "std_math.mh": 5,
                     "string_methods.mh": 6,
-                    "data_formats.mh": 7,
+                    # M41a: std:json now reads declared types through
+                    # std:reflect, whose natives are 1.14.
+                    "data_formats.mh": 14,
                     "random_collections.mh": 8,
                     "regex_log.mh": 9,
                     "binary_to_decimal.mh": 10,
@@ -109,6 +111,8 @@ class RoundTripTests(unittest.TestCase):
                     "files.mh": 12,
                     # M36: 1.13 with std:process.
                     "process.mh": 13,
+                    # M41a: 1.14 with std:reflect / std:json's decode.
+                    "reflection.mh": 14,
                 }.get(name, 4)
                 self.assertEqual(data[:8], b"MAHC\x01\x00" + bytes([minor, 0]))
 
@@ -159,10 +163,10 @@ class LoaderValidationTests(unittest.TestCase):
         self.assertIn("major", str(cm.exception))
 
     def test_unsupported_minor_version(self):
-        # M36: this VM now implements minor version 13, so the smallest
-        # genuinely unsupported minor version is 14.
+        # M41a: this VM now implements minor version 14, so the smallest
+        # genuinely unsupported minor version is 15.
         data = bytearray(compile_bytes(text="print(1)"))
-        data[6] = 14
+        data[6] = 15
         with self.assertRaises(MahcFormatError) as cm:
             decode(bytes(data))
         self.assertIn("minor", str(cm.exception))
@@ -175,11 +179,11 @@ class LoaderValidationTests(unittest.TestCase):
         data = compile_bytes(text='import math from "std:math"\nprint(math.tan(1))')
         self.assertIn(b"math.tan", data)
         data = bytearray(data.replace(b"math.tan", b"math.zzz"))
-        data[6] = 14
+        data[6] = 15
         with self.assertRaises(MahcFormatError) as cm:
             decode(bytes(data))
         message = str(cm.exception)
-        self.assertIn("unsupported minor version 14", message)
+        self.assertIn("unsupported minor version 15", message)
         self.assertIn("natives this VM doesn't have ('math.zzz')", message)
 
     def test_minor_is_the_lowest_the_program_needs(self):

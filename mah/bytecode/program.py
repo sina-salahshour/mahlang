@@ -50,6 +50,63 @@ class FunctionDecl:
 
 
 @dataclass
+class TypeRef:
+    """M41a (docs/MAHC_FORMAT.md #4.10): a written type annotation, resolved
+    to the declarations it names. `tag`: 0 unknown, 1 named (`kind`, `index`,
+    `args`), 2 fn (`args` = parameter types, `ret`, `throws`), 3 param
+    (`name`), 4 self, 5 never, 6 trait (`name`, `args`). `name` is a string
+    index; `throws` is None (no clause) or a list of TypeRef."""
+
+    tag: int
+    kind: int = 0
+    index: int = 0
+    name: int | None = None
+    args: list = field(default_factory=list)
+    ret: object = None
+    throws: list | None = None
+
+
+@dataclass
+class ParamMeta:
+    type: TypeRef
+    doc: int | None = None  # string index
+    # 0 = no default, 1 = a default that isn't constant, 2 = a constant
+    # default (`const` is its CONSTANTS index).
+    default: int = 0
+    const: int | None = None
+
+
+@dataclass
+class FnMeta:
+    """One function's entry in META. `has_meta` False: nothing else follows
+    in the file (and the fields below are their empty values)."""
+
+    has_meta: bool = False
+    doc: int | None = None
+    type_params: list = field(default_factory=list)  # string indices
+    params: list = field(default_factory=list)  # list[ParamMeta]
+    returns: TypeRef = field(default_factory=lambda: TypeRef(0))
+    throws: list | None = None  # None = no clause, else list[TypeRef]
+
+
+@dataclass
+class TypeMeta:
+    """A user type's entry in META: `body` is, for a struct, a list of
+    `(TypeRef, doc str index or None)` per field; for an enum, a list of
+    `(doc str index or None, [TypeRef per field])` per variant."""
+
+    doc: int | None = None
+    type_params: list = field(default_factory=list)
+    body: list = field(default_factory=list)
+
+
+@dataclass
+class Meta:
+    functions: list = field(default_factory=list)  # list[FnMeta], one per function
+    types: list = field(default_factory=list)  # list[TypeMeta], one per user type
+
+
+@dataclass
 class Instr:
     op: str
     args: tuple = ()
@@ -82,6 +139,8 @@ class Program:
     # M28 (docs/MAHC_FORMAT.md #4.9): list[TestEntry] -- the optional TESTS
     # section, present only in a file built for `mah test`.
     tests: list = field(default_factory=list)
+    # M41a (docs/MAHC_FORMAT.md #4.10): the optional META section, or None.
+    meta: object = None  # Meta | None
 
 
 @dataclass

@@ -11,6 +11,7 @@ instruction.
 
 from __future__ import annotations
 
+from ..runtime_values import PRIMITIVE_TYPE_NAMES
 from .format import TAG_DEC, TAG_FALSE, TAG_INT, TAG_NONE, TAG_STR, TAG_TRUE, builtin_types_for
 from .program import Program
 
@@ -75,6 +76,32 @@ class _Renderer:
         decl = self.p.types[t_idx - len(self.builtin_types)]
         return self.p.strings[decl.variants[variant_idx][0]]
 
+    def typeref(self, ref) -> str:
+        """M41a: a META type annotation, as Mah would write it."""
+        if ref.tag == 0:
+            return "Unknown"
+        if ref.tag == 1:
+            name = self.type_name(ref.index) if ref.kind == 0 else PRIMITIVE_TYPE_NAMES[ref.index]
+            return name + self._args(ref.args)
+        if ref.tag == 2:
+            text = f"fn({', '.join(self.typeref(p) for p in ref.args)}) -> {self.typeref(ref.ret)}"
+            return text + self.throws(ref.throws)
+        if ref.tag == 3:
+            return self.p.strings[ref.name]
+        if ref.tag == 4:
+            return "Self"
+        if ref.tag == 5:
+            return "Never"
+        return self.p.strings[ref.name] + self._args(ref.args)
+
+    def _args(self, args) -> str:
+        return "<" + ", ".join(self.typeref(a) for a in args) + ">" if args else ""
+
+    def throws(self, throws) -> str:
+        if throws is None:
+            return ""
+        return " throws " + (" | ".join(self.typeref(t) for t in throws) if throws else "never")
+
     def func(self, f_idx: int) -> str:
         fn = self.p.functions[f_idx]
         name = self.p.strings[fn.name] if fn.name is not None else ""
@@ -106,6 +133,17 @@ def _instr_line(r: _Renderer, i: int, instr) -> str:
         rendered = f"callee={_addr(a[0])} args={_addr_list(a[1])}"
     elif op == "callkw":
         rendered = f"callee={_addr(a[0])} args={_addr_list(a[1])} kwnames={_str_list(r, a[2])}"
+    elif op == "callspread":
+        rendered = f"callee={_addr(a[0])} args={_addr(a[1])} kwargs={_addr(a[2])}"
+    elif op == "callmethodspread":
+        rendered = (
+            f"recv={_addr(a[0])} name={r.s(a[1])} args={_addr(a[2])} kwargs={_addr(a[3])} trait={r.s_opt(a[4])}"
+        )
+    elif op == "spread":
+        rendered = f"target={_addr(a[0])} source={_addr(a[1])} keyword={a[2]}"
+    elif op == "loadtype":
+        what = r.type_name(a[1]) if a[0] == 0 else PRIMITIVE_TYPE_NAMES[a[1]]
+        rendered = f"type={what} dest={_addr(a[2])}"
     elif op == "ret":
         rendered = f"value={_addr(a[0])}"
     elif op == "retval":
@@ -235,6 +273,46 @@ def disassemble(program: Program) -> str:
         lines.append("TESTS:")
         for t in program.tests:
             lines.append(f"  {program.strings[t.name]!r} slot={t.slot} line={t.line}")
+
+    if program.meta is not None:
+        # M41a (docs/MAHC_FORMAT.md #4.10): the written annotations, docs
+        # and constant defaults.
+        lines.append("")
+        lines.append("META:")
+        for i, m in enumerate(program.meta.functions):
+            if not m.has_meta:
+                continue
+            fn = program.functions[i]
+            name = program.strings[fn.name] if fn.name is not None else "<anon>"
+            tparams = f"<{', '.join(program.strings[t] for t in m.type_params)}>" if m.type_params else ""
+            params = []
+            for (pname, _has_default), pm in zip(fn.params or [], m.params):
+                text = f"{program.strings[pname]}: {r.typeref(pm.type)}"
+                if pm.default == 2:
+                    text += f" = {r.const(pm.const)}"
+                elif pm.default == 1:
+                    text += " = ..."
+                params.append(text)
+            lines.append(f"  fn#{i} {name}{tparams}({', '.join(params)}) -> {r.typeref(m.returns)}{r.throws(m.throws)}")
+            if m.doc is not None:
+                lines.append(f"      doc: {_quote(program.strings[m.doc]).replace(chr(10), chr(92) + chr(110))}")
+        for i, tm in enumerate(program.meta.types):
+            decl = program.types[i]
+            name = program.strings[decl.name]
+            tparams = f"<{', '.join(program.strings[t] for t in tm.type_params)}>" if tm.type_params else ""
+            if decl.kind == 0:
+                fields = ", ".join(
+                    f"{program.strings[f]}: {r.typeref(ref)}" for f, (ref, _doc) in zip(decl.fields, tm.body)
+                )
+                lines.append(f"  type#{i + len(r.builtin_types)} struct {name}{tparams} {{ {fields} }}")
+            else:
+                variants = "; ".join(
+                    f"{program.strings[vn]}({', '.join(r.typeref(ref) for ref in refs)})"
+                    for (vn, _vf), (_vdoc, refs) in zip(decl.variants, tm.body)
+                )
+                lines.append(f"  type#{i + len(r.builtin_types)} enum {name}{tparams} {{ {variants} }}")
+            if tm.doc is not None:
+                lines.append(f"      doc: {_quote(program.strings[tm.doc]).replace(chr(10), chr(92) + chr(110))}")
 
     debug_by_pc: dict[int, tuple[int, int, int]] = {}
     if program.debug is not None:

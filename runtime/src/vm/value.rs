@@ -69,6 +69,8 @@ pub fn write_addr(frame: &FrameRef, addr: Addr, value: Value) -> Result<(), Runt
 // ---------------------------------------------------------------------------
 
 pub struct FunctionInfo {
+    /// M41a: this function's FUNCTIONS index -- the key into META.
+    pub index: usize,
     pub entry: usize,
     pub slot_count: usize,
     pub param_count: usize,
@@ -271,6 +273,23 @@ impl MapData {
 pub type MapRef = Rc<RefCell<MapData>>;
 
 // ---------------------------------------------------------------------------
+// Type values (M41a, docs/MAHC_FORMAT.md #5)
+// ---------------------------------------------------------------------------
+
+/// What a bare type name evaluates to. `kind` 0: `index` is a TYPES index
+/// (the built-in enums 0-2, then user types); kind 1: a primitive code
+/// (`PRIMITIVE_TYPE_NAMES`). Two Type values are `==` when kind and index
+/// match; `name` is what `to_string` shows.
+pub struct TypeData {
+    pub kind: u8,
+    pub index: usize,
+    pub name: Rc<str>,
+}
+
+/// M41a: the primitive types a `Type` can be, by code (`loadtype 1, code`).
+pub const PRIMITIVE_TYPE_NAMES: [&str; 8] = ["Number", "String", "Bool", "Function", "Vector", "Map", "None", "Type"];
+
+// ---------------------------------------------------------------------------
 // The value type
 // ---------------------------------------------------------------------------
 
@@ -289,6 +308,8 @@ pub enum Value {
     Promise(Rc<RefCell<PromiseData>>),
     Vector(VectorRef),
     Map(MapRef),
+    /// M41a (1.14): a `Type` value -- a bare type name.
+    Type(Rc<TypeData>),
     /// Interpreter-internal only: a defaulted-but-unbound parameter slot,
     /// until the callee's own `jmpset`-guarded default-computation code
     /// runs. Type name "Unknown"; never a real Mah value.
@@ -310,6 +331,7 @@ pub struct BuiltinTypeNames {
     pub promise: Rc<str>,
     pub vector: Rc<str>,
     pub map_: Rc<str>,
+    pub type_: Rc<str>,
     pub unknown: Rc<str>,
 }
 
@@ -324,6 +346,7 @@ impl BuiltinTypeNames {
             promise: Rc::from("Promise"),
             vector: Rc::from("Vector"),
             map_: Rc::from("Map"),
+            type_: Rc::from("Type"),
             unknown: Rc::from("Unknown"),
         }
     }
@@ -350,6 +373,7 @@ pub fn type_name_of(v: &Value, names: &BuiltinTypeNames) -> Rc<str> {
         Value::Promise(_) => names.promise.clone(),
         Value::Vector(_) => names.vector.clone(),
         Value::Map(_) => names.map_.clone(),
+        Value::Type(_) => names.type_.clone(),
         Value::Absent => names.unknown.clone(),
     }
 }
@@ -382,6 +406,7 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Promise(x), Value::Promise(y)) => Rc::ptr_eq(x, y),
         (Value::Vector(x), Value::Vector(y)) => Rc::ptr_eq(x, y),
         (Value::Map(x), Value::Map(y)) => Rc::ptr_eq(x, y),
+        (Value::Type(x), Value::Type(y)) => x.kind == y.kind && x.index == y.index,
         _ => false,
     }
 }

@@ -15,7 +15,7 @@ use std::fmt;
 
 pub const MAGIC: &[u8; 4] = b"MAHC";
 pub const MAJOR: u16 = 1;
-pub const MINOR: u16 = 13;
+pub const MINOR: u16 = 14;
 
 const SEC_STRINGS: u8 = 0x01;
 const SEC_CONSTANTS: u8 = 0x02;
@@ -28,6 +28,7 @@ const SEC_PARAMS: u8 = 0x07;
 const SEC_HANDLERS: u8 = 0x08;
 const SEC_DEBUG: u8 = 0x80;
 const SEC_TESTS: u8 = 0x81; // M28: optional, `mah test` builds only
+const SEC_META: u8 = 0x82; // M41a: optional, annotations/docs/defaults (docs/MAHC_FORMAT.md #4.10)
 
 const REQUIRED_SECTIONS: &[u8] = &[
     SEC_STRINGS,
@@ -195,6 +196,62 @@ pub struct FunctionDecl {
     pub params: Option<Vec<(usize, bool)>>,
 }
 
+/// M41a (docs/MAHC_FORMAT.md #4.10): a written type annotation, resolved to
+/// the declarations it names. Mirrors `mah/bytecode/program.py`'s `TypeRef`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypeRef {
+    Unknown,
+    /// `kind` 0: a TYPES index (built-in enums 0-2, then user types); 1: a
+    /// primitive code (Number, String, Bool, Function, Vector, Map, None, Type).
+    Named { kind: u8, index: usize, args: Vec<TypeRef> },
+    Fn { params: Vec<TypeRef>, ret: Box<TypeRef>, throws: Option<Vec<TypeRef>> },
+    Param(usize),
+    SelfType,
+    Never,
+    Trait { name: usize, args: Vec<TypeRef> },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParamMeta {
+    pub ty: TypeRef,
+    pub doc: Option<usize>,
+    /// 0 = no default, 1 = a default that isn't constant, 2 = constant.
+    pub default: u8,
+    pub const_index: Option<usize>,
+}
+
+/// One function's META entry; `has_meta` false = nothing was recorded.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FnMeta {
+    pub has_meta: bool,
+    pub doc: Option<usize>,
+    pub type_params: Vec<usize>,
+    pub params: Vec<ParamMeta>,
+    pub returns: TypeRef,
+    pub throws: Option<Vec<TypeRef>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypeMetaBody {
+    /// Per field: its type and doc.
+    Struct(Vec<(TypeRef, Option<usize>)>),
+    /// Per variant: its doc and its fields' types.
+    Enum(Vec<(Option<usize>, Vec<TypeRef>)>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeMeta {
+    pub doc: Option<usize>,
+    pub type_params: Vec<usize>,
+    pub body: TypeMetaBody,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Meta {
+    pub functions: Vec<FnMeta>,
+    pub types: Vec<TypeMeta>,
+}
+
 /// A frame-slot address: `(depth, slot)` -- walk `static_parent` `depth`
 /// times from the current frame, then index `slot`.
 pub type Addr = (u64, u64);
@@ -236,6 +293,14 @@ pub enum RawInstr {
     Retval { dest: Addr },
     CallMethod { recv: Addr, name: usize, args: Vec<Addr>, trait_: Option<usize> },
     CallMethodKw { recv: Addr, name: usize, args: Vec<Addr>, kwnames: Vec<usize>, trait_: Option<usize> },
+    /// M41a (1.14): callee, the Vector of positional arguments, the Map of keyword arguments
+    CallSpread { callee: Addr, args: Addr, kwargs: Addr },
+    /// M41a (1.14)
+    CallMethodSpread { recv: Addr, name: usize, args: Addr, kwargs: Addr, trait_: Option<usize> },
+    /// M41a (1.14): append a Vector's items to a Vector / merge a Map into a Map
+    Spread { target: Addr, source: Addr, keyword: bool },
+    /// M41a (1.14): a Type value -- `kind` 0 a TYPES index, 1 a primitive code
+    LoadType { kind: u8, index: usize, dest: Addr },
     Defmethod { closure: Addr, type_name: usize, trait_: Option<usize>, name: usize, is_method: bool },
     Detach { callee: Addr, args: Vec<Addr>, dest: Addr },
     DetachKw { callee: Addr, args: Vec<Addr>, kwnames: Vec<usize>, dest: Addr },
@@ -309,6 +374,8 @@ pub struct Program {
     /// M28 (docs/MAHC_FORMAT.md #4.9): the optional TESTS section -- only
     /// in a `mah test` build.
     pub tests: Vec<TestEntry>,
+    /// M41a (docs/MAHC_FORMAT.md #4.10): the optional META section.
+    pub meta: Option<Meta>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -465,6 +532,12 @@ fn read_sections(r: &mut Reader, minor: u16) -> FResult<Sections> {
                     return err("duplicate TESTS section");
                 }
                 payloads.insert(SEC_TESTS, payload);
+            } else if sec_id == SEC_META {
+                // M41a: likewise.
+                if payloads.contains_key(&SEC_META) {
+                    return err("duplicate META section");
+                }
+                payloads.insert(SEC_META, payload);
             }
             // else: an unknown optional section -- already consumed, skip it.
         }
@@ -824,6 +897,8 @@ fn opcode_info(op: u8) -> Option<(&'static str, Option<u16>)> {
         0x24 => ("callmethod", None),
         0x25 => ("defmethod", None),
         0x27 => ("callmethodkw", Some(1)),
+        0x2D => ("callspread", Some(14)),
+        0x2E => ("callmethodspread", Some(14)),
         0x28 => ("detach", None),
         0x29 => ("detachmethod", None),
         0x2A => ("await", None),
@@ -840,6 +915,8 @@ fn opcode_info(op: u8) -> Option<(&'static str, Option<u16>)> {
         0x38 => ("vector", Some(3)),
         0x39 => ("map", Some(3)),
         0x3A => ("matchtype", Some(4)),
+        0x3B => ("loadtype", Some(14)),
+        0x3C => ("spread", Some(14)),
         0x40 => ("deferpush", None),
         0x41 => ("deferadd", None),
         0x42 => ("deferpeek", None),
@@ -870,6 +947,8 @@ fn native_since_minor(name: &str) -> Option<u16> {
         | "fs.write" | "fs.close" => Some(12),
         "process.args" | "process.exit" | "process.env_get" | "process.env_set" | "process.env_remove"
         | "process.env_all" | "process.cwd" | "process.pid" | "process.platform" | "process.run" => Some(13),
+        "reflect.type_of" | "reflect.signature" | "reflect.schema" | "reflect.methods" | "reflect.implements"
+        | "reflect.construct" | "reflect.construct_variant" => Some(14),
         _ => None,
     }
 }
@@ -954,6 +1033,32 @@ fn decode_one_instr(name: &str, pr: &mut Reader, ctx: &CodeCtx, _i: u64) -> FRes
             let args = decode_addr_list(pr)?;
             let trait_ = decode_s_opt(pr, ctx)?;
             RawInstr::CallMethod { recv, name: name_idx, args, trait_ }
+        }
+        "callspread" => {
+            let callee = decode_addr(pr)?;
+            let args = decode_addr(pr)?;
+            let kwargs = decode_addr(pr)?;
+            RawInstr::CallSpread { callee, args, kwargs }
+        }
+        "callmethodspread" => {
+            let recv = decode_addr(pr)?;
+            let name_idx = decode_s(pr, ctx)?;
+            let args = decode_addr(pr)?;
+            let kwargs = decode_addr(pr)?;
+            let trait_ = decode_s_opt(pr, ctx)?;
+            RawInstr::CallMethodSpread { recv, name: name_idx, args, kwargs, trait_ }
+        }
+        "spread" => {
+            let target = decode_addr(pr)?;
+            let source = decode_addr(pr)?;
+            let keyword = decode_b(pr)?;
+            RawInstr::Spread { target, source, keyword }
+        }
+        "loadtype" => {
+            let kind = pr.varuint()?;
+            let index = pr.varuint()? as usize;
+            let dest = decode_addr(pr)?;
+            RawInstr::LoadType { kind: kind.min(255) as u8, index, dest }
         }
         "defmethod" => {
             let closure = decode_addr(pr)?;
@@ -1142,6 +1247,19 @@ fn validate_instr(instr: &RawInstr, i: usize, ncode: u64, ctx: &CodeCtx) -> FRes
                 ));
             }
         }
+        RawInstr::LoadType { kind, index, .. } => match kind {
+            0 => {
+                if *index >= ctx.builtin_types + ctx.ntypes {
+                    return err(format!("'loadtype' at instruction {i}: type index {index} out of range"));
+                }
+            }
+            1 => {
+                if *index >= 8 {
+                    return err(format!("'loadtype' at instruction {i}: primitive type code {index} out of range"));
+                }
+            }
+            other => return err(format!("'loadtype' at instruction {i}: unknown kind {other}")),
+        },
         RawInstr::Map { pairs, .. } => {
             if pairs.len() % 2 != 0 {
                 return err(format!(
@@ -1284,6 +1402,195 @@ fn newer_minor_message(r: &mut Reader, minor: u16) -> String {
     format!("{message}: it uses natives this VM doesn't have ({}); upgrade mah to run it", missing.join(", "))
 }
 
+/// M41a (docs/MAHC_FORMAT.md #4.10): the META section -- one entry per
+/// function (FUNCTIONS order) and per user type (TYPES order, built-ins
+/// excluded), each validated against what it describes. Mirrors
+/// `mah/bytecode/decode.py`'s `_parse_meta`, messages included.
+fn parse_meta(payload: &[u8], functions: &[FunctionDecl], types: &[TypeDecl], ctx: &CodeCtx) -> FResult<Meta> {
+    struct M<'a, 'c> {
+        pr: Reader<'a>,
+        ctx: &'c CodeCtx<'c>,
+    }
+    impl M<'_, '_> {
+        fn str_idx(&mut self) -> FResult<usize> {
+            let idx = self.pr.varuint()? as usize;
+            if idx >= self.ctx.nstrings {
+                return err(format!("META: string index {idx} out of range"));
+            }
+            Ok(idx)
+        }
+        fn opt_str(&mut self) -> FResult<Option<usize>> {
+            let v = self.pr.varuint()?;
+            if v == 0 {
+                return Ok(None);
+            }
+            let idx = (v - 1) as usize;
+            if idx >= self.ctx.nstrings {
+                return err(format!("META: string index {idx} out of range"));
+            }
+            Ok(Some(idx))
+        }
+        fn count(&mut self) -> FResult<usize> {
+            let n = self.pr.varuint()?;
+            if n > self.pr.remaining() as u64 {
+                return err("META: count larger than the remaining payload");
+            }
+            Ok(n as usize)
+        }
+        fn throws_clause(&mut self) -> FResult<Option<Vec<TypeRef>>> {
+            let flag = self.pr.u8()?;
+            match flag {
+                0 => Ok(None),
+                1 => {
+                    let n = self.count()?;
+                    let mut out = Vec::with_capacity(n);
+                    for _ in 0..n {
+                        out.push(self.typeref()?);
+                    }
+                    Ok(Some(out))
+                }
+                other => err(format!("META: invalid throws flag {other}")),
+            }
+        }
+        fn refs(&mut self) -> FResult<Vec<TypeRef>> {
+            let n = self.count()?;
+            let mut out = Vec::with_capacity(n);
+            for _ in 0..n {
+                out.push(self.typeref()?);
+            }
+            Ok(out)
+        }
+        fn typeref(&mut self) -> FResult<TypeRef> {
+            let tag = self.pr.u8()?;
+            match tag {
+                0 => Ok(TypeRef::Unknown),
+                4 => Ok(TypeRef::SelfType),
+                5 => Ok(TypeRef::Never),
+                1 => {
+                    let kind = self.pr.u8()?;
+                    let index = self.pr.varuint()? as usize;
+                    match kind {
+                        0 => {
+                            if index >= self.ctx.builtin_types + self.ctx.ntypes {
+                                return err(format!("META: type index {index} out of range"));
+                            }
+                        }
+                        1 => {
+                            if index >= 8 {
+                                return err(format!("META: primitive type code {index} out of range"));
+                            }
+                        }
+                        other => return err(format!("META: unknown named-type kind {other}")),
+                    }
+                    Ok(TypeRef::Named { kind, index, args: self.refs()? })
+                }
+                2 => {
+                    let params = self.refs()?;
+                    let ret = Box::new(self.typeref()?);
+                    Ok(TypeRef::Fn { params, ret, throws: self.throws_clause()? })
+                }
+                3 => Ok(TypeRef::Param(self.str_idx()?)),
+                6 => {
+                    let name = self.str_idx()?;
+                    Ok(TypeRef::Trait { name, args: self.refs()? })
+                }
+                other => err(format!("META: unknown type tag {other}")),
+            }
+        }
+    }
+    let mut m = M { pr: Reader::new(payload), ctx };
+    let nfunctions = m.pr.varuint()?;
+    if nfunctions != functions.len() as u64 {
+        return err(format!("META: describes {nfunctions} function(s) but FUNCTIONS declares {}", functions.len()));
+    }
+    let mut fn_metas = Vec::with_capacity(functions.len());
+    for f in functions {
+        let flags = m.pr.u8()?;
+        if flags & !1 != 0 {
+            return err(format!("META: invalid flags byte {flags} (only bit 0 is defined)"));
+        }
+        if flags & 1 == 0 {
+            fn_metas.push(FnMeta {
+                has_meta: false,
+                doc: None,
+                type_params: Vec::new(),
+                params: Vec::new(),
+                returns: TypeRef::Unknown,
+                throws: None,
+            });
+            continue;
+        }
+        let doc = m.opt_str()?;
+        let ntp = m.count()?;
+        let mut type_params = Vec::with_capacity(ntp);
+        for _ in 0..ntp {
+            type_params.push(m.str_idx()?);
+        }
+        let nparams = m.pr.varuint()?;
+        if nparams != f.param_count {
+            return err(format!("META: function declares {} parameter(s) but META lists {nparams}", f.param_count));
+        }
+        let mut params = Vec::new();
+        for _ in 0..nparams {
+            let ty = m.typeref()?;
+            let pdoc = m.opt_str()?;
+            let default = m.pr.u8()?;
+            let mut const_index = None;
+            if default == 2 {
+                let c = m.pr.varuint()? as usize;
+                if c >= ctx.nconsts {
+                    return err(format!("META: constant index {c} out of range"));
+                }
+                const_index = Some(c);
+            } else if default > 2 {
+                return err(format!("META: invalid default flag {default}"));
+            }
+            params.push(ParamMeta { ty, doc: pdoc, default, const_index });
+        }
+        let returns = m.typeref()?;
+        let throws = m.throws_clause()?;
+        fn_metas.push(FnMeta { has_meta: true, doc, type_params, params, returns, throws });
+    }
+    let ntypes = m.pr.varuint()?;
+    if ntypes != types.len() as u64 {
+        return err(format!("META: describes {ntypes} type(s) but TYPES declares {}", types.len()));
+    }
+    let mut type_metas = Vec::with_capacity(types.len());
+    for decl in types {
+        let doc = m.opt_str()?;
+        let ntp = m.count()?;
+        let mut type_params = Vec::with_capacity(ntp);
+        for _ in 0..ntp {
+            type_params.push(m.str_idx()?);
+        }
+        let body = match &decl.body {
+            TypeBody::Struct(fields) => {
+                let mut out = Vec::with_capacity(fields.len());
+                for _ in fields {
+                    let ty = m.typeref()?;
+                    out.push((ty, m.opt_str()?));
+                }
+                TypeMetaBody::Struct(out)
+            }
+            TypeBody::Enum(variants) => {
+                let mut out = Vec::with_capacity(variants.len());
+                for (_vname, vfields) in variants {
+                    let vdoc = m.opt_str()?;
+                    let mut refs = Vec::with_capacity(vfields.len());
+                    for _ in vfields {
+                        refs.push(m.typeref()?);
+                    }
+                    out.push((vdoc, refs));
+                }
+                TypeMetaBody::Enum(out)
+            }
+        };
+        type_metas.push(TypeMeta { doc, type_params, body });
+    }
+    check_consumed(&m.pr, "META")?;
+    Ok(Meta { functions: fn_metas, types: type_metas })
+}
+
 /// M28 (docs/MAHC_FORMAT.md #4.9): `count x (name str, slot varuint, line
 /// varuint)`; `slot` must be a slot of the main function's frame.
 fn parse_tests(payload: &[u8], nstrings: usize, nslots: u64) -> FResult<Vec<TestEntry>> {
@@ -1376,7 +1683,12 @@ pub fn decode(data: &[u8]) -> FResult<Program> {
         None => Vec::new(),
     };
 
-    Ok(Program { strings, constants, types, natives, functions, code, debug, minor, handlers, tests })
+    let meta = match sections.payloads.get(&SEC_META) {
+        Some(p) => Some(parse_meta(p, &functions, &types, &ctx)?),
+        None => None,
+    };
+
+    Ok(Program { strings, constants, types, natives, functions, code, debug, minor, handlers, tests, meta })
 }
 
 #[cfg(test)]
@@ -1444,6 +1756,82 @@ mod tests {
         assert!(program.handlers.is_empty());
     }
 
+    /// `minimal_file`, but with `code` (a whole CODE section payload) and a
+    /// STRINGS/NATIVES-free layout -- for opcode tests.
+    fn file_with_code(minor: u16, code: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(MAGIC);
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&minor.to_le_bytes());
+        push_section(&mut out, 0x01, &[0]);
+        push_section(&mut out, 0x02, &[0]);
+        push_section(&mut out, 0x03, &[0]);
+        push_section(&mut out, 0x04, &[0]);
+        push_section(&mut out, 0x05, &[1, 0, 0, 0, 0]);
+        push_section(&mut out, 0x06, code);
+        push_section(&mut out, 0x07, &[0]);
+        push_section(&mut out, 0x08, &[0]);
+        out
+    }
+
+    #[test]
+    fn decodes_loadtype_and_the_spread_opcodes() {
+        // loadtype (primitive 7 = Type) into (0,0); spread (0,0) <- (0,0), keyword;
+        // callspread callee (0,0) args (0,0) kwargs (0,0); halt
+        let code = [4, 0x3B, 1, 7, 0, 0, 0x3C, 0, 0, 0, 0, 1, 0x2D, 0, 0, 0, 0, 0, 0, 0x00];
+        let program = decode(&file_with_code(14, &code)).expect("should decode");
+        assert_eq!(program.code[0], RawInstr::LoadType { kind: 1, index: 7, dest: (0, 0) });
+        assert_eq!(program.code[1], RawInstr::Spread { target: (0, 0), source: (0, 0), keyword: true });
+        assert_eq!(program.code[2], RawInstr::CallSpread { callee: (0, 0), args: (0, 0), kwargs: (0, 0) });
+    }
+
+    #[test]
+    fn the_new_opcodes_need_minor_14() {
+        let code = [2, 0x3B, 1, 7, 0, 0, 0x00];
+        let e = decode(&file_with_code(13, &code)).unwrap_err();
+        assert_eq!(e.0, "opcode 'loadtype' at instruction 0 requires minor version >= 14, but this file's minor version is 13");
+    }
+
+    #[test]
+    fn loadtype_operands_are_validated() {
+        for (kind, index, message) in [
+            (0u8, 9u8, "'loadtype' at instruction 0: type index 9 out of range"),
+            (1, 8, "'loadtype' at instruction 0: primitive type code 8 out of range"),
+            (2, 0, "'loadtype' at instruction 0: unknown kind 2"),
+        ] {
+            let code = [2, 0x3B, kind, index, 0, 0, 0x00];
+            assert_eq!(decode(&file_with_code(14, &code)).unwrap_err().0, message);
+        }
+    }
+
+    #[test]
+    fn decodes_a_meta_section() {
+        // one function without metadata, no user types
+        let mut data = minimal_file(14);
+        push_section(&mut data, 0x82, &[1, 0, 0]);
+        let program = decode(&data).expect("should decode");
+        let meta = program.meta.expect("META was there");
+        assert_eq!(meta.functions.len(), 1);
+        assert!(!meta.functions[0].has_meta);
+        assert!(meta.types.is_empty());
+        // ...and without one, there is none (older encoders, or META stripped)
+        assert!(decode(&minimal_file(14)).unwrap().meta.is_none());
+    }
+
+    #[test]
+    fn meta_must_describe_the_files_functions() {
+        let mut data = minimal_file(14);
+        push_section(&mut data, 0x82, &[5]);
+        assert_eq!(decode(&data).unwrap_err().0, "META: describes 5 function(s) but FUNCTIONS declares 1");
+        let mut data = minimal_file(14);
+        push_section(&mut data, 0x82, &[1, 3]);
+        assert_eq!(decode(&data).unwrap_err().0, "META: invalid flags byte 3 (only bit 0 is defined)");
+        let mut data = minimal_file(14);
+        push_section(&mut data, 0x82, &[1, 0, 0]);
+        push_section(&mut data, 0x82, &[1, 0, 0]);
+        assert_eq!(decode(&data).unwrap_err().0, "duplicate META section");
+    }
+
     #[test]
     fn minor_0_without_params_ok() {
         let data = minimal_file(0);
@@ -1496,7 +1884,7 @@ mod tests {
         // M27: the current maximum is 5; the file has no sections at all,
         // so there are no natives to name.
         assert_eq!(e.0, format!("unsupported minor version 99 (this VM supports up to minor version {MINOR})"));
-        assert_eq!(MINOR, 13);
+        assert_eq!(MINOR, 14);
     }
 
     #[test]

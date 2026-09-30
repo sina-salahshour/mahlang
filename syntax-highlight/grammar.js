@@ -721,7 +721,16 @@ module.exports = grammar({
     // `function` field above).
     _args: ($) => seq($._arg, repeat(seq(",", $._arg))),
 
-    _arg: ($) => choice($.expr, $.keyword_argument),
+    _arg: ($) => choice($.expr, $.keyword_argument, $.spread_argument),
+
+    // M41a (spread calls): `...xs` expands a Vector into positional
+    // arguments, `**m` a Map into keyword arguments (`f(a, ...xs, k: v,
+    // **m)`, `obj.m(...xs)`). Like `keyword_argument`, only ever inside a
+    // call's `( ... )`; `**` is the exponent operator everywhere else, but
+    // an expression can't start with it, so here (right after `(` or `,`)
+    // it can only be the spread. Ordering (positional before keyword) isn't
+    // enforced here, matching this file's convention.
+    spread_argument: ($) => seq(choice("...", "**"), field("value", $.expr)),
 
     // `name: value` keyword argument at a call site (`area(w: 2, h: 5)`,
     // `r.scaled(k: 3, add: 1)`, `print("a", sep: ", ")`,

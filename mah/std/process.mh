@@ -33,55 +33,55 @@ extern fn native_run(
     stdin: String
 ) -> Promise<Vector<Unknown>> = "process.run"
 
-# A program that couldn't be started: `kind` is "not_found",
-# "permission_denied" or "other"; `command` the program's name (for
-# `shell`, the command line).
+## A program that couldn't be started: `kind` is "not_found",
+## "permission_denied" or "other"; `command` the program's name (for
+## `shell`, the command line).
 struct ProcessError { kind: String, command: String, description: String }
 
 impl Error for ProcessError {
     fn message(self) -> String { self.command + ": " + self.description }
 }
 
-# What a finished program left: its exit code (128 plus the signal number if
-# a signal killed it) and what it wrote, decoded as UTF-8 (invalid bytes
-# become U+FFFD).
+## What a finished program left: its exit code (128 plus the signal number if
+## a signal killed it) and what it wrote, decoded as UTF-8 (invalid bytes
+## become U+FFFD).
 struct Output { code: Number, stdout: String, stderr: String }
 
 impl Output {
-    # Whether it exited with code 0.
+    ## Whether it exited with code 0.
     fn ok(self) -> Bool { self.code == 0 }
 }
 
-# The program's arguments: what follows `--` in `mah run FILE -- ARGS`.
+## The program's arguments: what follows `--` in `mah run FILE -- ARGS`.
 export fn args() -> Vector<String> { native_args() }
 
-# Ends the program at once with this exit code (0 to 255): output written so
-# far is flushed, but pending `defer`s don't run, detached tasks, timers and
-# I/O are abandoned, and no `try`/`catch` can intercept it.
+## Ends the program at once with this exit code (0 to 255): output written so
+## far is flushed, but pending `defer`s don't run, detached tasks, timers and
+## I/O are abandoned, and no `try`/`catch` can intercept it.
 export fn exit(code: Number = 0) -> Never { native_exit(code) }
 
-# The environment variable's value, or `none` if it isn't set.
+## The environment variable's value, or `none` if it isn't set.
 export fn env_get(name: String) -> Option<String> {
     let value = native_env_get(name)
     if value == none { none } else { some(value) }
 }
 
-# Sets a variable (for this program and the programs it runs).
+## Sets a variable (for this program and the programs it runs).
 export fn env_set(name: String, value: String) { native_env_set(name, value) }
 
-# Removes a variable (nothing happens if it isn't set).
+## Removes a variable (nothing happens if it isn't set).
 export fn env_remove(name: String) { native_env_remove(name) }
 
-# Every variable, sorted by name.
+## Every variable, sorted by name.
 export fn env() -> Map<String, String> { native_env_all() }
 
-# The current directory, as an absolute path.
+## The current directory, as an absolute path.
 export fn cwd() -> String { native_cwd() }
 
-# This program's process id.
+## This program's process id.
 export fn pid() -> Number { native_pid() }
 
-# "linux", "macos", "windows", or else the operating system's own name.
+## "linux", "macos", "windows", or else the operating system's own name.
 export fn platform() -> String { native_platform() }
 
 fn start(
@@ -100,9 +100,9 @@ fn start(
     throw ProcessError { kind: r[1], command: command, description: r[2] }
 }
 
-# Runs `program` (looked up in PATH, no shell) with `args`, waits for it and
-# returns what it wrote. `cwd` is its directory (default: this program's),
-# `env` variables added to the environment it gets, `stdin` its input.
+## Runs `program` (looked up in PATH, no shell) with `args`, waits for it and
+## returns what it wrote. `cwd` is its directory (default: this program's),
+## `env` variables added to the environment it gets, `stdin` its input.
 export fn run(
     program: String,
     args: Vector<String> = [],
@@ -113,8 +113,8 @@ export fn run(
     start(program, args, cwd, env, stdin, program)
 }
 
-# Runs a command line with the system shell (`/bin/sh -c`, or `cmd /C` on
-# Windows). A command the shell can't find is just a non-zero exit code.
+## Runs a command line with the system shell (`/bin/sh -c`, or `cmd /C` on
+## Windows). A command the shell can't find is just a non-zero exit code.
 export fn shell(
     command: String,
     cwd: Option<String> = none,

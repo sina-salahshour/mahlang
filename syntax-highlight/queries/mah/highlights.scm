@@ -80,6 +80,8 @@
 "=" @operator
 ".." @operator
 "..=" @operator
+; M41a: spread arguments, `f(...xs, **m)`
+"..." @operator
 
 ; Punctuation
 ;
@@ -110,6 +112,10 @@
 (number) @number
 (string) @string
 (comment) @comment
+; M41a: `##` comments are doc comments (docs/REFLECTION.md); listed after the
+; generic capture above, so they win.
+((comment) @comment.documentation
+  (#match? @comment.documentation "^##"))
 
 ; Type names -- struct/enum/trait declarations and any reference to a
 ; struct/enum/trait/impl-target type name in a literal, pattern, or impl
@@ -195,7 +201,7 @@
 ; -- also matched generically by text wherever else they appear.
 ((identifier) @type.builtin
   (#any-of? @type.builtin
-    "Number" "String" "Bool" "Function" "Option" "Promise" "Vector" "Map"
+    "Number" "String" "Bool" "Function" "Option" "Promise" "Vector" "Map" "Type" "RuntimeError"
     "Printable" "Index" "IndexAssign" "Unknown" "Never" "None"))
 
 ; M28: the contextual `test` of a test block -- last, so it wins over the

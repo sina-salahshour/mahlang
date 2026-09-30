@@ -92,6 +92,7 @@ pub fn format_value(val: &Value, recurse: &mut dyn FnMut(&Value) -> RResult<Stri
                 format!("[{}]", parts.join(", "))
             }
         }
+        Value::Type(t) => t.name.to_string(),
         Value::Absent => "<absent>".to_string(),
     })
 }
@@ -358,7 +359,7 @@ pub fn deep_copy(value: &Value, memo: &mut HashMap<usize, Value>) -> Value {
             out.borrow_mut().fields = copied;
             Value::Enum(out)
         }
-        Value::Absent => value.clone(),
+        Value::Type(_) | Value::Absent => value.clone(),
     }
 }
 

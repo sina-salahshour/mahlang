@@ -159,6 +159,22 @@ mirroring `_gen_method_call`: `static_address` set -> an ordinary `detach`
 `detach some_fn(...)`); `trait_name` set or neither set -> `detachmethod`,
 the receiver being `args[0]` for the former and `obj` for the latter.
 
+M41a (docs/REFLECTION.md, docs/MAHC_FORMAT.md 1.14) adds three IR ops and one
+helper:
+- `loadtype`: `arg1` = `("struct" | "enum" | "prim", name)` (set by the
+  resolver on an `Ident`), `dest` = where the `Type` value goes.
+- `callspread` / `callmethodspread`: like `call`/`callmethod` (`callee`/`recv`
+  first, and `(method_name, ..., trait, source_position)` in `arg2` for the
+  latter), but the argument operands are one Vector address and one Map
+  address, built by `_gen_spread_args` for a call that has `...`/`**`
+  arguments. Both are followed by `retval`.
+- `spread`: `arg1` = the Vector (or Map) being built, `arg2` = the Vector
+  (Map) to append (merge) into it, `dest` = the keyword flag (again a
+  repurposed slot, like `setfield`'s).
+The closure IR op's metadata also carries `(FnExpr, type parameters in scope)`
+for `lower.py`'s META section, and `CodeBuffer.struct_asts`/`enum_asts` the
+type declarations.
+
 New opcodes for M9 (`defer`, see docs/V2_DESIGN.md's M9 milestone): a
 `DeferStmt` is compiled as the body of a synthesized zero-arg `FnExpr`
 (parser-built), so `defer <stmt>` codegen is just `gen_expr` on that
@@ -230,6 +246,7 @@ from .ast_nodes import (
     ReturnStmt,
     SinExpr,
     SleepAsyncExpr,
+    SpreadArg,
     StringLit,
     StructDecl,
     StructLit,
@@ -309,6 +326,11 @@ class CodeBuffer:
         # into the HANDLERS section (addresses need no remapping, exactly
         # like jump targets -- see that module's docstring).
         self.handlers: list = []
+        # M41a (docs/MAHC_FORMAT.md #4.10): the struct/enum declarations
+        # codegen met, by name -- `lower.py`'s META section reads their
+        # written annotations and doc comments from them.
+        self.struct_asts: dict = {}
+        self.enum_asts: dict = {}
 
     def emit(self, code, address: int | None = None) -> int:
         if address is None:
@@ -348,6 +370,11 @@ class Codegen:
         # whatever gets emitted next -- see `gen_stmt`/`gen_expr`/
         # `_gen_pattern_check` and `CodeBuffer.current_pos`/`positions`.
         self._pos = None
+        # M41a: the type parameter names in scope for the function being
+        # compiled (its own, its enclosing functions', and the impl's/
+        # trait's for a method) -- META records `T` in an annotation as a
+        # parameter, not a type name.
+        self._tparam_scopes: list = [frozenset()]
 
     def _temp(self) -> tuple:
         return (0, self.frame_stack[-1].alloc())
@@ -365,10 +392,12 @@ class Codegen:
         # itself) populated.
         for stmt in stmts:
             if isinstance(stmt, (TraitDecl, ImplDecl)):
+                self._tparam_scopes.append(frozenset(tp.name for tp in stmt.type_params))
                 for method in stmt.methods:
                     if method.fn is not None:
                         addr = self.gen_expr(method.fn)
                         self.buf.emit(("=", addr, None, (0, method.slot)))
+                self._tparam_scopes.pop()
         for stmt in stmts:
             if isinstance(stmt, ImplDecl):
                 for name, slot, is_method in stmt.registrations:
@@ -475,9 +504,10 @@ class Codegen:
             self.buf.emit(("=", src, None, (0, stmt.slot)))
             self.buf.tests.append((stmt.name, stmt.slot, stmt.position))
         elif isinstance(stmt, StructDecl):
-            pass  # purely a resolve-time/compile-time declaration; no runtime code
+            # purely a resolve-time/compile-time declaration; no runtime code
+            self.buf.struct_asts[stmt.name] = stmt
         elif isinstance(stmt, EnumDecl):
-            pass  # purely a resolve-time/compile-time declaration; no runtime code
+            self.buf.enum_asts[stmt.name] = stmt
         elif isinstance(stmt, (TraitDecl, ImplDecl)):
             pass  # M12: method closures + defmethod are hoisted in `generate` above
         elif isinstance(stmt, DeferStmt):
@@ -983,7 +1013,14 @@ class Codegen:
             self.buf.emit(("ld", expr.value, None, tmp))
             return tmp
         if isinstance(expr, Ident):
+            if expr.type_value is not None:
+                # M41a: a bare type name -- `loadtype` (docs/MAHC_FORMAT.md #4.6).
+                dest = self._temp()
+                self.buf.emit(("loadtype", expr.type_value, None, dest))
+                return dest
             return expr.address
+        if isinstance(expr, SpreadArg):
+            raise AssertionError("a spread argument outside a call's argument list")
         if isinstance(expr, Unary):
             src = self.gen_expr(expr.operand)
             tmp = self._temp()
@@ -1207,6 +1244,7 @@ class Codegen:
         # "used outside a loop" error.
         saved_while_stack = self._while_stack
         self._while_stack = []
+        self._tparam_scopes.append(self._tparam_scopes[-1] | frozenset(tp.name for tp in fn.type_params))
         # M25 (docs/MAHC_FORMAT.md #5.5): this function gets an implicit
         # F-region wrapping its ENTIRE body (default-parameter prologue
         # included) iff it contains a `defer` anywhere in its own code --
@@ -1259,6 +1297,7 @@ class Codegen:
             self._emit_handler_entries(segments, f_handler, err_f[1])
         self._while_stack = saved_while_stack
         self._defer_depth = saved_defer_depth
+        tparam_scope = self._tparam_scopes.pop()
         self._fn_depth -= 1
         self._fn_stack.pop()
         slot_count = self.frame_stack.pop().next_slot
@@ -1280,6 +1319,8 @@ class Codegen:
                     fn.name,
                     tuple(fn.params),
                     tuple(d is not None for d in fn.defaults),
+                    # M41a: what META (docs/MAHC_FORMAT.md #4.10) records.
+                    (fn, tparam_scope),
                 ),
                 dest,
             )
@@ -1308,8 +1349,73 @@ class Codegen:
         self.buf.emit(("native", "io.read_line", (prompt,), dest))
         return dest
 
+    @staticmethod
+    def _has_spread(args: list, kwargs: list) -> bool:
+        return any(isinstance(a, SpreadArg) for a in args) or any(name is None for name, _v, _p in kwargs)
+
+    def _gen_spread_args(self, args: list, kwargs: list) -> tuple:
+        """M41a: a call with `...xs`/`**m` arguments -- build the Vector of
+        positional arguments and the Map of keyword arguments the
+        `callspread`/`callmethodspread` opcodes take. Everything is evaluated
+        left to right (positional items, then keyword items). The Vector
+        starts as the plain items before the first spread; each `...xs` then
+        appends a copy of xs's items (`spread`), and a run of plain items
+        after it is built as a small Vector and appended the same way. The
+        Map works the same with keyword items (a `name: v` item is a one-entry
+        Map merged in), so a keyword given twice is caught at run time."""
+        vec = self._temp()
+        leading = []
+        rest = []
+        seen_spread = False
+        for arg in args:
+            if isinstance(arg, SpreadArg):
+                seen_spread = True
+            (rest if seen_spread else leading).append(arg)
+        self.buf.emit(("vector", tuple(self.gen_expr(a) for a in leading), None, vec))
+        run: list = []
+
+        def flush_run() -> None:
+            if run:
+                part = self._temp()
+                self.buf.emit(("vector", tuple(run), None, part))
+                self.buf.emit(("spread", vec, part, False))
+                run.clear()
+
+        for arg in rest:
+            if isinstance(arg, SpreadArg):
+                flush_run()
+                self.buf.emit(("spread", vec, self.gen_expr(arg.value), False))
+            else:
+                run.append(self.gen_expr(arg))
+        flush_run()
+        kw_map = self._temp()
+        first_spread = next((i for i, (name, _v, _p) in enumerate(kwargs) if name is None), len(kwargs))
+        flat = []
+        for name, value, _pos in kwargs[:first_spread]:
+            key = self._temp()
+            self.buf.emit(("ld", name, None, key))
+            flat.append(key)
+            flat.append(self.gen_expr(value))
+        self.buf.emit(("map", tuple(flat), None, kw_map))
+        for name, value, _pos in kwargs[first_spread:]:
+            if name is None:
+                self.buf.emit(("spread", kw_map, self.gen_expr(value.value), True))
+            else:
+                key = self._temp()
+                self.buf.emit(("ld", name, None, key))
+                part = self._temp()
+                self.buf.emit(("map", (key, self.gen_expr(value)), None, part))
+                self.buf.emit(("spread", kw_map, part, True))
+        return vec, kw_map
+
     def _gen_call(self, expr: Call) -> tuple:
         callee_addr = self.gen_expr(expr.callee)
+        if self._has_spread(expr.args, expr.kwargs):
+            vec, kw_map = self._gen_spread_args(expr.args, expr.kwargs)
+            dest = self._temp()
+            self.buf.emit(("callspread", callee_addr, (vec, kw_map), None))
+            self.buf.emit(("retval", None, None, dest))
+            return dest
         arg_addrs = tuple(self.gen_expr(a) for a in expr.args)
         dest = self._temp()
         if not expr.kwargs:
@@ -1324,6 +1430,8 @@ class Codegen:
         """M12: three shapes, chosen by what the resolver set on `expr` --
         see `ast_nodes.py`'s `MethodCall` docstring and this module's own
         docstring for the `defmethod`/`callmethod` opcode shapes."""
+        if self._has_spread(expr.args, expr.kwargs):
+            return self._gen_spread_method_call(expr)
         if expr.static_address is not None:
             # `Type.fn(args)` resolved at compile time to a specific hidden
             # global slot -- an ordinary `call`/`callkw`, no runtime
@@ -1388,6 +1496,34 @@ class Codegen:
             self.buf.emit(
                 ("callmethodkw", recv, (expr.method, arg_addrs + kw_addrs, kw_names, None, expr.position), None)
             )
+        self.buf.emit(("retval", None, None, dest))
+        return dest
+
+    def _gen_spread_method_call(self, expr: MethodCall) -> tuple:
+        """M41a: a method call with spread arguments -- `callspread` for a
+        statically resolved `Type.fn(...)`, else `callmethodspread` (the
+        receiver being `args[0]` for `Trait.m(recv, ...)`/a native inherent
+        `Type.m(recv, ...)`, which must then be a plain argument)."""
+        dest = self._temp()
+        if expr.static_address is not None:
+            vec, kw_map = self._gen_spread_args(expr.args, expr.kwargs)
+            self.buf.emit(("callspread", expr.static_address, (vec, kw_map), None))
+            self.buf.emit(("retval", None, None, dest))
+            return dest
+        if expr.trait_name is not None or expr.native_inherent:
+            trait = expr.trait_name if expr.trait_name is not None else None
+            if isinstance(expr.args[0], SpreadArg):
+                raise SyntaxError(
+                    f"the receiver of '{expr.obj.name}.{expr.method}(...)' can't be a spread argument "
+                    f"at position {expr.position}"
+                )
+            recv = self.gen_expr(expr.args[0])
+            vec, kw_map = self._gen_spread_args(expr.args[1:], expr.kwargs)
+        else:
+            trait = None
+            recv = self.gen_expr(expr.obj)
+            vec, kw_map = self._gen_spread_args(expr.args, expr.kwargs)
+        self.buf.emit(("callmethodspread", recv, (expr.method, vec, kw_map, trait, expr.position), None))
         self.buf.emit(("retval", None, None, dest))
         return dest
 

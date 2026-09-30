@@ -30,7 +30,11 @@ from decimal import Decimal
 # like `Option`/`Promise`, so it gets the native `Printable.to_string` any
 # other built-in type gets (docs/MAHC_FORMAT.md #6.7) and users can't
 # redeclare it (the same rule as redeclaring `Option`).
-BUILTIN_TYPE_NAMES = ("Number", "String", "Bool", "Function", "Option", "Promise", "Vector", "Map", "RuntimeError")
+# M41a (1.14, docs/REFLECTION.md): `Type`, the runtime value a bare type name
+# evaluates to, joins them (Printable, like every built-in type).
+BUILTIN_TYPE_NAMES = (
+    "Number", "String", "Bool", "Function", "Option", "Promise", "Vector", "Map", "RuntimeError", "Type",
+)
 
 # M12: system traits -- trait name -> {method name -> parameter names}.
 # User types opt in with a normal `impl`. M19 adds `Index` (`x[k]`) and
@@ -52,6 +56,29 @@ SYSTEM_TRAIT_NATIVE_TYPES = {
 }
 
 
+# M41a (docs/MAHC_FORMAT.md #5, `loadtype`): the primitive types a `Type` can
+# be, by code -- `loadtype 1, code`.
+PRIMITIVE_TYPE_NAMES = ("Number", "String", "Bool", "Function", "Vector", "Map", "None", "Type")
+
+
+class TypeValue:
+    """M41a: a `Type` value -- what a bare type name evaluates to. `kind` 0:
+    `index` is a TYPES-section index (the built-in enums 0-2, then user
+    types); kind 1: `index` is a primitive code (PRIMITIVE_TYPE_NAMES).
+    Two Type values are `==` when kind and index match. `name` is the type's
+    (demangled) name, for `to_string`."""
+
+    __slots__ = ("kind", "index", "name")
+
+    def __init__(self, kind: int, index: int, name: str):
+        self.kind = kind
+        self.index = index
+        self.name = name
+
+    def __repr__(self):
+        return f"TypeValue({self.name})"
+
+
 class Frame:
     __slots__ = ("slots", "static_parent")
 
@@ -61,9 +88,9 @@ class Frame:
 
 
 class Closure:
-    __slots__ = ("code_address", "defining_frame", "slot_count", "param_count", "name", "params")
+    __slots__ = ("code_address", "defining_frame", "slot_count", "param_count", "name", "params", "index")
 
-    def __init__(self, code_address, defining_frame, slot_count, param_count, name=None, params=None):
+    def __init__(self, code_address, defining_frame, slot_count, param_count, name=None, params=None, index=0):
         self.code_address = code_address
         self.defining_frame = defining_frame
         self.slot_count = slot_count
@@ -75,6 +102,9 @@ class Closure:
         # required) -- see docs/MAHC_FORMAT.md #4.5a/#6.1 and
         # code_interpreter.py's `_bind_params`.
         self.params = params
+        # M41a: the FUNCTIONS index this closure was made from -- the key
+        # into the META section (`reflect.signature`).
+        self.index = index
 
 
 class StructInstance:
@@ -323,4 +353,6 @@ def type_name_of(value) -> str:
         return "Vector"
     if isinstance(value, MapValue):
         return "Map"
+    if isinstance(value, TypeValue):
+        return "Type"
     return "Unknown"

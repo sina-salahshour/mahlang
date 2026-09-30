@@ -308,7 +308,8 @@ class DataModuleTests(unittest.TestCase):
     def test_bytecode_minor(self):
         from mah.bytecode.decode import decode
 
-        self.assertEqual(decode(compile_bytes(text='import json from "std:json"\nprint(json.parse("1"))')).minor, 7)
+        # M41a: std:json reads declared types through std:reflect (1.14)
+        self.assertEqual(decode(compile_bytes(text='import json from "std:json"\nprint(json.parse("1"))')).minor, 14)
         self.assertEqual(decode(compile_bytes(text='import csv from "std:csv"\nprint(csv.parse("a"))')).minor, 7)
         # std:path is plain Mah over the 1.6 String methods
         self.assertEqual(decode(compile_bytes(text='import path from "std:path"\nprint(path.dirname("a/b"))')).minor, 6)

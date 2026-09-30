@@ -64,6 +64,7 @@ from .process_natives import snapshot_environment
 from .test_outcome import TestOutcome
 from .runtime_values import (
     BUILTIN_TYPE_NAMES,
+    PRIMITIVE_TYPE_NAMES,
     Closure,
     EnumInstance,
     Frame,
@@ -74,10 +75,12 @@ from .runtime_values import (
     PromiseInstance,
     StructInstance,
     Task,
+    TypeValue,
     VectorValue,
     map_key,
     type_name_of,
 )
+from .reflect_natives import ReflectData
 
 _BINOP_SYMBOLS = {
     "add": "+", "sub": "-", "mul": "*", "div": "/",
@@ -247,6 +250,8 @@ class FunctionInfo(NamedTuple):
     # ...], or `None` for a 1.0 file (unnamed, all-required parameters) --
     # see docs/MAHC_FORMAT.md #4.5a.
     params: list | None
+    # M41a: this function's FUNCTIONS index, the key into META.
+    index: int = 0
 
 
 class DebugIndex(NamedTuple):
@@ -267,6 +272,11 @@ class LinkedProgram(NamedTuple):
     # M25 (docs/MAHC_FORMAT.md #4.8): (start, end, handler, slot) tuples, in
     # section order (innermost-first) -- see `step_task`'s `_unwind`.
     handlers: list
+    # M41a: the optional META section (mah.bytecode.program.Meta, or None),
+    # and what `std:reflect` needs to read it.
+    meta: object = None
+    strings: list = []
+    program_types: list = []  # the user types' TypeDecls, parallel to META's type entries
 
 
 def _convert_const(const, strings: list) -> Any:
@@ -370,6 +380,24 @@ def _link_instr(instr, strings: list, constants: list, types: list, natives: lis
     if op == "callkw":
         callee, arg_addrs, kwnames = a
         return ("callkw", callee, arg_addrs, tuple(strings[i] for i in kwnames))
+    if op == "callspread":
+        return ("callspread", a[0], a[1], a[2])
+    if op == "callmethodspread":
+        recv, name_idx, vec, kw_map, trait_idx = a
+        return (
+            "callmethodspread",
+            recv,
+            strings[name_idx],
+            vec,
+            kw_map,
+            strings[trait_idx] if trait_idx is not None else None,
+        )
+    if op == "spread":
+        return ("spread", a[0], a[1], a[2])
+    if op == "loadtype":
+        kind, index, dest = a
+        name = types[index].name if kind == 0 else PRIMITIVE_TYPE_NAMES[index]
+        return ("loadtype", TypeValue(kind, index, name), dest)
     if op == "ret":
         return ("ret", a[0])
     if op == "retval":
@@ -499,12 +527,24 @@ def _link(program: Program) -> LinkedProgram:
             [(strings[name_idx], has_default) for name_idx, has_default in fn.params]
             if fn.params is not None
             else None,
+            index,
         )
-        for fn in program.functions
+        for index, fn in enumerate(program.functions)
     ]
     code = [_link_instr(instr, strings, constants, types, natives, functions) for instr in program.code]
     debug = _link_debug(program.debug, strings) if program.debug is not None else None
-    return LinkedProgram(constants, types, natives, functions, code, debug, list(program.handlers))
+    return LinkedProgram(
+        constants,
+        types,
+        natives,
+        functions,
+        code,
+        debug,
+        list(program.handlers),
+        program.meta,
+        strings,
+        program.types,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -545,6 +585,8 @@ def _values_equal(a: Any, b: Any) -> bool:
         return False
     if ta in ("Number", "String", "Bool"):
         return a == b
+    if ta == "Type":
+        return a.kind == b.kind and a.index == b.index
     return a is b
 
 
@@ -785,6 +827,28 @@ def _map_remove(m: MapValue, key: Any) -> Any:
     return NONE_VALUE if entry is None else entry[1]
 
 
+def _spread(target: Any, source: Any, keyword: bool) -> None:
+    """M41a `spread` (docs/MAHC_FORMAT.md #6.1): append the items of the
+    Vector `source` to the Vector `target` (the positional arguments of a
+    spread call), or merge the entries of the Map `source` into the Map
+    `target` (its keyword arguments). Anything else is an ArgumentError, as
+    is a non-String key or a keyword that's already in `target`."""
+    if not keyword:
+        if not isinstance(source, VectorValue):
+            raise MahRuntimeError(f"'...' needs a Vector, got {type_name_of(source)}", kind="ArgumentError")
+        target.items.extend(source.items)
+        return
+    if not isinstance(source, MapValue):
+        raise MahRuntimeError(f"'**' needs a Map, got {type_name_of(source)}", kind="ArgumentError")
+    for key, value in source.entries.values():
+        if not isinstance(key, str):
+            raise MahRuntimeError(f"'**' needs String keys, got a {type_name_of(key)} key", kind="ArgumentError")
+        k = map_key(key)
+        if k in target.entries:
+            raise MahRuntimeError(f"keyword argument '{key}' given more than once", kind="ArgumentError")
+        target.entries[k] = (key, value)
+
+
 def _format_value(val: Any, recurse) -> str:
     """Structural (non-`Printable`-aware) formatting -- `recurse` is called
     for every nested value (an enum payload, a struct field) so `to_str`
@@ -815,6 +879,8 @@ def _format_value(val: Any, recurse) -> str:
         return _format_number(val)
     if isinstance(val, str):
         return val
+    if isinstance(val, TypeValue):
+        return val.name
     return str(val)
 
 
@@ -1107,6 +1173,7 @@ def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, dead
         read_line=lambda p: io.read_line(p),
         cancel_timer=lambda p: cancel_timer(p),
         io=io,
+        reflect=ReflectData(linked, method_table),
     )
 
     def enter_closure(task: Task, closure: Closure, arg_values: list) -> None:
@@ -1536,6 +1603,7 @@ def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, dead
                         function_info.param_count,
                         function_info.name,
                         function_info.params,
+                        function_info.index,
                     ),
                 )
             case ("call", callee_addr, arg_addrs):
@@ -1556,6 +1624,19 @@ def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, dead
                 kwargs = [(kwnames[j], _read(frame, arg_addrs[npos + j])) for j in range(len(kwnames))]
                 bound = _bind_params(closure.param_count, closure.params, values, kwargs, label)
                 enter_closure(task, closure, bound)
+            case ("callspread", callee_addr, vec_addr, map_addr):
+                closure = _read(frame, callee_addr)
+                if not isinstance(closure, Closure):
+                    raise MahRuntimeError(f"Tried to call a non-function value ({type_name_of(closure)})", kind="TypeMismatch")
+                label = f"'{closure.name}'" if closure.name else "function"
+                values = list(_read(frame, vec_addr).items)
+                kwargs = [(k, v) for k, v in _read(frame, map_addr).entries.values()]
+                bound = _bind_params(closure.param_count, closure.params, values, kwargs, label)
+                enter_closure(task, closure, bound)
+            case ("spread", target_addr, source_addr, keyword):
+                _spread(_read(frame, target_addr), _read(frame, source_addr), keyword)
+            case ("loadtype", type_value, dest):
+                _write(frame, dest, type_value)
             case ("jmpset", param_addr, target):
                 if _read(frame, param_addr) is not ABSENT:
                     task.pc = target
@@ -1714,6 +1795,16 @@ def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, dead
                 npos = len(arg_addrs) - len(kwnames)
                 values = [_read(frame, a) for a in arg_addrs[:npos]]
                 kwargs = [(kwnames[j], _read(frame, arg_addrs[npos + j])) for j in range(len(kwnames))]
+                bound = _bind_method_call(recv, fn, include_self, name, values, kwargs)
+                if isinstance(fn, Closure):
+                    enter_closure(task, fn, bound)
+                else:
+                    return_register = _call_native(fn, bound)
+            case ("callmethodspread", recv_addr, name, vec_addr, map_addr, trait):
+                recv = _read(frame, recv_addr)
+                fn, include_self = find_method(recv, name, trait)
+                values = list(_read(frame, vec_addr).items)
+                kwargs = [(k, v) for k, v in _read(frame, map_addr).entries.values()]
                 bound = _bind_method_call(recv, fn, include_self, name, values, kwargs)
                 if isinstance(fn, Closure):
                     enter_closure(task, fn, bound)
