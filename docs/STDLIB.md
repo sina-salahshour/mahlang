@@ -343,7 +343,8 @@ these decisions:
   for Q.tags[0], got Number`, `expected a Number for Q.m["k"], got String`,
   `missing field 'x' for P.p`, `unknown variant 'Nope' for Shape`.
 - `std:json` now imports `std:reflect`, so a program that imports it is
-  written at bytecode 1.14 (it was 1.7). Since M41s `std:reflect`'s types
+  written at bytecode 1.14 (it was 1.7; 1.16 since M41c, whose hook natives
+  `std:reflect` lists). Since M41s `std:reflect`'s types
   (`TypeRef`, `Param`, `Signature`, `Field`, `Variant`, `Schema`, `Method`,
   `ReflectError`) are module-scoped, so a program of its own with a `Field`
   struct can import `std:json` freely.
@@ -625,7 +626,15 @@ section) and §5 (the `Type` value). In short:
   trait_name)`, `call(f, args = [], kwargs = [:])`, `construct(t, fields)`
   and `construct_variant(t, variant, fields)` (throwing `ReflectError`).
   M41b: every descriptor has a `decorators` Vector, and `find(decorators,
-  target)` picks one by type or `==` (docs/REFLECTION.md).
+  target)` picks one by type or `==` (docs/REFLECTION.md). M41c: a `Signature`
+  also has `rest` and `kwrest`; `find` matches a function with the same
+  identity even after it was wrapped; and the module exports the hook traits
+  `WrapFn`, `WrapParam`, `WrapField`, `WrapStruct` with their info structs
+  `FnInfo`, `ParamInfo`, `FieldInfo`, `TypeInfo`. It also holds the private
+  helpers (`__wrap_fn`, `__setup_*`, `__run_*`, not exported) that the code
+  generated for a decorated program calls, which is why a program with a
+  decorator imports it implicitly; its `hooks.*` natives make every program
+  that imports it (or `std:json`) bytecode 1.16.
 - It reports what the source *wrote*, never what the checker inferred; an
   unannotated parameter's type is `TypeRef.Unknown`.
 - Bare type names are values (`User`, `Number`), spread calls

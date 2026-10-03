@@ -85,6 +85,8 @@ PRELUDE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "std", "
 # back to a user file.
 STD_DIR = os.path.dirname(PRELUDE_PATH)
 STD_PREFIX = "std:"
+# M41c: the module a program with decorators implicitly imports.
+REFLECT_PATH = os.path.join(STD_DIR, "reflect.mh")
 # M28: test files (docs/MAH_TEST.md) -- run only by `mah test`.
 TEST_SUFFIX = ".test.mh"
 _STD_NAME_RE = re.compile(r"[a-z][a-z0-9_]*")
@@ -321,6 +323,11 @@ class Preprocessed:
     # entry-file offsets are unchanged for programs that don't trigger it
     # -- the LSP relies on that.
     prelude_start: Optional[int] = None
+    # M41c: the combined-text range `(start, end)` of the std:reflect module
+    # the preprocessor added because the program has decorators and doesn't
+    # import it itself, or `None`. Like the prelude it sits after every real
+    # segment; editor features treat it as implementation detail.
+    hidden_reflect: Optional[tuple] = None
 
     # -- source map -------------------------------------------------------
     def map_to_source(self, offset: int):
@@ -561,8 +568,12 @@ def _shadowed_params(tokens: list, names) -> set:
                 and tokens[k + 1].kind == "punct"
                 and tokens[k + 1].value in ":,)="
             ):
-                # M41b: a parameter may have decorators before its name.
-                before = _skip_decorators_back(tokens, k)
+                # M41b: a parameter may have decorators before its name; M41c: and
+                # a `...` / `**` rest marker right before it.
+                marked = k
+                while marked > 0 and (tokens[marked - 1].kind == "dot" or _is_punct(tokens, marked - 1, "*")):
+                    marked -= 1
+                before = _skip_decorators_back(tokens, marked)
                 if punct(before, "(") or punct(before, ","):
                     params.append(k)
             k += 1
@@ -1024,6 +1035,23 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
 
     process(entry_path, text, root=None, is_entry=True)
 
+    hidden_reflect = None
+    # M41c: a program with any decorator implicitly imports std:reflect (its
+    # hook helpers run the decorators' hooks). It is inlined like the prelude,
+    # after everything else, as an ordinary module with its own index and
+    # mangled names -- so it can't collide with a user's own `import reflect
+    # from "std:reflect"` (the include guard makes that the same module), a
+    # flat import of it, or any user variable named `reflect`: nothing is
+    # bound in the user's namespace. The code generator reaches the
+    # non-exported helpers through their mangled global names.
+    if REFLECT_PATH not in included and any(
+        tok.kind == "punct" and tok.value == "@" for tokens in program_tokens for tok in tokens
+    ):
+        emit(";\n", entry_path, len(text), 0, None)
+        hidden_start = state["len"]
+        inline_module(REFLECT_PATH, None)
+        hidden_reflect = (hidden_start, state["len"])
+
     # M17: the prelude is inlined LAST, after everything else -- as a
     # module with its own index, exactly the way an ordinary import is
     # processed (mangling rules etc; it declares no top-level `fn`/`let`,
@@ -1056,6 +1084,7 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
         exports=exports,
         module_index=module_index,
         prelude_start=prelude_start,
+        hidden_reflect=hidden_reflect,
     )
 
 

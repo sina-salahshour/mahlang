@@ -491,9 +491,12 @@ module.exports = grammar({
     // expected. `self` is an ordinary parameter name here too, same as
     // before this milestone (see the highlight queries for how it's
     // special-cased); it's simply never given a default in practice.
+    // M41c: `...name` collects the extra positional arguments, `**name` the
+    // unmatched keyword arguments (rest parameters; no default).
     param: ($) =>
       seq(
         repeat($.decorator),
+        optional(field("rest", choice("...", "**"))),
         field("name", $.identifier),
         optional($._type_annotation),
         optional(seq("=", field("default", $.expr))),

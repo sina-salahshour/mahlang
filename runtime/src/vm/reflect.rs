@@ -186,17 +186,19 @@ pub fn signature(vm: &mut Vm, args: &[Value]) -> R {
             ErrorKind::TypeMismatch,
         ));
     };
-    let meta: Option<&FnMeta> =
-        vm.linked.meta.as_ref().and_then(|m| m.functions.get(f.func.index)).filter(|m| m.has_meta);
-    let names: Vec<(Rc<str>, bool)> = match &f.func.params {
+    // M41c: a wrapped function reports the function it wraps (its identity).
+    let index = f.identity.get();
+    let info = vm.linked.functions[index].clone();
+    let meta: Option<&FnMeta> = vm.linked.meta.as_ref().and_then(|m| m.functions.get(index)).filter(|m| m.has_meta);
+    let names: Vec<(Rc<str>, bool)> = match &info.params {
         Some(p) => p.clone(),
-        None => (0..f.func.param_count).map(|i| (Rc::from(format!("#{i}").as_str()), false)).collect(),
+        None => (0..info.param_count).map(|i| (Rc::from(format!("#{i}").as_str()), false)).collect(),
     };
-    let mut params = Vec::with_capacity(names.len());
+    let mut described = Vec::with_capacity(names.len());
     for (i, (pname, has_default)) in names.iter().enumerate() {
         let pm = meta.map(|m| &m.params[i]);
         let constant = pm.is_some_and(|p| p.default == 2);
-        params.push(vec_value(vec![
+        described.push(vec_value(vec![
             Value::Str(pname.clone()),
             pm.map(|p| ref_value(vm, &p.ty)).unwrap_or_else(unknown_ref),
             match pm {
@@ -209,11 +211,15 @@ pub fn signature(vm: &mut Vm, args: &[Value]) -> R {
                 Some(c) if constant => vm.linked.constants[c].clone(),
                 _ => Value::None,
             },
-            decorators_of(vm, 1, f.func.index, i),
+            decorators_of(vm, 1, index, i),
         ]));
     }
+    // M41c: the rest parameters are described like the others but kept apart
+    let kwrest = if info.rest & 2 != 0 { described.pop().unwrap_or(Value::None) } else { Value::None };
+    let rest = if info.rest & 1 != 0 { described.pop().unwrap_or(Value::None) } else { Value::None };
+    let params = described;
     Ok(vec_value(vec![
-        match &f.func.name {
+        match &info.name {
             Some(n) => Value::Str(n.clone()),
             None => Value::None,
         },
@@ -234,7 +240,9 @@ pub fn signature(vm: &mut Vm, args: &[Value]) -> R {
             Some(m) => throws_value(vm, &m.throws),
             None => Value::None,
         },
-        decorators_of(vm, 0, f.func.index, 0),
+        decorators_of(vm, 0, index, 0),
+        rest,
+        kwrest,
     ]))
 }
 
@@ -464,4 +472,168 @@ pub fn construct_variant(vm: &mut Vm, args: &[Value]) -> R {
             Ok(vec_value(vec![Value::Bool(true), value]))
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// M41c (1.16): the hook machinery behind std:reflect's WrapFn/WrapParam/
+// WrapStruct/WrapField -- mirrors `mah/reflect_natives.py` (`_hooks_*`),
+// message for message.
+// ---------------------------------------------------------------------------
+
+/// `hooks.has(value, trait)`: whether `value`'s type -- for a function, its
+/// item type `fn#<identity>` -- has a method registered under a trait whose
+/// display name is `trait`.
+pub fn hooks_has(vm: &mut Vm, args: &[Value]) -> R {
+    let Value::Str(trait_name) = &args[1] else {
+        return Err(RuntimeError::with_kind(
+            format!("hooks.has: the trait name must be a String, got {}", type_name_of(&args[1], &vm.names)),
+            ErrorKind::TypeMismatch,
+        ));
+    };
+    let type_name: Rc<str> = match &args[0] {
+        Value::Function(c) => Rc::from(format!("fn#{}", c.identity.get()).as_str()),
+        other => type_name_of(other, &vm.names),
+    };
+    for ((tname, _method), entry) in vm.method_table.iter() {
+        if tname.as_ref() == type_name.as_ref() && entry.traits.keys().any(|k| display_name(k) == trait_name.as_ref()) {
+            return Ok(Value::Bool(true));
+        }
+    }
+    Ok(Value::Bool(false))
+}
+
+/// `hooks.adopt(wrapper, original)`: `wrapper` takes `original`'s identity.
+pub fn hooks_adopt(vm: &mut Vm, args: &[Value]) -> R {
+    match (&args[0], &args[1]) {
+        (Value::Function(w), Value::Function(o)) => {
+            w.identity.set(o.identity.get());
+            Ok(args[0].clone())
+        }
+        (a, b) => Err(RuntimeError::with_kind(
+            format!(
+                "hooks.adopt: expected two Functions, got {} and {}",
+                type_name_of(a, &vm.names),
+                type_name_of(b, &vm.names)
+            ),
+            ErrorKind::TypeMismatch,
+        )),
+    }
+}
+
+/// `hooks.same_fn(a, b)`: both closures, the same identity and defining frame.
+pub fn hooks_same_fn(_vm: &mut Vm, args: &[Value]) -> R {
+    Ok(Value::Bool(match (&args[0], &args[1]) {
+        (Value::Function(a), Value::Function(b)) => {
+            a.identity.get() == b.identity.get() && Rc::ptr_eq(&a.defining_frame, &b.defining_frame)
+        }
+        _ => false,
+    }))
+}
+
+pub fn hooks_set_type(vm: &mut Vm, args: &[Value]) -> R {
+    let t = type_arg(vm, "hooks.set_type", &args[0])?.clone();
+    let name = if t.kind == 0 {
+        match &vm.linked.types[t.index].kind {
+            TypeKind::Struct(_) => Some(vm.linked.types[t.index].name.clone()),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let Some(name) = name else {
+        return Err(RuntimeError::with_kind(
+            format!("hooks.set_type: {} isn't a struct", display_name(&t.name)),
+            ErrorKind::TypeMismatch,
+        ));
+    };
+    vm.hook_types.insert(name, args[1].clone());
+    Ok(Value::None)
+}
+
+pub fn hooks_set_param(vm: &mut Vm, args: &[Value]) -> R {
+    let Value::Function(f) = &args[0] else {
+        return Err(RuntimeError::with_kind(
+            format!("hooks.set_param: expected a Function, got {}", type_name_of(&args[0], &vm.names)),
+            ErrorKind::TypeMismatch,
+        ));
+    };
+    let index = match &args[1] {
+        Value::Number(n) if n.is_integer() => n.to_i64().filter(|v| *v >= 0),
+        _ => None,
+    };
+    let Some(index) = index else {
+        return Err(RuntimeError::with_kind(
+            "hooks.set_param: the parameter index must be a whole Number".to_string(),
+            ErrorKind::TypeMismatch,
+        ));
+    };
+    vm.hook_params.insert((f.identity.get(), index as usize), args[2].clone());
+    Ok(Value::None)
+}
+
+pub fn hooks_of(vm: &mut Vm, args: &[Value]) -> R {
+    if let Value::Struct(s) = &args[0] {
+        let name = s.borrow().type_name.clone();
+        return Ok(vm.hook_types.get(&name).cloned().unwrap_or(Value::None));
+    }
+    Ok(Value::None)
+}
+
+/// The `type_name` of a struct/enum value that has the field `name`, or the
+/// error `hooks.get_field`/`hooks.set_field` give.
+fn hook_field_target(vm: &Vm, func: &str, value: &Value, name: &Value) -> Result<Rc<str>, RuntimeError> {
+    let Value::Str(field) = name else {
+        return Err(RuntimeError::with_kind(
+            format!("{func}: the field name must be a String, got {}", type_name_of(name, &vm.names)),
+            ErrorKind::TypeMismatch,
+        ));
+    };
+    let (type_name, has) = match value {
+        Value::Struct(s) => {
+            let b = s.borrow();
+            (b.type_name.clone(), b.get(field).is_some())
+        }
+        Value::Enum(e) => {
+            let b = e.borrow();
+            (b.type_name.clone(), b.get(field).is_some())
+        }
+        other => {
+            return Err(RuntimeError::with_kind(
+                format!("{func}: expected a struct, got {}", type_name_of(other, &vm.names)),
+                ErrorKind::TypeMismatch,
+            ))
+        }
+    };
+    if !has {
+        return Err(RuntimeError::with_kind(
+            format!("{func}: '{}' has no field '{field}'", display_name(&type_name)),
+            ErrorKind::NoSuchField,
+        ));
+    }
+    Ok(type_name)
+}
+
+pub fn hooks_get_field(vm: &mut Vm, args: &[Value]) -> R {
+    hook_field_target(vm, "hooks.get_field", &args[0], &args[1])?;
+    let Value::Str(field) = &args[1] else { unreachable!() };
+    Ok(match &args[0] {
+        Value::Struct(s) => s.borrow().get(field).cloned().unwrap_or(Value::None),
+        Value::Enum(e) => e.borrow().get(field).cloned().unwrap_or(Value::None),
+        _ => Value::None,
+    })
+}
+
+pub fn hooks_set_field(vm: &mut Vm, args: &[Value]) -> R {
+    hook_field_target(vm, "hooks.set_field", &args[0], &args[1])?;
+    let Value::Str(field) = &args[1] else { unreachable!() };
+    match &args[0] {
+        Value::Struct(s) => {
+            s.borrow_mut().set(field, args[2].clone());
+        }
+        Value::Enum(e) => {
+            e.borrow_mut().set(field, args[2].clone());
+        }
+        _ => {}
+    }
+    Ok(Value::None)
 }

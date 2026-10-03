@@ -1267,25 +1267,38 @@ class Parser:
         defaults = []
         docs = []
         decorators = []
-        if self.current.type in (TokenType.ID, TokenType.AT):
-            name, pos, ptype, default, doc, decs = self._parse_one_param(allow_decorators)
+        rest = 0
+        first = True
+        while self.current.type is not TokenType.PAREN_CLOSE:
+            if not first:
+                self.expect(TokenType.COMMA)
+            first = False
+            name, pos, ptype, default, doc, decs, kind = self._parse_one_param(allow_decorators)
+            if kind:
+                if default is not None:
+                    raise SyntaxError(f"a rest parameter can't have a default value at position '{pos}'")
+                if name == "self":
+                    raise SyntaxError(f"'self' can't be a rest parameter at position '{pos}'")
+                if rest & kind:
+                    which = "'...'" if kind == 1 else "'**'"
+                    raise SyntaxError(f"a function can have only one {which} rest parameter at position '{pos}'")
+                if kind == 1 and rest & 2:
+                    raise SyntaxError(
+                        f"the '...' rest parameter must come before the '**' rest parameter at position '{pos}'"
+                    )
+                rest |= kind
+            elif rest:
+                raise SyntaxError(
+                    f"a rest parameter ('...' or '**') must come after every ordinary parameter at position '{pos}'"
+                )
             params.append(name)
             param_positions.append(pos)
             param_types.append(ptype)
             defaults.append(default)
             docs.append(doc)
             decorators.append(decs)
-            while self.current.type is TokenType.COMMA:
-                self.advance()
-                name, pos, ptype, default, doc, decs = self._parse_one_param(allow_decorators)
-                params.append(name)
-                param_positions.append(pos)
-                param_types.append(ptype)
-                defaults.append(default)
-                docs.append(doc)
-                decorators.append(decs)
         self.expect(TokenType.PAREN_CLOSE)
-        return params, param_positions, param_types, defaults, docs, decorators
+        return params, param_positions, param_types, defaults, docs, decorators, rest
 
     def _parse_one_param(self, allow_decorators: bool = False):
         decorators = []
@@ -1295,6 +1308,16 @@ class Parser:
                 raise self._decorator_error(self.current.position)
             doc_at = self.current.position
             decorators = self._parse_decorators()
+        # M41c: `...name` / `**name` -- a rest parameter. `**` is an operator
+        # everywhere else, but right at the start of a parameter (after `(`
+        # or `,`, which is the only place this runs) it is the marker.
+        kind = 0
+        if self.current.type is TokenType.ELLIPSIS:
+            kind = 1
+            self.advance()
+        elif self.current.type is TokenType.POW:
+            kind = 2
+            self.advance()
         param_tok = self.expect(TokenType.ID)
         doc = self.lexer.doc_above(doc_at if doc_at is not None else param_tok.position)
         ptype = None
@@ -1308,7 +1331,7 @@ class Parser:
             self.advance()
             ptype = self._parse_type()
         default = self._parse_optional_default()
-        return param_tok.literal, param_tok.position, ptype, default, doc, decorators
+        return param_tok.literal, param_tok.position, ptype, default, doc, decorators, kind
 
     def _parse_optional_default(self):
         if self.current.type is TokenType.ASSIGN:
@@ -1408,7 +1431,7 @@ class Parser:
             name = name_tok.literal
             name_position = name_tok.position
         type_params = self._parse_type_params()
-        params, param_positions, param_types, defaults, param_docs, param_decorators = self._parse_param_list(
+        params, param_positions, param_types, defaults, param_docs, param_decorators, rest = self._parse_param_list(
             allow_decorators=decl
         )
         return_type = None
@@ -1432,6 +1455,7 @@ class Parser:
             doc=doc,
             param_docs=param_docs,
             param_decorators=param_decorators,
+            rest=rest,
         )
 
     # -- M28: test blocks ------------------------------------------------------
@@ -1494,11 +1518,13 @@ class Parser:
         self.advance()  # FN
         name_tok = self.expect(TokenType.ID)
         type_params = self._parse_type_params()
-        params, param_positions, param_types, defaults, param_docs, param_decorators = self._parse_param_list(
+        params, param_positions, param_types, defaults, param_docs, param_decorators, rest = self._parse_param_list(
             allow_decorators=top_level
         )
         if any(d is not None for d in defaults):
             raise SyntaxError(f"an extern fn's parameters can't have defaults at position '{name_tok.position}'")
+        if rest:
+            raise SyntaxError(f"an extern fn can't have rest parameters at position '{name_tok.position}'")
         return_type = None
         if self.current.type is TokenType.ARROW:
             self.advance()
@@ -1612,7 +1638,7 @@ class Parser:
         doc = self.lexer.doc_above(doc_at if doc_at is not None else fn_tok.position)
         name_tok = self.expect(TokenType.ID)
         type_params = self._parse_type_params()
-        params, param_positions, param_types, defaults, param_docs, param_decorators = self._parse_param_list(
+        params, param_positions, param_types, defaults, param_docs, param_decorators, rest = self._parse_param_list(
             allow_decorators=require_body
         )
         return_type = None
@@ -1638,6 +1664,7 @@ class Parser:
                 param_docs=param_docs,
                 decorators=decorators,
                 param_decorators=param_decorators,
+                rest=rest,
             )
         elif require_body:
             raise SyntaxError(
@@ -1662,6 +1689,7 @@ class Parser:
             param_docs=param_docs,
             decorators=decorators,
             param_decorators=param_decorators,
+            rest=rest,
         )
 
     # -- expressions (precedence chain, lowest to highest binding) --------

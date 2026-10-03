@@ -623,6 +623,68 @@ fn boom(x) { throw Oops { message: "boom " + x } }
 @boom("late")
 fn doomed() { }
 """, b""),
+    # M41c: rest parameters, function-item impls and the four hooks.
+    ("hooks", """
+import reflect from "std:reflect"
+fn show(a, b = 2, ...r, **k) { print(a, b, r, k) }
+show(1)
+show(1, 3, 4, 5, x: 6)
+show(1, b: 9, y: 1)
+show(...[1, 2, 3], **["z": 0])
+print(show.arity(), reflect.signature(show).params.len(), reflect.signature(show).rest, reflect.signature(show).kwrest)
+fn one(a) { a }
+fn only_rest(...r) { r }
+for let bad in [fn() { show(b: 1) }, fn() { one(1, 2) }, fn() { one(1, z: 2) }, fn() { only_rest(x: 1) }] {
+    print(try { bad() } catch { e: RuntimeError => { e.message() } })
+}
+fn log(f, info: reflect.FnInfo) { fn(...args, **kw) { print("-> " + info.name); f(...args, **kw) } }
+impl reflect.WrapFn for log { fn wrap(self, f, info) { self(f, info) } }
+impl log { fn describe(self) -> String { "logs" } }
+trait Describe { fn name(self) -> String }
+@log
+fn greet(name: String, punct: String = "!") { "hi " + name + punct }
+impl Describe for greet { fn name(self) -> String { "greet" } }
+print(greet("a"), greet("b", punct: "?"), greet.name(), log.describe())
+print(try { greet.describe() } catch { e: RuntimeError => { e.message() } })
+print(reflect.signature(greet).params.len(), reflect.signature(greet).decorators.len(), reflect.type_of(log) == Function)
+struct Obj { v: Number }
+impl Obj { @log fn m(self) { self.v } }
+print(Obj { v: 4 }.m())
+fn trim(v, info) { v }
+impl reflect.WrapParam for trim { fn transform(self, v, info) { info.name + "#" + info.index.to_string() + ":" + v.trim() } }
+fn size(v, info) { v }
+impl reflect.WrapParam for size { fn transform(self, v, info) { v.len() } }
+fn hi(a, @trim name: String, @size ...more) { name + more.to_string() }
+print(hi(1, "  x "), hi(1, name: " y "), reflect.call(hi, [1, " z ", 7, 8]), hi(...[1, " w ", 9]))
+fn upper(v, info) { v }
+impl reflect.WrapField for upper { fn set(self, v, info) { v.to_upper() } }
+struct Positive {}
+impl reflect.WrapStruct for Positive {
+    fn construct(self, v, info) {
+        if v.age < 0 { throw RuntimeError.ArgumentError { message: "age < 0" } }
+        v
+    }
+}
+fn positive() -> Positive { Positive {} }
+@positive()
+struct User { @upper name: String, age: Number }
+let u = User { name: "ann", age: 3 }
+u.name = "bob"
+print(u.name, reflect.construct(User, ["name": "cy", "age": 1]).name)
+print(try { User { name: "x", age: 0 - 1 } } catch { e: RuntimeError => { e.message() } })
+struct Plain { a: Number }
+let p = Plain { a: 1 }
+p.a = 2
+print(p.a)
+""", b""),
+    ("hooks_wrap_returns_a_non_function", """
+import reflect from "std:reflect"
+fn bad(f, info) { 5 }
+impl reflect.WrapFn for bad { fn wrap(self, f, info) { 5 } }
+print("never printed: the decorator phase runs first")
+@bad
+fn doomed() { }
+""", b""),
     ("std_csv", """
 import csv from "std:csv"
 print(csv.parse("a,\\"b,c\\"\\r\\n\\n\\"q\\"\\"x\\",\\n"), csv.parse_records("n,v\\nx,1\\n"))
@@ -695,6 +757,61 @@ def build_malformed_cases(tmpdir: str) -> list[tuple[str, bytes]]:
         patched = bytearray(deco_body)
         patched[at + 1 + edit[0]] = edit[1]
         cases.append((f"decorate_{label}", bytes(patched)))
+    # M41c: PARAMS rest flags (both VMs refuse them with the same message),
+    # `paramhooks` operands, and function-item keys.
+    rest_path = compile_source("fn f(a, ...r, **k) { }\nprint(1)\n", tmpdir, "rest_for_malformed")
+    with open(rest_path, "rb") as f:
+        rest_file = f.read()
+    rest_body = rest_file[rest_file.index(b"\n") + 1 :]
+    import re
+
+    found = re.search(rb"\x03.\x00.\x02.\x04", rest_body)
+    assert found is not None
+    flags_at = found.start()
+    for label, edits in (
+        # offsets: 0 nparams, then (name, flags) pairs -- flags at 2 (a), 4 (r), 6 (k)
+        ("rest_with_default", {6: 5}),
+        ("both_rest_flags", {6: 6}),
+        ("undefined_flag_bit", {6: 8}),
+        ("positional_rest_first", {2: 2}),
+        ("keyword_rest_not_last", {4: 4}),
+    ):
+        patched = bytearray(rest_body)
+        for offset, value in edits.items():
+            patched[flags_at + offset] = value
+        cases.append((f"params_{label}", bytes(patched)))
+    old_minor = bytearray(rest_body)
+    old_minor[6:8] = (15).to_bytes(2, "little")
+    cases.append(("params_rest_flag_in_minor_15", bytes(old_minor)))
+    sys.path.insert(0, REPO_ROOT)
+    from mah.bytecode.decode import decode as py_decode
+    from mah.bytecode.encode import encode as py_encode
+    from mah.bytecode.program import Instr
+
+    hook_src = (
+        "import reflect from \"std:reflect\"\n"
+        "fn tag(x) { x }\nfn f(@tag(1) a) { a }\n"
+        "trait Tr { fn m(self) -> String }\nimpl Tr for tag { fn m(self) -> String { \"x\" } }\n"
+    )
+    hook_path = compile_source(hook_src, tmpdir, "hooks_for_malformed")
+    with open(hook_path, "rb") as f:
+        hook_program = py_decode(f.read())
+    at = next(i for i, instr in enumerate(hook_program.code) if instr.op == "paramhooks")
+    fn_index, param_index, dest = hook_program.code[at].args
+    for label, args in (("function_out_of_range", (999, 0, dest)), ("param_out_of_range", (fn_index, 9, dest))):
+        patched = py_decode(py_encode(hook_program))
+        patched.code[at] = Instr("paramhooks", args)
+        cases.append((f"paramhooks_{label}", py_encode(patched)))
+    at = next(
+        i
+        for i, instr in enumerate(hook_program.code)
+        if instr.op == "defmethod" and hook_program.strings[instr.args[1]].startswith("fn#")
+    )
+    for label, key in (("out_of_range", "fn#9999"), ("not_a_number", "fn#x"), ("leading_zero", "fn#01")):
+        patched = py_decode(py_encode(hook_program))
+        string_index = patched.code[at].args[1]
+        patched.strings[string_index] = key
+        cases.append((f"defmethod_fn_key_{label}", py_encode(patched)))
     cases.append(("truncated_at_10_bytes", body[:10]))
     cases.append(("truncated_at_magic", body[:2]))
     cases.append(("empty_file", b""))

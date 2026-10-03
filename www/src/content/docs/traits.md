@@ -41,6 +41,11 @@ print(Shape.area(r))            # trait-qualified call
   `String`, `Bool`, `Function`, `Option`, `Promise`, `Vector`, `Map`.
   Built-in traits: `Printable`, `Index`, `IndexAssign`, `Iterable`,
   `Iterator`.
+- A top-level `fn` can be an impl target too: `impl Tr for somefn { ... }` or
+  `impl somefn { ... }` give *that function* methods (`somefn.describe()`),
+  in the function's module or the trait's. It is how a plain function is a
+  [decorator hook](/docs/decorators). Other functions and closures don't
+  have them, and a `let`, a nested `fn` or a closure isn't a target.
 - The impl must define every required method, with the same parameters.
 - If two traits give one type the same method name, call it as
   `Trait.name(value)`.

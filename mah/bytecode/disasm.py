@@ -157,6 +157,8 @@ def _instr_line(r: _Renderer, i: int, instr) -> str:
         else:
             target = f"variant {y} of {r.type_name(x)}"
         rendered = f"target={target} values={_addr_list(values)}"
+    elif op == "paramhooks":
+        rendered = f"fn={r.func(a[0])} param={a[1]} dest={_addr(a[2])}"
     elif op == "ret":
         rendered = f"value={_addr(a[0])}"
     elif op == "retval":
@@ -262,9 +264,13 @@ def disassemble(program: Program) -> str:
     for i, fn in enumerate(program.functions):
         name = program.strings[fn.name] if fn.name is not None else "<anon>"
         if fn.params is not None:
+            nparams = len(fn.params)
+            kw_at = nparams - 1 if fn.rest & 2 else -1
+            pos_at = nparams - 1 - (1 if fn.rest & 2 else 0) if fn.rest & 1 else -1
             params_text = ", ".join(
-                f"{program.strings[pname]}=" if has_default else program.strings[pname]
-                for pname, has_default in fn.params
+                ("..." if i == pos_at else "**" if i == kw_at else "")
+                + (f"{program.strings[pname]}=" if has_default else program.strings[pname])
+                for i, (pname, has_default) in enumerate(fn.params)
             )
         else:
             params_text = str(fn.param_count)  # 1.0 file: no names/defaults

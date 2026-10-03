@@ -71,7 +71,7 @@ type        := "fn" "(" [type {"," type}] ")" ["->" type]
              | "(" type ")"
 type_params := "<" type_param {"," type_param} ">"
 type_param  := NAME [":" bound {"+" bound}] ["=" type]   # bound: a trait type, e.g. Iterable<T>
-param       := NAME [":" type] ["=" expr]
+param       := ["..." | "**"] NAME [":" type] ["=" expr]   # *(M41c)* a rest parameter has no default
 fn_expr     := "fn" [NAME] [type_params] "(" params ")" ["->" type] block
 let_stmt    := "let" NAME [":" type] "=" expr
 field_decl  := NAME [":" type]                    # struct fields, enum variant fields
@@ -119,6 +119,30 @@ for_binding := "let" NAME [":" type]
 
 `Function` stays a runtime type name (`type_name_of`) but isn't a static
 type: write `fn(...) -> ...`.
+
+### Rest parameters and item types *(M41c)*
+
+- A **rest parameter** `...r` / `**k` is typed by its annotation, which is
+  the *collection's* type: `...r: Vector<Number>`, `**k: Map<String, String>`.
+  Unannotated, `r` is `Vector<Unknown>` and `k` `Map<String, Unknown>`
+  (explicit Unknowns, so the explicit level doesn't ask for annotations). The
+  function's type lists them as ordinary parameters at the end, but a call
+  matches differently: with `...`, any number of extra positional arguments
+  is accepted, each checked against the Vector's element type; with `**`,
+  any keyword that names no ordinary parameter is accepted, its value
+  checked against the Map's value type. Without them the old errors remain
+  ("Too many arguments", "No parameter named"). Required-argument counting
+  only involves the ordinary parameters. A call with `...xs`/`**m` arguments
+  isn't matched to parameters at all (M41a), rest parameters or not.
+- A top-level `fn` declaration's name has the function's **item type**: its
+  ordinary function type with a marker (`fn#name`). It unifies with and is
+  assignable to the ordinary `fn(...) -> ...` type everywhere, and method
+  lookup on a value of that type finds the methods of `impl Tr for name` /
+  `impl name { ... }`, which register under the key `fn#name` in the
+  checker's impl table. The marker travels with the type through `let g =
+  name`; a nested `fn`, a closure and a `let f = fn ...` have none. A
+  function wrapped by a hook keeps its item type for the checker (hooks never
+  change declared types).
 
 ## The type model
 

@@ -1,11 +1,11 @@
 # Reflection, decorators, and hooks
 
-Status: **designed 2026-09-30; M41a and M41b landed** (type values, metadata,
-spread calls, `std:reflect`, `json.decode`; bytecode 1.14; decorators as
-metadata, bytecode 1.15). M41c (hook traits, function-item impls, rest
-parameters, bytecode 1.16) is not started. See "M41a: what landed" and
-"M41b: what landed" below for where the implementation differs from or adds
-to this design.
+Status: **designed 2026-09-30; M41a, M41b and M41c landed** (type values,
+metadata, spread calls, `std:reflect`, `json.decode`; bytecode 1.14;
+decorators as metadata, bytecode 1.15; hook traits, function-item impls and
+rest parameters, bytecode 1.16). See "M41a: what landed", "M41b: what landed"
+and "M41c: what landed" below for where the implementation differs from or
+adds to this design.
 
 The motivating user is a backend web framework written in Mah, in the
 style of NestJS and FastAPI:
@@ -462,8 +462,8 @@ Every **top-level** named `fn` has its own nominal type, the *item
 type* of that function, written by its name in `impl` position only:
 
 ```mah
-fn log(f, info: FnInfo) { ... }
-impl WrapFn for log { fn wrap(self, f, info) { self(f, info) } }
+fn log(f, info: reflect.FnInfo) { ... }
+impl reflect.WrapFn for log { fn wrap(self, f, info) { self(f, info) } }
 impl log { fn describe(self) -> String { "logs calls" } }
 ```
 
@@ -483,71 +483,278 @@ impl log { fn describe(self) -> String { "logs calls" } }
 
 ### Hook traits
 
-Declared in the prelude (so no import is needed to implement them), with
-the info structs they receive:
+*(Revised 2026-10-03, before implementation, from what M41a/M41b
+taught: the hook machinery lives in `std:reflect`, not the prelude,
+because every program compiles the prelude and would otherwise need
+bytecode 1.16; and struct literals name their type, so most checks are
+decided at compile time instead of inside the VM.)*
+
+`std:reflect` exports the traits and the info structs they receive
+(`Function` isn't a legal annotation, so functions are `Unknown`):
 
 ```mah
-struct FnInfo { name: String, function: Function }           # function: the original
-struct ParamInfo { name: String, index: Number, function: Function }
-struct TypeInfo { type: Type<Unknown> }
-struct FieldInfo { name: String, type: Type<Unknown> }
+export struct FnInfo { name: String, function: Unknown }       # function: the original
+export struct ParamInfo { name: String, index: Number, function: Unknown }
+export struct TypeInfo { type: Type<Unknown> }
+export struct FieldInfo { name: String, type: Type<Unknown> }
 
-trait WrapFn { fn wrap(self, f: Function, info: FnInfo) -> Function }
-trait WrapParam { fn transform(self, value: Unknown, info: ParamInfo) -> Unknown }
-trait WrapStruct { fn construct(self, value: Unknown, info: TypeInfo) -> Unknown }
-trait WrapField { fn set(self, value: Unknown, info: FieldInfo) -> Unknown }
+export trait WrapFn { fn wrap(self, f: Unknown, info: FnInfo) -> Unknown }
+export trait WrapParam { fn transform(self, value: Unknown, info: ParamInfo) -> Unknown }
+export trait WrapStruct { fn construct(self, value: Unknown, info: TypeInfo) -> Unknown }
+export trait WrapField { fn set(self, value: Unknown, info: FieldInfo) -> Unknown }
 ```
 
-A decorator is a hook if its runtime type (or item type) implements the
-trait. Hooks of one target run **closest-first**: the decorator nearest
-the declaration first (reverse source order), each receiving the
-previous one's result. `std:reflect`'s `Signature` etc. give richer
-information from `info.function`/`info.type`.
+Users write `impl reflect.WrapFn for Log` (or a flat import). **A program
+that contains any decorator implicitly imports `std:reflect`** (the
+preprocessor adds a hidden import), so the generated code below can call
+its helpers; a program without decorators is unchanged.
 
-- **WrapFn** — functions and `impl` methods. At the end of the
-  decorator phase for that function: `f = d.wrap(f, info)` for each hook;
-  the result replaces the function's global slot (or re-registers the
-  method with `defmethod`). The runtime then marks the final wrapper
-  closure with the original's function index as its *identity*:
-  `reflect.signature`, `reflect.decorators`, and item-type dispatch all
-  use the identity, so a wrapped `get_user` still reports `get_user`'s
-  parameters and decorators. Calls that happened before the phase (only
-  possible from earlier-module decorators) saw the unwrapped function.
-  A wrapper returning a non-Function is an `ArgumentError`.
-- **WrapParam** — on **every call**, after arguments are bound and
-  defaults filled, before the body: `value = d.transform(value, info)`
-  per hook, stored back into the parameter. Only parameters with at
-  least one hook pay anything: codegen emits, at the function's entry,
-  for each *decorated* parameter, a check (opcode `hasparamhooks fn,
-  i` → Bool) and, when true, a call to the prelude helper that runs them.
-- **WrapField** — on struct construction (literals and
-  `reflect.construct`) for each field that has hooks, in declaration
-  order, and on every `obj.field = v` assignment to it: `v =
-  d.set(v, info)` per hook, then stored.
-- **WrapStruct** — after WrapField hooks on construction: `value =
-  d.construct(value, info)` per hook; the final value is the literal's
-  result (it may be a different instance, or a throw to reject it).
+A decorator is a hook if its runtime type (or, for a function, its item
+type) has a method registered under the trait — checked by native
+`hooks.has(value, trait_display_name)`, which matches display names like
+`reflect.implements` does. Hooks of one target run **closest-first**:
+the decorator nearest the declaration first (reverse source order), each
+receiving the previous one's result.
 
-Construction and assignment are compiled without knowing the type, so
-the VM decides: types with field or struct hooks get a *hooked* flag
-(set by the decorator phase through a native); `newstruct` and
-`setfield` on a hooked type call the prelude helpers
-(`__run_struct_hooks(value)`, `__run_field_hooks(obj, field, value)`,
-which the prelude registers once with native `hooks.install`) instead of
-finishing directly, and the opcode's result is the helper's return
-value. Unhooked types pay one flag check. The helpers use raw natives
-(`reflect.__raw_set`) so they don't re-trigger hooks.
+**Setup, in the decorator phase.** M41b's phase evaluates and stores each
+target's decorators in source order. M41c adds, right after each
+*declaration's* own `decorate`s (so a later declaration's decorators see
+earlier declarations already wrapped):
 
-Hooks run in whatever task triggered them and may `await`. A hook that
-throws propagates to the declaration's use (the call, the literal, the
-assignment) — or, for WrapFn, out of the decorator phase as an uncaught
-error at program start.
+- a type `T` with decorators on itself or any field: `reflect.__setup_type(T,
+  struct_decorators, [field name: field decorators, ...])`, which keeps
+  the hooks (filtered, closest-first) and stores them with native
+  `hooks.set_type(T, data)`; nothing is stored when there are none;
+- each decorated parameter `i` of function `F`:
+  `reflect.__setup_param(F, i, name, decorators)` → `hooks.set_param(F, i,
+  data)` when any hook remains;
+- function `F` (top-level or method): `F2 = reflect.__wrap_fn(F, name,
+  decorators)`: for each WrapFn hook `f = d.wrap(f, FnInfo { name, function:
+  F })`; a non-Function result is an `ArgumentError` ("WrapFn.wrap must
+  return a function"); then `hooks.adopt(f, F)` gives the final wrapper
+  F's **identity**. Codegen stores `F2` into F's global slot, or re-runs the
+  method's `defmethod` with `F2`. Only emitted for functions with at
+  least one decorator.
+
+**Identity.** Every closure has an identity: its own function index,
+unless adopted. `reflect.signature`, `reflect.decorators`, the
+`paramhooks` lookup and item-type dispatch all use the identity, so a
+wrapped `get_user` still reports `get_user`'s parameters and decorators.
+`reflect.find(decorators, f)` matches a function decorator with the same
+identity and defining frame as `f` (native `hooks.same_fn`), so finding
+a function that has since been wrapped still works. `==` on functions is
+unchanged (object identity).
+
+**At run time:**
+
+- **WrapParam** — on every call, after arguments are bound and defaults
+  filled, before the body. For each *decorated* parameter (known at
+  compile time) codegen emits `paramhooks i` (new opcode: the running
+  closure's identity's stored data for parameter `i`, or `none`) and, when
+  it isn't `none`, `p = reflect.__run_param(p, data)`. Undecorated
+  parameters cost nothing; decorated ones without hooks cost one opcode.
+- **WrapField / WrapStruct on construction** — a struct literal names
+  its type, so codegen emits, after `newstruct` and only for a type that
+  has decorators on itself or a field, `data = hooks.of(v)` and when it
+  isn't `none`, `v = reflect.__run_struct(v, data)`: each hooked field, in
+  declaration order, gets `set` hooks (read and written with the raw
+  natives `hooks.get_field`/`hooks.set_field`, so no hook re-triggers),
+  then the struct's `construct` hooks; the result is the literal's value
+  (it may be a different value, or a throw rejects it).
+  `reflect.construct` does the same after building the value.
+- **WrapField on assignment** — `obj.f = v` doesn't know `obj`'s type, so
+  in a program that contains any decorator, codegen emits before every
+  field assignment `data = hooks.of(obj)` and, when not `none`, `v =
+  reflect.__run_field(obj, data, "f", v)` (which runs `f`'s set hooks, or
+  returns `v` unchanged). Programs without decorators compile field
+  assignment as today. Hooks run in the task that triggered them and may
+  `await`; a throw propagates to the call, literal or assignment, or for
+  setup, out of the phase as an uncaught error at startup.
+
+Natives (1.16): `hooks.has` (2), `hooks.adopt` (2), `hooks.same_fn` (2),
+`hooks.set_type` (2), `hooks.set_param` (3), `hooks.of` (1),
+`hooks.get_field` (2), `hooks.set_field` (3). Opcode: `paramhooks`.
+Enums and variants have no hooks.
 
 ### Checker
 
 WrapFn doesn't change a function's declared type (a wrapper with another
 signature fails at runtime, not in the checker). Parameter and field
-hooks don't change declared types either.
+hooks don't change declared types either. Item types: see above.
+
+---
+
+### M41c: what landed
+
+Everything in "M41c: hooks, function-item impls, rest parameters" above, as
+specified, with these additions and choices (each was either unspecified or
+forced):
+
+**Rest parameters**
+
+- **Representation**: the rest parameters are the last one or two entries of
+  `FnExpr.params` (and `MethodDecl.params`), with `rest` flags on the node (1
+  `...`, 2 `**`), so slots, positions, docs, decorators and `arity` need no
+  special case. `FunctionDecl.rest` carries the same flags to the bytecode
+  (derived from PARAMS' bits; the decoder validates them, message for message
+  the same in both VMs).
+- **Binding** is the `_bind_params`/`bind_params` of M16 extended in place
+  (docs/MAHC_FORMAT.md §6.1): extras go to a new Vector, unmatched keywords to
+  a new Map; a rest parameter's own name is not a keyword name; `Argument
+  Count is invalid` is only the fast path with no keyword, default or rest.
+- **A method call whose function has no ordinary parameter and a `...`
+  parameter** (`fn(...args, **kw)`) binds the receiver as the first item of
+  that Vector. The spec says nothing on how a wrapper written that way (the
+  design's own example) would ever receive a method's `self`; the normal
+  "slot 0 is the receiver" rule would put it in `kw`'s place and underflow.
+- **Parse errors** (all `SyntaxError`s with positions): "a rest parameter
+  ('...' or '**') must come after every ordinary parameter", "a function can
+  have only one '...' rest parameter" (`'**'` likewise), "the '...' rest
+  parameter must come before the '**' rest parameter", "a rest parameter can't
+  have a default value", "'self' can't be a rest parameter", "an extern fn
+  can't have rest parameters". The parser decides `**` by position (the start
+  of a parameter), like M41a did for arguments.
+- `reflect.signature` has `rest` and `kwrest` (`Option<Param>`), so a
+  `Signature` literal needs two more fields (none exists outside `reflect.mh`).
+
+**Function-item impls**
+
+- **Resolver**: a type name wins; otherwise a top-level `fn` *declaration*
+  (collected before impl headers are registered, since functions are declared
+  in a later phase); otherwise "impl targets must be a type or a top-level
+  function" when the name is a `let` or a nested `fn` somewhere in the
+  program, and the old "Undefined type" for an unknown name. The impl table
+  key is `fn#NAME`; `ImplDecl.fn_target` is the function's `FnExpr`, which
+  lowering turns into `fn#<index>` (deferred like `decorate`, once every
+  closure is lowered). `Self` in such an impl is an error.
+- **Orphan rule** compares *source files* from the preprocessor's source map
+  (the impl, the function and the trait's declaration positions), not mangled
+  prefixes; the message is "an impl for the function 'NAME' must be in its own
+  module or the trait's". `impl Mine for lib.f` with `Mine` declared in the
+  same file is therefore *allowed* (the impl is in the trait's module); the
+  case the rule rejects is a foreign trait for a foreign function
+  (`impl lib.Named for lib.f`, `impl reflect.WrapFn for lib.f`). A built-in
+  trait counts as declared nowhere.
+- **Dispatch**: both VMs keep a flag "some `fn#` method exists" so ordinary
+  method calls never build a key. A call tries the identity's table entry and
+  falls back to `Function`'s; a trait-restricted call falls through the same
+  way. `print` doesn't consult function-item `Printable` impls.
+- **Checker**: `TFn` has an `item` marker (`fn#name`) set when a top-level fn
+  *declaration*'s name is used as a value; it survives `subst` and `let g =
+  f`, unification ignores it, `_method_sig` looks up `impl_methods["fn#name"]`
+  for it. The `self` of such a method is unchecked (`TUnknown`), and the
+  receiver-inference scan skips `fn#` keys.
+- **LSP**: after the functions are declared the resolver looks up every
+  fn-target impl's name, so go-to-definition and rename see it as a reference
+  (cross-file rename of a function was already there); hover shows `impl fn
+  NAME`. Tree-sitter needed nothing (an `impl` target was already an
+  identifier).
+
+**Hooks**
+
+- **How codegen reaches the private helpers.** `reflect.__setup_type`,
+  `__setup_param`, `__wrap_fn`, `__run_param`, `__run_struct`, `__run_field`
+  are plain functions in `mah/std/reflect.mh`, **not exported**: user code
+  can't name them (`reflect.__x` is "not exported", a bare `__x` undefined, a
+  user's own `__setup_type` doesn't clash since it's a different mangled
+  name). Every top-level name of a module is a global slot whether exported or
+  not, so `Resolver._resolve_hook_helpers` finds `__mah_m{idx}___setup_type`
+  and friends in the global scope (idx from `Preprocessed.module_index`),
+  stores their `(0, slot)` addresses on `resolver.hook_helpers` and
+  `global_frame.hook_helpers` (which `Codegen` reads, so the three
+  `Codegen(global_frame, pp)` call sites keep their signature), and codegen
+  calls them with `call`. Nothing was exported under a special name.
+- **The hidden import** is `preprocess()` inlining `std:reflect` after the
+  user's code (before the prelude, like it) when any scanned file has an `@`
+  token and the module wasn't imported already. It binds no name in anyone's
+  namespace, so it can't collide with `import reflect from "std:reflect"`, a
+  flat import or a variable called `reflect`; the include guard makes a user
+  import and the hidden one the same module. `Preprocessed.hidden_reflect` is
+  its `(start, end)` range (the LSP's completion skips those symbols).
+  Because it comes after the user's code, nothing in `reflect.mh` can have a
+  top-level `let` (none does).
+- **Minor versions: a conflict in the spec.** `reflect.mh` itself uses
+  `hooks.*` natives (`find` -> `same_fn`, `construct` -> `of`, the helpers), and
+  a std module's natives are in the file's NATIVES whether or not the program
+  calls them. So **every program that imports `std:reflect` or `std:json`**,
+  not only decorated ones, is written at 16 (it was 14); a program that
+  imports neither and has no rest parameter, decorator or `fn#` impl keeps its
+  old minor (`print(1)` is still 4, `std:math` 5, ...). Keeping reflect-only
+  programs at 14 would have needed the hook code in another module (and `find`
+  and `construct` need it), or conditional compilation of the std module.
+  tests/test_decorators.py, test_reflection.py, test_stdlib.py and
+  test_bytecode.py's expectations moved to 16 accordingly; test_hooks.py
+  asserts what is true. A metadata-only decorator program is 16 too, as the
+  task said.
+- **`paramhooks function index dest`** takes the function as an operand
+  (resolved at lowering like `decorate`) rather than reading "the running
+  closure's identity", because frames here don't know their closure and the
+  function whose prologue it sits in is known statically. It reads the data
+  keyed by that function's own index, so a wrapper (which has the original's
+  *identity*) running its own decorated parameters' hooks doesn't pick up the
+  original's. `hooks.set_param(f, i, data)` keys by `f`'s identity, which for
+  the original, at setup time, is its index.
+- **Identity**: `Closure.identity` / `ClosureData.identity` (a `Cell`),
+  initially the FUNCTIONS index. `hooks.adopt` mutates and returns the
+  *wrapper*: a wrapper that returns a function shared elsewhere (a top-level
+  one rather than a fresh closure) changes that function's identity too.
+  `reflect.signature`, the decorator lookups (they are keyed by function index
+  at `decorate` time, so a wrapper reads the original's), `paramhooks` data
+  and `fn#` dispatch use it; `==` and everything else don't. `signature` now
+  reads the parameter names and function name from the identity's FUNCTIONS
+  entry, not the closure's. `hooks.same_fn` is identity + defining frame, so
+  two closures of one function made by a factory differ.
+- **What the setup stores** (private structs in `reflect.mh`): `ParamHooks
+  { info, hooks }` for a parameter and `TypeHooks { info, struct_hooks,
+  field_hooks }` for a struct, so `__run_*` don't index heterogeneous Vectors
+  (the checker would reject those literals). `hooks.of` returns them
+  or `none`. `FieldInfo.type` is the struct that declares the field (the spec
+  gave only `Type<Unknown>`); `ParamInfo.function` and `FnInfo.function` are
+  the original function.
+- **`hooks.has`** looks a function decorator up under its item type only
+  (`fn#<identity>`), not `Function`, per the spec's "its item type"; a closure
+  that was never declared with `impl` therefore isn't a hook. It scans the
+  whole method table (setup time only).
+- **Order**: after a declaration's `decorate`s, codegen emits the type setup
+  (struct), then each decorated parameter's `__setup_param(F, i, name,
+  decorators)`, then `F2 = __wrap_fn(F, name, decorators)` stored into F's
+  global slot; a method also re-emits its `defmethod`s for the slot (every
+  trait impl that registered it, including a trait impl's own methods).
+  The decorator values are the addresses the `decorate` just used (each
+  decorator expression is evaluated once). A function whose wrap list holds
+  no `WrapFn` hook is "wrapped" by itself.
+- **Runtime checks** exactly as specified: `paramhooks` only for decorated
+  parameters, after defaults, with a `jmpf` over the call when `none`;
+  `hooks.of` after a struct literal only for types decorated on themselves or
+  a field (by declared name; `Self { }` too); `hooks.of` before **every** field
+  assignment in a program with any decorator -- including assignments in the
+  std modules and the prelude that program contains (a few instructions each) --
+  never in a program without decorators. The assigned value is copied to a
+  fresh temp first, so assigning from a variable doesn't overwrite it.
+  `__run_struct` reads and writes fields with `hooks.get_field`/`set_field`, so
+  hooks never re-trigger, and runs each hooked field once, in declaration order.
+- **`reflect.find`** with a function: `hooks.same_fn`; with a Type: by type;
+  otherwise `==`, as before. `reflect.construct` runs `__run_struct` when
+  `hooks.of` gives data, so it must be declared after the helpers in the file
+  (functions can't be named before their declaration).
+- **Errors**: a non-function `wrap` result is `RuntimeError.ArgumentError`,
+  "WrapFn.wrap must return a function", raised from `__wrap_fn` in the decorator
+  phase (uncaught at startup, nothing printed first, the same on both VMs). The
+  `hooks.*` natives' argument errors are `TypeMismatch`/`NoSuchField` with the
+  texts in docs/MAHC_FORMAT.md §4.4.
+- **Not done**: hooks for enums and variants; `print` of function-item
+  `Printable`; a user-facing way to reach the info structs' constructors other
+  than `reflect.FnInfo { ... }` (they are exported, as specified).
+
+**Tooling and tests**: formatter (`...name: T` tight, idempotent), tree-sitter
+(`param` gains an optional `rest` marker; regenerated, zero ERROR nodes across
+`examples/*.mh` and `mah/std/*.mh`), the VS Code grammar already scopes `...`
+and `**` as operators, the project templates' language reference,
+`examples/hooks.mh`, www (decorators and functions pages, standard-library,
+traits), `mah dis` (`...r`, `**k`, `paramhooks`), `tests/test_hooks.py` (121
+tests, both VMs), `mah/std/reflect.test.mh`, vm_diff (`hooks`,
+`hooks_wrap_returns_a_non_function`, malformed PARAMS flags, `paramhooks`
+operands and `fn#` keys) and Rust decode tests.
 
 ---
 

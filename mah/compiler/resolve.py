@@ -181,6 +181,7 @@ declaration ("hoisting"):
 
 from __future__ import annotations
 
+import os
 import re
 
 from .ast_nodes import (
@@ -236,6 +237,7 @@ from .ast_nodes import (
     WildcardPat,
 )
 from ..bytecode.format import NATIVE_ARITIES
+from ..preprocessor import STD_DIR, demangle_message
 from ..runtime_values import BUILTIN_TYPE_NAMES, SYSTEM_TRAIT_NATIVE_TYPES, SYSTEM_TRAITS
 
 # M21 (syntax only -- see docs/TYPES.md): known type names' arity (the
@@ -313,6 +315,19 @@ class Resolver:
         # M41b: top-level declarations (FnExpr/StructDecl/EnumDecl) whose
         # decorators wait until every top-level name is declared.
         self._pending_decorators: list = []
+        # M41c: the program's top-level `fn` declarations by name (the targets
+        # `impl Tr for somefn` can name), every top-level statement (for
+        # telling a variable from an undefined name) and the names of every
+        # `let`/`fn` declared anywhere, computed on first need.
+        self._top_level_fns: dict = {}
+        self._program_stmts: list = []
+        self._let_names = None
+        self._declared_lets: set = set()
+        # M41c: the global slots of std:reflect's private hook helpers
+        # (`__setup_type`, ...), set at the end of `resolve_program` when the
+        # program has decorators: `{helper name: (0, slot)}`; codegen reads
+        # them off `global_frame.hook_helpers`.
+        self.hook_helpers: dict = {}
         # M28: the test names seen so far (unique per test file).
         self.test_names: set = set()
         # M17: the combined-text offset where the prelude begins (see
@@ -790,6 +805,8 @@ class Resolver:
         (ordinary orphan rule: MyTrait is user-defined)."""
         if name in self._system_types:
             return False
+        if name.startswith("fn#"):  # M41c: a function's item type
+            return True
         return name in self.struct_decls or (name in self.enum_decls and name not in BUILTIN_TYPE_NAMES)
 
     def _check_prelude_name_clash(self, name: str, position: int) -> None:
@@ -821,6 +838,49 @@ class Resolver:
         """M17: whether `position` (a declaration's own source position)
         falls inside the prelude -- see `self.prelude_start`'s docstring."""
         return self.prelude_start is not None and position >= self.prelude_start
+
+    def _declared_as_variable(self, name: str) -> bool:
+        """M41c: whether `name` is declared as a variable or a function
+        *somewhere* in the program (a top-level `let`, a nested `fn`, ...) --
+        what turns an impl target that isn't a type into "impl targets must
+        be a type or a top-level function" instead of "Undefined type"."""
+        if name in self._declared_lets:
+            return True
+        if self._let_names is None:
+            names: set = set()
+            stack: list = list(self._program_stmts)
+            while stack:
+                node = stack.pop()
+                if isinstance(node, LetStmt):
+                    names.add(node.name)
+                if isinstance(node, (list, tuple)):
+                    stack.extend(node)
+                elif hasattr(node, "__dataclass_fields__"):
+                    stack.extend(getattr(node, f) for f in node.__dataclass_fields__)
+            self._let_names = names
+        return name in self._let_names
+
+    def _module_path_of(self, position):
+        if self._pp is None or position is None:
+            return None
+        return self._pp.map_to_source(position)[0]
+
+    def _check_fn_impl_orphan(self, impl: ImplDecl, fn_stmt) -> None:
+        """M41c (docs/REFLECTION.md, "Function-item types"): an impl for a
+        function must be in the module that declares the function or the one
+        that declares the trait."""
+        if self._pp is None:
+            return
+        here = self._module_path_of(impl.position)
+        if here == self._module_path_of(fn_stmt.position):
+            return
+        if impl.trait_name is not None and impl.trait_name in self.trait_decl_positions:
+            if here == self._module_path_of(self.trait_decl_positions[impl.trait_name]):
+                return
+        raise Exception(
+            f"an impl for the function '{demangle_message(impl.type_name)}' must be in its own module or the "
+            f"trait's at position {impl.type_name_position or impl.position}"
+        )
 
     def _is_type_name(self, name: str) -> bool:
         return name in self.struct_decls or name in self.enum_decls or name in BUILTIN_TYPE_NAMES
@@ -1187,6 +1247,12 @@ class Resolver:
         # of struct/enum/trait/impl, and method bodies seeing every
         # top-level name regardless of textual order).
         hoisted = set()
+        self._program_stmts = stmts
+        self._top_level_fns = {
+            stmt.name: stmt
+            for stmt in stmts
+            if isinstance(stmt, LetStmt) and stmt.is_decl and isinstance(stmt.value, FnExpr)
+        }
         # Phase 1a: hoist top-level struct/enum declarations (registers
         # them via the existing resolve_stmt branches).
         for stmt in stmts:
@@ -1223,6 +1289,11 @@ class Resolver:
             else:
                 self._resolve_type_decorators(pending)
         self._pending_decorators = []
+        # M41c: now that every top-level function is declared, an `impl` for
+        # one is a reference to it (go-to-definition, rename).
+        for impl in impls:
+            if impl.fn_target is not None and impl.type_name_position is not None:
+                self._lookup(impl.type_name, impl.type_name_position)
         # Phase 3: method bodies, with every top-level name now in scope.
         for trait in traits:
             # M13: `_self_trait` while resolving THIS trait's own default
@@ -1241,7 +1312,7 @@ class Resolver:
                 self._self_trait = None
                 self._fn_type_param_stack.pop()
         for impl in impls:
-            self._self_type = impl.type_name
+            self._self_type = impl.item_key or impl.type_name
             self._fn_type_param_stack.append(frozenset(tp.name for tp in impl.type_params))
             try:
                 for method in impl.methods:
@@ -1253,10 +1324,58 @@ class Resolver:
         # real type name (rename would otherwise rewrite `Self` itself).
         for pos in self._self_positions:
             self.type_position_index.pop(pos, None)
+        self._resolve_hook_helpers(stmts)
         # M21: every annotation's type names are validated last, now that
         # every struct/enum/trait/type-param in the whole program is known
         # -- see `_pending_type_exprs`/`_pending_type_params`'s docstrings.
         self._validate_pending_types()
+
+    # -- M41c: hooks -----------------------------------------------------
+
+    HOOK_HELPERS = ("__setup_type", "__setup_param", "__wrap_fn", "__run_param", "__run_struct", "__run_field")
+
+    @staticmethod
+    def program_has_decorators(stmts: list) -> bool:
+        for stmt in stmts:
+            if isinstance(stmt, LetStmt) and stmt.is_decl and isinstance(stmt.value, FnExpr):
+                fn = stmt.value
+                if fn.decorators or any(fn.param_decorators):
+                    return True
+            elif isinstance(stmt, StructDecl):
+                if stmt.decorators or any(stmt.field_decorators):
+                    return True
+            elif isinstance(stmt, EnumDecl):
+                if stmt.decorators or any(stmt.variant_decorators):
+                    return True
+            elif isinstance(stmt, ImplDecl):
+                for method in stmt.methods:
+                    if method.fn is not None and (method.fn.decorators or any(method.fn.param_decorators)):
+                        return True
+        return False
+
+    def _resolve_hook_helpers(self, stmts: list) -> None:
+        """A program with any decorator gets std:reflect inlined by the
+        preprocessor (a hidden import). Its private helpers (the `__`-prefixed,
+        non-exported functions) are reached by their mangled global names:
+        every top-level name of a module is a global slot, exported or not, and
+        only user *source* is barred from non-exported names -- so codegen
+        calls them through these addresses (docs/REFLECTION.md, M41c)."""
+        self.global_frame.hook_helpers = {}
+        if self._pp is None or not self.program_has_decorators(stmts):
+            return
+        path = os.path.join(STD_DIR, "reflect.mh")
+        idx = self._pp.module_index.get(path)
+        if idx is None:
+            return
+        scope = self.scopes[0]
+        helpers = {}
+        for name in self.HOOK_HELPERS:
+            entry = scope.get(f"__mah_m{idx}_{name}")
+            if entry is None:
+                return
+            helpers[name] = (0, entry[1])
+        self.hook_helpers = helpers
+        self.global_frame.hook_helpers = helpers
 
     # -- statements ------------------------------------------------------
 
@@ -1587,7 +1706,8 @@ class Resolver:
             default_expr = fn.defaults[index] if index < len(fn.defaults) else None
             if param_name == "self" and default_expr is not None:
                 raise Exception(f"'self' can't have a default value at position {param_position}")
-            if default_expr is None and seen_default:
+            is_rest = index >= len(fn.params) - bin(fn.rest).count("1")  # M41c: no default needed
+            if default_expr is None and seen_default and not is_rest:
                 raise Exception(
                     f"Parameter '{param_name}' needs a default value because an earlier "
                     f"parameter has one at position {param_position}"
@@ -1711,8 +1831,25 @@ class Resolver:
         if type_name == "Self":
             raise Exception(f"'Self' cannot be the target of an impl at position {pos}")
         self._record_impl_header_types(impl)
+        fn_stmt = None
         if not self._is_type_name(type_name):
-            raise NameError(f"Undefined type '{type_name}' in impl at position {pos}")
+            # M41c: not a type -- a top-level `fn` declaration is an impl
+            # target too (its own "item type"); anything else is an error.
+            fn_stmt = self._top_level_fns.get(type_name)
+            if fn_stmt is None:
+                if self._declared_as_variable(type_name):
+                    raise Exception(
+                        f"impl targets must be a type or a top-level function at position {impl.type_name_position or pos}"
+                    )
+                raise NameError(f"Undefined type '{type_name}' in impl at position {pos}")
+            if impl.type_args:
+                raise Exception(
+                    f"The function '{demangle_message(type_name)}' has no type arguments at position {impl.type_name_position or pos}"
+                )
+            self._check_fn_impl_orphan(impl, fn_stmt)
+            impl.fn_target = fn_stmt.value
+            type_name = f"fn#{type_name}"
+            impl.item_key = type_name
         if type_name in self.struct_decls and type_name in self.enum_decls:
             raise Exception(
                 f"'{type_name}' is ambiguous in impl: it is both a struct and an enum at position {pos}"
@@ -1722,9 +1859,9 @@ class Resolver:
         entry = self.impls[type_name]
 
         if impl.trait_name is None:
-            self._register_inherent_impl(impl, entry)
+            self._register_inherent_impl(impl, entry, type_name)
         else:
-            self._register_trait_impl(impl, entry)
+            self._register_trait_impl(impl, entry, type_name)
 
         # LSP: register the type-name / trait-name use sites in the impl
         # header (built-in types / system traits get nothing here -- they
@@ -1743,8 +1880,7 @@ class Resolver:
             (impl.position, impl.end_position if impl.end_position is not None else impl.position, "impl", type_name)
         )
 
-    def _register_inherent_impl(self, impl: ImplDecl, entry: dict) -> None:
-        type_name = impl.type_name
+    def _register_inherent_impl(self, impl: ImplDecl, entry: dict, type_name: str) -> None:
         # M17: an inherent impl written BY THE PRELUDE (`impl __Iter { }`)
         # skips this check entirely -- it may target a prelude-declared
         # (system) type freely.
@@ -1780,8 +1916,7 @@ class Resolver:
             # M13: method-name declaration index -- see its docstring above.
             self.method_decl_index[decl_pos] = ("impl", type_name, None, method.name)
 
-    def _register_trait_impl(self, impl: ImplDecl, entry: dict) -> None:
-        type_name = impl.type_name
+    def _register_trait_impl(self, impl: ImplDecl, entry: dict, type_name: str) -> None:
         trait_name = impl.trait_name
         pos = impl.position
         if trait_name not in self.trait_decls:

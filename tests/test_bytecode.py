@@ -98,8 +98,9 @@ class RoundTripTests(unittest.TestCase):
                     "std_math.mh": 5,
                     "string_methods.mh": 6,
                     # M41a: std:json now reads declared types through
-                    # std:reflect, whose natives are 1.14.
-                    "data_formats.mh": 14,
+                    # std:reflect, whose natives are 1.14; M41c: std:reflect
+                    # itself uses the 1.16 `hooks.*` natives.
+                    "data_formats.mh": 16,
                     "random_collections.mh": 8,
                     "regex_log.mh": 9,
                     "binary_to_decimal.mh": 10,
@@ -112,9 +113,12 @@ class RoundTripTests(unittest.TestCase):
                     # M36: 1.13 with std:process.
                     "process.mh": 13,
                     # M41a: 1.14 with std:reflect / std:json's decode.
-                    "reflection.mh": 14,
-                    # M41b: 1.15 with decorators.
-                    "decorators.mh": 15,
+                    # M41c: 16, std:reflect's `hooks.*` natives.
+                    "reflection.mh": 16,
+                    # M41b: decorators; M41c: 16 (the hidden std:reflect import).
+                    "decorators.mh": 16,
+                    # M41c: rest parameters, function impls and hooks.
+                    "hooks.mh": 16,
                 }.get(name, 4)
                 self.assertEqual(data[:8], b"MAHC\x01\x00" + bytes([minor, 0]))
 
@@ -165,10 +169,10 @@ class LoaderValidationTests(unittest.TestCase):
         self.assertIn("major", str(cm.exception))
 
     def test_unsupported_minor_version(self):
-        # M41b: this VM now implements minor version 15, so the smallest
-        # genuinely unsupported minor version is 16.
+        # M41c: this VM now implements minor version 16, so the smallest
+        # genuinely unsupported minor version is 17.
         data = bytearray(compile_bytes(text="print(1)"))
-        data[6] = 16
+        data[6] = 17
         with self.assertRaises(MahcFormatError) as cm:
             decode(bytes(data))
         self.assertIn("minor", str(cm.exception))
@@ -181,11 +185,11 @@ class LoaderValidationTests(unittest.TestCase):
         data = compile_bytes(text='import math from "std:math"\nprint(math.tan(1))')
         self.assertIn(b"math.tan", data)
         data = bytearray(data.replace(b"math.tan", b"math.zzz"))
-        data[6] = 16
+        data[6] = 17
         with self.assertRaises(MahcFormatError) as cm:
             decode(bytes(data))
         message = str(cm.exception)
-        self.assertIn("unsupported minor version 16", message)
+        self.assertIn("unsupported minor version 17", message)
         self.assertIn("natives this VM doesn't have ('math.zzz')", message)
 
     def test_minor_is_the_lowest_the_program_needs(self):

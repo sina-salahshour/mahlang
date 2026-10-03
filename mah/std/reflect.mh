@@ -23,6 +23,22 @@
 # `sig.params[i].decorators`, the `decorators` of a `Schema`, `Field` and
 # `Variant`; `find(sig.decorators, Route)` picks one out by type.
 #
+# Hooks (M41c, docs/REFLECTION.md): a decorator whose type implements one of
+# the traits below changes behavior. `impl reflect.WrapFn for Log` wraps the
+# decorated function; `WrapParam` transforms an argument on every call;
+# `WrapStruct` and `WrapField` validate or transform a struct when it is
+# built and a field when it is assigned. A program with any decorator imports
+# this module implicitly: the `__`-prefixed functions at the end are what the
+# compiler's generated code calls (they are not exported, so no program can
+# reach them by name).
+#
+#   struct Log {}
+#   impl reflect.WrapFn for Log {
+#       fn wrap(self, f, info) { fn(...args, **kw) { print("-> " + info.name); f(...args, **kw) } }
+#   }
+#   @Log {}
+#   fn greet(name) { "hi " + name }
+#
 # A bare type name (`User`, `Number`, `Vector`) is a value of type `Type`.
 # What the descriptors report is what the source *wrote*: annotations
 # resolved to the types they name, `##` doc comments and constant default
@@ -44,6 +60,19 @@ extern fn native_construct_variant(
     variant: String,
     fields: Map<String, Unknown>
 ) -> Vector<Unknown> = "reflect.construct_variant"
+
+extern fn native_has(value: Unknown, trait_name: String) -> Bool = "hooks.has"
+extern fn native_adopt(wrapper: Unknown, original: Unknown) -> Unknown = "hooks.adopt"
+extern fn native_same_fn(a: Unknown, b: Unknown) -> Bool = "hooks.same_fn"
+extern fn native_set_type(t: Type<Unknown>, data: Unknown) -> Unknown = "hooks.set_type"
+extern fn native_set_param(f: Unknown, index: Number, data: Unknown) -> Unknown = "hooks.set_param"
+extern fn native_hooks_of(value: Unknown) -> Unknown = "hooks.of"
+extern fn native_get_field(value: Unknown, name: String) -> Unknown = "hooks.get_field"
+extern fn native_set_field(
+    value: Unknown,
+    name: String,
+    new: Unknown
+) -> Unknown = "hooks.set_field"
 
 ## What went wrong in `construct`/`construct_variant`.
 export struct ReflectError { message: String }
@@ -92,7 +121,13 @@ export struct Signature {
     returns: TypeRef,
     ## `none` when no `throws` clause was written.
     throws: Option<Vector<TypeRef>>,
-    decorators: Vector<Unknown>
+    decorators: Vector<Unknown>,
+    ## The `...name` parameter that collects extra positional arguments
+    ## (its type is the collection's: `Vector<T>`), and the `**name` one
+    ## that collects keyword arguments (`Map<String, T>`); neither is in
+    ## `params`.
+    rest: Option<Param>,
+    kwrest: Option<Param>
 }
 
 ## A field of a struct or enum variant.
@@ -134,6 +169,163 @@ export struct Method {
     trait_name: Option<String>
 }
 
+# -- hooks (M41c) ----------------------------------------------------------------
+
+## What `WrapFn.wrap` is told about the function it wraps: its name ("" for
+## an anonymous one) and the original function (before any wrapping).
+export struct FnInfo { name: String, function: Unknown }
+
+## What `WrapParam.transform` is told: the parameter's name and position, and
+## the function it belongs to (the original).
+export struct ParamInfo { name: String, index: Number, function: Unknown }
+
+## What `WrapStruct.construct` is told: the struct's type.
+export struct TypeInfo { type: Type<Unknown> }
+
+## What `WrapField.set` is told: the field's name and the struct type that
+## declares it.
+export struct FieldInfo { name: String, type: Type<Unknown> }
+
+## A decorator whose type implements this wraps the function it decorates:
+## `wrap` receives the function (already wrapped by the decorators closer to
+## the declaration) and returns the function that takes its place, which
+## must be a function. The result still reports the original's
+## `reflect.signature`, decorators and parameter hooks.
+export trait WrapFn {
+    fn wrap(self, f: Unknown, info: FnInfo) -> Unknown
+}
+
+## A decorator on a parameter that implements this transforms the argument
+## on every call, after it is bound (and a default filled), before the body.
+export trait WrapParam {
+    fn transform(self, value: Unknown, info: ParamInfo) -> Unknown
+}
+
+## A decorator on a struct that implements this sees every value of the
+## struct right after it is built (a literal, or `reflect.construct`), after
+## the field hooks. Returning a value replaces it; throwing rejects it.
+export trait WrapStruct {
+    fn construct(self, value: Unknown, info: TypeInfo) -> Unknown
+}
+
+## A decorator on a field that implements this transforms the value stored
+## in it, when the struct is built and on every assignment `obj.field = v`.
+export trait WrapField {
+    fn set(self, value: Unknown, info: FieldInfo) -> Unknown
+}
+
+fn wrong(message: String) -> Unknown {
+    throw RuntimeError.ArgumentError { message: message }
+}
+
+# The hooks among `decorators` with the trait, closest to the declaration first.
+fn hooks_among(decorators: Vector<Unknown>, trait_name: String) -> Vector<Unknown> {
+    let out = []
+    let i = decorators.len() - 1
+    while i >= 0 {
+        if native_has(decorators[i], trait_name) { out.push(decorators[i]) }
+        i = i - 1
+    }
+    out
+}
+
+# What the setup helpers keep for the VM (`hooks.set_param` / `hooks.set_type`).
+struct ParamHooks { info: ParamInfo, hooks: Vector<Unknown> }
+struct TypeHooks {
+    info: TypeInfo,
+    struct_hooks: Vector<Unknown>,
+    field_hooks: Map<String, Vector<Unknown>>
+}
+
+# Everything below is called by the code the compiler generates for a
+# program with decorators -- never by user code (it is not exported).
+
+# `f` wrapped by every WrapFn among `decorators`, which sit on `f`; the result
+# takes `f`'s identity.
+fn __wrap_fn(f: Unknown, name: String, decorators: Vector<Unknown>) -> Unknown {
+    let info = FnInfo { name: name, function: f }
+    let wrapped = f
+    for let d in hooks_among(decorators, "WrapFn") {
+        wrapped = WrapFn.wrap(d, wrapped, info)
+        if native_type_of(wrapped) != Function {
+            wrong("WrapFn.wrap must return a function")
+        }
+    }
+    native_adopt(wrapped, f)
+}
+
+# Parameter `index` of `f`: remember the WrapParam hooks among its decorators.
+fn __setup_param(f: Unknown, index: Number, name: String, decorators: Vector<Unknown>) -> Unknown {
+    let hooks = hooks_among(decorators, "WrapParam")
+    if hooks.len() > 0 {
+        native_set_param(
+            f,
+            index,
+            ParamHooks { info: ParamInfo { name: name, index: index, function: f }, hooks: hooks }
+        )
+    }
+}
+
+# Struct type `t`: remember the WrapStruct hooks among `decorators` and the
+# WrapField hooks of each field in `fields` (a Map of field name to its
+# decorators, in declaration order).
+fn __setup_type(
+    t: Type<Unknown>,
+    decorators: Vector<Unknown>,
+    fields: Map<String, Unknown>
+) -> Unknown {
+    let struct_hooks = hooks_among(decorators, "WrapStruct")
+    let field_hooks = [:]
+    for let name in fields.keys() {
+        let hooks = hooks_among(fields[name], "WrapField")
+        if hooks.len() > 0 { field_hooks[name] = hooks }
+    }
+    if struct_hooks.len() > 0 | field_hooks.len() > 0 {
+        native_set_type(
+            t,
+            TypeHooks {
+                info: TypeInfo { type: t },
+                struct_hooks: struct_hooks,
+                field_hooks: field_hooks
+            }
+        )
+    }
+}
+
+# A parameter's value after its WrapParam hooks (`data` is what __setup_param stored).
+fn __run_param(value: Unknown, data: ParamHooks) -> Unknown {
+    let v = value
+    for let hook in data.hooks { v = WrapParam.transform(hook, v, data.info) }
+    v
+}
+
+# A field's value after its WrapField hooks.
+fn run_field_hooks(data: TypeHooks, name: String, value: Unknown) -> Unknown {
+    let hooks = data.field_hooks[name]
+    let v = value
+    let info = FieldInfo { name: name, type: data.info.type }
+    for let hook in hooks { v = WrapField.set(hook, v, info) }
+    v
+}
+
+# A new struct value `value` of a type with hooks: each hooked field in
+# declaration order (read and written raw, so no hook runs twice), then the
+# WrapStruct hooks.
+fn __run_struct(value: Unknown, data: TypeHooks) -> Unknown {
+    let v = value
+    for let name in data.field_hooks.keys() {
+        native_set_field(v, name, run_field_hooks(data, name, native_get_field(v, name)))
+    }
+    for let hook in data.struct_hooks { v = WrapStruct.construct(hook, v, data.info) }
+    v
+}
+
+# The value to store in `obj.name = value` for an `obj` whose type has hooks.
+fn __run_field(obj: Unknown, data: TypeHooks, name: String, value: Unknown) -> Unknown {
+    if data.field_hooks.has(name) { return run_field_hooks(data, name, value) }
+    value
+}
+
 # -- reading what the natives return -----------------------------------------------
 
 fn typeref(v: Vector<Unknown>) -> TypeRef {
@@ -170,6 +362,17 @@ fn fields_of(v: Vector<Unknown>) -> Vector<Field> {
     out
 }
 
+fn param_of(p: Vector<Unknown>) -> Param {
+    Param {
+        name: p[0],
+        type: typeref(p[1]),
+        doc: p[2],
+        has_default: p[3],
+        default: if p[4] { some(p[5]) } else { none },
+        decorators: p[6]
+    }
+}
+
 # `[true, value]` or `[false, message]` from `construct`.
 fn built(r: Vector<Unknown>) -> Unknown throws ReflectError {
     if r[0] { return r[1] }
@@ -187,18 +390,7 @@ export fn type_of(value: Unknown) -> Type<Unknown> { native_type_of(value) }
 export fn signature(f: Unknown) -> Signature {
     let r = native_signature(f)
     let params = []
-    for let p in r[3] {
-        params.push(
-            Param {
-                name: p[0],
-                type: typeref(p[1]),
-                doc: p[2],
-                has_default: p[3],
-                default: if p[4] { some(p[5]) } else { none },
-                decorators: p[6]
-            }
-        )
-    }
+    for let p in r[3] { params.push(param_of(p)) }
     Signature {
         name: if r[0] == none { "" } else { r[0] },
         doc: r[1],
@@ -206,7 +398,9 @@ export fn signature(f: Unknown) -> Signature {
         params: params,
         returns: typeref(r[4]),
         throws: if r[5] == none { none } else { some(refs_of(r[5])) },
-        decorators: r[6]
+        decorators: r[6],
+        rest: if r[7] == none { none } else { some(param_of(r[7])) },
+        kwrest: if r[8] == none { none } else { some(param_of(r[8])) }
     }
 }
 
@@ -268,13 +462,18 @@ export fn implements(t: Type<Unknown>, trait_name: String) -> Bool {
 
 ## The first of `decorators` (a `decorators` field of a `Signature`, `Param`,
 ## `Schema`, `Field` or `Variant`) that matches `target`: with a Type
-## (`find(sig.decorators, Route)`) the first whose type is it; with anything
-## else (a function) the first that `==` it. `none` when there is none.
+## (`find(sig.decorators, Route)`) the first whose type is it; with a
+## function the first that is the same function (the same declaration and
+## defining scope, so it still matches after the function has been wrapped
+## by a hook); with anything else the first that `==` it. `none` when there
+## is none.
 export fn find(decorators: Vector<Unknown>, target: Unknown) -> Option<Unknown> {
-    let by_type = native_type_of(target) == Type
+    let kind = native_type_of(target)
     for let d in decorators {
-        if by_type {
+        if kind == Type {
             if native_type_of(d) == target { return some(d) }
+        } elif kind == Function {
+            if native_same_fn(d, target) { return some(d) }
         } else {
             if d == target { return some(d) }
         }
@@ -297,7 +496,11 @@ export fn call(
 ## A new struct value from exactly its fields. A missing or unknown field
 ## is a ReflectError naming it.
 export fn construct(t: Type<Unknown>, fields: Map<String, Unknown>) -> Unknown throws ReflectError {
-    built(native_construct(t, fields))
+    let value = built(native_construct(t, fields))
+    # a struct with hooks (M41c) is checked/transformed like a literal
+    let data = native_hooks_of(value)
+    if data == none { return value }
+    __run_struct(value, data)
 }
 
 ## A new enum value: the variant's name and exactly its fields.

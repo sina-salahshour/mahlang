@@ -221,9 +221,14 @@ def encode(program: Program) -> bytes:
         for fn in program.functions:
             params = fn.params if fn.params is not None else []
             payload += write_varuint(len(params))
-            for name_idx, has_default in params:
+            for index, (name_idx, has_default) in enumerate(params):
                 payload += _str_index(name_idx)
-                payload += _u8(1 if has_default else 0)
+                flags = 1 if has_default else 0
+                if fn.rest & 2 and index == len(params) - 1:
+                    flags |= 4
+                elif fn.rest & 1 and index == len(params) - 1 - (1 if fn.rest & 2 else 0):
+                    flags |= 2
+                payload += _u8(flags)
         out += _section(SEC_PARAMS, bytes(payload))
 
     # HANDLERS (0x08, required from minor 4 -- docs/MAHC_FORMAT.md #4.8)

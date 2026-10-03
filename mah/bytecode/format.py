@@ -62,6 +62,14 @@ Map), the `reflect.*` natives behind std:reflect, and the optional META
 section (0x82: written annotations, doc comments and constant defaults --
 older VMs skip it, so a file whose only 1.14 content is META keeps its old
 minor) -- docs/MAHC_FORMAT.md #4.4/#4.6/#4.10.
+
+M41b bumps MINOR to 15: `decorate` and the `reflect.decorators` native.
+
+M41c bumps MINOR to 16: rest parameters (PARAMS flag bits 1 and 2), the
+`paramhooks` opcode, the `hooks.*` natives behind the hook traits, and
+function-item impls (`defmethod` keys spelled `fn#<function index>`) --
+docs/MAHC_FORMAT.md #4.4/#4.5a/#4.6/#6.7. A file uses 1.16 only when it
+uses one of those.
 """
 
 from __future__ import annotations
@@ -74,7 +82,7 @@ MAGIC = b"MAHC"
 # `.mahc` extension).
 SHEBANG = b"#!/usr/bin/env -S mah runc\n"
 MAJOR = 1
-MINOR = 15
+MINOR = 16
 
 # -- section ids (docs/MAHC_FORMAT.md #3) -----------------------------------
 SEC_STRINGS = 0x01
@@ -232,6 +240,16 @@ NATIVE_ARITIES = {
     "reflect.construct_variant": 3,
     # M41b (1.15): the decorators stored by `decorate` (kind, a, b).
     "reflect.decorators": 3,
+    # M41c (1.16): the hook machinery behind std:reflect's WrapFn/WrapParam/
+    # WrapStruct/WrapField (docs/MAHC_FORMAT.md #4.4).
+    "hooks.has": 2,
+    "hooks.adopt": 2,
+    "hooks.same_fn": 2,
+    "hooks.set_type": 2,
+    "hooks.set_param": 3,
+    "hooks.of": 1,
+    "hooks.get_field": 2,
+    "hooks.set_field": 3,
 }
 
 # M16: which minor version introduced each 1.1+ native -- a 1.0 file
@@ -300,6 +318,14 @@ NATIVE_SINCE_MINOR = {
     "reflect.construct": 14,
     "reflect.construct_variant": 14,
     "reflect.decorators": 15,
+    "hooks.has": 16,
+    "hooks.adopt": 16,
+    "hooks.same_fn": 16,
+    "hooks.set_type": 16,
+    "hooks.set_param": 16,
+    "hooks.of": 16,
+    "hooks.get_field": 16,
+    "hooks.set_field": 16,
 }
 
 # M29: native inherent methods added after 1.0, by the minor that added
@@ -377,6 +403,7 @@ OPCODES: dict[str, tuple[int, tuple[str, ...]]] = {
     "loadtype": (0x3B, ("N", "N", "A")),  # M41a (1.14): kind (0 TYPES index, 1 primitive), index, dest
     "spread": (0x3C, ("A", "A", "B")),  # M41a (1.14): target, source, keyword?
     "decorate": (0x3D, ("N", "N", "N", "A*")),  # M41b (1.15): kind, a, b, the decorator values in source order
+    "paramhooks": (0x3E, ("N", "N", "A")),  # M41c (1.16): function index, parameter index, dest
     "deferpush": (0x40, ()),
     "deferadd": (0x41, ("A",)),
     "deferpeek": (0x42, ("A",)),
@@ -416,4 +443,5 @@ OPCODE_SINCE_MINOR: dict[str, int] = {
     "loadtype": 14,
     "spread": 14,
     "decorate": 15,
+    "paramhooks": 16,
 }

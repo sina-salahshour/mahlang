@@ -1799,6 +1799,20 @@
           }
         ]
       },
+      "rest": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "**",
+            "named": false
+          },
+          {
+            "type": "...",
+            "named": false
+          }
+        ]
+      },
       "type": {
         "multiple": true,
         "required": false,

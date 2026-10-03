@@ -574,6 +574,12 @@ class FnExpr:
     # method ever has any.
     decorators: list = field(default_factory=list, repr=False)
     param_decorators: list = field(default_factory=list, repr=False)
+    # M41c: rest parameters -- bit 0 (1) = the last ordinary-after parameter
+    # is `...name` (collects extra positional arguments into a Vector), bit 1
+    # (2) = the last parameter is `**name` (collects unknown keyword
+    # arguments into a Map). They are ordinary entries of `params` (the
+    # last one or two), so slots, positions and arity need no special case.
+    rest: int = field(default=0, repr=False)
 
 
 @dataclass
@@ -647,6 +653,8 @@ class MethodDecl:
     # method's; a trait method never has any).
     decorators: list = field(default_factory=list, repr=False)
     param_decorators: list = field(default_factory=list, repr=False)
+    # M41c: same as `FnExpr.rest`.
+    rest: int = field(default=0, repr=False)
 
     @property
     def is_method(self) -> bool:
@@ -696,6 +704,14 @@ class ImplDecl:
     # list[TypeExpr], `[]` when absent.
     type_args: list = field(default_factory=list, repr=False)
     trait_args: list = field(default_factory=list, repr=False)
+    # M41c: set by Resolver when the target is a top-level function
+    # (`impl Tr for somefn`, `impl somefn { ... }`) rather than a type -- the
+    # function's own FnExpr. `type_name` then still holds the function's
+    # (possibly mangled) name; codegen/lowering key the method table by the
+    # function's index (`fn#<index>`).
+    fn_target: Optional[object] = field(default=None, repr=False)
+    # M41c: the resolver's key for that target, `fn#<name>` (None for a type).
+    item_key: Optional[str] = field(default=None, repr=False)
 
 
 @dataclass

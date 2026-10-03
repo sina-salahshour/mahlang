@@ -214,6 +214,36 @@ print("a-b".split(...["-"]))         # [a, b]   method calls take them too
   `sleep_async` take no spread arguments, and `detach f(...xs)` isn't allowed
   yet. In `Trait.m(x, ...)`/`Type.m(x, ...)` the receiver `x` can't be a spread.
 
+### Rest parameters
+
+`...name` collects the extra positional arguments into a new Vector and
+`**name` the keyword arguments that match no parameter into a new Map (in the
+order given). They go last, `...` before `**`, with no default; either or
+both may be there:
+
+```mah
+fn show(label, ...items, **options) {
+    print(label, items, options)
+}
+show("a")                          # a [] [:]
+show("b", 1, 2, 3, color: "red")   # b [1, 2, 3] [color: red]
+show("c", ...[4], **["size": 9])   # c [4] [size: 9]   spread calls bind them too
+
+fn log_all(prefix: String, ...items: Vector<Number>, **opts: Map<String, String>) { }
+```
+
+- The annotation is the collection's type (`Vector<T>`, `Map<String, T>`);
+  without one they're `Vector<Unknown>` and `Map<String, Unknown>`.
+- Without `**`, an unknown keyword is still an `ArgumentError`; without `...`,
+  too many positional arguments still is. A keyword that names an ordinary
+  parameter binds it as usual and never lands in the Map.
+- They work on top-level and nested `fn`s, closures and methods (not
+  `extern fn`). `f.arity()` counts them, and `reflect.signature(f)` lists
+  them as `rest`/`kwrest` (an `Option` of a `Param`), apart from `params`.
+- `**` is still the exponent operator anywhere but at the start of a
+  parameter. In a method call the receiver binds to the first parameter, so
+  in `fn(...args, **kw)` it is `args[0]`.
+
 ## Structs and enums
 
 ```mah
@@ -525,6 +555,14 @@ print(Shape.area(r))            # trait-qualified call
   `Function`, `Option`, `Promise`, `Vector`, `Map`. Built-in traits:
   `Printable`, `Index`, `IndexAssign`.
 - The impl must define every required method, with the same parameters.
+- A top-level `fn` can be an impl target too: `impl Tr for somefn { ... }`
+  and `impl somefn { ... }` give *that function* methods
+  (`somefn.describe()`); other functions and closures don't have them. Only a
+  top-level `fn` declaration works (not a `let f = fn ...`, a nested `fn` or
+  a closure: "impl targets must be a type or a top-level function"), and the
+  impl must be in the module that declares the function or the one that
+  declares the trait. `reflect.type_of(somefn)` is still `Function`. This is
+  how a function acts as a decorator with hooks (see Hooks).
 - If two traits give one type the same method name, call it as
   `Trait.name(value)`.
 - `p.f()` calls a function stored in field `f` if there's no method `f`.
@@ -1051,10 +1089,10 @@ print(reflect.implements(User, "Printable"), reflect.call(add, [1], ["b": 5]))  
 `fn`/`struct`/`enum` (and above `export`), an `impl` method, or before a
 parameter, struct field or enum variant attaches a value to it. The
 expression is evaluated **once, at startup**, and kept in source order;
-nothing acts on it except `std:reflect`, which returns them as the
+nothing acts on it unless its type implements a hook trait (see Hooks); `std:reflect` returns them as the
 `decorators` Vector of a `Signature`, `Param`, `Schema`, `Field` or
 `Variant`. `reflect.find(decorators, Route)` is the first one whose type is
-`Route`; `reflect.find(decorators, my_fn)` the first that `==` the function.
+`Route`; `reflect.find(decorators, my_fn)` the first that is the same function.
 
 ```mah
 import reflect from "std:reflect"
@@ -1090,6 +1128,80 @@ print(sig.params[0].decorators)              # [tag:path]
   `fn`/`struct`/`enum`/method go one per line above it; a parameter's, field's
   or variant's stay inline (`@a @b(1) name: T`).
 - A decorator anywhere else is a compile error.
+
+## Hooks
+
+A decorator **changes behavior** when its type implements a hook trait from
+`std:reflect`: `reflect.WrapFn`, `reflect.WrapParam`, `reflect.WrapField` or
+`reflect.WrapStruct`. A decorator is either a value of a struct/enum type (a
+factory like `@retry(3)` returns one) or a function that has the impl
+(`impl reflect.WrapFn for log`). A program with any decorator imports
+`std:reflect` implicitly; you only write the import to name the traits.
+
+```mah
+import reflect from "std:reflect"
+
+# WrapFn: replace the function (`f` is the function so far, `info.name` its name)
+fn log(f, info: reflect.FnInfo) {
+    fn(...args, **kw) {
+        print("call", info.name)
+        f(...args, **kw)
+    }
+}
+impl reflect.WrapFn for log { fn wrap(self, f, info) { self(f, info) } }
+
+@log
+fn greet(name: String, punct: String = "!") { "hi " + name + punct }
+print(greet("ann"))                          # call greet / hi ann!
+print(reflect.signature(greet).params.len()) # 2   the wrapper reports greet's own signature
+
+# WrapParam: transform an argument on every call, before the body runs
+fn trim(value, info: reflect.ParamInfo) { value }
+impl reflect.WrapParam for trim { fn transform(self, value, info) { value.trim() } }
+fn shout(@trim text: String) { text.to_upper() }
+print(shout("  hi "))                         # HI
+
+# WrapField / WrapStruct: on a literal, `reflect.construct`, and `obj.field = v`
+fn lower(value, info: reflect.FieldInfo) { value }
+impl reflect.WrapField for lower { fn set(self, value, info) { value.to_lower() } }
+struct Adult {}
+impl reflect.WrapStruct for Adult {
+    fn construct(self, value, info) {
+        if value.age < 18 { throw RuntimeError.ArgumentError { message: "too young" } }
+        value
+    }
+}
+fn adult() -> Adult { Adult {} }
+
+@adult()
+struct Member { @lower email: String, age: Number }
+let m = Member { email: "ANN@X.COM", age: 30 }
+m.email = "BOB@X.COM"
+print(m.email)                               # bob@x.com
+```
+
+- `wrap(self, f, info)` gets the function (already wrapped by the decorators
+  closer to it) and `reflect.FnInfo { name, function }` (`function` is the
+  original) and returns the function that takes its place, which must be a
+  function (`ArgumentError`: "WrapFn.wrap must return a function", at startup).
+  A wrapper for a method receives the object as its first argument
+  (`fn(...args, **kw)` is `args[0]`).
+- `transform(self, value, info)` gets the bound argument (a Vector or Map for
+  a rest parameter) and `reflect.ParamInfo { name, index, function }`.
+  `set(self, value, info)` gets `reflect.FieldInfo { name, type }` (`type` is
+  the struct) and `construct(self, value, info)` `reflect.TypeInfo { type }`;
+  both return the value to use (`construct` may return a different value, or
+  throw to reject it). Field hooks run before struct hooks, a throw
+  propagates to the call, literal or assignment, and hooks may `await`.
+- Several hooks on one target run **closest to the declaration first**, each
+  receiving the previous result. A decorator that implements no hook trait
+  only attaches its value, as before.
+- The wrapped function keeps the original's identity: `reflect.signature`,
+  its decorators and its parameter hooks, and `impl Tr for greet` methods
+  all still work; `reflect.find(decorators, greet)` finds `greet` even after
+  it was wrapped. Hooks never change what the type checker thinks.
+- Not available: hooks on enums, variants or nested functions, and field *read*
+  hooks.
 
 ## Errors
 
@@ -1219,10 +1331,10 @@ test "not ready yet" {
   `pad_start`, and friends).
 - `&&`, `||`, `+=`, `++`, ternary `?:`.
 - Type-checking trait-typed values, bounds, and the prelude's iterator methods (the checker skips these for now); classes/inheritance.
-- Variadic *parameters* (`*args`, `...rest`, `**kwargs`): a function has a fixed
-  parameter list (a call can spread a Vector or Map into it, see Spread calls);
-  only `print` takes any number of arguments. Hook traits (a decorator that
-  *changes* behavior); a decorator only attaches a value.
+- `*args` (use `...args`, see Rest parameters), rest parameters on an `extern fn`
+  or with a default; only `print` takes any number of arguments without one.
+- Hooks for enums or variants, field *get* hooks, and `impl` for a nested
+  `fn` or closure (only top-level `fn`s and types are impl targets).
 - Decorators on `let`s, traits, `impl` blocks, nested functions or closures.
 - Network access, spawning a process to stream from, binary file data, and every other planned
   `std:` module besides `std:math`, `std:path`, `std:json`, `std:csv`,

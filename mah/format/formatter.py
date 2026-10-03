@@ -383,6 +383,14 @@ def _facts(program: list, toks: list, module_starts: set, prefixes: set = frozen
             # M41a: `...xs` and `**m` in an argument list print tight, like a
             # prefix operator.
             facts.unary.add(index_of(node.position))
+        elif isinstance(node, (ast.FnExpr, ast.MethodDecl)) and node.rest:
+            # M41c: a rest parameter's `...` / `**` marker prints tight against
+            # its name: `...args: Vector<Number>`, `**options`.
+            count = bin(node.rest).count("1")
+            for position in node.param_positions[len(node.params) - count :]:
+                marker = index_of(position)
+                if marker is not None:
+                    facts.unary.add(marker - 1)
         elif isinstance(node, ast.NumberLit) and node.value < 0:
             facts.unary.add(index_of(node.position))  # a negative literal pattern: `-1`
         elif isinstance(node, ast.NamedType) and node.args:

@@ -259,6 +259,7 @@ from .ast_nodes import (
     WhileStmt,
     WildcardPat,
 )
+from ..preprocessor import demangle_message
 from ..runtime_values import NONE_VALUE
 
 
@@ -351,6 +352,16 @@ class Codegen:
         # phase (`_decorator_phases`) needs to know which module (source
         # file) a declaration or statement belongs to.
         self._pp = pp
+        # M41c: the global addresses of std:reflect's private hook helpers
+        # (set by the resolver for a program that has decorators; empty
+        # otherwise) -- what the setup calls, `paramhooks` checks, struct
+        # literals and field assignments below call. Truthy only when this
+        # program has any decorator, which is also when field assignments
+        # get their runtime check.
+        self._hooks: dict = getattr(global_frame_level, "hook_helpers", None) or {}
+        # M41c: the struct types with decorators on themselves or a field
+        # (their literals get a `hooks.of` check).
+        self._decorated_structs: set = set()
         # M41b: ids of the top-level `fn` declarations whose closures were
         # created up front (only in a program that has decorators).
         self._hoisted_fns: set = set()
@@ -403,6 +414,12 @@ class Codegen:
         # too (no observable difference: creating a closure has no effect
         # and nothing can name a function before its declaration).
         phases = self._decorator_phases(stmts)
+        if self._hooks:
+            self._decorated_structs = {
+                stmt.name
+                for stmt in stmts
+                if isinstance(stmt, StructDecl) and (stmt.decorators or any(stmt.field_decorators))
+            }
         if phases:
             for stmt in stmts:
                 if self._is_fn_decl(stmt):
@@ -420,9 +437,7 @@ class Codegen:
         for stmt in stmts:
             if isinstance(stmt, ImplDecl):
                 for name, slot, is_method in stmt.registrations:
-                    self.buf.emit(
-                        ("defmethod", (0, slot), (stmt.type_name, stmt.trait_name, name, is_method), None)
-                    )
+                    self.buf.emit(("defmethod", (0, slot), self._defmethod_args(stmt, name, is_method), None))
         # M25 (docs/MAHC_FORMAT.md #5.5): the top-level program gets the
         # same implicit F-region a function with `defer` anywhere in its
         # own body gets -- wraps EVERYTHING below (the M9 push/drain,
@@ -497,11 +512,19 @@ class Codegen:
     def _module_key(self, position):
         return self._pp.map_to_source(position)[0] if self._pp is not None and position is not None else None
 
+    def _defmethod_args(self, impl, name: str, is_method) -> tuple:
+        """`defmethod`'s `(type, trait, name, is_method)`: the type is a name,
+        or, for a function-item impl (M41c), the target's FnExpr -- lowered to
+        `fn#<function index>` once FUNCTIONS indices are known."""
+        return (impl.fn_target if impl.fn_target is not None else impl.type_name, impl.trait_name, name, is_method)
+
     def _decorator_phases(self, stmts: list) -> list:
         """docs/REFLECTION.md (M41b, "Evaluation"): `[(trigger, decorations)]`
         sorted by trigger, one entry per module (source file) that has
-        decorated declarations. `decorations` are `(position, target, exprs)`
-        in source order; `trigger` is the combined-text offset the phase goes
+        decorated declarations. `decorations` are `(position, target, exprs,
+        group)` in source order; `group` (M41c) identifies the declaration
+        the target belongs to, whose hook setup follows its last `decorate`;
+        `trigger` is the combined-text offset the phase goes
         before -- the position of the module's first statement, or, if it has
         none, the end of its code (the end of its last source segment), so
         the phase then runs right after everything the module declares and
@@ -510,30 +533,35 @@ class Codegen:
         around the modules it imports)."""
         by_module: dict = {}
 
-        def add(target, exprs) -> None:
+        def add(target, exprs, group) -> None:
             if exprs:
-                by_module.setdefault(self._module_key(exprs[0].position), []).append((exprs[0].position, target, exprs))
+                by_module.setdefault(self._module_key(exprs[0].position), []).append(
+                    (exprs[0].position, target, exprs, group)
+                )
 
-        def add_fn(fn: FnExpr) -> None:
-            add(("fn", fn, None), fn.decorators)
+        def add_fn(fn: FnExpr, slot, impl=None, method=None) -> None:
+            group = {"kind": "fn", "fn": fn, "slot": slot, "impl": impl, "method": method, "addrs": {}}
+            add(("fn", fn, None), fn.decorators, group)
             for index, decorators in enumerate(fn.param_decorators):
-                add(("param", fn, index), decorators)
+                add(("param", fn, index), decorators, group)
 
         for stmt in stmts:
             if self._is_fn_decl(stmt):
-                add_fn(stmt.value)
+                add_fn(stmt.value, stmt.address)
             elif isinstance(stmt, StructDecl):
-                add(("struct", stmt.name, None), stmt.decorators)
+                group = {"kind": "struct", "decl": stmt, "addrs": {}}
+                add(("struct", stmt.name, None), stmt.decorators, group)
                 for index, decorators in enumerate(stmt.field_decorators):
-                    add(("field", stmt.name, index), decorators)
+                    add(("field", stmt.name, index), decorators, group)
             elif isinstance(stmt, EnumDecl):
-                add(("enum", stmt.name, None), stmt.decorators)
+                group = {"kind": "enum", "addrs": {}}
+                add(("enum", stmt.name, None), stmt.decorators, group)
                 for index, decorators in enumerate(stmt.variant_decorators):
-                    add(("variant", stmt.name, index), decorators)
+                    add(("variant", stmt.name, index), decorators, group)
             elif isinstance(stmt, ImplDecl):
                 for method in stmt.methods:
                     if method.fn is not None:
-                        add_fn(method.fn)
+                        add_fn(method.fn, method.slot, stmt, method)
         if not by_module:
             return []
         first_statement: dict = {}
@@ -554,12 +582,122 @@ class Codegen:
         return phases
 
     def _gen_decorator_phase(self, decorations: list) -> None:
-        for _position, target, exprs in decorations:
+        for i, (_position, target, exprs, group) in enumerate(decorations):
             saved = self.buf.current_pos
             self.buf.current_pos = exprs[0].position
             addrs = tuple(self.gen_expr(expr) for expr in exprs)
             self.buf.emit(("decorate", target, addrs, None))
+            group["addrs"][(target[0], target[2])] = addrs
+            # M41c: the declaration's hook setup, right after its own decorates
+            if self._hooks and (i + 1 == len(decorations) or decorations[i + 1][3] is not group):
+                self._gen_hook_setup(group, exprs[0].position)
             self.buf.current_pos = saved
+
+    # -- M41c: hooks -----------------------------------------------------------
+
+    def _hook_callee(self, name: str) -> tuple:
+        """The address of one of std:reflect's private helpers from the code
+        being generated (a global: depth = the current frame's depth)."""
+        return (self.frame_stack[-1].depth, self._hooks[name][1])
+
+    def _hook_call(self, name: str, args: tuple) -> tuple:
+        dest = self._temp()
+        self.buf.emit(("call", self._hook_callee(name), args, None))
+        self.buf.emit(("retval", None, None, dest))
+        return dest
+
+    def _const(self, value) -> tuple:
+        dest = self._temp()
+        self.buf.emit(("ld", value, None, dest))
+        return dest
+
+    def _vector_of(self, addrs: tuple) -> tuple:
+        dest = self._temp()
+        self.buf.emit(("vector", tuple(addrs), None, dest))
+        return dest
+
+    @staticmethod
+    def _display(name: str) -> str:
+        return demangle_message(name)
+
+    def _gen_hook_setup(self, group: dict, position) -> None:
+        """docs/REFLECTION.md (M41c, "Setup, in the decorator phase"): after a
+        declaration's `decorate`s, hand its decorators to std:reflect's
+        helpers, which keep the hooks among them."""
+        addrs = group["addrs"]
+        if group["kind"] == "struct":
+            decl = group["decl"]
+            type_value = self._temp()
+            self.buf.emit(("loadtype", ("struct", decl.name), None, type_value))
+            own = self._vector_of(addrs.get(("struct", None), ()))
+            pairs = []
+            for index, fname in enumerate(decl.fields):
+                if ("field", index) in addrs:
+                    pairs.append(self._const(self._display(fname)))
+                    pairs.append(self._vector_of(addrs[("field", index)]))
+            fields = self._temp()
+            self.buf.emit(("map", tuple(pairs), None, fields))
+            self._hook_call("__setup_type", (type_value, own, fields))
+        elif group["kind"] == "fn":
+            fn = group["fn"]
+            slot = (0, group["slot"])
+            name = self._display(fn.name) if fn.name else ""
+            for index in range(len(fn.params)):
+                if ("param", index) in addrs:
+                    self._hook_call(
+                        "__setup_param",
+                        (
+                            slot,
+                            self._const(Decimal(index)),
+                            self._const(self._display(fn.params[index])),
+                            self._vector_of(addrs[("param", index)]),
+                        ),
+                    )
+            if ("fn", None) in addrs:
+                wrapped = self._hook_call(
+                    "__wrap_fn", (slot, self._const(name), self._vector_of(addrs[("fn", None)]))
+                )
+                self.buf.emit(("=", wrapped, None, slot))
+                if group["impl"] is not None:
+                    # a method: register the wrapped function in its place
+                    for mname, mslot, is_method in group["impl"].registrations:
+                        if mslot == group["slot"]:
+                            self.buf.emit(
+                                ("defmethod", slot, self._defmethod_args(group["impl"], mname, is_method), None)
+                            )
+
+    def _gen_param_hooks(self, fn: FnExpr) -> None:
+        """M41c: WrapParam on every call -- after the arguments are bound and
+        the defaults filled, before the body, for each *decorated* parameter:
+        `paramhooks` fetches what the setup stored (or `none`), and when there
+        is something, the parameter becomes `__run_param(p, data)`."""
+        if not self._hooks:
+            return
+        for index, decorators in enumerate(fn.param_decorators):
+            if not decorators:
+                continue
+            param = (0, fn.param_slots[index])
+            data = self._temp()
+            self.buf.emit(("paramhooks", (fn, index), None, data))
+            skip = self.buf.emit((None, None, None, None))
+            result = self._hook_call("__run_param", (param, data))
+            self.buf.emit(("=", result, None, param))
+            self.buf.emit(("jmpf", data, None, self.buf.code_pointer), address=skip)
+
+    def _gen_struct_hooks(self, value) -> tuple:
+        """M41c: after a struct literal of a type that has hooks (decorators
+        on itself or a field): the literal's value goes through
+        `__run_struct`, which runs the field `set` hooks then the struct's
+        `construct` hooks (it may be another value, or a throw)."""
+        data = self._temp()
+        self.buf.emit(("native", "hooks.of", (value,), data))
+        out = self._temp()
+        self.buf.emit(("=", value, None, out))
+        skip = self.buf.emit((None, None, None, None))
+        result = self._hook_call("__run_struct", (out, data))
+        self.buf.emit(("=", result, None, out))
+        self.buf.emit(("jmpf", data, None, self.buf.code_pointer), address=skip)
+        return out
 
     # -- statements ------------------------------------------------------
 
@@ -786,6 +924,21 @@ class Codegen:
             self.buf.emit(("=", src_addr, None, target.address))
         elif isinstance(target, FieldAccess):
             obj_addr = self.gen_expr(target.obj)
+            if self._hooks:
+                # M41c: WrapField on assignment -- the object's type isn't known
+                # here, so ask the VM (`hooks.of`) and run the field's hooks
+                # when it has any.
+                value = self._temp()
+                self.buf.emit(("=", src_addr, None, value))
+                data = self._temp()
+                self.buf.emit(("native", "hooks.of", (obj_addr,), data))
+                skip = self.buf.emit((None, None, None, None))
+                result = self._hook_call(
+                    "__run_field", (obj_addr, data, self._const(self._display(target.field)), value)
+                )
+                self.buf.emit(("=", result, None, value))
+                self.buf.emit(("jmpf", data, None, self.buf.code_pointer), address=skip)
+                src_addr = value
             self.buf.emit(("setfield", obj_addr, target.field, src_addr))
         elif isinstance(target, Index):
             # M19: `obj[key] = v` is `IndexAssign.index_assign(obj, key, v)`.
@@ -1223,6 +1376,8 @@ class Codegen:
             pairs = tuple((name, self.gen_expr(value_expr)) for name, value_expr in expr.fields)
             dest = self._temp()
             self.buf.emit(("struct", expr.type_name, pairs, dest))
+            if expr.type_name in self._decorated_structs:
+                return self._gen_struct_hooks(dest)
             return dest
         if isinstance(expr, FieldAccess):
             if expr.enum_unit_type is not None:
@@ -1385,6 +1540,7 @@ class Codegen:
             self.buf.emit(
                 ("jmpset", (0, param_slot), None, self.buf.code_pointer), address=jmpset_placeholder
             )
+        self._gen_param_hooks(fn)
         # M5: implicit return of the body block's tail value if it falls
         # off the end -- `none` when there's no tail, a strict superset of
         # M1's "always none" trailer (unconditionally appended, dead code
@@ -1431,6 +1587,7 @@ class Codegen:
                     tuple(d is not None for d in fn.defaults),
                     # M41a: what META (docs/MAHC_FORMAT.md #4.10) records.
                     (fn, tparam_scope),
+                    fn.rest,  # M41c: rest-parameter flags (PARAMS bits 1/2)
                 ),
                 dest,
             )

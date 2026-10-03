@@ -56,6 +56,12 @@ print(Rect.area(r))                     # type-qualified call:  explicit self
   - `impl Tr for T { }` — the trait or the type must be user-defined.
     `impl MyTrait for Promise` ✓, `impl Printable for Point` ✓,
     `impl Printable for Number` ✗.
+  - *(M41c)* `impl somefn { }` and `impl Tr for somefn { }` — `somefn` may
+    be a top-level `fn` declaration instead of a type (its *item type*), and
+    the impl must then be in the module that declares the function or the one
+    that declares the trait. The method table key is `fn#<function index>`;
+    a method call on a Function value looks that entry up first, then
+    `Function`'s (docs/REFLECTION.md).
 - **Impl checking** (compile time): every required trait method present, no
   extras, same parameter count, same method-vs-static shape; no duplicate
   `impl Tr for T`; no duplicate inherent method names across `impl T` blocks.

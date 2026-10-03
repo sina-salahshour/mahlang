@@ -37,16 +37,26 @@ class TFn(Type):
     default; `names` are the parameter names (for keyword arguments), or
     `None` when unknown (a written `fn(A) -> B` type). `throws` is the
     function's error set (an `ESet`, M26), or None for a function that
-    throws nothing the checker tracks (a native method)."""
+    throws nothing the checker tracks (a native method).
 
-    __slots__ = ("params", "ret", "required", "names", "throws")
+    M41c: `rest` says the last parameter(s) are rest parameters (bit 0 the
+    `...` one, bit 1 the `**` one; their types are the collections', and
+    `required` counts only ordinary parameters). `item` is the key
+    (`fn#name`) of the item type of the top-level function this type is the
+    type of, or None -- an item type is assignable to (and unifies with) the
+    ordinary function type, and method lookup on it finds `impl somefn`'s
+    methods."""
 
-    def __init__(self, params, ret, required: int | None = None, names=None, throws=None):
+    __slots__ = ("params", "ret", "required", "names", "throws", "rest", "item")
+
+    def __init__(self, params, ret, required: int | None = None, names=None, throws=None, rest: int = 0, item=None):
         self.params = tuple(params)
         self.ret = ret
         self.required = len(self.params) if required is None else required
         self.names = tuple(names) if names is not None else None
         self.throws = throws
+        self.rest = rest
+        self.item = item
 
 
 class TParam(Type):
@@ -260,7 +270,13 @@ def subst(t: Type, mapping: dict, emap: dict | None = None) -> Type:
         if emap and throws is not None:
             throws = emap.get(throws.id, throws)
         return TFn(
-            [subst(p, mapping, emap) for p in t.params], subst(t.ret, mapping, emap), t.required, t.names, throws
+            [subst(p, mapping, emap) for p in t.params],
+            subst(t.ret, mapping, emap),
+            t.required,
+            t.names,
+            throws,
+            t.rest,
+            t.item,
         )
     return t
 

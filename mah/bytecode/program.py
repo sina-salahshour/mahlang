@@ -47,6 +47,10 @@ class FunctionDecl:
     # order, length always == param_count. `None` for a 1.0 file (no PARAMS
     # section at all -- every parameter is unnamed and required).
     params: list | None = None
+    # M41c (1.16, PARAMS flag bits 1/2): which of the last parameters are
+    # rest parameters -- bit 0 (1): the `...` positional rest, bit 1 (2): the
+    # `**` keyword rest. 0 for every function without one.
+    rest: int = 0
 
 
 @dataclass

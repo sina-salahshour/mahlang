@@ -1392,6 +1392,9 @@ def get_completions(
             # detail, not part of the user's own program.
             if pp_nav.prelude_start is not None and symbol.decl_position >= pp_nav.prelude_start:
                 continue
+            # M41c: likewise std:reflect when only decorators brought it in.
+            if pp_nav.hidden_reflect is not None and pp_nav.hidden_reflect[0] <= symbol.decl_position < pp_nav.hidden_reflect[1]:
+                continue
             items.append(_resolver_symbol_completion_item(symbol))
         for struct_name in resolver.struct_decls:
             if struct_name.startswith("__"):
@@ -1614,8 +1617,14 @@ def _fn_signature_text(name: str, t, skip_receiver: bool = False) -> str:
         return f"{name}: {_type_text(t)}"
     names = t.names or [f"_{i}" for i in range(len(t.params))]
     params = [f"{n}: {_type_text(p)}" if n != "self" else "self" for n, p in zip(names, t.params)]
-    for index in range(t.required, len(params)):
+    n_ord = len(params) - bin(getattr(t, "rest", 0)).count("1")
+    for index in range(t.required, n_ord):
         params[index] += " = ..."
+    # M41c: rest parameters print with their markers
+    if getattr(t, "rest", 0) & 2 and params:
+        params[-1] = "**" + params[-1]
+    if getattr(t, "rest", 0) & 1 and n_ord < len(params):
+        params[n_ord] = "..." + params[n_ord]
     ret = prune_type(t.ret)
     arrow = "" if isinstance(ret, TCon) and ret.name == "None" else f" -> {_type_text(ret)}"
     # M26: the error set the checker inferred (or the written `throws`).
@@ -1929,6 +1938,7 @@ def _method_signature_lines(resolver, cand, name: str) -> str:
     M13 spec's 'LSP' section."""
     if cand[0] == "impl":
         _kind, type_name, trait_name = cand
+        type_name = type_name.replace("fn#", "fn ", 1)  # M41c: a function's item type
         fninfo = _method_fninfo(resolver, cand, name)
         params = ", ".join(fninfo["param_names"]) if fninfo else ""
         if trait_name is None:

@@ -305,31 +305,75 @@ def _parse_functions(payload: bytes, nstrings: int) -> list:
     return functions
 
 
-def _parse_params(payload: bytes, functions: list, nstrings: int) -> list:
+def _parse_params(payload: bytes, functions: list, nstrings: int, minor: int = 0) -> list:
     """M16 (1.1): PARAMS section, docs/MAHC_FORMAT.md #4.5a -- one entry per
     function, in FUNCTIONS order, each `nparams` required to equal that
     function's own `param_count`. Returns a new `functions` list with
     `.params` filled in (FunctionDecl is otherwise unchanged)."""
     pr = _Reader(payload)
     out = []
-    for fn in functions:
+    for fn_index, fn in enumerate(functions):
         nparams = pr.varuint()
         if nparams != fn.param_count:
             raise MahcFormatError(
                 f"PARAMS: function declares {fn.param_count} parameter(s) but PARAMS lists {nparams}"
             )
         params = []
+        flag_bytes = []
         for _ in range(nparams):
             name = pr.varuint()
             if name >= nstrings:
                 raise MahcFormatError(f"PARAMS: name string index {name} out of range")
             flags = pr.u8()
-            if flags & ~1:
-                raise MahcFormatError(f"PARAMS: invalid flags byte {flags} (only bit 0 is defined)")
+            if minor < 16:
+                if flags & ~1:
+                    raise MahcFormatError(f"PARAMS: invalid flags byte {flags} (only bit 0 is defined)")
+            elif flags & ~7:
+                raise MahcFormatError(f"PARAMS: invalid flags byte {flags} (only bits 0-2 are defined)")
             params.append((name, bool(flags & 1)))
-        out.append(FunctionDecl(fn.entry, fn.slot_count, fn.param_count, fn.name, params=params))
+            flag_bytes.append(flags)
+        rest = _rest_flags(flag_bytes, fn_index)
+        out.append(FunctionDecl(fn.entry, fn.slot_count, fn.param_count, fn.name, params=params, rest=rest))
     _check_consumed(pr, "PARAMS")
     return out
+
+
+def _rest_flags(flag_bytes: list, fn_index: int) -> int:
+    """M41c (1.16, docs/MAHC_FORMAT.md #4.5a): the rest-parameter bits of one
+    function's PARAMS flags -- bit 1 (positional rest) and bit 2 (keyword
+    rest). A rest parameter has no default and carries one bit; the
+    positional one is the last parameter, or the one before the keyword one
+    (which is the last); each at most once. Returns bit 0 = positional rest,
+    bit 1 = keyword rest. Same messages as runtime/src/decode.rs."""
+    n = len(flag_bytes)
+    rest = 0
+    for i, flags in enumerate(flag_bytes):
+        pos, kw = bool(flags & 2), bool(flags & 4)
+        if not (pos or kw):
+            continue
+        if pos and kw:
+            raise MahcFormatError(
+                f"PARAMS: function {fn_index} parameter {i} is flagged as both a '...' and a '**' rest parameter"
+            )
+        if flags & 1:
+            raise MahcFormatError(
+                f"PARAMS: function {fn_index} parameter {i} is a rest parameter and can't have a default"
+            )
+        if kw:
+            if i != n - 1:
+                raise MahcFormatError(
+                    f"PARAMS: function {fn_index}: the '**' rest parameter must be the last parameter"
+                )
+            rest |= 2
+        else:
+            last_ok = i == n - 1 or (i == n - 2 and flag_bytes[n - 1] & 4)
+            if not last_ok:
+                raise MahcFormatError(
+                    f"PARAMS: function {fn_index}: the '...' rest parameter must be the last parameter "
+                    f"or the one before the '**' rest parameter"
+                )
+            rest |= 1
+    return rest
 
 
 def _type_variants(t_index: int, ctx: dict):
@@ -513,6 +557,24 @@ def _parse_code(payload: bytes, ctx: dict) -> list:
                 raise MahcFormatError(f"'loadtype' at instruction {i}: unknown kind {kind}")
         elif op == "decorate":
             _validate_decorate(instr.args, ctx, i)
+        elif op == "paramhooks":
+            # M41c: the function and the parameter exist
+            fn_index, param_index, _dest = instr.args
+            if fn_index >= ctx["nfunctions"]:
+                raise MahcFormatError(f"'paramhooks' at instruction {i}: function index {fn_index} out of range")
+            if param_index >= ctx["param_counts"][fn_index]:
+                raise MahcFormatError(
+                    f"'paramhooks' at instruction {i}: parameter index {param_index} out of range for function {fn_index}"
+                )
+        elif op == "defmethod" and minor >= 16:
+            # M41c: a function-item impl's type is spelled `fn#<function index>`
+            type_name = ctx["strings"][instr.args[1]]
+            if type_name.startswith("fn#"):
+                digits = type_name[3:]
+                if not (digits.isascii() and digits.isdigit() and str(int(digits)) == digits) or int(digits) >= ctx["nfunctions"]:
+                    raise MahcFormatError(
+                        f"'defmethod' at instruction {i}: '{type_name}' is not a valid function-item key"
+                    )
         elif op == "map":
             items, _dest = instr.args
             if len(items) % 2 != 0:
@@ -813,7 +875,7 @@ def decode(data: bytes) -> Program:
     if minor >= 1:
         # M16: PARAMS is required from minor 1 -- `_read_sections` already
         # guarantees `payloads[SEC_PARAMS]` exists whenever we get here.
-        functions = _parse_params(payloads[SEC_PARAMS], functions, len(strings))
+        functions = _parse_params(payloads[SEC_PARAMS], functions, len(strings), minor)
 
     ctx = {
         "nstrings": len(strings),

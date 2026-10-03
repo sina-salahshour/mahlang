@@ -1,0 +1,85 @@
+# Hooks (M41c): a decorator whose type implements WrapFn, WrapParam,
+# WrapField or WrapStruct changes behavior. A function can implement a trait
+# too (`impl Tr for somefn`), and `...rest` / `**options` collect the extra
+# arguments.
+
+import reflect from "std:reflect"
+
+# WrapFn: `log` wraps the function it decorates.
+fn log(f, info: reflect.FnInfo) {
+    fn(...args, **kw) {
+        print("call", info.name)
+        f(...args, **kw)
+    }
+}
+
+impl reflect.WrapFn for log {
+    fn wrap(self, f, info) { self(f, info) }
+}
+
+@log
+fn greet(name: String, punct: String = "!") { "hi " + name + punct }
+
+print(greet("ann"))
+print(greet("bob", punct: "?"))
+print(reflect.signature(greet).params.len())
+
+# WrapParam: `trim` cleans an argument before the body sees it.
+fn trim(value, info) { value }
+
+impl reflect.WrapParam for trim {
+    fn transform(self, value, info) { value.trim() }
+}
+
+fn shout(@trim text: String) { "[" + text.to_upper() + "]" }
+
+print(shout("  hello "))
+
+# WrapField and WrapStruct: normalize a field, reject a bad struct.
+fn lower(value, info) { value }
+
+impl reflect.WrapField for lower {
+    fn set(self, value, info) { value.to_lower() }
+}
+
+struct Adult { }
+
+impl reflect.WrapStruct for Adult {
+    fn construct(self, value, info) {
+        if value.age < 18 { throw RuntimeError.ArgumentError { message: "too young" } }
+        value
+    }
+}
+
+fn adult() -> Adult { Adult { } }
+
+@adult()
+struct Member {
+    @lower email: String,
+    age: Number
+}
+
+let m = Member { email: "ANN@Example.com", age: 30 }
+print(m.email)
+m.email = "BOB@Example.COM"
+print(m.email)
+print(
+    try { Member { email: "kid@example.com", age: 9 } } catch {
+        RuntimeError.ArgumentError { message } => { message }
+    }
+)
+
+# A function is a target for `impl` too.
+impl log {
+    fn describe(self) -> String { "logs every call" }
+}
+
+print(log.describe())
+
+# Rest parameters.
+fn summary(label, ...items, **options) {
+    label + ": " + items.len().to_string() + " items, " + options.len().to_string() + " options"
+}
+
+print(summary("a"))
+print(summary("b", 1, 2, 3, color: "red"))

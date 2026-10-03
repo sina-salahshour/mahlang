@@ -3433,6 +3433,54 @@ node that resolved to it. Then:
     - Tests: `tests/test_decorators.py` (both VMs), `mah/std/reflect.test.mh`,
       vm_diff cases, `examples/decorators.mh`, formatter and bytecode tests.
 
+41. **M41c — hooks, function-item impls, rest parameters. ✅ Landed.**
+    `docs/REFLECTION.md` (the design and its "M41c: what landed" list);
+    bytecode 1.16. Three features:
+
+    - **Rest parameters** `fn f(a, b = 2, ...r, **k)`: `...r` collects the
+      extra positional arguments into a new Vector, `**k` the keyword
+      arguments no parameter takes into a new Map (PARAMS flag bits 1 and 2
+      on the last one or two parameters; `Function.arity()` counts them;
+      `reflect.signature` has `rest`/`kwrest`). The binding is §6.1's,
+      identical in both VMs, including through `callspread`; the checker
+      accepts any extra arguments and types them by the annotation
+      (`Vector<Unknown>`/`Map<String, Unknown>` without one); they work on
+      top-level fns, nested fns, closures and methods, and a method call
+      binds its receiver as the first item of a leading `...` parameter (what
+      lets a `fn(...args, **kw)` wrapper wrap a method).
+    - **Function-item impls** `impl Tr for somefn` / `impl somefn { ... }`:
+      the method table key is `fn#<function index>`, lowered once indices are
+      known; dispatch on a Function value tries its identity's key, then
+      `Function`. Only top-level `fn` declarations are targets (anything else:
+      "impl targets must be a type or a top-level function"), and the impl
+      must be in the function's module or the trait's. The checker gives a
+      top-level fn name's type an item marker, so method lookup finds the
+      impls; the LSP treats the target as a reference to the fn (definition,
+      rename).
+    - **Hooks**: `WrapFn`, `WrapParam`, `WrapStruct`, `WrapField` and their
+      info structs are exported by `std:reflect`. A program with any decorator
+      inlines `std:reflect` (a hidden preprocessor import), and its decorator
+      phase calls the module's private `__setup_*`/`__wrap_fn` helpers right
+      after each declaration's `decorate`s; `paramhooks` in the prologue of a
+      function with decorated parameters, a `hooks.of` check after a literal of
+      a type with decorators and before every field assignment (in a program
+      with decorators) run the rest at run time. Closures carry an identity
+      (`hooks.adopt`) so a wrapped function still reports its own signature,
+      decorators and parameter hooks.
+
+    - **Bytecode 1.16**: PARAMS rest flags, `paramhooks` (0x3E), eight
+      `hooks.*` natives, `fn#` keys. The encoder writes 16 for those and so
+      for every program that imports `std:reflect`/`std:json` or has a
+      decorator; any other program keeps its minor. Decode validation and
+      vm_diff cases for the malformed forms.
+    - **Tooling**: formatter (`...name: T`), tree-sitter (`rest` on `param`;
+      `impl` already took an identifier target), checker, LSP (hover prints
+      the markers; completion hides the hidden import's names), the project
+      templates' language reference, www docs, `examples/hooks.mh`.
+    - Tests: `tests/test_hooks.py` (both VMs), `mah/std/reflect.test.mh`,
+      vm_diff cases (`hooks`, malformed PARAMS/`paramhooks`/`fn#`), Rust
+      decode tests.
+
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
 it** (`make test` must stay green) — see `docs/TESTING.md` for where
@@ -3444,17 +3492,17 @@ M1 was built and documented that way.
 
 ## Status
 
-M0 through M41b and M41s (and M21b, `mah format`) have all landed; each milestone's
+M0 through M41c and M41s (and M21b, `mah format`) have all landed; each milestone's
 entry above says what changed and where it deliberately deviates from the
 design. The language has traits, generics, typed and checked errors, a
 static type checker, projects and `mah test`, async I/O with timers, and a
-`.mahc` bytecode format (currently 1.15) run by the reference Python VM
+`.mahc` bytecode format (currently 1.16) run by the reference Python VM
 and the native Rust VM in `runtime/`; the standard library (`std:math`,
 `std:json`, `std:csv`, `std:path`, `std:random`, `std:collections`,
 `std:regex`, `std:time`, `std:async`, `std:fs`, `std:process`, `std:reflect`)
 is described in `docs/STDLIB.md`. Type values, `##` docs, spread calls and
-reflection landed with M41a, and decorators as metadata with M41b
-(`docs/REFLECTION.md`); hook traits (M41c) are designed there but not started. M41s made
+reflection landed with M41a, decorators as metadata with M41b, and hooks,
+function-item impls and rest parameters with M41c (`docs/REFLECTION.md`). M41s made
 struct/enum/trait names module-scoped (a breaking change: export the types a
 module shares, write `lib.Point` to use one). What else is
 deferred and what comes next (the network modules, and the rest) is in

@@ -547,13 +547,13 @@ print(reflect.call(add, [1], ["b": 5]))                   # 6
 | Function | |
 |---|---|
 | `type_of(value)` | the value's type (`type_of(none)` is `None`) |
-| `signature(f)` | a `reflect.Signature { name, doc, type_params, params, returns, throws, decorators }`; each `reflect.Param` has `name`, `type`, `doc`, `has_default` and `default` (`some(value)` when it's a literal) |
+| `signature(f)` | a `reflect.Signature { name, doc, type_params, params, returns, throws, decorators, rest, kwrest }`; each `reflect.Param` has `name`, `type`, `doc`, `has_default` and `default` (`some(value)` when it's a literal). `rest` and `kwrest` are `Option`s of the `...` and `**` parameters, which `params` doesn't list. A function wrapped by a hook reports the original's signature |
 | `schema(T)` | `some(Schema.Struct { ... fields })` or `some(Schema.Enum { ... variants })`; `none` for `Number`, `String` and the other primitives |
 | `methods(T)` | the `reflect.Method { name, function, is_method, trait_name }` written in `impl`s: inherent first, then trait methods by trait and name |
 | `implements(T, "Trait")` | whether the type has methods for that trait, native ones included |
 | `call(f, args = [], kwargs = [:])` | `f(...args, **kwargs)` |
 | `construct(T, fields)`, `construct_variant(T, "Variant", fields)` | a new struct or enum value from exactly its fields; a missing or unknown field throws `reflect.ReflectError` naming it |
-| `find(decorators, target)` | the first of a `decorators` Vector (see [Decorators](/docs/decorators)) whose type is `target` (a Type), or that `==` it (a function); `none` if there is none |
+| `find(decorators, target)` | the first of a `decorators` Vector (see [Decorators](/docs/decorators)) whose type is `target` (a Type), that is the same function as `target` (a function, even if it was wrapped since), or that `==` it; `none` if there is none |
 
 A type annotation comes back as a `reflect.TypeRef`: `Unknown`, `Named { type,
 args }`, `Fn { params, returns, throws }`, `Param { name }`, `SelfType`,
@@ -564,11 +564,14 @@ arguments, a Map into keyword arguments: `f(...args, k: 1, **more)`) exist so
 `call` can be written in Mah; see
 [Functions & closures](/docs/functions-closures).
 
-The natives behind it read the `.mahc` file's structure, so they need
-bytecode 1.14 (and so does any program that imports `std:json`, whose
-`decode` is written over it). `std:reflect` exports its types (`TypeRef`, `Param`, `Signature`, `Field`,
-`Variant`, `Schema`, `Method`, `ReflectError`), reached as `reflect.TypeRef`
-and so on; like every module's types they are module-scoped, so your own
+The natives behind it read the `.mahc` file's structure and run the
+decorator hooks, so they need bytecode 1.16 (and so does any program that
+imports `std:json`, whose `decode` is written over it, or has a decorator,
+which imports `std:reflect` implicitly). `std:reflect` exports its types (`TypeRef`, `Param`, `Signature`, `Field`,
+`Variant`, `Schema`, `Method`, `ReflectError`) and the hook traits and their
+info structs (`WrapFn`, `WrapParam`, `WrapField`, `WrapStruct`, `FnInfo`,
+`ParamInfo`, `FieldInfo`, `TypeInfo`, see [Decorators](/docs/decorators)),
+reached as `reflect.TypeRef` and so on; like every module's types they are module-scoped, so your own
 `Field` or `Method` struct never clashes with them.
 
 ## How it's built

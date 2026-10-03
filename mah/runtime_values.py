@@ -106,9 +106,13 @@ class Frame:
 
 
 class Closure:
-    __slots__ = ("code_address", "defining_frame", "slot_count", "param_count", "name", "params", "index")
+    __slots__ = (
+        "code_address", "defining_frame", "slot_count", "param_count", "name", "params", "index", "rest", "identity"
+    )
 
-    def __init__(self, code_address, defining_frame, slot_count, param_count, name=None, params=None, index=0):
+    def __init__(
+        self, code_address, defining_frame, slot_count, param_count, name=None, params=None, index=0, rest=0
+    ):
         self.code_address = code_address
         self.defining_frame = defining_frame
         self.slot_count = slot_count
@@ -123,6 +127,13 @@ class Closure:
         # M41a: the FUNCTIONS index this closure was made from -- the key
         # into the META section (`reflect.signature`).
         self.index = index
+        # M41c: rest-parameter flags (bit 0 `...`, bit 1 `**`), see
+        # code_interpreter.py's `_bind_params`.
+        self.rest = rest
+        # M41c: the FUNCTIONS index `reflect.signature`, the decorator
+        # lookups and item-type dispatch use -- its own, unless
+        # `hooks.adopt` gave it the one of the function it wraps.
+        self.identity = index
 
 
 class StructInstance:

@@ -18,7 +18,7 @@ from __future__ import annotations
 import os
 from decimal import Decimal
 
-from ..compiler.ast_nodes import BoolLit, EnumLit, FnType, NamedType, NumberLit, StringLit, Unary
+from ..compiler.ast_nodes import BoolLit, EnumLit, FnExpr, FnType, NamedType, NumberLit, StringLit, Unary
 from ..preprocessor import BUFFER_PATH, PRELUDE_PATH, demangle_message, source_label, std_module_name
 from ..runtime_values import NONE_VALUE, PRIMITIVE_TYPE_NAMES
 from .format import (
@@ -224,7 +224,8 @@ class _Lowerer:
     # -- FUNCTIONS / CODE ------------------------------------------------
 
     def _function_index_for(
-        self, code_addr: int, slot_count: int, param_count: int, name, param_names, has_defaults, meta_source=None
+        self, code_addr: int, slot_count: int, param_count: int, name, param_names, has_defaults, meta_source=None,
+        rest: int = 0,
     ) -> int:
         idx = self._closure_function_index.get(code_addr)
         if idx is not None:
@@ -238,7 +239,7 @@ class _Lowerer:
             for pname, has_default in zip(param_names, has_defaults)
         ]
         idx = len(self.functions)
-        self.functions.append(FunctionDecl(code_addr, slot_count, param_count, name_idx, params=params))
+        self.functions.append(FunctionDecl(code_addr, slot_count, param_count, name_idx, params=params, rest=rest))
         if meta_source is not None:
             self._fn_meta_sources[idx] = meta_source
             self._fn_index_by_ast[id(meta_source[0])] = idx
@@ -260,14 +261,35 @@ class _Lowerer:
             if instr == (None, None, None, None):
                 out.append(Instr("halt", ()))
                 continue
-            if instr[0] == "decorate":
-                # M41b: needs every closure lowered first (function indices)
+            if instr[0] in ("decorate", "paramhooks") or (
+                instr[0] == "defmethod" and isinstance(instr[2][0], FnExpr)
+            ):
+                # M41b/M41c: needs every closure lowered first (function indices)
                 decorations.append(pc)
                 out.append(None)
                 continue
             out.append(self._lower_one(instr))
         for pc in decorations:
-            out[pc] = self._lower_decorate(self.buf.code[pc])
+            instr = self.buf.code[pc]
+            if instr[0] == "decorate":
+                out[pc] = self._lower_decorate(instr)
+            elif instr[0] == "paramhooks":
+                # M41c: `paramhooks fn, index, dest` -- the function the code sits in
+                fn_ast, index = instr[1]
+                out[pc] = Instr("paramhooks", (self._fn_index_by_ast[id(fn_ast)], index, instr[3]))
+            else:
+                # M41c: `impl somefn { ... }` -- the item type's key `fn#<index>`
+                (fn_ast, trait, name, is_method) = instr[2]
+                out[pc] = Instr(
+                    "defmethod",
+                    (
+                        instr[1],
+                        self.intern_str(f"fn#{self._fn_index_by_ast[id(fn_ast)]}"),
+                        self.intern_str(trait) if trait is not None else None,
+                        self.intern_str(name),
+                        bool(is_method),
+                    ),
+                )
         self.code = out
 
     def _lower_decorate(self, instr: tuple) -> Instr:
@@ -307,9 +329,9 @@ class _Lowerer:
         if op == "not":
             return Instr("not", (a1, a3))
         if op == "closure":
-            slot_count, param_count, name, param_names, has_defaults, meta_source = a2
+            slot_count, param_count, name, param_names, has_defaults, meta_source, rest = a2
             fn_idx = self._function_index_for(
-                a1, slot_count, param_count, name, param_names, has_defaults, meta_source
+                a1, slot_count, param_count, name, param_names, has_defaults, meta_source, rest
             )
             return Instr("closure", (fn_idx, a3))
         if op == "call":
@@ -667,7 +689,9 @@ def lower(buf, resolver, pp, target: str = "debug") -> Program:
         functions=lowerer.functions,
         code=lowerer.code,
         debug=debug,
-        minor=_file_minor(lowerer.natives, lowerer.strings, lowerer.code, buf.positions, pp.prelude_start),
+        minor=_file_minor(
+            lowerer.natives, lowerer.strings, lowerer.code, buf.positions, pp.prelude_start, lowerer.functions
+        ),
         handlers=list(buf.handlers),
         tests=[
             TestEntry(lowerer.intern_str(name), slot, lowerer.line_of(position)) for name, slot, position in buf.tests
@@ -681,7 +705,9 @@ def lower(buf, resolver, pp, target: str = "debug") -> Program:
 _BASE_MINOR = 4
 
 
-def _file_minor(natives: list, strings: list, code: list, positions: list, prelude_start) -> int:
+def _file_minor(
+    natives: list, strings: list, code: list, positions: list, prelude_start, functions: list = ()
+) -> int:
     """M27 (docs/MAHC_FORMAT.md #3/#4.4): the lowest minor version whose
     features this file uses -- 1.4, or higher only when it calls a native
     added later (the `std:math` ones are 1.5). So a program that doesn't use
@@ -692,6 +718,13 @@ def _file_minor(natives: list, strings: list, code: list, positions: list, prelu
     prelude method the program calls, which is itself in that table (e.g.
     `to_number`, which calls `parse_number`)."""
     minor = _BASE_MINOR
+    # M41c: a rest parameter (PARAMS flag bits 1/2) or a function-item impl
+    # (`defmethod` with a `fn#<index>` type name) needs 1.16 (`paramhooks`
+    # and the `hooks.*` natives do too, below, through their own tables).
+    if any(fn.rest for fn in functions) or any(
+        instr.op == "defmethod" and strings[instr.args[1]].startswith("fn#") for instr in code
+    ):
+        minor = max(minor, 16)
     for ref in natives:
         minor = max(minor, NATIVE_SINCE_MINOR.get(strings[ref.name], 0))
     for pc, instr in enumerate(code):

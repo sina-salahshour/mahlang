@@ -78,11 +78,17 @@ pub struct FunctionInfo {
     /// Parallel to param slots `0..param_count-1`: `(name, has_default)`.
     /// `None` for a 1.0 file (unnamed, all-required parameters).
     pub params: Option<Vec<(Rc<str>, bool)>>,
+    /// M41c: rest-parameter flags -- bit 0 `...`, bit 1 `**` (PARAMS, 1.16).
+    pub rest: u8,
 }
 
 pub struct ClosureData {
     pub func: Rc<FunctionInfo>,
     pub defining_frame: FrameRef,
+    /// M41c: the FUNCTIONS index `reflect.signature`, the decorator lookups
+    /// and item-type dispatch use -- `func.index`, unless `hooks.adopt` gave
+    /// this closure the identity of the function it wraps.
+    pub identity: std::cell::Cell<usize>,
 }
 
 // ---------------------------------------------------------------------------

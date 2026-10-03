@@ -65,6 +65,10 @@ class ReflectData:
         # M41b: the decorators `decorate` stored this run, by target
         # `(kind, a, b)` (docs/MAHC_FORMAT.md #4.6).
         self.decorators: dict = {}
+        # M41c: what `hooks.set_type` / `hooks.set_param` stored this run --
+        # a struct's hooks by type name, a parameter's by (identity, index).
+        self.hook_types: dict = {}
+        self.hook_params: dict = {}
         meta = linked.meta
         self.fn_meta = meta.functions if meta is not None else []
         nbuiltin = len(linked.types) - len(linked.program_types)
@@ -176,14 +180,17 @@ def _signature(ctx, args):
     data = _reflect(ctx)
     if not isinstance(f, Closure):
         raise MahRuntimeError(f"reflect.signature: expected a Function, got {type_name_of(f)}", kind="TypeMismatch")
-    meta = data.fn_meta[f.index] if f.index < len(data.fn_meta) else None
+    # M41c: a wrapped function reports the function it wraps (its identity).
+    index = f.identity
+    info = data.functions[index]
+    meta = data.fn_meta[index] if index < len(data.fn_meta) else None
     has_meta = meta is not None and meta.has_meta
-    names = f.params if f.params is not None else [(f"#{i}", False) for i in range(f.param_count)]
-    params = []
+    names = info.params if info.params is not None else [(f"#{i}", False) for i in range(info.param_count)]
+    described = []
     for i, (pname, has_default) in enumerate(names):
         pm = meta.params[i] if has_meta else None
         constant = pm is not None and pm.default == 2
-        params.append(
+        described.append(
             _vec(
                 [
                     pname,
@@ -192,19 +199,25 @@ def _signature(ctx, args):
                     bool(has_default),
                     constant,
                     data.constants[pm.const] if constant else NONE_VALUE,
-                    _decorators(data, 1, f.index, i),
+                    _decorators(data, 1, index, i),
                 ]
             )
         )
+    # M41c: the rest parameters are described like the others but kept apart
+    kwrest = described.pop() if info.rest & 2 else NONE_VALUE
+    rest = described.pop() if info.rest & 1 else NONE_VALUE
+    params = described
     return _vec(
         [
-            f.name if f.name is not None else NONE_VALUE,
+            info.name if info.name is not None else NONE_VALUE,
             _doc(data, meta.doc) if has_meta else "",
             _strings(data.strings[t] for t in meta.type_params) if has_meta else _vec([]),
             _vec(params),
             _ref_value(data, meta.returns) if has_meta else _unknown_ref(),
             _throws_value(data, meta.throws) if has_meta else NONE_VALUE,
-            _decorators(data, 0, f.index),
+            _decorators(data, 0, index),
+            rest,
+            kwrest,
         ]
     )
 
@@ -368,7 +381,107 @@ def _decorators_native(ctx, args):
     return _decorators(_reflect(ctx), kind, a, b if kind in (1, 3, 4) else 0)
 
 
+# -- M41c (1.16): the hook machinery behind std:reflect's WrapFn/WrapParam/
+# WrapStruct/WrapField (docs/REFLECTION.md, docs/MAHC_FORMAT.md #4.4) ----------
+
+
+def _hooks_has(ctx, args):
+    """`hooks.has(value, trait)`: whether `value`'s type -- for a function,
+    its item type `fn#<identity>` -- has a method registered under a trait
+    whose display name is `trait`."""
+    value, trait = args
+    if not isinstance(trait, str):
+        raise MahRuntimeError(
+            f"hooks.has: the trait name must be a String, got {type_name_of(trait)}", kind="TypeMismatch"
+        )
+    type_name = f"fn#{value.identity}" if isinstance(value, Closure) else type_name_of(value)
+    for (tname, _method), entry in _reflect(ctx).method_table.items():
+        if tname == type_name and any(display_name(k) == trait for k in entry["traits"]):
+            return True
+    return False
+
+
+def _hooks_adopt(ctx, args):
+    """`hooks.adopt(wrapper, original)`: `wrapper` takes `original`'s
+    identity (which is the identity `original` itself adopted, if any)."""
+    wrapper, original = args
+    if not isinstance(wrapper, Closure) or not isinstance(original, Closure):
+        raise MahRuntimeError(
+            f"hooks.adopt: expected two Functions, got {type_name_of(wrapper)} and {type_name_of(original)}",
+            kind="TypeMismatch",
+        )
+    wrapper.identity = original.identity
+    return wrapper
+
+
+def _hooks_same_fn(ctx, args):
+    a, b = args
+    return (
+        isinstance(a, Closure)
+        and isinstance(b, Closure)
+        and a.identity == b.identity
+        and a.defining_frame is b.defining_frame
+    )
+
+
+def _hooks_set_type(ctx, args):
+    t, hooks = args
+    t = _type_arg("hooks.set_type", t)
+    data = _reflect(ctx)
+    if t.kind != 0 or data.types[t.index].kind != 0:
+        raise MahRuntimeError(f"hooks.set_type: {display_name(t.name)} isn't a struct", kind="TypeMismatch")
+    data.hook_types[data.types[t.index].name] = hooks
+    return NONE_VALUE
+
+
+def _hooks_set_param(ctx, args):
+    f, index, hooks = args
+    if not isinstance(f, Closure):
+        raise MahRuntimeError(f"hooks.set_param: expected a Function, got {type_name_of(f)}", kind="TypeMismatch")
+    if not isinstance(index, Decimal) or index != index.to_integral_value() or index < 0:
+        raise MahRuntimeError("hooks.set_param: the parameter index must be a whole Number", kind="TypeMismatch")
+    _reflect(ctx).hook_params[(f.identity, int(index))] = hooks
+    return NONE_VALUE
+
+
+def _hooks_of(ctx, args):
+    (value,) = args
+    if isinstance(value, StructInstance):
+        return _reflect(ctx).hook_types.get(value.type_name, NONE_VALUE)
+    return NONE_VALUE
+
+
+def _hook_field_target(fn: str, value, name):
+    if not isinstance(value, (StructInstance, EnumInstance)):
+        raise MahRuntimeError(f"{fn}: expected a struct, got {type_name_of(value)}", kind="TypeMismatch")
+    if not isinstance(name, str):
+        raise MahRuntimeError(f"{fn}: the field name must be a String, got {type_name_of(name)}", kind="TypeMismatch")
+    if name not in value.fields:
+        raise MahRuntimeError(f"{fn}: '{display_name(value.type_name)}' has no field '{name}'", kind="NoSuchField")
+
+
+def _hooks_get_field(ctx, args):
+    value, name = args
+    _hook_field_target("hooks.get_field", value, name)
+    return value.fields[name]
+
+
+def _hooks_set_field(ctx, args):
+    value, name, new = args
+    _hook_field_target("hooks.set_field", value, name)
+    value.fields[name] = new
+    return NONE_VALUE
+
+
 NATIVES = {
+    "hooks.has": (2, _hooks_has),
+    "hooks.adopt": (2, _hooks_adopt),
+    "hooks.same_fn": (2, _hooks_same_fn),
+    "hooks.set_type": (2, _hooks_set_type),
+    "hooks.set_param": (3, _hooks_set_param),
+    "hooks.of": (1, _hooks_of),
+    "hooks.get_field": (2, _hooks_get_field),
+    "hooks.set_field": (3, _hooks_set_field),
     "reflect.type_of": (1, _type_of),
     "reflect.signature": (1, _signature),
     "reflect.schema": (1, _schema),

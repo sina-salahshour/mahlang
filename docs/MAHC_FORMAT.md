@@ -1,4 +1,4 @@
-# The `.mahc` bytecode format (version 1.15)
+# The `.mahc` bytecode format (version 1.16)
 
 `mah build prog.mh` compiles a program (its entry file plus everything it
 imports) into a single `.mahc` file; `mah runc prog.mahc` runs one. This
@@ -75,8 +75,15 @@ sections   (id u8, length varuint, payload bytes(length))*   until end of file
   writes 15 only when the code contains `decorate`. The META
   section (§4.10) doesn't count: it's optional, so a file whose only 1.14
   feature is META keeps its lower minor (older VMs skip the section).
-  (`std:reflect` itself never needs 1.15: `signature` and `schema` carry the
-  decorators, so a program with no `decorate` stays at 14 or below.)
+  (`std:reflect`'s own functions never use `decorate`: `signature` and `schema`
+  carry the decorators.) *(1.16)* It writes 16 when the code uses
+  `paramhooks` or a `hooks.*` native, when any function's PARAMS has a rest
+  flag (§4.5a), or when a `defmethod` names a function-item type
+  `fn#<index>` (§6.7). `std:reflect` lists the `hooks.*` natives (its `find`,
+  `construct` and hook helpers use them), so every program that imports it
+  or `std:json`, and every program with a decorator (which imports
+  `std:reflect` implicitly, docs/REFLECTION.md), is 16; one with none of
+  these keeps its lower minor.
 - **Required sections**, each present exactly once and in increasing id
   order: STRINGS (`0x01`), CONSTANTS (`0x02`), TYPES (`0x03`), NATIVES
   (`0x04`), FUNCTIONS (`0x05`), CODE (`0x06`), — in files with minor ≥ 1 —
@@ -232,13 +239,21 @@ Version 1.0 defines:
 | `process.platform` | 0 | *(1.13)* → `"linux"`, `"macos"`, `"windows"`, or else the OS's own name |
 | `process.run` | 5 | *(1.13)* `program, args, cwd, env, stdin` → a Promise of a result (below): `[true, [code, stdout, stderr]]` |
 | `reflect.type_of` | 1 | *(1.14)* `value` → the value's type as a `Type` value (§5): `none` is the primitive `None`, `some(x)` is `Option`, a struct or enum value its declared type, everything else its built-in type |
-| `reflect.signature` | 1 | *(1.14)* `f` (a Function, else `TypeMismatch`, `reflect.signature: expected a Function, got TYPE`) → `[name or none, doc, type_params, params, returns, throws or none, decorators]`, each parameter `[name, type, doc, has_default, is_constant, constant, decorators]` (below; `decorators` *(1.15)* is a copy of what `decorate` stored for the function / parameter, `[]` if nothing) |
+| `reflect.signature` | 1 | *(1.14)* `f` (a Function, else `TypeMismatch`, `reflect.signature: expected a Function, got TYPE`) → `[name or none, doc, type_params, params, returns, throws or none, decorators, rest, kwrest]`, each parameter `[name, type, doc, has_default, is_constant, constant, decorators]` (below; `decorators` *(1.15)* is a copy of what `decorate` stored for the function / parameter, `[]` if nothing). *(1.16)* It describes `f`'s *identity* (§6.7): a function a hook wrapped reports the function it wraps. `rest` and `kwrest` are the descriptors of the `...` and `**` parameters, or `none`; `params` doesn't list them |
 | `reflect.schema` | 1 | *(1.14)* `t` (a Type, else `TypeMismatch`, `NAME: expected a Type, got TYPE`) → `none` for a primitive, else `["struct", t, doc, type_params, fields, decorators]` (a field is `[name, type, doc, decorators]`) or `["enum", t, doc, type_params, variants, decorators]` (a variant is `[name, doc, fields, decorators]`, its fields `[name, type, doc, []]`); `decorators` *(1.15)* are copies of what `decorate` stored for the type, field or variant |
 | `reflect.methods` | 1 | *(1.14)* `t` → a new Vector of `[name, function, is_method, trait or none]`, one per Mah-code target in the method table (§6.7) under the type's name: the inherent ones sorted by name, then the trait ones sorted by trait name, then method name. Native targets (§6.7) aren't functions, so aren't listed |
 | `reflect.implements` | 2 | *(1.14)* `t, trait_name` → Bool: whether the method table has any target, native or not, under that trait name for the type's name |
 | `reflect.construct` | 2 | *(1.14)* `t, fields` (a Map with String keys) → `[true, value]` with a new struct value of type `t` whose fields, in declaration order, are `fields`' entries, or `[false, message]`: `can't construct T: it isn't a struct`, `T has no field 'f'` (checked first, in the Map's order), `missing field 'f' for T` |
 | `reflect.decorators` | 3 | *(1.15)* `kind, a, b` (whole Numbers, else `TypeMismatch`, `reflect.decorators: NAME must be a whole Number, got TYPE`) → a new Vector holding a copy of the decorators `decorate` (§4.6) stored this run for that target, or `[]`. `b` only matters for kinds 1, 3, 4. A negative index has none. `signature`/`schema` don't call it: they append the same Vectors themselves |
 | `reflect.construct_variant` | 3 | *(1.14)* `t, variant, fields` → likewise a new enum value (`none` for `Option`'s `none`): failures `can't construct a variant of T: it isn't an enum`, `can't construct a Promise`, `T has no variant 'v'`, `T.v has no field 'f'`, `missing field 'f' for T.v` |
+| `hooks.has` | 2 | *(1.16)* `value, trait` (a String, else `TypeMismatch`, `hooks.has: the trait name must be a String, got TYPE`) → Bool: whether the type of `value` has a target registered under a trait whose *display* name (§4.3) is `trait` in the method table (§6.7). The type is `value`'s type name, or for a Function the item type `fn#<its identity>` only (not `Function`) |
+| `hooks.adopt` | 2 | *(1.16)* `wrapper, original` (both Functions, else `TypeMismatch`, `hooks.adopt: expected two Functions, got TYPE and TYPE`) → `wrapper`, which now has `original`'s identity (§6.7); adopting an adopted closure takes the identity the original has |
+| `hooks.same_fn` | 2 | *(1.16)* `a, b` → Bool: both are Functions with the same identity and the same defining frame (anything else is `false`, never an error) |
+| `hooks.set_type` | 2 | *(1.16)* `t, data` (a Type naming a struct, else `TypeMismatch`, `NAME: expected a Type, got TYPE` / `hooks.set_type: T isn't a struct`) → `none`, storing `data` for that struct type (by its type name) |
+| `hooks.set_param` | 3 | *(1.16)* `f, index, data` (a Function, else `TypeMismatch`, `hooks.set_param: expected a Function, got TYPE`; a whole Number ≥ 0, else `hooks.set_param: the parameter index must be a whole Number`) → `none`, storing `data` for parameter `index` of `f`'s identity, what `paramhooks` reads |
+| `hooks.of` | 1 | *(1.16)* `value` → the data `hooks.set_type` stored for `value`'s type if `value` is a struct instance, else `none` |
+| `hooks.get_field` | 2 | *(1.16)* `value, name` → the field's current value, read raw. `value` a struct or enum instance (else `TypeMismatch`, `hooks.get_field: expected a struct, got TYPE`), `name` a String naming one of its fields (`NoSuchField`, `hooks.get_field: 'T' has no field 'f'`) |
+| `hooks.set_field` | 3 | *(1.16)* `value, name, new` → `none`, writing the field raw; the same checks (`hooks.set_field: ...`) |
 | `math.sin` | 1 | sine of a Number (radians); the result is computed in IEEE-754 double precision and converted to Number via its shortest round-trip decimal text |
 | `math.cos` | 1 | cosine, same rules |
 | `time.sleep_async` | 1 | returns a new pending Promise that the scheduler settles with `none` after the argument's number of milliseconds (§6.4) |
@@ -443,12 +458,32 @@ messages.
 for each function, in FUNCTIONS order:
   nparams varuint                  (must equal that function's param_count)
   nparams × (name str, flags u8)   flags bit 0 = the parameter has a default;
+                                   bit 1 = (1.16) the `...` rest parameter;
+                                   bit 2 = (1.16) the `**` rest parameter;
                                    all other bits must be 0
 ```
 Parameter names are needed to bind keyword arguments, and default flags to
 know which parameters may be left unbound (§6.1). Function 0 has 0
 parameters. In a 1.0 file (no PARAMS), parameters are unnamed and have no
 defaults.
+
+*(1.16)* A **rest parameter** collects the arguments no ordinary parameter
+takes (§6.1): bit 1 marks the positional one (a Vector of the extra
+positional arguments), bit 2 the keyword one (a Map of the unmatched
+keyword arguments). A parameter has at most one of the two bits and no
+default; bit 2 is only allowed on the last parameter, and bit 1 on the last
+parameter or the one before a bit-2 parameter, so the rest parameters are
+always the last one or two, `...` before `**`. They are ordinary slots: they
+count in `param_count` and in `Function.arity()`. In a file whose minor is
+below 16 only bit 0 is defined. The load-time messages (the same on both VMs,
+`F` the function's FUNCTIONS index, `P` the parameter's index): `PARAMS:
+invalid flags byte N (only bit 0 is defined)` (below 1.16) or `(only bits
+0-2 are defined)`; `PARAMS: function F parameter P is flagged as both a '...'
+and a '**' rest parameter`; `PARAMS: function F parameter P is a rest
+parameter and can't have a default`; `PARAMS: function F: the '**' rest
+parameter must be the last parameter`; `PARAMS: function F: the '...' rest
+parameter must be the last parameter or the one before the '**' rest
+parameter`.
 
 ### 4.6 CODE (`0x06`)
 ```
@@ -530,6 +565,7 @@ Opcodes (semantics in §6):
 | `0x3B` | `loadtype` *(1.14)* | kind `N`, index `N`, dest `A` |
 | `0x3C` | `spread` *(1.14)* | target `A`, source `A`, keyword `B` |
 | `0x3D` | `decorate` *(1.15)* | kind `N`, a `N`, b `N`, values `A*` |
+| `0x3E` | `paramhooks` *(1.16)* | function `N`, param `N`, dest `A` |
 | `0x40` | `deferpush` | — |
 | `0x41` | `deferadd` | closure `A` |
 | `0x42` | `deferpeek` | dest `A` |
@@ -546,7 +582,8 @@ those marked *(1.2)* not in one whose minor version is below 2, those
 marked *(1.3)* not in one whose minor version is below 3, and those
 marked *(1.4)* not in one whose minor version is below 4, and those marked
 *(1.14)* not in one whose minor version is below 14, and those marked
-*(1.15)* not in one whose minor version is below 15.
+*(1.15)* not in one whose minor version is below 15, and those marked
+*(1.16)* not in one whose minor version is below 16.
 
 `decorate kind a b values` *(1.15)* stores the decorators of one target
 (docs/REFLECTION.md, M41b). `values` are the addresses holding the decorator
@@ -566,6 +603,19 @@ range), for 3 `type index A is not a struct` and `field index B out of range
 for type A`, for 4 `type index A is not an enum` and `variant index B out of
 range for type A`. The encoder puts all of a module's `decorate`s in one run
 before that module's first statement (docs/REFLECTION.md).
+
+`paramhooks fn index dest` *(1.16)*: `dest ←` the hooks the VM stored for
+parameter `index` of the function with FUNCTIONS index `fn` (`hooks.set_param`,
+§4.4), or `none`. It sits in the prologue of function `fn` itself, after the
+arguments are bound and the defaults filled, for each decorated parameter
+(docs/REFLECTION.md, "WrapParam"); the stored data is keyed by the function's
+*identity* (§6.7), which for the original function is its own index, so a
+wrapper that took the original's identity doesn't read the original's
+parameters' hooks. (The design says the opcode reads the running closure's
+identity; frames here don't know their closure, and the function the code
+belongs to is known statically, so the index is an operand.) Load-time checks
+(`'paramhooks' at instruction I: ...`): `function index F out of range`;
+`parameter index P out of range for function F`.
 
 In the `*kw` opcodes, `kwnames` names the **last** `len(kwnames)` entries
 of `args`, in order; the entries before them are positional. `len(kwnames)
@@ -751,6 +801,26 @@ the empty String are falsy; every other value is truthy.
   4. Every parameter still unbound: if it has a default, its slot holds the
      **absent** marker; otherwise → runtime error (missing required
      argument).
+
+  *(1.16)* **Rest parameters** (PARAMS flags, §4.5a). Let `n'` be the
+  number of ordinary parameters, `n` minus the rest ones (they are always the
+  last one or two). The same four steps apply to the ordinary parameters
+  `p0..p(n'-1)` only, with these changes: in step 1, `m > n'` is an error
+  only when there is no `...` parameter, and the extra values `v(n')..v(m-1)`
+  go, in order, into a **new Vector** bound to it; in step 3 a keyword
+  naming an ordinary parameter binds it as before (or is "multiple
+  values"), and any other keyword goes, in the order given, into a **new Map**
+  (String keys) bound to the `**` parameter, or is "unexpected keyword
+  argument" when there is none. A keyword given twice that way is "got
+  multiple values". The rest parameters' own names are not parameter names for
+  keywords (`f(r: 1)` with `...r` is an unmatched keyword). The "Argument
+  Count is invalid" text is only used when there are no keywords, no
+  defaulted parameters and no rest parameter; with a rest parameter the "at
+  most N positional arguments" text counts `n'`. A method call (`callmethod`
+  and friends) binds the receiver to the first parameter; when that is the
+  `...` parameter (a function that has no ordinary parameter, such as a
+  wrapper `fn(...args, **kw)`), the receiver is the first item of its Vector
+  and every following argument binds as above.
   Encoders emit, at the start of the function body, one `jmpset` per
   defaulted parameter that skips that parameter's default computation when
   the parameter was bound, so the absent marker is never observed by
@@ -979,7 +1049,7 @@ name. A target is (function value or native, `is_method`).
   |---|---|---|
   | `String` | `len()` | the number of Unicode code points, as a Number |
   | `String` | `char_at(i)` | the code point at index `i` (an integer Number, `0 ≤ i < len`) as a one-character String; anything else is a runtime error |
-  | `Function` | `arity()` | the function's `param_count` (including defaulted parameters) |
+  | `Function` | `arity()` | the function's `param_count` (including defaulted parameters and *(1.16)* rest parameters) |
   | `Vector` *(1.3)* | `len()` | the number of items |
   | `Vector` *(1.3)* | `push(x)` / `push_start(x)` | append `x` at the end / insert it at index 0; returns `none` |
   | `Vector` *(1.3)* | `pop()` / `pop_start()` | remove and return the last / first item, or `none` if empty |
@@ -1012,6 +1082,18 @@ name. A target is (function value or native, `is_method`).
   reference implementation.
   Wrong argument counts give the usual `Argument Count is invalid.
   method 'NAME' accepts N arguments but M was given`.
+- *(1.16)* **Function identity and item types.** Every Function value has an
+  *identity*: its FUNCTIONS index, unless `hooks.adopt` (§4.4) gave it
+  another's. A `defmethod` whose `type` is spelled `fn#<N>` (`N` a FUNCTIONS
+  index in canonical decimal, validated at load: `'defmethod' at instruction
+  I: 'KEY' is not a valid function-item key`) registers the method on the
+  *item type* of function `N` (docs/REFLECTION.md, "Function-item types"):
+  the compiler writes `impl Tr for somefn` / `impl somefn { ... }` that way,
+  `N` being `somefn`'s index. In the lookup of a method call on a Function
+  value below, the entry for `fn#<identity>` is tried first (with the same
+  rules as the entry for the type name, and a miss falls through, including
+  for a trait-restricted call), then the one for `Function`. The type name
+  of a Function is still `Function` (messages, `reflect.type_of`).
 - `defmethod c type trait name is_method`: set the inherent target
   (`trait` absent) or that trait's target to (`c`, `is_method`). Encoders
   emit all `defmethod`s before any user code runs.
@@ -1318,6 +1400,14 @@ message
   `decorate` opcode (§4.6) and the `reflect.decorators` native (§4.4);
   `reflect.signature`/`reflect.schema` results gained their `decorators`
   elements. The encoder writes 15 only for a file that contains `decorate`.
+- **1.16** added rest parameters, function-item impls and hooks
+  (docs/REFLECTION.md, M41c): the PARAMS rest flags (§4.5a, with the
+  binding of §6.1), `fn#<index>` method-table types and Function identity
+  (§6.7), the `paramhooks` opcode (§4.6), and the eight `hooks.*` natives
+  (§4.4); `reflect.signature`'s result gained `rest` and `kwrest`. The
+  encoder writes 16 for a file with a rest flag, `paramhooks`, a `hooks.*`
+  native or a `fn#` key (§3) -- which includes every file that imports
+  `std:reflect`, `std:json` or has a decorator.
 - Planned growth, for orientation: error-set checking (the static
   checker's `throws` inference and "unhandled error" diagnostics -- M26),
   string utilities, filesystem, networking, and process natives.

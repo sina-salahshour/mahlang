@@ -572,5 +572,13 @@ pub fn call_native(vm: &mut Vm, native: NativeFn, args: &[Value]) -> Result<Valu
         NativeFn::ReflectConstruct => super::reflect::construct(vm, args),
         NativeFn::ReflectConstructVariant => super::reflect::construct_variant(vm, args),
         NativeFn::ReflectDecorators => super::reflect::decorators(vm, args),
+        NativeFn::HooksHas => super::reflect::hooks_has(vm, args),
+        NativeFn::HooksAdopt => super::reflect::hooks_adopt(vm, args),
+        NativeFn::HooksSameFn => super::reflect::hooks_same_fn(vm, args),
+        NativeFn::HooksSetType => super::reflect::hooks_set_type(vm, args),
+        NativeFn::HooksSetParam => super::reflect::hooks_set_param(vm, args),
+        NativeFn::HooksOf => super::reflect::hooks_of(vm, args),
+        NativeFn::HooksGetField => super::reflect::hooks_get_field(vm, args),
+        NativeFn::HooksSetField => super::reflect::hooks_set_field(vm, args),
     }
 }

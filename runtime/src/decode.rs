@@ -15,7 +15,7 @@ use std::fmt;
 
 pub const MAGIC: &[u8; 4] = b"MAHC";
 pub const MAJOR: u16 = 1;
-pub const MINOR: u16 = 15;
+pub const MINOR: u16 = 16;
 
 const SEC_STRINGS: u8 = 0x01;
 const SEC_CONSTANTS: u8 = 0x02;
@@ -194,6 +194,10 @@ pub struct FunctionDecl {
     /// M16 (1.1+): parallel to param slots 0..param_count-1 -- (name string
     /// index, has_default). `None` for a 1.0 file (no PARAMS section).
     pub params: Option<Vec<(usize, bool)>>,
+    /// M41c (1.16, PARAMS flag bits 1/2): bit 0 = the last ordinary-after
+    /// parameter is a `...` positional rest, bit 1 = the last is a `**`
+    /// keyword rest.
+    pub rest: u8,
 }
 
 /// M41a (docs/MAHC_FORMAT.md #4.10): a written type annotation, resolved to
@@ -305,6 +309,9 @@ pub enum RawInstr {
     /// target -- `kind` 0 function `a`, 1 parameter `b` of function `a`, 2 type `a`,
     /// 3 field `b` of struct `a`, 4 variant `b` of enum `a`
     Decorate { kind: u64, a: usize, b: usize, values: Vec<Addr> },
+    /// M41c (1.16): `dest` <- the WrapParam hooks stored for parameter `param`
+    /// of function `func` (or `none`)
+    ParamHooks { func: usize, param: usize, dest: Addr },
     Defmethod { closure: Addr, type_name: usize, trait_: Option<usize>, name: usize, is_method: bool },
     Detach { callee: Addr, args: Vec<Addr>, dest: Addr },
     DetachKw { callee: Addr, args: Vec<Addr>, kwnames: Vec<usize>, dest: Addr },
@@ -681,7 +688,7 @@ fn parse_functions(payload: &[u8], nstrings: usize) -> FResult<Vec<FunctionDecl>
                 return err(format!("FUNCTIONS: name string index {n} out of range"));
             }
         }
-        functions.push(FunctionDecl { entry, slot_count, param_count, name, params: None });
+        functions.push(FunctionDecl { entry, slot_count, param_count, name, params: None, rest: 0 });
     }
     if functions[0].entry != 0 || functions[0].param_count != 0 {
         return err("function 0 (the main program) must have entry=0 and param_count=0");
@@ -690,10 +697,15 @@ fn parse_functions(payload: &[u8], nstrings: usize) -> FResult<Vec<FunctionDecl>
     Ok(functions)
 }
 
-fn parse_params(payload: &[u8], functions: Vec<FunctionDecl>, nstrings: usize) -> FResult<Vec<FunctionDecl>> {
+fn parse_params(
+    payload: &[u8],
+    functions: Vec<FunctionDecl>,
+    nstrings: usize,
+    minor: u64,
+) -> FResult<Vec<FunctionDecl>> {
     let mut pr = Reader::new(payload);
     let mut out = Vec::with_capacity(functions.len());
-    for fn_decl in functions {
+    for (fn_index, fn_decl) in functions.into_iter().enumerate() {
         let nparams = pr.varuint()?;
         if nparams != fn_decl.param_count {
             return err(format!(
@@ -702,21 +714,67 @@ fn parse_params(payload: &[u8], functions: Vec<FunctionDecl>, nstrings: usize) -
             ));
         }
         let mut params = Vec::new();
+        let mut flag_bytes = Vec::new();
         for _ in 0..nparams {
             let name = pr.varuint()? as usize;
             if name >= nstrings {
                 return err(format!("PARAMS: name string index {name} out of range"));
             }
             let flags = pr.u8()?;
-            if flags & !1 != 0 {
-                return err(format!("PARAMS: invalid flags byte {flags} (only bit 0 is defined)"));
+            if minor < 16 {
+                if flags & !1 != 0 {
+                    return err(format!("PARAMS: invalid flags byte {flags} (only bit 0 is defined)"));
+                }
+            } else if flags & !7 != 0 {
+                return err(format!("PARAMS: invalid flags byte {flags} (only bits 0-2 are defined)"));
             }
             params.push((name, flags & 1 != 0));
+            flag_bytes.push(flags);
         }
-        out.push(FunctionDecl { params: Some(params), ..fn_decl });
+        let rest = rest_flags(&flag_bytes, fn_index)?;
+        out.push(FunctionDecl { params: Some(params), rest, ..fn_decl });
     }
     check_consumed(&pr, "PARAMS")?;
     Ok(out)
+}
+
+/// M41c: the rest-parameter bits of one function's PARAMS flags (mirrors
+/// `mah/bytecode/decode.py`'s `_rest_flags`, message for message).
+fn rest_flags(flag_bytes: &[u8], fn_index: usize) -> FResult<u8> {
+    let n = flag_bytes.len();
+    let mut rest = 0u8;
+    for (i, &flags) in flag_bytes.iter().enumerate() {
+        let pos = flags & 2 != 0;
+        let kw = flags & 4 != 0;
+        if !(pos || kw) {
+            continue;
+        }
+        if pos && kw {
+            return err(format!(
+                "PARAMS: function {fn_index} parameter {i} is flagged as both a '...' and a '**' rest parameter"
+            ));
+        }
+        if flags & 1 != 0 {
+            return err(format!(
+                "PARAMS: function {fn_index} parameter {i} is a rest parameter and can't have a default"
+            ));
+        }
+        if kw {
+            if i != n - 1 {
+                return err(format!("PARAMS: function {fn_index}: the '**' rest parameter must be the last parameter"));
+            }
+            rest |= 2;
+        } else {
+            let last_ok = i == n - 1 || (i + 2 == n && flag_bytes[n - 1] & 4 != 0);
+            if !last_ok {
+                return err(format!(
+                    "PARAMS: function {fn_index}: the '...' rest parameter must be the last parameter or the one before the '**' rest parameter"
+                ));
+            }
+            rest |= 1;
+        }
+    }
+    Ok(rest)
 }
 
 // ---------------------------------------------------------------------------
@@ -924,6 +982,7 @@ fn opcode_info(op: u8) -> Option<(&'static str, Option<u16>)> {
         0x3B => ("loadtype", Some(14)),
         0x3C => ("spread", Some(14)),
         0x3D => ("decorate", Some(15)),
+        0x3E => ("paramhooks", Some(16)),
         0x40 => ("deferpush", None),
         0x41 => ("deferadd", None),
         0x42 => ("deferpeek", None),
@@ -957,6 +1016,8 @@ fn native_since_minor(name: &str) -> Option<u16> {
         "reflect.type_of" | "reflect.signature" | "reflect.schema" | "reflect.methods" | "reflect.implements"
         | "reflect.construct" | "reflect.construct_variant" => Some(14),
         "reflect.decorators" => Some(15),
+        "hooks.has" | "hooks.adopt" | "hooks.same_fn" | "hooks.set_type" | "hooks.set_param" | "hooks.of"
+        | "hooks.get_field" | "hooks.set_field" => Some(16),
         _ => None,
     }
 }
@@ -1074,6 +1135,12 @@ fn decode_one_instr(name: &str, pr: &mut Reader, ctx: &CodeCtx, _i: u64) -> FRes
             let b = pr.varuint()? as usize;
             let values = decode_addr_list(pr)?;
             RawInstr::Decorate { kind, a, b, values }
+        }
+        "paramhooks" => {
+            let func = pr.varuint()? as usize;
+            let param = pr.varuint()? as usize;
+            let dest = decode_addr(pr)?;
+            RawInstr::ParamHooks { func, param, dest }
         }
         "defmethod" => {
             let closure = decode_addr(pr)?;
@@ -1315,6 +1382,31 @@ fn validate_instr(instr: &RawInstr, i: usize, ncode: u64, ctx: &CodeCtx) -> FRes
             other => return err(format!("'loadtype' at instruction {i}: unknown kind {other}")),
         },
         RawInstr::Decorate { kind, a, b, .. } => validate_decorate(*kind, *a, *b, i, ctx)?,
+        RawInstr::ParamHooks { func, param, .. } => {
+            if *func >= ctx.nfunctions {
+                return err(format!("'paramhooks' at instruction {i}: function index {func} out of range"));
+            }
+            if *param as u64 >= ctx.param_counts[*func] {
+                return err(format!(
+                    "'paramhooks' at instruction {i}: parameter index {param} out of range for function {func}"
+                ));
+            }
+        }
+        RawInstr::Defmethod { type_name, .. } if ctx.minor >= 16 => {
+            // M41c: a function-item impl's type is spelled `fn#<function index>`
+            let name = &ctx.strings[*type_name];
+            if let Some(digits) = name.strip_prefix("fn#") {
+                let canonical = !digits.is_empty()
+                    && digits.bytes().all(|c| c.is_ascii_digit())
+                    && (digits == "0" || !digits.starts_with('0'));
+                let in_range = canonical && digits.parse::<usize>().map(|n| n < ctx.nfunctions).unwrap_or(false);
+                if !in_range {
+                    return err(format!(
+                        "'defmethod' at instruction {i}: '{name}' is not a valid function-item key"
+                    ));
+                }
+            }
+        }
         RawInstr::Map { pairs, .. } => {
             if pairs.len() % 2 != 0 {
                 return err(format!(
@@ -1706,7 +1798,7 @@ pub fn decode(data: &[u8]) -> FResult<Program> {
     let natives = parse_natives(get(SEC_NATIVES), strings.len())?;
     let mut functions = parse_functions(get(SEC_FUNCTIONS), strings.len())?;
     if minor >= 1 {
-        functions = parse_params(get(SEC_PARAMS), functions, strings.len())?;
+        functions = parse_params(get(SEC_PARAMS), functions, strings.len(), minor as u64)?;
     }
 
     let ctx = CodeCtx {
@@ -1879,6 +1971,71 @@ mod tests {
         assert_eq!(e.0, "opcode 'decorate' at instruction 0 requires minor version >= 15, but this file's minor version is 14");
     }
 
+
+    /// A file whose FUNCTIONS declares function 0 plus one function with `nparams`
+    /// parameters (named by string 0) whose PARAMS flags are `flags`.
+    fn file_with_params(minor: u16, flags: &[u8], code: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(MAGIC);
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&minor.to_le_bytes());
+        push_section(&mut out, 0x01, &[1, 1, b'a']);
+        push_section(&mut out, 0x02, &[0]);
+        push_section(&mut out, 0x03, &[0]);
+        push_section(&mut out, 0x04, &[0]);
+        push_section(&mut out, 0x05, &[2, 0, 0, 0, 0, 0, 0, flags.len() as u8, 0]);
+        push_section(&mut out, 0x06, code);
+        let mut params = vec![0u8, flags.len() as u8];
+        for flag in flags {
+            params.extend_from_slice(&[0, *flag]);
+        }
+        push_section(&mut out, 0x07, &params);
+        push_section(&mut out, 0x08, &[0]);
+        out
+    }
+
+    #[test]
+    fn rest_flags_are_decoded_and_validated() {
+        let halt = [1, 0x00];
+        let program = decode(&file_with_params(16, &[0, 2, 4], &halt)).expect("should decode");
+        assert_eq!(program.functions[1].rest, 3);
+        assert_eq!(decode(&file_with_params(16, &[0, 2], &halt)).unwrap().functions[1].rest, 1);
+        assert_eq!(decode(&file_with_params(16, &[4], &halt)).unwrap().functions[1].rest, 2);
+        for (flags, message) in [
+            (vec![0u8, 1, 5], "PARAMS: function 1 parameter 2 is a rest parameter and can't have a default"),
+            (vec![0, 0, 6], "PARAMS: function 1 parameter 2 is flagged as both a '...' and a '**' rest parameter"),
+            (vec![0, 0, 8], "PARAMS: invalid flags byte 8 (only bits 0-2 are defined)"),
+            (vec![2, 0, 0], "PARAMS: function 1: the '...' rest parameter must be the last parameter or the one before the '**' rest parameter"),
+            (vec![0, 4, 4], "PARAMS: function 1: the '**' rest parameter must be the last parameter"),
+        ] {
+            assert_eq!(decode(&file_with_params(16, &flags, &halt)).unwrap_err().0, message);
+        }
+        assert_eq!(
+            decode(&file_with_params(15, &[0, 2, 4], &halt)).unwrap_err().0,
+            "PARAMS: invalid flags byte 2 (only bit 0 is defined)"
+        );
+    }
+
+    #[test]
+    fn decodes_paramhooks_and_validates_it() {
+        // paramhooks function 1, parameter 0 -> (0,0); halt
+        let ok = [2, 0x3E, 1, 0, 0, 0, 0x00];
+        let program = decode(&file_with_params(16, &[0], &ok)).expect("should decode");
+        assert_eq!(program.code[0], RawInstr::ParamHooks { func: 1, param: 0, dest: (0, 0) });
+        assert_eq!(
+            decode(&file_with_params(16, &[0], &[2, 0x3E, 9, 0, 0, 0, 0x00])).unwrap_err().0,
+            "'paramhooks' at instruction 0: function index 9 out of range"
+        );
+        assert_eq!(
+            decode(&file_with_params(16, &[0], &[2, 0x3E, 1, 5, 0, 0, 0x00])).unwrap_err().0,
+            "'paramhooks' at instruction 0: parameter index 5 out of range for function 1"
+        );
+        assert_eq!(
+            decode(&file_with_params(15, &[0], &ok)).unwrap_err().0,
+            "opcode 'paramhooks' at instruction 0 requires minor version >= 16, but this file's minor version is 15"
+        );
+    }
+
     #[test]
     fn decodes_a_meta_section() {
         // one function without metadata, no user types
@@ -1959,7 +2116,7 @@ mod tests {
         // M27: the current maximum is 5; the file has no sections at all,
         // so there are no natives to name.
         assert_eq!(e.0, format!("unsupported minor version 99 (this VM supports up to minor version {MINOR})"));
-        assert_eq!(MINOR, 15);
+        assert_eq!(MINOR, 16);
     }
 
     #[test]

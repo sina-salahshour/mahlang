@@ -250,6 +250,15 @@ class ExampleTests(unittest.TestCase):
             "Fetch one user.\nGET /users/{id}\n[tag:path]\n",
         )
 
+    def test_hooks(self):
+        # M41c: rest parameters, function-item impls and the four hooks.
+        self.assertEqual(
+            run_file(example_path("hooks.mh")),
+            "call greet\nhi ann!\ncall greet\nhi bob?\n2\n[HELLO]\n"
+            "ann@example.com\nbob@example.com\ntoo young\nlogs every call\n"
+            "a: 0 items, 0 options\nb: 3 items, 1 options\n",
+        )
+
     def test_reflection(self):
         # M41a: type values, `##` docs, spread calls, std:reflect, json.decode.
         out = run_file(example_path("reflection.mh"))

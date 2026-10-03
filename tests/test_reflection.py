@@ -714,12 +714,13 @@ class MetaTests(unittest.TestCase):
         self.assertEqual(decode(compile_bytes(text="struct S { a: Number }\n## d\nfn f<T>(x: T) -> T { x }\nprint(1)")).minor, plain)
 
     def test_loadtype_a_spread_and_reflect_natives_write_minor_14(self):
-        # (M41b raised MINOR to 15, but only a file with `decorate` is written at 15)
-        self.assertEqual(MINOR, 15)
+        # (M41b raised MINOR to 15 and M41c to 16, but only a file that uses those features is written there)
+        self.assertEqual(MINOR, 16)
         self.assertEqual(decode(compile_bytes(text="print(Number)")).minor, 14)
         self.assertEqual(decode(compile_bytes(text="fn f(a) { a }\nprint(f(...[1]))")).minor, 14)
         self.assertEqual(decode(compile_bytes(text="fn f(a) { a }\nprint(f(**[\"a\": 1]))")).minor, 14)
-        self.assertEqual(decode(compile_bytes(text=REFLECT + "print(reflect.type_of(1))")).minor, 14)
+        # M41c: std:reflect itself references the 1.16 `hooks.*` natives (find, construct, the hook helpers)
+        self.assertEqual(decode(compile_bytes(text=REFLECT + "print(reflect.type_of(1))")).minor, 16)
         # a struct name in a pattern or literal isn't a type value
         self.assertEqual(decode(compile_bytes(text="struct S { a }\nprint(S { a: 1 })")).minor, 4)
 

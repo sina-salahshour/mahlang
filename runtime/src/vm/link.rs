@@ -95,6 +95,15 @@ pub enum NativeFn {
     ReflectConstructVariant,
     /// M41b (1.15)
     ReflectDecorators,
+    /// M41c (1.16): the hook machinery (runtime/src/vm/reflect.rs).
+    HooksHas,
+    HooksAdopt,
+    HooksSameFn,
+    HooksSetType,
+    HooksSetParam,
+    HooksOf,
+    HooksGetField,
+    HooksSetField,
 }
 
 /// Whether this VM implements a native of that name (any arity) -- for
@@ -171,6 +180,14 @@ fn native_by_name(name: &str) -> Option<(u64, NativeFn)> {
         "reflect.construct" => Some((2, NativeFn::ReflectConstruct)),
         "reflect.construct_variant" => Some((3, NativeFn::ReflectConstructVariant)),
         "reflect.decorators" => Some((3, NativeFn::ReflectDecorators)),
+        "hooks.has" => Some((2, NativeFn::HooksHas)),
+        "hooks.adopt" => Some((2, NativeFn::HooksAdopt)),
+        "hooks.same_fn" => Some((2, NativeFn::HooksSameFn)),
+        "hooks.set_type" => Some((2, NativeFn::HooksSetType)),
+        "hooks.set_param" => Some((3, NativeFn::HooksSetParam)),
+        "hooks.of" => Some((1, NativeFn::HooksOf)),
+        "hooks.get_field" => Some((2, NativeFn::HooksGetField)),
+        "hooks.set_field" => Some((3, NativeFn::HooksSetField)),
         _ => None,
     }
 }
@@ -232,6 +249,8 @@ pub enum LinkedInstr {
     /// M41b (1.15): `kind` 0 function `a`, 1 parameter `b` of function `a`,
     /// 2 type `a`, 3 field `b` of struct `a`, 4 variant `b` of enum `a`
     Decorate { kind: u64, a: usize, b: usize, values: Vec<Addr> },
+    /// M41c (1.16): `dest` <- the WrapParam hooks of parameter `param` of function `func`, or `none`
+    ParamHooks { func: usize, param: usize, dest: Addr },
     Defmethod { closure: Addr, type_name: Rc<str>, trait_: Option<Rc<str>>, name: Rc<str>, is_method: bool },
     Detach { callee: Addr, args: Vec<Addr>, dest: Addr },
     DetachKw { callee: Addr, args: Vec<Addr>, kwnames: Vec<Rc<str>>, dest: Addr },
@@ -381,6 +400,7 @@ fn build_functions(decls: &[FunctionDecl], interned: &[Rc<str>]) -> Vec<Rc<Funct
                 param_count: fd.param_count as usize,
                 name,
                 params,
+                rest: fd.rest,
             })
         })
         .collect()
@@ -444,6 +464,9 @@ fn link_instr(
                 value: Value::Type(Rc::new(TypeData { kind: *kind, index: *index, name })),
                 dest: *dest,
             }
+        }
+        RawInstr::ParamHooks { func, param, dest } => {
+            LinkedInstr::ParamHooks { func: *func, param: *param, dest: *dest }
         }
         RawInstr::Decorate { kind, a, b, values } => {
             LinkedInstr::Decorate { kind: *kind, a: *a, b: *b, values: values.clone() }

@@ -102,6 +102,35 @@ non-Vector after `...` and a non-Map after `**` are
 `RuntimeError.ArgumentError`s. `**` is still the exponent everywhere else.
 `detach f(...xs)` isn't allowed yet.
 
+## Rest parameters
+
+`...name` collects the extra positional arguments into a new Vector, and
+`**name` the keyword arguments that match no parameter into a new Map, in the
+order given:
+
+```mah
+fn show(label, ...items, **options) {
+    print(label, items, options)
+}
+show("a")                          # a [] [:]
+show("b", 1, 2, 3, color: "red")   # b [1, 2, 3] [color: red]
+show("c", ...[4], **["size": 9])   # c [4] [size: 9]   spread calls bind them too
+print(show.arity())                # 3
+
+fn total(...nums: Vector<Number>) { nums.len() }
+```
+
+They come last (`...` before `**`), take no default, and work on `fn`s,
+closures and methods (not on an `extern fn`). The annotation is the
+collection's type, `Vector<T>` or `Map<String, T>`; without one the items are
+`Unknown`. Without `**` an unknown keyword is still an `ArgumentError`, and
+without `...` so are extra positional arguments. A keyword that names an
+ordinary parameter binds it and never reaches the Map. `reflect.signature(f)`
+lists them as `rest` and `kwrest`, apart from `params`. In a method call the
+receiver is the first parameter, so in `fn(...args, **kw)` it is `args[0]`;
+that is what lets one wrapper decorate functions and methods alike (see
+[Decorators](/docs/decorators)).
+
 ## `defer`
 
 ```mah

@@ -381,3 +381,112 @@ test "decorators are copies" {
     ds.push(1)
     assert_eq(reflect.signature(decorated).decorators.len(), 2)
 }
+
+# -- M41c: rest parameters, function-item impls and the four hooks -------------------
+
+fn gather(a, b = 2, ...items: Vector<Number>, **options: Map<String, String>) {
+    [a, b, items, options]
+}
+
+test "rest parameters collect the extras" {
+    assert_eq(gather(1).join(","), "1,2,[],[:]")
+    assert_eq(gather(1, 3, 4, 5, x: "6").join(","), "1,3,[4, 5],[x: 6]")
+    assert_eq(gather(1, b: 9, y: "1").join(","), "1,9,[],[y: 1]")
+    assert_eq(gather(...[1, 2, 3], **["z": "0"]).join(","), "1,2,[3],[z: 0]")
+    assert_eq(gather.arity(), 4)
+}
+
+test "a signature lists rest parameters apart from params" {
+    let sig = reflect.signature(gather)
+    assert_eq(sig.params.len(), 2)
+    match sig.rest {
+        some(p) => { assert_eq(p.name, "items") }
+        none => { fail("expected a rest parameter") }
+    }
+    match sig.kwrest {
+        some(p) => { assert_eq(p.name, "options") }
+        none => { fail("expected a keyword rest parameter") }
+    }
+    assert_eq(reflect.signature(plain).rest, none)
+}
+
+fn counting(f, info: reflect.FnInfo) {
+    fn(...args, **kw) { f(...args, **kw) + 100 }
+}
+
+impl reflect.WrapFn for counting {
+    fn wrap(self, f, info) { self(f, info) }
+}
+
+impl counting {
+    fn describe(self) -> String { "counts" }
+}
+
+@counting
+fn base(n: Number) -> Number { n }
+
+fn trim_hook(v, info) { v }
+
+impl reflect.WrapParam for trim_hook {
+    fn transform(self, v, info) { info.name + ":" + v.trim() }
+}
+
+fn say(@trim_hook word: String) -> String { word }
+
+fn shout(v, info) { v }
+
+impl reflect.WrapField for shout {
+    fn set(self, v, info) { v.to_upper() }
+}
+
+struct Ranged { }
+
+impl reflect.WrapStruct for Ranged {
+    fn construct(self, v, info) {
+        if v.n < 0 { throw RuntimeError.ArgumentError { message: "n < 0" } }
+        v
+    }
+}
+
+fn ranged() -> Ranged { Ranged { } }
+
+@ranged()
+struct Note {
+    @shout text: String,
+    n: Number
+}
+
+test "a WrapFn decorator wraps the function and keeps its identity" {
+    assert_eq(base(1), 101)
+    assert_eq(reflect.signature(base).name, "base")
+    assert_eq(reflect.signature(base).params[0].name, "n")
+    assert_eq(reflect.signature(base).decorators.len(), 1)
+}
+
+test "an impl for a function adds methods to that function" {
+    assert_eq(counting.describe(), "counts")
+    assert_eq(reflect.type_of(counting), Function)
+}
+
+test "find matches a function even after it was wrapped" {
+    assert(reflect.find(reflect.signature(base).decorators, counting) != none)
+    assert_eq(reflect.find(reflect.signature(base).decorators, shout), none)
+}
+
+test "WrapParam transforms the argument on every call" {
+    assert_eq(say("  hi "), "word:hi")
+    assert_eq(say(word: " yo "), "word:yo")
+    assert_eq(reflect.call(say, [" z "]), "word:z")
+}
+
+test "WrapField and WrapStruct run on literals, assignments and construct" {
+    let note = Note { text: "a", n: 1 }
+    assert_eq(note.text, "A")
+    note.text = "b"
+    assert_eq(note.text, "B")
+    assert_eq(reflect.construct(Note, ["text": "c", "n": 2]).text, "C")
+    let rejected = try { Note { text: "d", n: 0 - 1 } } catch {
+        RuntimeError.ArgumentError { message } => { message }
+    }
+    assert_eq(rejected, "n < 0")
+}

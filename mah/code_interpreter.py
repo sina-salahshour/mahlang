@@ -127,7 +127,7 @@ class NativeMethod(NamedTuple):
     optional: tuple = ()
 
 
-def _bind_params(param_count: int, params, values: list, kwargs: list, label: str) -> list:
+def _bind_params(param_count: int, params, values: list, kwargs: list, label: str, rest: int = 0) -> list:
     """docs/MAHC_FORMAT.md #6.1's argument-binding algorithm, exactly --
     shared by every call-shaped opcode (`call`, `callkw`, `callmethod(kw)`,
     `detach(kw)`, `detachmethod(kw)`, and `invoke_sync`). `params` is
@@ -140,11 +140,17 @@ def _bind_params(param_count: int, params, values: list, kwargs: list, label: st
     the exact wording that section specifies. `label` is the fully
     formatted subject of every message (`"'f'"`, `"function"`, or
     `"method 'm'"`) -- callers decide that, since it depends on context
-    (plain call vs. method call) this function has no way to know."""
+    (plain call vs. method call) this function has no way to know.
+
+    M41c: `rest` (bit 0 `...`, bit 1 `**`) says the last parameter slot(s)
+    are rest parameters: extra positional arguments are collected into the
+    first one's Vector and keyword arguments that match no (ordinary)
+    parameter into the other's Map, instead of being errors."""
     m = len(values)
     n = param_count
+    n_ord = n - (1 if rest & 1 else 0) - (1 if rest & 2 else 0)
     has_any_default = params is not None and any(has_default for _name, has_default in params)
-    if not kwargs and not has_any_default:
+    if not kwargs and not has_any_default and not rest:
         # Old (pre-M16) wording, unconditionally, for the common case with
         # no keyword arguments and no defaulted parameters -- existing
         # tests assert this exact string.
@@ -154,26 +160,38 @@ def _bind_params(param_count: int, params, values: list, kwargs: list, label: st
                 kind="ArgumentError",
             )
         return list(values)
-    if m > n:
-        raise MahRuntimeError(f"{label} takes at most {n} positional arguments but {m} were given", kind="ArgumentError")
-    bound: list = list(values) + [ABSENT] * (n - m)
-    bound_flags = [True] * m + [False] * (n - m)
-    name_to_index = {pname: i for i, (pname, _has_default) in enumerate(params)} if params else {}
+    if m > n_ord and not rest & 1:
+        raise MahRuntimeError(
+            f"{label} takes at most {n_ord} positional arguments but {m} were given", kind="ArgumentError"
+        )
+    bound: list = list(values[:n_ord]) + [ABSENT] * (n_ord - m)
+    bound_flags = [True] * min(m, n_ord) + [False] * (n_ord - m)
+    name_to_index = {pname: i for i, (pname, _has_default) in enumerate(params[:n_ord])} if params else {}
+    extra_kwargs: dict = {}
     for k, w in kwargs:
         idx = name_to_index.get(k)
         if idx is None:
+            if rest & 2:
+                if k in extra_kwargs:
+                    raise MahRuntimeError(f"{label} got multiple values for argument '{k}'", kind="ArgumentError")
+                extra_kwargs[k] = w
+                continue
             raise MahRuntimeError(f"{label} got an unexpected keyword argument '{k}'", kind="ArgumentError")
         if bound_flags[idx]:
             raise MahRuntimeError(f"{label} got multiple values for argument '{k}'", kind="ArgumentError")
         bound[idx] = w
         bound_flags[idx] = True
-    for i in range(n):
+    for i in range(n_ord):
         if bound_flags[i]:
             continue
         has_default = params[i][1] if params else False
         if not has_default:
             pname = params[i][0] if params else f"#{i}"
             raise MahRuntimeError(f"{label} is missing required argument '{pname}'", kind="ArgumentError")
+    if rest & 1:
+        bound.append(VectorValue(list(values[n_ord:])))
+    if rest & 2:
+        bound.append(MapValue({map_key(k): (k, w) for k, w in extra_kwargs.items()}))
     return bound
 
 
@@ -188,11 +206,17 @@ def _bind_method_call(recv, fn, include_self: bool, name: str, values: list, kwa
     `spawn_detached`."""
     label = f"method '{name}'" if include_self else f"'{name}'"
     if isinstance(fn, Closure):
+        if include_self and fn.rest & 1 and fn.param_count - bin(fn.rest).count("1") == 0:
+            # M41c: the receiver is the method's first positional argument; when
+            # the function's first parameter is a `...` rest parameter (a
+            # wrapper like `fn(...args, **kw)`), it becomes that Vector's
+            # first item.
+            return _bind_params(fn.param_count, fn.params, [recv] + values, kwargs, label, fn.rest)
         if include_self:
             rest_params = fn.params[1:] if fn.params is not None else None
-            bound_rest = _bind_params(fn.param_count - 1, rest_params, values, kwargs, label)
+            bound_rest = _bind_params(fn.param_count - 1, rest_params, values, kwargs, label, fn.rest)
             return [recv] + bound_rest
-        return _bind_params(fn.param_count, fn.params, values, kwargs, label)
+        return _bind_params(fn.param_count, fn.params, values, kwargs, label, fn.rest)
     # A native target -- always a system-trait/inherent method (`is_method`
     # true), so `include_self` is always true here; never accepts keyword
     # arguments (there are no declared parameter names to bind them to --
@@ -253,6 +277,8 @@ class FunctionInfo(NamedTuple):
     params: list | None
     # M41a: this function's FUNCTIONS index, the key into META.
     index: int = 0
+    # M41c: rest-parameter flags -- bit 0 `...`, bit 1 `**` (PARAMS, 1.16).
+    rest: int = 0
 
 
 class DebugIndex(NamedTuple):
@@ -397,6 +423,8 @@ def _link_instr(instr, strings: list, constants: list, types: list, natives: lis
         return ("spread", a[0], a[1], a[2])
     if op == "decorate":
         return ("decorate", a[0], a[1], a[2], a[3])
+    if op == "paramhooks":
+        return ("paramhooks", a[0], a[1], a[2])
     if op == "loadtype":
         kind, index, dest = a
         name = types[index].name if kind == 0 else PRIMITIVE_TYPE_NAMES[index]
@@ -531,6 +559,7 @@ def _link(program: Program) -> LinkedProgram:
             if fn.params is not None
             else None,
             index,
+            fn.rest,
         )
         for index, fn in enumerate(program.functions)
     ]
@@ -1187,23 +1216,36 @@ def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, dead
         task.current_frame = new_frame
         task.pc = closure.code_address
 
+    # M41c: whether any function-item impl (`impl Tr for somefn`, method-table
+    # type `fn#<index>`) was registered -- until then, function dispatch skips
+    # the identity lookup entirely.
+    fn_items = [False]
+
+    def pick_target(entry, name: str, trait: str | None, tname: str):
+        if entry is None:
+            return None
+        if trait is not None:
+            return entry["traits"].get(trait)
+        if entry["inherent"] is not None:
+            return entry["inherent"]
+        if len(entry["traits"]) == 1:
+            return next(iter(entry["traits"].values()))
+        if len(entry["traits"]) > 1:
+            raise MahRuntimeError(
+                f"Method '{name}' on '{tname}' is ambiguous: provided by traits "
+                f"{sorted(entry['traits'])}; call it as 'Trait.{name}(value, ...)'",
+                kind="NoSuchMethod",
+            )
+        return None
+
     def find_method(recv, name: str, trait: str | None):
         tname = type_name_of(recv)
-        entry = method_table.get((tname, name))
         target = None
-        if entry is not None:
-            if trait is not None:
-                target = entry["traits"].get(trait)
-            elif entry["inherent"] is not None:
-                target = entry["inherent"]
-            elif len(entry["traits"]) == 1:
-                target = next(iter(entry["traits"].values()))
-            elif len(entry["traits"]) > 1:
-                raise MahRuntimeError(
-                    f"Method '{name}' on '{tname}' is ambiguous: provided by traits "
-                    f"{sorted(entry['traits'])}; call it as 'Trait.{name}(value, ...)'",
-                    kind="NoSuchMethod",
-                )
+        if fn_items[0] and isinstance(recv, Closure):
+            # M41c: a function's item type (its identity's `fn#<index>`) first
+            target = pick_target(method_table.get((f"fn#{recv.identity}", name)), name, trait, tname)
+        if target is None:
+            target = pick_target(method_table.get((tname, name)), name, trait, tname)
         if trait is None and (target is None or not target[1]):
             if isinstance(recv, (StructInstance, EnumInstance)) and name in recv.fields:
                 value = recv.fields[name]
@@ -1238,7 +1280,7 @@ def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, dead
 
     def invoke_sync(closure: Closure, arg_values: list, label: str):
         call_label = f"'{closure.name}'" if closure.name else "function"
-        bound = _bind_params(closure.param_count, closure.params, arg_values, [], call_label)
+        bound = _bind_params(closure.param_count, closure.params, arg_values, [], call_label, closure.rest)
         frame = Frame(slots=[NONE_VALUE] * closure.slot_count, static_parent=closure.defining_frame)
         for i, v in enumerate(bound):
             frame.slots[i] = v
@@ -1607,6 +1649,7 @@ def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, dead
                         function_info.name,
                         function_info.params,
                         function_info.index,
+                        function_info.rest,
                     ),
                 )
             case ("call", callee_addr, arg_addrs):
@@ -1615,7 +1658,7 @@ def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, dead
                     raise MahRuntimeError(f"Tried to call a non-function value ({type_name_of(closure)})", kind="TypeMismatch")
                 label = f"'{closure.name}'" if closure.name else "function"
                 values = [_read(frame, a) for a in arg_addrs]
-                bound = _bind_params(closure.param_count, closure.params, values, [], label)
+                bound = _bind_params(closure.param_count, closure.params, values, [], label, closure.rest)
                 enter_closure(task, closure, bound)
             case ("callkw", callee_addr, arg_addrs, kwnames):
                 closure = _read(frame, callee_addr)
@@ -1625,7 +1668,7 @@ def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, dead
                 npos = len(arg_addrs) - len(kwnames)
                 values = [_read(frame, a) for a in arg_addrs[:npos]]
                 kwargs = [(kwnames[j], _read(frame, arg_addrs[npos + j])) for j in range(len(kwnames))]
-                bound = _bind_params(closure.param_count, closure.params, values, kwargs, label)
+                bound = _bind_params(closure.param_count, closure.params, values, kwargs, label, closure.rest)
                 enter_closure(task, closure, bound)
             case ("callspread", callee_addr, vec_addr, map_addr):
                 closure = _read(frame, callee_addr)
@@ -1634,7 +1677,7 @@ def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, dead
                 label = f"'{closure.name}'" if closure.name else "function"
                 values = list(_read(frame, vec_addr).items)
                 kwargs = [(k, v) for k, v in _read(frame, map_addr).entries.values()]
-                bound = _bind_params(closure.param_count, closure.params, values, kwargs, label)
+                bound = _bind_params(closure.param_count, closure.params, values, kwargs, label, closure.rest)
                 enter_closure(task, closure, bound)
             case ("spread", target_addr, source_addr, keyword):
                 _spread(_read(frame, target_addr), _read(frame, source_addr), keyword)
@@ -1647,6 +1690,9 @@ def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, dead
                         f"decorate: the target (kind {kind}, {x}, {y}) is decorated twice", kind="Internal"
                     )
                 table[key] = VectorValue([_read(frame, a) for a in value_addrs])
+            case ("paramhooks", fn_index, param_index, dest):
+                # M41c: the WrapParam hooks `hooks.set_param` stored for this parameter
+                _write(frame, dest, ctx.reflect.hook_params.get((fn_index, param_index), NONE_VALUE))
             case ("loadtype", type_value, dest):
                 _write(frame, dest, type_value)
             case ("jmpset", param_addr, target):
@@ -1665,7 +1711,7 @@ def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, dead
                     raise MahRuntimeError(f"Tried to detach a non-function value ({type_name_of(closure)})", kind="TypeMismatch")
                 label = f"'{closure.name}'" if closure.name else "function"
                 values = [_read(frame, a) for a in arg_addrs]
-                bound = _bind_params(closure.param_count, closure.params, values, [], label)
+                bound = _bind_params(closure.param_count, closure.params, values, [], label, closure.rest)
                 _write(frame, dest, spawn_detached(closure, bound))
             case ("detachkw", callee_addr, arg_addrs, kwnames, dest):
                 closure = _read(frame, callee_addr)
@@ -1675,7 +1721,7 @@ def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, dead
                 npos = len(arg_addrs) - len(kwnames)
                 values = [_read(frame, a) for a in arg_addrs[:npos]]
                 kwargs = [(kwnames[j], _read(frame, arg_addrs[npos + j])) for j in range(len(kwnames))]
-                bound = _bind_params(closure.param_count, closure.params, values, kwargs, label)
+                bound = _bind_params(closure.param_count, closure.params, values, kwargs, label, closure.rest)
                 _write(frame, dest, spawn_detached(closure, bound))
             case ("await", promise_addr, dest):
                 value = _read(frame, promise_addr)
@@ -1788,6 +1834,8 @@ def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, dead
             case ("defmethod", closure_addr, type_name, trait, name, is_method):
                 closure = _read(frame, closure_addr)
                 entry = method_table.setdefault((type_name, name), {"inherent": None, "traits": {}})
+                if type_name.startswith("fn#"):
+                    fn_items[0] = True
                 if trait is None:
                     entry["inherent"] = (closure, is_method)
                 else:

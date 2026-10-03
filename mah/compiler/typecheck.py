@@ -834,11 +834,17 @@ class Checker:
                     params.append(self_type)
                 elif annotation is not None:
                     params.append(self._convert(annotation))
+                elif index >= len(fn.params) - bin(fn.rest).count("1"):
+                    # M41c: a rest parameter without an annotation holds
+                    # `Vector<Unknown>` (`...`) / `Map<String, Unknown>` (`**`).
+                    is_kw = fn.rest & 2 and index == len(fn.params) - 1
+                    unknown = TUnknown("explicit")
+                    params.append(TCon("Map", [STRING, unknown]) if is_kw else TCon("Vector", [unknown]))
                 elif exp is not None and index < len(exp.params):
                     params.append(exp.params[index])
                 else:
                     params.append(self._fresh())
-            required = len(fn.params)
+            required = len(fn.params) - bin(fn.rest).count("1")
             for index, default in enumerate(fn.defaults):
                 if default is not None:
                     required = index
@@ -858,7 +864,7 @@ class Checker:
                 throws = sealed
                 whose = f"'{fn.name}'" if fn.name else "This function"
                 self.throw_checks.append((acc, throws, fn.position, whose))
-            sig = TFn(params, ret, required, fn.params, throws)
+            sig = TFn(params, ret, required, fn.params, throws, fn.rest)
             if on_sig is not None:
                 on_sig(sig)
 
@@ -904,6 +910,8 @@ class Checker:
     # -- methods -------------------------------------------------------------
 
     def _impl_target(self, impl: ImplDecl):
+        if impl.item_key is not None:
+            return _unchecked()  # M41c: `self` is the function itself
         info = self.structs.get(impl.type_name) or self.enums.get(impl.type_name)
         if impl.type_args:
             return TCon(impl.type_name, [self._convert(a) for a in impl.type_args])
@@ -937,7 +945,7 @@ class Checker:
                     if p not in params:
                         params.append(p)
                 system = self._in_prelude(decl.position)
-                entry = self.impl_methods.setdefault(decl.type_name, {"inherent": {}, "traits": {}})
+                entry = self.impl_methods.setdefault(decl.item_key or decl.type_name, {"inherent": {}, "traits": {}})
                 table = entry["inherent"] if decl.trait_name is None else entry["traits"].setdefault(decl.trait_name, {})
                 for method in decl.methods:
                     table[method.name] = _Method(method, target, scope, params, system)
@@ -946,7 +954,7 @@ class Checker:
         if isinstance(decl, TraitDecl):
             table = self.trait_methods.get(decl.name, {})
         else:
-            entry = self.impl_methods.get(decl.type_name, {"inherent": {}, "traits": {}})
+            entry = self.impl_methods.get(decl.item_key or decl.type_name, {"inherent": {}, "traits": {}})
             table = entry["inherent"] if decl.trait_name is None else entry["traits"].get(decl.trait_name, {})
         return [table[m.name] for m in decl.methods if table.get(m.name) is not None and table[m.name].decl is m]
 
@@ -982,9 +990,11 @@ class Checker:
                     else:
                         params.append(self._convert(annotation) if annotation is not None else _unchecked())
                 ret = self._convert(decl.return_type) if decl.return_type is not None else _unchecked()
-                required = next((i for i, d in enumerate(decl.defaults) if d is not None), len(decl.params))
+                required = next(
+                    (i for i, d in enumerate(decl.defaults) if d is not None), len(decl.params) - bin(decl.rest).count("1")
+                )
                 throws = self._sealed(decl.throws, decl.position) if decl.throws is not None else None
-                m.scheme = Scheme(list(own.values()) + m.params, TFn(params, ret, required, decl.params, throws))
+                m.scheme = Scheme(list(own.values()) + m.params, TFn(params, ret, required, decl.params, throws, decl.rest))
                 return m.scheme
             self._enter_level()
 
@@ -1117,6 +1127,13 @@ class Checker:
                 scheme = self._method_scheme(m)
                 return instantiate(scheme, self.level) if scheme is not None else _unchecked()
             return self._native_method(receiver, name)
+        if isinstance(receiver, TFn) and receiver.item is not None:
+            # M41c: a top-level function's item type -- the methods of the
+            # impls written for that function.
+            m = self._find_method(receiver.item, name)
+            if m is not None:
+                scheme = self._method_scheme(m)
+                return instantiate(scheme, self.level) if scheme is not None else _unchecked()
         return None
 
     def _infer_receiver(self, var, name: str) -> None:
@@ -1124,6 +1141,8 @@ class Checker:
         `name` (docs/TYPES.md's "Inferring a parameter from its uses")."""
         found = set()
         for type_name, entry in self.impl_methods.items():
+            if type_name.startswith("fn#"):
+                continue  # a function's item type isn't a type a variable can be
             if self._find_method(type_name, name) is not None:
                 found.add(type_name)
         for type_name, sample in (("String", STRING), ("Vector", TCon("Vector", [NONE])), ("Map", TCon("Map", [NONE, NONE]))):
@@ -1161,7 +1180,7 @@ class Checker:
             return sig if isinstance(sig, TUnknown) else _unchecked()
         self._expect(receiver, sig.params[0], receiver_position, "in the receiver")
         names = sig.names[1:] if sig.names is not None else None
-        bound = TFn(sig.params[1:], sig.ret, max(sig.required - 1, 0), names, sig.throws)
+        bound = TFn(sig.params[1:], sig.ret, max(sig.required - 1, 0), names, sig.throws, sig.rest)
         return self._apply(bound, args, kwargs, position)
 
     def _check_method_call(self, expr: MethodCall):
@@ -1461,7 +1480,13 @@ class Checker:
             return _unchecked()
         item = self.items.get(symbol)
         if item is not None:
-            return instantiate(self._check_item(item), self.level)
+            fn_type = instantiate(self._check_item(item), self.level)
+            if item.stmt.is_decl and isinstance(prune(fn_type), TFn):
+                # M41c: the item type of a top-level function: this function
+                # type, which also finds `impl somefn`'s methods
+                t = prune(fn_type)
+                return TFn(t.params, t.ret, t.required, t.names, t.throws, t.rest, f"fn#{item.stmt.name}")
+            return fn_type
         t = self.env.get(symbol)
         if t is None:
             return _unchecked()
@@ -1511,6 +1536,16 @@ class Checker:
             return callee
         return self._apply(callee, args, kwargs, position)
 
+    @staticmethod
+    def _collection_item(t, name: str, which: int):
+        """M41c: the element type of a rest parameter's collection type
+        (`Vector<T>` -> T, `Map<String, T>` -> T), or None when it isn't one
+        (nothing is then checked against it)."""
+        t = prune(t)
+        if isinstance(t, TCon) and t.name == name and len(t.args) > which:
+            return t.args[which]
+        return None
+
     def _apply(self, callee: TFn, args, kwargs, position: int):
         """Match arguments to a function type's parameters by position and
         keyword, check each, and give the return type."""
@@ -1522,24 +1557,37 @@ class Checker:
             self._raise(callee.throws, position)
             return callee.ret
         params = callee.params
+        # M41c: the last parameter(s) may be rest parameters: they take the
+        # extra positional / unmatched keyword arguments.
+        n_ord = len(params) - bin(callee.rest).count("1")
+        rest_item = kw_item = None
+        if callee.rest & 1:
+            rest_item = self._collection_item(params[n_ord], "Vector", 0)
+        if callee.rest & 2:
+            kw_item = self._collection_item(params[-1], "Map", 1)
         pairs = []  # (argument expression, parameter type or None)
         filled = set()
         for index, arg in enumerate(args):
-            if index < len(params):
+            if index < n_ord:
                 pairs.append((arg, params[index]))
                 filled.add(index)
+            elif callee.rest & 1:
+                pairs.append((arg, rest_item))
             else:
                 pairs.append((arg, None))
-        if len(args) > len(params):
+        if len(args) > n_ord and not callee.rest & 1:
             self._error(
                 position,
-                f"Too many arguments: expected at most {len(params)}, found {len(args)}",
+                f"Too many arguments: expected at most {n_ord}, found {len(args)}",
             )
         for name, value, kw_position in kwargs:
             if callee.names is None:
                 pairs.append((value, None))
                 continue
-            if name not in callee.names:
+            if name not in callee.names[:n_ord]:
+                if callee.rest & 2:
+                    pairs.append((value, kw_item))
+                    continue
                 self._error(kw_position, f"No parameter named '{name}'")
                 pairs.append((value, None))
                 continue

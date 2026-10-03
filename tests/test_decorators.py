@@ -810,13 +810,15 @@ class PreprocessorTests(unittest.TestCase):
 class BytecodeTests(unittest.TestCase):
     SRC = 'fn t(x) { x }\n@t(1)\nfn f(@t(2) a) { }\n@t(3)\nstruct S { @t(4) x }\nenum E { @t(5) A { r } }\n'
 
-    def test_minor_is_15_only_with_decorate(self):
-        self.assertEqual(MINOR, 15)
-        self.assertEqual(decode(compile_bytes(text=self.SRC)).minor, 15)
+    def test_minor_is_16_with_decorators_or_std_reflect(self):
+        # M41c: decorators import std:reflect implicitly, and std:reflect (like
+        # std:json) uses the 1.16 `hooks.*` natives; a program with neither
+        # keeps its old minor.
+        self.assertEqual(MINOR, 16)
+        self.assertEqual(decode(compile_bytes(text=self.SRC)).minor, 16)
         self.assertEqual(decode(compile_bytes(text="fn f(a) { a }\nprint(f(1))")).minor, 4)
-        self.assertEqual(decode(compile_bytes(text=REFLECT + "print(reflect.type_of(1))")).minor, 14)
-        # std:reflect itself doesn't need 1.15, decorators or not
-        self.assertEqual(decode(compile_bytes(text=REFLECT + "fn t(x) { x }\nprint(reflect.signature(t).decorators)")).minor, 14)
+        self.assertEqual(decode(compile_bytes(text=REFLECT + "print(reflect.type_of(1))")).minor, 16)
+        self.assertEqual(decode(compile_bytes(text=REFLECT + "fn t(x) { x }\nprint(reflect.signature(t).decorators)")).minor, 16)
 
     def test_the_opcode_and_native_are_pinned(self):
         self.assertEqual(OPCODES["decorate"], (0x3D, ("N", "N", "N", "A*")))
@@ -847,7 +849,7 @@ class BytecodeTests(unittest.TestCase):
         self.assertIn("target=variant 0 of E", text)
 
     def test_a_1_14_file_may_not_contain_decorate(self):
-        program = compile_program(text=self.SRC)
+        program = compile_program(text="fn t(x) { x }\n@t(1)\nfn f(a) { }\n")
         program.minor = 14
         with self.assertRaisesRegex(MahcFormatError, r"opcode 'decorate' at instruction \d+ requires minor version >= 15"):
             decode(encode(program))
@@ -869,7 +871,12 @@ class BytecodeTests(unittest.TestCase):
         self.assertRegex(patched(lambda k, a, b, v: (0, 99, b, v)), r"'decorate' at instruction \d+: function index 99 out of range")
         self.assertRegex(patched(lambda k, a, b, v: (1, 1, 9, v)), r"'decorate' at instruction \d+: parameter index 9 out of range for function 1")
         self.assertRegex(patched(lambda k, a, b, v: (4, a, b, v)), r"'decorate' at instruction \d+: type index \d+ is not an enum")
-        self.assertRegex(patched(lambda k, a, b, v: (3, a + 1, b, v)), r"'decorate' at instruction \d+: type index \d+ is not a struct")
+        enum_index = next(
+            instr.args[1] for instr in compile_program(text=self.SRC).code if instr.op == "decorate" and instr.args[0] == 4
+        )
+        self.assertRegex(
+            patched(lambda k, a, b, v: (3, enum_index, b, v)), r"'decorate' at instruction \d+: type index \d+ is not a struct"
+        )
 
     def test_decode_accepts_the_valid_shapes(self):
         program = compile_program(text=self.SRC)
@@ -1046,7 +1053,9 @@ class LspTests(unittest.TestCase):
             self.assertEqual(_apply(main, by_name["main.mh"]), main.replace("factory", "make"))
 
     def test_completion_inside_a_decorator_matches_an_expression(self):
-        head = 'import lib from "lib"\nfn local(x) { x }\n'
+        # (the loop makes both documents include the prelude, as the hidden
+        # std:reflect import of the decorated one does)
+        head = 'import lib from "lib"\nfor let _i in [1] { }\nfn local(x) { x }\n'
         with project({"lib.mh": "export fn factory(p) { p }\n", "c.mh": head}) as td:
             path = os.path.join(td, "c.mh")
 

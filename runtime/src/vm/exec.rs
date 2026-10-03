@@ -157,11 +157,16 @@ pub fn bind_params(
     values: Vec<Value>,
     kwargs: Vec<(Rc<str>, Value)>,
     label: &str,
+    rest: u8,
 ) -> RResult<Vec<Value>> {
     let m = values.len();
     let n = param_count;
+    // M41c: the last parameter slot(s) may be rest parameters (`...` collects
+    // extra positional arguments into a Vector, `**` the keyword arguments
+    // that match no ordinary parameter into a Map).
+    let n_ord = n - (rest & 1) as usize - ((rest >> 1) & 1) as usize;
     let has_any_default = params.is_some_and(|ps| ps.iter().any(|(_, d)| *d));
-    if kwargs.is_empty() && !has_any_default {
+    if kwargs.is_empty() && !has_any_default && rest == 0 {
         if m != n {
             return Err(RuntimeError::with_kind(
                 format!("Argument Count is invalid. {label} accepts {n} arguments but {m} was given"),
@@ -170,27 +175,41 @@ pub fn bind_params(
         }
         return Ok(values);
     }
-    if m > n {
+    if m > n_ord && rest & 1 == 0 {
         return Err(RuntimeError::with_kind(
-            format!("{label} takes at most {n} positional arguments but {m} were given"),
+            format!("{label} takes at most {n_ord} positional arguments but {m} were given"),
             ErrorKind::ArgumentError,
         ));
     }
+    let mut values = values;
+    let extra: Vec<Value> = if m > n_ord { values.split_off(n_ord) } else { Vec::new() };
     let mut bound: Vec<Value> = values;
     let mut bound_flags: Vec<bool> = vec![true; bound.len()];
-    bound.resize(n, Value::Absent);
-    bound_flags.resize(n, false);
+    bound.resize(n_ord, Value::Absent);
+    bound_flags.resize(n_ord, false);
     let name_to_index: HashMap<&str, usize> = match params {
-        Some(ps) => ps.iter().enumerate().map(|(i, (name, _))| (name.as_ref(), i)).collect(),
+        Some(ps) => ps.iter().take(n_ord).enumerate().map(|(i, (name, _))| (name.as_ref(), i)).collect(),
         None => HashMap::new(),
     };
+    let extra_map = MapData::new();
     for (k, w) in kwargs {
         match name_to_index.get(k.as_ref()) {
             None => {
+                if rest & 2 != 0 {
+                    let mk = map_key(&Value::Str(k.clone())).expect("a String is a Map key");
+                    if extra_map.borrow().entries.contains_key(&mk) {
+                        return Err(RuntimeError::with_kind(
+                            format!("{label} got multiple values for argument '{k}'"),
+                            ErrorKind::ArgumentError,
+                        ));
+                    }
+                    extra_map.borrow_mut().index_assign(mk, Value::Str(k.clone()), w);
+                    continue;
+                }
                 return Err(RuntimeError::with_kind(
                     format!("{label} got an unexpected keyword argument '{k}'"),
                     ErrorKind::ArgumentError,
-                ))
+                ));
             }
             Some(&idx) => {
                 if bound_flags[idx] {
@@ -204,7 +223,7 @@ pub fn bind_params(
             }
         }
     }
-    for i in 0..n {
+    for i in 0..n_ord {
         if bound_flags[i] {
             continue;
         }
@@ -216,6 +235,12 @@ pub fn bind_params(
                 ErrorKind::ArgumentError,
             ));
         }
+    }
+    if rest & 1 != 0 {
+        bound.push(Value::Vector(Rc::new(RefCell::new(extra))));
+    }
+    if rest & 2 != 0 {
+        bound.push(Value::Map(extra_map));
     }
     Ok(bound)
 }
@@ -231,15 +256,24 @@ pub fn bind_method_call(
     let label = if include_self { format!("method '{name}'") } else { format!("'{name}'") };
     match target {
         Callable::Closure(c) => {
-            if include_self {
+            if include_self && c.func.rest & 1 != 0 && c.func.param_count == c.func.rest.count_ones() as usize {
+                // M41c: the receiver is the method's first positional argument; when
+                // the function's first parameter is a `...` rest parameter (a wrapper
+                // like `fn(...args, **kw)`), it becomes that Vector's first item.
+                let mut all = Vec::with_capacity(values.len() + 1);
+                all.push(recv);
+                all.extend(values);
+                bind_params(c.func.param_count, c.func.params.as_deref(), all, kwargs, &label, c.func.rest)
+            } else if include_self {
                 let rest_params: Option<Vec<(Rc<str>, bool)>> = c.func.params.as_ref().map(|p| p[1..].to_vec());
-                let bound_rest = bind_params(c.func.param_count - 1, rest_params.as_deref(), values, kwargs, &label)?;
+                let bound_rest =
+                    bind_params(c.func.param_count - 1, rest_params.as_deref(), values, kwargs, &label, c.func.rest)?;
                 let mut out = Vec::with_capacity(bound_rest.len() + 1);
                 out.push(recv);
                 out.extend(bound_rest);
                 Ok(out)
             } else {
-                bind_params(c.func.param_count, c.func.params.as_deref(), values, kwargs, &label)
+                bind_params(c.func.param_count, c.func.params.as_deref(), values, kwargs, &label, c.func.rest)
             }
         }
         Callable::Native(kind) => {
@@ -249,7 +283,7 @@ pub fn bind_method_call(
                 let mut params: Vec<(Rc<str>, bool)> =
                     (0..arity).map(|i| (Rc::from(format!("#{i}").as_str()), false)).collect();
                 params.extend(optional.iter().map(|(name, _)| (Rc::from(*name), true)));
-                let mut bound = bind_params(params.len(), Some(&params), values, kwargs, &label)?;
+                let mut bound = bind_params(params.len(), Some(&params), values, kwargs, &label, 0)?;
                 for (i, (_name, default)) in optional.iter().enumerate() {
                     if matches!(bound[arity + i], Value::Absent) {
                         bound[arity + i] = default.value();
@@ -458,6 +492,14 @@ pub struct Vm<'p> {
     /// M41b: the decorators `decorate` stored this run, by target
     /// `(kind, a, b)` (`b` is 0 for kinds 0 and 2), each a Vector.
     pub(super) decorators: HashMap<(u64, usize, usize), Value>,
+    /// M41c: `hooks.set_type`'s data by struct type name, `hooks.set_param`'s
+    /// by (function identity, parameter index).
+    pub(super) hook_types: HashMap<Rc<str>, Value>,
+    pub(super) hook_params: HashMap<(usize, usize), Value>,
+    /// M41c: whether any function-item impl (a `fn#<index>` method-table
+    /// type) was registered; until then function dispatch skips the identity
+    /// lookup.
+    fn_items: bool,
     return_register: Value,
     timers: BinaryHeap<TimerEntry>,
     timer_seq: u64,
@@ -1007,27 +1049,47 @@ impl<'p> Vm<'p> {
         }
     }
 
+    fn pick_target<'a>(
+        entry: Option<&'a MethodEntry>,
+        name: &Rc<str>,
+        trait_: Option<&Rc<str>>,
+        tname: &Rc<str>,
+    ) -> RResult<Option<&'a (Callable, bool)>> {
+        let Some(e) = entry else { return Ok(None) };
+        if let Some(t) = trait_ {
+            return Ok(e.traits.get(t.as_ref()));
+        }
+        if let Some(inh) = &e.inherent {
+            return Ok(Some(inh));
+        }
+        if e.traits.len() == 1 {
+            return Ok(e.traits.values().next());
+        }
+        if e.traits.len() > 1 {
+            let names_list: Vec<String> = e.traits.keys().map(|k| format!("'{k}'")).collect();
+            return Err(RuntimeError::with_kind(
+                format!(
+                    "Method '{name}' on '{tname}' is ambiguous: provided by traits [{}]; call it as 'Trait.{name}(value, ...)'",
+                    names_list.join(", ")
+                ),
+                ErrorKind::NoSuchMethod,
+            ));
+        }
+        Ok(None)
+    }
+
     pub fn find_method(&self, recv: &Value, name: &Rc<str>, trait_: Option<&Rc<str>>) -> RResult<(Callable, bool)> {
         let tname = type_name_of(recv, &self.names);
-        let entry = self.method_table.get(&(tname.clone(), name.clone()));
         let mut target: Option<&(Callable, bool)> = None;
-        if let Some(e) = entry {
-            if let Some(t) = trait_ {
-                target = e.traits.get(t.as_ref());
-            } else if let Some(inh) = &e.inherent {
-                target = Some(inh);
-            } else if e.traits.len() == 1 {
-                target = e.traits.values().next();
-            } else if e.traits.len() > 1 {
-                let names_list: Vec<String> = e.traits.keys().map(|k| format!("'{k}'")).collect();
-                return Err(RuntimeError::with_kind(
-                    format!(
-                        "Method '{name}' on '{tname}' is ambiguous: provided by traits [{}]; call it as 'Trait.{name}(value, ...)'",
-                        names_list.join(", ")
-                    ),
-                    ErrorKind::NoSuchMethod,
-                ));
+        if self.fn_items {
+            if let Value::Function(c) = recv {
+                // M41c: a function's item type (its identity's `fn#<index>`) first
+                let key: Rc<str> = Rc::from(format!("fn#{}", c.identity.get()).as_str());
+                target = Self::pick_target(self.method_table.get(&(key, name.clone())), name, trait_, &tname)?;
             }
+        }
+        if target.is_none() {
+            target = Self::pick_target(self.method_table.get(&(tname.clone(), name.clone())), name, trait_, &tname)?;
         }
         if trait_.is_none() && target.as_ref().map(|(_, is_method)| !is_method).unwrap_or(true) {
             if let Some(field_val) = struct_or_enum_field(recv, name) {
@@ -1093,7 +1155,7 @@ impl<'p> Vm<'p> {
             Some(n) => format!("'{n}'"),
             None => "function".to_string(),
         };
-        let bound = bind_params(closure.func.param_count, closure.func.params.as_deref(), arg_values, Vec::new(), &call_label)?;
+        let bound = bind_params(closure.func.param_count, closure.func.params.as_deref(), arg_values, Vec::new(), &call_label, closure.func.rest)?;
         let frame = value::new_frame(closure.func.slot_count, Some(closure.defining_frame.clone()));
         {
             let mut fb = frame.borrow_mut();
@@ -1366,7 +1428,11 @@ impl<'p> Vm<'p> {
                 wr!(*dest, Value::Bool(!truthy(&v)));
             }
             LinkedInstr::Closure { func, dest } => {
-                wr!(*dest, Value::Function(Rc::new(ClosureData { func: func.clone(), defining_frame: frame.clone() })));
+                wr!(*dest, Value::Function(Rc::new(ClosureData {
+                    func: func.clone(),
+                    defining_frame: frame.clone(),
+                    identity: std::cell::Cell::new(func.index),
+                })));
             }
             LinkedInstr::Call { callee, args } => {
                 let closure_val = rd(*callee)?;
@@ -1381,7 +1447,7 @@ impl<'p> Vm<'p> {
                     None => "function".to_string(),
                 };
                 let values: Vec<Value> = args.iter().map(|a| rd(*a)).collect::<RResult<_>>()?;
-                let bound = bind_params(c.func.param_count, c.func.params.as_deref(), values, Vec::new(), &label)?;
+                let bound = bind_params(c.func.param_count, c.func.params.as_deref(), values, Vec::new(), &label, c.func.rest)?;
                 let c = c.clone();
                 self.enter_closure(task, &c, bound);
             }
@@ -1403,7 +1469,7 @@ impl<'p> Vm<'p> {
                 for (j, kw) in kwnames.iter().enumerate() {
                     kwargs.push((kw.clone(), rd(args[npos + j])?));
                 }
-                let bound = bind_params(c.func.param_count, c.func.params.as_deref(), values, kwargs, &label)?;
+                let bound = bind_params(c.func.param_count, c.func.params.as_deref(), values, kwargs, &label, c.func.rest)?;
                 let c = c.clone();
                 self.enter_closure(task, &c, bound);
             }
@@ -1471,7 +1537,7 @@ impl<'p> Vm<'p> {
                     None => "function".to_string(),
                 };
                 let (values, kwargs) = spread_arguments(&rd(*args)?, &rd(*kwargs)?);
-                let bound = bind_params(c.func.param_count, c.func.params.as_deref(), values, kwargs, &label)?;
+                let bound = bind_params(c.func.param_count, c.func.params.as_deref(), values, kwargs, &label, c.func.rest)?;
                 let c = c.clone();
                 self.enter_closure(task, &c, bound);
             }
@@ -1508,12 +1574,20 @@ impl<'p> Vm<'p> {
                 }
                 self.decorators.insert(key, Value::Vector(Rc::new(RefCell::new(items))));
             }
+            LinkedInstr::ParamHooks { func, param, dest } => {
+                // M41c: the WrapParam hooks `hooks.set_param` stored for this parameter
+                let data = self.hook_params.get(&(*func, *param)).cloned().unwrap_or(Value::None);
+                wr!(*dest, data);
+            }
             LinkedInstr::LoadType { value, dest } => wr!(*dest, value.clone()),
             LinkedInstr::Defmethod { closure, type_name, trait_, name, is_method } => {
                 let closure_v = rd(*closure)?;
                 let Value::Function(c) = &closure_v else {
                     return Err(RuntimeError::new("'defmethod' given a non-function value"));
                 };
+                if type_name.starts_with("fn#") {
+                    self.fn_items = true;
+                }
                 let entry = self.method_table.entry((type_name.clone(), name.clone())).or_insert_with(MethodEntry::empty);
                 match trait_ {
                     None => entry.inherent = Some((Callable::Closure(c.clone()), *is_method)),
@@ -1535,7 +1609,7 @@ impl<'p> Vm<'p> {
                     None => "function".to_string(),
                 };
                 let values: Vec<Value> = args.iter().map(|a| rd(*a)).collect::<RResult<_>>()?;
-                let bound = bind_params(c.func.param_count, c.func.params.as_deref(), values, Vec::new(), &label)?;
+                let bound = bind_params(c.func.param_count, c.func.params.as_deref(), values, Vec::new(), &label, c.func.rest)?;
                 let c = c.clone();
                 let promise = self.spawn_detached(&c, bound)?;
                 wr!(*dest, Value::Promise(promise));
@@ -1558,7 +1632,7 @@ impl<'p> Vm<'p> {
                 for (j, kw) in kwnames.iter().enumerate() {
                     kwargs.push((kw.clone(), rd(args[npos + j])?));
                 }
-                let bound = bind_params(c.func.param_count, c.func.params.as_deref(), values, kwargs, &label)?;
+                let bound = bind_params(c.func.param_count, c.func.params.as_deref(), values, kwargs, &label, c.func.rest)?;
                 let c = c.clone();
                 let promise = self.spawn_detached(&c, bound)?;
                 wr!(*dest, Value::Promise(promise));
@@ -2015,6 +2089,9 @@ fn run(linked: &LinkedProgram, test_slot: Option<usize>, args: &[String]) -> RRe
         names,
         method_table,
         decorators: HashMap::new(),
+        hook_types: HashMap::new(),
+        hook_params: HashMap::new(),
+        fn_items: false,
         return_register: Value::None,
         timers: BinaryHeap::new(),
         timer_seq: 0,
