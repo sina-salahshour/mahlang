@@ -181,6 +181,8 @@ declaration ("hoisting"):
 
 from __future__ import annotations
 
+import re
+
 from .ast_nodes import (
     TestDecl,
     NativeCall,
@@ -283,10 +285,13 @@ class Symbol:
     own actual scoping rules -- see docs/V2_DESIGN.md's M7 milestone and its
     "LSP rename" design section."""
 
-    __slots__ = ("name", "decl_position", "kind", "references", "type_hint")
+    __slots__ = ("name", "decl_position", "kind", "references", "type_hint", "top_level_let")
 
     def __init__(self, name: str, decl_position: int, kind: str):
         self.name = name
+        # M41b: a top-level `let` variable (not a `fn` declaration) -- what a
+        # decorator of the same module may not use, see `_lookup`.
+        self.top_level_let = False
         self.decl_position = decl_position
         self.kind = kind  # "let" | "fn" | "param" | "binding"
         self.references: list = []  # positions (ints) of every Ident that resolved here
@@ -298,7 +303,16 @@ class Symbol:
 
 
 class Resolver:
-    def __init__(self, prelude_start: int | None = None):
+    def __init__(self, prelude_start: int | None = None, pp=None):
+        # M41b: the `Preprocessed` result, when there is one -- only to tell
+        # which module a decorator is written in (`_module_of`).
+        self._pp = pp
+        # M41b: the module index of the decorator being resolved, or None
+        # outside decorators -- set by `_resolve_decorators`.
+        self._decorator_module: int | None = None
+        # M41b: top-level declarations (FnExpr/StructDecl/EnumDecl) whose
+        # decorators wait until every top-level name is declared.
+        self._pending_decorators: list = []
         # M28: the test names seen so far (unique per test file).
         self.test_names: set = set()
         # M17: the combined-text offset where the prelude begins (see
@@ -645,8 +659,44 @@ class Resolver:
                 frame_level, slot, symbol = scope[name]
                 symbol.references.append(position)
                 self.position_index[position] = symbol
+                if symbol.top_level_let and self._decorator_module is not None:
+                    self._check_decorator_variable(name, position)
                 return frame_level, slot
         raise NameError(f"Undefined variable '{name}' at position {position}")
+
+    # -- M41b: decorators -------------------------------------------------
+
+    def _module_of(self, position: int) -> int:
+        """The index the preprocessor gave the module `position` is in (0:
+        the entry file, whose names aren't mangled)."""
+        if self._pp is None:
+            return 0
+        path = self._pp.map_to_source(position)[0]
+        return self._pp.module_index.get(path, 0)
+
+    def _check_decorator_variable(self, name: str, position: int) -> None:
+        """A decorator runs before its own module's top-level `let`s, so it
+        may not read one of them (other modules' have run already). The
+        variable's module is in its mangled name (`__mah_m{idx}_{name}`)."""
+        match = re.match(r"__mah_m(\d+)_(.*)", name, re.S)
+        owner = int(match.group(1)) if match else 0
+        if owner == self._decorator_module:
+            shown = match.group(2) if match else name
+            raise Exception(
+                f"a decorator can't use the top-level variable '{shown}': it runs before it; "
+                f"use a function or a literal at position {position}"
+            )
+
+    def _resolve_decorators(self, decorators: list) -> None:
+        """Resolve decorator expressions (in the scope they're written in:
+        for a parameter's, not the function's own)."""
+        for expr in decorators:
+            saved = self._decorator_module
+            self._decorator_module = self._module_of(expr.position)
+            try:
+                self.resolve_expr(expr)
+            finally:
+                self._decorator_module = saved
 
     def _resolve_ident_address(self, name: str, position: int) -> tuple:
         frame_level, slot = self._lookup(name, position)
@@ -1154,9 +1204,25 @@ class Resolver:
         # Phase 2: every other top-level statement, in original order
         # (unchanged pre-M12 semantics).
         for stmt in stmts:
-            if id(stmt) in hoisted or isinstance(stmt, (TraitDecl, ImplDecl)):
+            if id(stmt) in hoisted:
+                # M41b: a struct's/enum's decorators are resolved here, in
+                # source order among the statements (they may name any
+                # function declared above it), not with the hoisted type.
+                self._pending_decorators.append(stmt)
+                continue
+            if isinstance(stmt, (TraitDecl, ImplDecl)):
                 continue
             self.resolve_stmt(stmt)
+        # M41b: every top-level declaration's decorators, now that all of
+        # the module's top-level names are in scope: a decorator may name a
+        # function or type declared *after* it (the decorator phase runs once
+        # every function closure exists). A top-level `let` is still refused.
+        for pending in self._pending_decorators:
+            if isinstance(pending, FnExpr):
+                self._resolve_fn_decorators(pending)
+            else:
+                self._resolve_type_decorators(pending)
+        self._pending_decorators = []
         # Phase 3: method bodies, with every top-level name now in scope.
         for trait in traits:
             # M13: `_self_trait` while resolving THIS trait's own default
@@ -1211,12 +1277,15 @@ class Resolver:
                 slot = self.frame_stack[-1].alloc()
                 symbol = self._declare(stmt.name, slot, name_position, kind="fn")
                 symbol.type_hint = "Function"
+                if not stmt.is_decl and self._at_top_level():
+                    symbol.top_level_let = True  # `let f = fn ...` is a statement
                 stmt.address = slot
-                self._resolve_fn_expr(stmt.value)
+                self._resolve_fn_expr(stmt.value, defer_decorators=stmt.is_decl and self._at_top_level())
             else:
                 self.resolve_expr(stmt.value)
                 slot = self.frame_stack[-1].alloc()
                 symbol = self._declare(stmt.name, slot, name_position, kind="let", allow_shadow=True)
+                symbol.top_level_let = self._at_top_level()
                 # M13: best-effort type hint, purely advisory (LSP) -- see
                 # `_type_hint`'s docstring.
                 symbol.type_hint = self._type_hint(stmt.value)
@@ -1443,7 +1512,26 @@ class Resolver:
             self.resolve_expr(block.tail)
         self._pop()
 
-    def _resolve_fn_expr(self, fn: FnExpr, allow_self: bool = False) -> None:
+    def _resolve_type_decorators(self, decl) -> None:
+        self._resolve_decorators(decl.decorators)
+        for decorators in decl.field_decorators if isinstance(decl, StructDecl) else decl.variant_decorators:
+            self._resolve_decorators(decorators)
+
+    def _at_top_level(self) -> bool:
+        return len(self.frame_stack) == 1 and len(self.scopes) == 1
+
+    def _resolve_fn_decorators(self, fn: FnExpr) -> None:
+        """M41b: a function's and its parameters' decorators are resolved in
+        the scope the function is declared in (parameters aren't in scope)."""
+        self._resolve_decorators(fn.decorators)
+        for decorators in fn.param_decorators:
+            self._resolve_decorators(decorators)
+
+    def _resolve_fn_expr(self, fn: FnExpr, allow_self: bool = False, defer_decorators: bool = False) -> None:
+        if defer_decorators:
+            self._pending_decorators.append(fn)
+        else:
+            self._resolve_fn_decorators(fn)
         # M21: this fn's own type parameters join those of every enclosing
         # fn (and, for a method, its trait's/impl's, seeded by
         # resolve_program's phase 3) for its annotations and its body.

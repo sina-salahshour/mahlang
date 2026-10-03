@@ -195,6 +195,52 @@ class GoldenTests(unittest.TestCase):
         )
 
 
+class DecoratorTests(unittest.TestCase):
+    """M41b: decorators (docs/REFLECTION.md)."""
+
+    def check(self, source: str, expected: str):
+        self.assertEqual(format_source(source), expected)
+        self.assertEqual(format_source(expected), expected)  # a second format is a no-op
+
+    def test_stacked_decorators_go_on_their_own_lines(self):
+        self.check(
+            '## Fetch.\n@get( "/x" , a:1)   @lib.q\n\n@Route.make(...xs)\nfn f() { 1 }\n',
+            '## Fetch.\n@get("/x", a: 1)\n@lib.q\n@Route.make(...xs)\nfn f() { 1 }\n',
+        )
+
+    def test_before_export_extern_struct_and_enum(self):
+        self.check(
+            '@get("/")   export fn f() { 1 }\n@m struct S { a }\n@t   enum E { A }\n',
+            '@get("/")\nexport fn f() { 1 }\n@m\nstruct S { a }\n@t\nenum E { A }\n',
+        )
+        self.check('@a  extern fn q(x) = "m.n"\n', '@a\nextern fn q(x) = "m.n"\n')
+
+    def test_parameter_field_and_variant_decorators_stay_inline(self):
+        self.check(
+            "fn f(  @a   @b( 1 )x:Number,  @c y = 2 ) { 1 }\n"
+            'struct S { @a\n x: Number,\n @b   @c(1) y }\n'
+            'enum E { @t("x")   A { r: Number }, @u B }\n',
+            "fn f(@a @b(1) x: Number, @c y = 2) { 1 }\n"
+            "struct S { @a x: Number, @b @c(1) y }\n"
+            'enum E { @t("x") A { r: Number }, @u B }\n',
+        )
+
+    def test_impl_methods_are_indented_with_their_decorators(self):
+        self.check(
+            "impl S {\n@m fn hi(self, @p   z) { 1 }\n\n   @n\n\n fn ho(self) { 2 }\n}\n",
+            "impl S {\n    @m\n    fn hi(self, @p z) { 1 }\n\n    @n\n    fn ho(self) { 2 }\n}\n",
+        )
+
+    def test_no_blank_line_between_a_decorator_and_its_declaration(self):
+        self.check("@a\n\n\nfn f() { }\n", "@a\nfn f() { }\n")
+
+    def test_a_long_parameter_list_breaks_with_its_decorators(self):
+        source = "fn f(" + ", ".join(f"@decorator_{i}(\"value {i}\") param_{i}: Number" for i in range(5)) + ") { 1 }\n"
+        formatted = format_source(source)
+        self.assertEqual(format_source(formatted), formatted)
+        self.assertIn('    @decorator_0("value 0") param_0: Number,\n', formatted)
+
+
 class CorpusTests(unittest.TestCase):
     def test_every_source_formats_verifies_and_is_idempotent(self):
         for name, source in _corpus():

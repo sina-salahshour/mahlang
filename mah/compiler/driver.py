@@ -145,7 +145,7 @@ def _parse_and_resolve(*, path: str | None, text: str | None, test: bool = False
     if test:
         _check_test_file(pp, program)
 
-    resolver = Resolver(prelude_start=pp.prelude_start)
+    resolver = Resolver(prelude_start=pp.prelude_start, pp=pp)
     resolver.resolve_program(program)
 
     return pp, program, resolver
@@ -175,7 +175,7 @@ def compile_to_program(
         if reportable:
             raise SyntaxError(_format_type_diagnostics(pp, reportable))
 
-    codegen = Codegen(resolver.global_frame)
+    codegen = Codegen(resolver.global_frame, pp)
     buf = codegen.generate(program)
 
     return lower(buf, resolver, pp, target=target)

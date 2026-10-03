@@ -59,10 +59,10 @@ def compile_source(*, path: str | None = None, text: str | None = None):
         message, _position = parser.errors[0]
         raise SyntaxError(message)
 
-    resolver = Resolver(prelude_start=pp.prelude_start)
+    resolver = Resolver(prelude_start=pp.prelude_start, pp=pp)
     resolver.resolve_program(program)
 
-    codegen = Codegen(resolver.global_frame)
+    codegen = Codegen(resolver.global_frame, pp)
     return codegen.generate(program)
 
 

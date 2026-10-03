@@ -6,6 +6,7 @@
   "patterns": [
     { "include": "#comments" },
     { "include": "#strings" },
+    { "include": "#decorators" },
     { "include": "#numbers" },
     { "include": "#constants" },
     { "include": "#module-keywords" },
@@ -26,6 +27,14 @@
     { "include": "#punctuation" }
   ],
   "repository": {
+    "decorators": {
+      "comment": "M41b: `@get(\"/x\")` / `@lib.route` -- the `@` and the (dotted) name; the arguments are highlighted as ordinary code.",
+      "match": "(@)([A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)*)",
+      "captures": {
+        "1": { "name": "punctuation.definition.decorator.mah" },
+        "2": { "name": "entity.name.function.decorator.mah" }
+      }
+    },
     "comments": {
       "patterns": [
         {

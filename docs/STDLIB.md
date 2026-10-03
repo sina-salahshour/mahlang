@@ -624,6 +624,8 @@ section) and §5 (the `Type` value). In short:
   with types and docs; `none` for a primitive), `methods(t)`, `implements(t,
   trait_name)`, `call(f, args = [], kwargs = [:])`, `construct(t, fields)`
   and `construct_variant(t, variant, fields)` (throwing `ReflectError`).
+  M41b: every descriptor has a `decorators` Vector, and `find(decorators,
+  target)` picks one by type or `==` (docs/REFLECTION.md).
 - It reports what the source *wrote*, never what the checker inferred; an
   unannotated parameter's type is `TypeRef.Unknown`.
 - Bare type names are values (`User`, `Number`), spread calls

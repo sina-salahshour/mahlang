@@ -360,12 +360,31 @@ class Checker:
             if isinstance(stmt, LetStmt) and self._sym(self._name_pos(stmt)) in self.items:
                 continue
             self._check_stmt(stmt)
+        self._check_decorators(program)
         self._finish_constraints()
         self._report_implicit()
         self._report_errors()
         diagnostics = [d for d in self.diagnostics if not self._in_prelude(d.position)]
         diagnostics.sort(key=lambda d: d.position)
         return diagnostics
+
+    def _check_decorators(self, program: list) -> None:
+        """M41b: every decorator expression is checked as an expression in
+        the top-level scope (parameters aren't in scope for a parameter's).
+        Nothing constrains its type."""
+        for stmt in program:
+            exprs: list = []
+            if isinstance(stmt, LetStmt) and isinstance(stmt.value, FnExpr) and stmt.is_decl:
+                exprs = [*stmt.value.decorators, *(d for ds in stmt.value.param_decorators for d in ds)]
+            elif isinstance(stmt, StructDecl):
+                exprs = [*stmt.decorators, *(d for ds in stmt.field_decorators for d in ds)]
+            elif isinstance(stmt, EnumDecl):
+                exprs = [*stmt.decorators, *(d for ds in stmt.variant_decorators for d in ds)]
+            elif isinstance(stmt, ImplDecl) and not self._in_prelude(stmt.position):
+                for method in stmt.methods:
+                    exprs += [*method.decorators, *(d for ds in method.param_decorators for d in ds)]
+            for expr in exprs:
+                self._check_expr(expr)
 
     # -- small utilities -------------------------------------------------
 

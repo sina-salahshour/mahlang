@@ -292,3 +292,92 @@ test "json.decode errors say where" {
     )
     assert_eq(message_of(P, "[]"), "expected an object for P, got Vector")
 }
+
+# -- M41b: decorators ---------------------------------------------------------
+
+struct Route { path: String }
+
+fn route(path: String) -> Route { Route { path: path } }
+fn label(name: String) -> String { "label:" + name }
+fn marker(x) { x }
+
+@route("/things/{id}")
+@label("fn")
+fn decorated(@label("param") id: Number, plain: Number = 1) -> Number { id }
+
+@label("type")
+struct Thing { @label("field") name: String, other }
+
+enum Kind { @label("variant") Big { size: Number }, Small }
+
+impl Thing {
+    @label("method")
+    fn show(self) -> String { "thing" }
+}
+
+test "decorators on functions and parameters" {
+    let sig = reflect.signature(decorated)
+    assert_eq(sig.decorators.len(), 2)
+    assert_eq(sig.decorators[0].path, "/things/{id}")
+    assert_eq(sig.decorators[1], "label:fn")
+    assert_eq(sig.params[0].decorators.join(","), "label:param")
+    assert_eq(sig.params[1].decorators.join(","), "")
+}
+
+test "decorators on types, fields and variants" {
+    match reflect.schema(Thing) {
+        some(
+            reflect.Schema.Struct {
+                type: t,
+                doc: doc,
+                type_params: tps,
+                fields: fields,
+                decorators: ds
+            }
+        ) => {
+            assert_eq(ds.join(","), "label:type")
+            assert_eq(fields[0].decorators.join(","), "label:field")
+            assert_eq(fields[1].decorators.join(","), "")
+        }
+        _ => { fail("expected a struct schema") }
+    }
+    match reflect.schema(Kind) {
+        some(
+            reflect.Schema.Enum {
+                type: t,
+                doc: doc,
+                type_params: tps,
+                variants: variants,
+                decorators: ds
+            }
+        ) => {
+            assert_eq(ds.join(","), "")
+            assert_eq(variants[0].decorators.join(","), "label:variant")
+            assert_eq(variants[1].decorators.join(","), "")
+        }
+        _ => { fail("expected an enum schema") }
+    }
+}
+
+test "decorators on methods" {
+    let ms = reflect.methods(Thing)
+    assert_eq(reflect.signature(ms[0].function).decorators.join(","), "label:method")
+}
+
+test "find picks a decorator by type or by value" {
+    let ds = reflect.signature(decorated).decorators
+    match reflect.find(ds, Route) {
+        some(r) => { assert_eq(r.path, "/things/{id}") }
+        none => { fail("expected a Route") }
+    }
+    assert_eq(reflect.find(ds, Number), none)
+    assert_eq("" + reflect.find(ds, String), "some(label:fn)")
+    assert_eq(reflect.find(ds, marker), none)
+    assert_eq(reflect.find([], Route), none)
+}
+
+test "decorators are copies" {
+    let ds = reflect.signature(decorated).decorators
+    ds.push(1)
+    assert_eq(reflect.signature(decorated).decorators.len(), 2)
+}

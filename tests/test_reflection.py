@@ -714,7 +714,8 @@ class MetaTests(unittest.TestCase):
         self.assertEqual(decode(compile_bytes(text="struct S { a: Number }\n## d\nfn f<T>(x: T) -> T { x }\nprint(1)")).minor, plain)
 
     def test_loadtype_a_spread_and_reflect_natives_write_minor_14(self):
-        self.assertEqual(MINOR, 14)
+        # (M41b raised MINOR to 15, but only a file with `decorate` is written at 15)
+        self.assertEqual(MINOR, 15)
         self.assertEqual(decode(compile_bytes(text="print(Number)")).minor, 14)
         self.assertEqual(decode(compile_bytes(text="fn f(a) { a }\nprint(f(...[1]))")).minor, 14)
         self.assertEqual(decode(compile_bytes(text="fn f(a) { a }\nprint(f(**[\"a\": 1]))")).minor, 14)

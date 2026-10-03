@@ -74,7 +74,7 @@ MAGIC = b"MAHC"
 # `.mahc` extension).
 SHEBANG = b"#!/usr/bin/env -S mah runc\n"
 MAJOR = 1
-MINOR = 14
+MINOR = 15
 
 # -- section ids (docs/MAHC_FORMAT.md #3) -----------------------------------
 SEC_STRINGS = 0x01
@@ -230,6 +230,8 @@ NATIVE_ARITIES = {
     "reflect.implements": 2,
     "reflect.construct": 2,
     "reflect.construct_variant": 3,
+    # M41b (1.15): the decorators stored by `decorate` (kind, a, b).
+    "reflect.decorators": 3,
 }
 
 # M16: which minor version introduced each 1.1+ native -- a 1.0 file
@@ -297,6 +299,7 @@ NATIVE_SINCE_MINOR = {
     "reflect.implements": 14,
     "reflect.construct": 14,
     "reflect.construct_variant": 14,
+    "reflect.decorators": 15,
 }
 
 # M29: native inherent methods added after 1.0, by the minor that added
@@ -373,6 +376,7 @@ OPCODES: dict[str, tuple[int, tuple[str, ...]]] = {
     "matchtype": (0x3A, ("A", "T", "A")),  # M25 (1.4)
     "loadtype": (0x3B, ("N", "N", "A")),  # M41a (1.14): kind (0 TYPES index, 1 primitive), index, dest
     "spread": (0x3C, ("A", "A", "B")),  # M41a (1.14): target, source, keyword?
+    "decorate": (0x3D, ("N", "N", "N", "A*")),  # M41b (1.15): kind, a, b, the decorator values in source order
     "deferpush": (0x40, ()),
     "deferadd": (0x41, ("A",)),
     "deferpeek": (0x42, ("A",)),
@@ -411,4 +415,5 @@ OPCODE_SINCE_MINOR: dict[str, int] = {
     "callmethodspread": 14,
     "loadtype": 14,
     "spread": 14,
+    "decorate": 15,
 }

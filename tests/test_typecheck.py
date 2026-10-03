@@ -41,7 +41,7 @@ def _front_end(src: str):
     parser = Parser(Lexer(pp.text))
     program = parser.parse_program()
     assert not parser.errors, parser.errors
-    resolver = Resolver(prelude_start=pp.prelude_start)
+    resolver = Resolver(prelude_start=pp.prelude_start, pp=pp)
     resolver.resolve_program(program)
     return pp, program, resolver
 
@@ -855,7 +855,7 @@ class WholeProgramTests(_Base):
                     text = f.read()
                 pp = preprocess(path, text)
                 program = Parser(Lexer(pp.text)).parse_program()
-                resolver = Resolver(prelude_start=pp.prelude_start)
+                resolver = Resolver(prelude_start=pp.prelude_start, pp=pp)
                 resolver.resolve_program(program)
                 mismatches = reportable(check_program(program, resolver), "strict")
                 self.assertEqual([d.message for d in mismatches], [])
@@ -871,14 +871,14 @@ class WholeProgramTests(_Base):
                     text = f.read()
                 pp = preprocess(path, text)
                 program = Parser(Lexer(pp.text)).parse_program()
-                resolver = Resolver(prelude_start=pp.prelude_start)
+                resolver = Resolver(prelude_start=pp.prelude_start, pp=pp)
                 resolver.resolve_program(program)
                 check_program(program, resolver)
                 from mah.bytecode.encode import encode
                 from mah.bytecode.lower import lower
                 from mah.compiler.codegen import Codegen
 
-                after = encode(lower(Codegen(resolver.global_frame).generate(program), resolver, pp, target="debug"))
+                after = encode(lower(Codegen(resolver.global_frame, pp).generate(program), resolver, pp, target="debug"))
                 self.assertEqual(before, after)
 
     def test_range_bounds_are_numbers(self):

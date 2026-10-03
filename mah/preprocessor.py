@@ -432,6 +432,88 @@ def analyze_module(tokens: list) -> ModuleInfo:
     return ModuleInfo(exported=exported, top_level=top_level, types=types)
 
 
+def _is_punct(tokens: list, k: int, ch: str) -> bool:
+    return 0 <= k < len(tokens) and tokens[k].kind == "punct" and tokens[k].value == ch
+
+
+def _skip_balanced(tokens: list, k: int, opener: str, closer: str) -> int:
+    """Index just past the `closer` matching the `opener` at `tokens[k]`
+    (the end of the token list when it never closes)."""
+    depth = 0
+    count = len(tokens)
+    while k < count:
+        if _is_punct(tokens, k, opener):
+            depth += 1
+        elif _is_punct(tokens, k, closer):
+            depth -= 1
+            if depth == 0:
+                return k + 1
+        k += 1
+    return count
+
+
+def _skip_decorators_back(tokens: list, k: int) -> int:
+    """M41b: the index of the token before the decorators (`@a`, `@a.b`,
+    `@a(...)`, `@a.b(...)`, any number) that directly precede `tokens[k]`
+    -- `k - 1` when there are none. A parameter, field or variant that has
+    decorators is then recognized by what comes before *them*."""
+    while True:
+        p = k - 1
+        if p < 0:
+            return p
+        if _is_punct(tokens, p, ")"):
+            depth = 0
+            m = p
+            while m >= 0:
+                if _is_punct(tokens, m, ")"):
+                    depth += 1
+                elif _is_punct(tokens, m, "("):
+                    depth -= 1
+                    if depth == 0:
+                        break
+                m -= 1
+            p = m - 1
+            if m < 1 or tokens[p].kind != "id":
+                return k - 1
+        elif tokens[p].kind != "id":
+            return p
+        while p >= 2 and tokens[p - 1].kind == "dot" and tokens[p - 2].kind == "id":
+            p -= 2
+        if _is_punct(tokens, p - 1, "@"):
+            k = p - 1
+            continue
+        return k - 1
+
+
+def _enum_variant_names(tokens: list, open_index: int) -> set:
+    """M41b: the indices of the variant-name tokens of the enum body opened
+    by `tokens[open_index]` (`{`): each is the first token of a comma-
+    separated item after its decorators, if any (`@tag("x") Circle { r: N }`)."""
+    out: set = set()
+    count = len(tokens)
+    j = open_index + 1
+    while j < count:
+        while _is_punct(tokens, j, "@"):
+            j += 1
+            if j < count and tokens[j].kind == "id":
+                j += 1
+            while j + 1 < count and tokens[j].kind == "dot" and tokens[j + 1].kind == "id":
+                j += 2
+            if _is_punct(tokens, j, "("):
+                j = _skip_balanced(tokens, j, "(", ")")
+        if j >= count or tokens[j].kind != "id":
+            break
+        out.add(j)
+        j += 1
+        if _is_punct(tokens, j, "{"):
+            j = _skip_balanced(tokens, j, "{", "}")
+        if _is_punct(tokens, j, ","):
+            j += 1
+            continue
+        break
+    return out
+
+
 _DECLARATION_WORDS = frozenset({"struct", "enum", "trait", "impl", "let", "export", "extern", "test"})
 
 
@@ -475,12 +557,14 @@ def _shadowed_params(tokens: list, names) -> set:
                 depth == 1
                 and tokens[k].kind == "id"
                 and tokens[k].value in names
-                and (punct(k - 1, "(") or punct(k - 1, ","))
                 and k + 1 < count
                 and tokens[k + 1].kind == "punct"
                 and tokens[k + 1].value in ":,)="
             ):
-                params.append(k)
+                # M41b: a parameter may have decorators before its name.
+                before = _skip_decorators_back(tokens, k)
+                if punct(before, "(") or punct(before, ","):
+                    params.append(k)
             k += 1
         if not params or k >= count:
             continue
@@ -533,8 +617,11 @@ def _call_labels(tokens: list, names) -> set:
                 and tok.value in names
                 and stack
                 and (stack[-1][0] == "{" or (stack[-1][0] == "(" and stack[-1][1]))
-                and tokens[i - 1].kind == "punct"
-                and tokens[i - 1].value in "({,"
+                and (
+                    # M41b: a field may have decorators before its name
+                    tokens[_skip_decorators_back(tokens, i)].kind == "punct"
+                    and tokens[_skip_decorators_back(tokens, i)].value in "({,"
+                )
                 and i + 1 < count
                 and tokens[i + 1].kind == "punct"
                 and tokens[i + 1].value == ":"
@@ -727,7 +814,7 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
         # (`enum TypeRef { Param { ... } }`) is never a reference to a
         # top-level type that happens to share its spelling (`struct Param`).
         pending_enum = False
-        enum_body_depth = None
+        variant_names: set = set()
 
         def emit_gap(upto: int) -> None:
             nonlocal cursor
@@ -888,15 +975,13 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
                 if pending_trait_impl and trait_impl_body_depth is None:
                     trait_impl_body_depth = depth
                     pending_trait_impl = False
-                if pending_enum and enum_body_depth is None:
-                    enum_body_depth = depth
+                if pending_enum:
+                    variant_names |= _enum_variant_names(tokens, i)
                     pending_enum = False
             elif tok.kind == "punct" and tok.value == "}":
                 depth = max(0, depth - 1)
                 if trait_impl_body_depth is not None and depth < trait_impl_body_depth:
                     trait_impl_body_depth = None
-                if enum_body_depth is not None and depth < enum_body_depth:
-                    enum_body_depth = None
 
             # M12 fix 1: an `id` immediately preceded by a `dot` is always a
             # field/method NAME (`p.field`, `p.method(...)`), never a
@@ -918,13 +1003,7 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
                 and tokens[i - 1].value == "fn"
             )
 
-            prev_is_variant_decl_name = (
-                enum_body_depth is not None
-                and depth == enum_body_depth
-                and i > 0
-                and tokens[i - 1].kind == "punct"
-                and tokens[i - 1].value in "{,"
-            )
+            prev_is_variant_decl_name = i in variant_names
 
             if (
                 tok.kind == "id"

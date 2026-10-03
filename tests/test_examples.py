@@ -243,6 +243,13 @@ class ExampleTests(unittest.TestCase):
             'not_found: no-such-program-mah: no such file or directory\n'
         )
 
+    def test_decorators(self):
+        # M41b: decorators as metadata.
+        self.assertEqual(
+            run_file(example_path("decorators.mh")),
+            "Fetch one user.\nGET /users/{id}\n[tag:path]\n",
+        )
+
     def test_reflection(self):
         # M41a: type values, `##` docs, spread calls, std:reflect, json.decode.
         out = run_file(example_path("reflection.mh"))

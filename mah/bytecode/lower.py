@@ -94,6 +94,8 @@ class _Lowerer:
 
         self.functions: list[FunctionDecl] = [FunctionDecl(0, buf.global_slot_count, 0, None, params=[])]
         self._closure_function_index: dict[int, int] = {}
+        # M41b: FUNCTIONS index by the FnExpr's identity, for `decorate`.
+        self._fn_index_by_ast: dict[int, int] = {}
         # M41a: what each function's META entry is built from -- function
         # index -> (FnExpr, type parameter names in scope); function 0 (the
         # main program) has none.
@@ -239,6 +241,7 @@ class _Lowerer:
         self.functions.append(FunctionDecl(code_addr, slot_count, param_count, name_idx, params=params))
         if meta_source is not None:
             self._fn_meta_sources[idx] = meta_source
+            self._fn_index_by_ast[id(meta_source[0])] = idx
         self._closure_function_index[code_addr] = idx
         return idx
 
@@ -252,12 +255,35 @@ class _Lowerer:
         # every OTHER placeholder (jumps, `jmpset`) is backpatched by
         # codegen before this ever runs.
         out = []
-        for instr in self.buf.code:
+        decorations = []
+        for pc, instr in enumerate(self.buf.code):
             if instr == (None, None, None, None):
                 out.append(Instr("halt", ()))
                 continue
+            if instr[0] == "decorate":
+                # M41b: needs every closure lowered first (function indices)
+                decorations.append(pc)
+                out.append(None)
+                continue
             out.append(self._lower_one(instr))
+        for pc in decorations:
+            out[pc] = self._lower_decorate(self.buf.code[pc])
         self.code = out
+
+    def _lower_decorate(self, instr: tuple) -> Instr:
+        """M41b: `decorate kind, a, b, values` -- the target as an index pair."""
+        _op, (what, owner, index), addrs, _dest = instr
+        if what == "fn":
+            return Instr("decorate", (0, self._fn_index_by_ast[id(owner)], 0, addrs))
+        if what == "param":
+            return Instr("decorate", (1, self._fn_index_by_ast[id(owner)], index, addrs))
+        if what == "struct":
+            return Instr("decorate", (2, self.struct_index[owner], 0, addrs))
+        if what == "enum":
+            return Instr("decorate", (2, self.enum_index[owner], 0, addrs))
+        if what == "field":
+            return Instr("decorate", (3, self.struct_index[owner], index, addrs))
+        return Instr("decorate", (4, self.enum_index[owner], index, addrs))
 
     def _lower_one(self, instr: tuple) -> Instr:
         op, a1, a2, a3 = instr

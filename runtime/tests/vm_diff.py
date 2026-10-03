@@ -584,6 +584,45 @@ print(try { json.stringify(User) } catch { e: json.JsonError => { e.message() } 
 print(try { [User: 1] } catch { e: RuntimeError => { e.message() } })
 print(User == User, User == Shape, User != Number, [User, Number].copy(deep: true))
 """, b""),
+    # M41b: decorators as metadata -- every target kind, `find`, evaluation
+    # order, and a decorator that throws (an uncaught error at startup).
+    ("decorators", """
+import reflect from "std:reflect"
+struct Route { method: String, path: String }
+fn get(path: String) -> Route { Route { method: "GET", path: path } }
+fn tag(t: String) -> String { print("eval " + t); "tag:" + t }
+fn parts(t) {
+    match reflect.schema(t) {
+        some(reflect.Schema.Struct { type: a, doc: b, type_params: c, fields: fields, decorators: ds }) => { [ds, fields] }
+        some(reflect.Schema.Enum { type: a, doc: b, type_params: c, variants: vs, decorators: ds }) => { [ds, vs] }
+        _ => { [] }
+    }
+}
+print("first statement")
+## Fetch.
+@get("/users/{id}")
+@tag("users")
+fn get_user(@tag("path") id: Number, verbose: Bool = false) -> Number { id }
+@tag("model")
+struct User { @tag("json") name: String, age: Number }
+enum Shape { @tag("round") Circle { r: Number }, Empty }
+impl User { @tag("m") fn hello(self, @tag("hp") x = 1) -> String { "hi" } }
+let s = reflect.signature(get_user)
+print(s.doc, s.decorators[0].path, s.decorators[1], s.params[0].decorators, s.params[1].decorators)
+let u = parts(User)
+let sh = parts(Shape)
+print(u[0], u[1][0].decorators, u[1][1].decorators, sh[1][0].decorators, sh[1][1].decorators)
+let m = reflect.signature(reflect.methods(User)[0].function)
+print(m.decorators, m.params[1].decorators)
+print(reflect.find(s.decorators, Route), reflect.find(s.decorators, Number), reflect.find(s.decorators, get) == none)
+s.decorators.push(1)
+print(reflect.signature(get_user).decorators.len())
+struct Oops { message: String }
+impl Error for Oops { fn message(self) -> String { self.message } }
+fn boom(x) { throw Oops { message: "boom " + x } }
+@boom("late")
+fn doomed() { }
+""", b""),
     ("std_csv", """
 import csv from "std:csv"
 print(csv.parse("a,\\"b,c\\"\\r\\n\\n\\"q\\"\\"x\\",\\n"), csv.parse_records("n,v\\nx,1\\n"))
@@ -645,6 +684,17 @@ def build_malformed_cases(tmpdir: str) -> list[tuple[str, bytes]]:
     meta_body = bytes(body[:7]) + bytes([14]) + bytes(body[8:])
     cases.append(("meta_wrong_function_count", meta_body + bytes([0x82, 1, 5])))
     cases.append(("meta_duplicate", meta_body + bytes([0x82, 1, 5, 0x82, 1, 5])))
+    # M41b: `decorate` with an unknown kind, a field index out of range, a
+    # non-user type -- both VMs must refuse them with the same message.
+    deco_path = compile_source("fn d(x) { x }\nstruct S { @d(1) a }\n", tmpdir, "decorate_for_malformed")
+    with open(deco_path, "rb") as f:
+        deco = f.read()
+    deco_body = deco[deco.index(b"\n") + 1 :]
+    at = deco_body.index(bytes([0x3D, 3, 3, 0, 1]))
+    for label, edit in (("kind_5", (0, 5)), ("field_out_of_range", (2, 7)), ("not_a_user_type", (1, 1))):
+        patched = bytearray(deco_body)
+        patched[at + 1 + edit[0]] = edit[1]
+        cases.append((f"decorate_{label}", bytes(patched)))
     cases.append(("truncated_at_10_bytes", body[:10]))
     cases.append(("truncated_at_magic", body[:2]))
     cases.append(("empty_file", b""))

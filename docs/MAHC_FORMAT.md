@@ -1,4 +1,4 @@
-# The `.mahc` bytecode format (version 1.14)
+# The `.mahc` bytecode format (version 1.15)
 
 `mah build prog.mh` compiles a program (its entry file plus everything it
 imports) into a single `.mahc` file; `mah runc prog.mahc` runs one. This
@@ -71,9 +71,12 @@ sections   (id u8, length varuint, payload bytes(length))*   until end of file
   the program's own code (outside the prelude) uses, whatever the
   receiver turns out to be; the prelude's `to_number`, which relies on 1.6
   methods, counts as one. *(1.14)* It also writes 14 when the code uses
-  `loadtype`, `callspread`, `callmethodspread` or `spread`. The META
+  `loadtype`, `callspread`, `callmethodspread` or `spread`. *(1.15)* It
+  writes 15 only when the code contains `decorate`. The META
   section (§4.10) doesn't count: it's optional, so a file whose only 1.14
   feature is META keeps its lower minor (older VMs skip the section).
+  (`std:reflect` itself never needs 1.15: `signature` and `schema` carry the
+  decorators, so a program with no `decorate` stays at 14 or below.)
 - **Required sections**, each present exactly once and in increasing id
   order: STRINGS (`0x01`), CONSTANTS (`0x02`), TYPES (`0x03`), NATIVES
   (`0x04`), FUNCTIONS (`0x05`), CODE (`0x06`), — in files with minor ≥ 1 —
@@ -229,11 +232,12 @@ Version 1.0 defines:
 | `process.platform` | 0 | *(1.13)* → `"linux"`, `"macos"`, `"windows"`, or else the OS's own name |
 | `process.run` | 5 | *(1.13)* `program, args, cwd, env, stdin` → a Promise of a result (below): `[true, [code, stdout, stderr]]` |
 | `reflect.type_of` | 1 | *(1.14)* `value` → the value's type as a `Type` value (§5): `none` is the primitive `None`, `some(x)` is `Option`, a struct or enum value its declared type, everything else its built-in type |
-| `reflect.signature` | 1 | *(1.14)* `f` (a Function, else `TypeMismatch`, `reflect.signature: expected a Function, got TYPE`) → `[name or none, doc, type_params, params, returns, throws or none]`, each parameter `[name, type, doc, has_default, is_constant, constant]` (below) |
-| `reflect.schema` | 1 | *(1.14)* `t` (a Type, else `TypeMismatch`, `NAME: expected a Type, got TYPE`) → `none` for a primitive, else `["struct", t, doc, type_params, fields]` (a field is `[name, type, doc]`) or `["enum", t, doc, type_params, variants]` (a variant is `[name, doc, fields]`) |
+| `reflect.signature` | 1 | *(1.14)* `f` (a Function, else `TypeMismatch`, `reflect.signature: expected a Function, got TYPE`) → `[name or none, doc, type_params, params, returns, throws or none, decorators]`, each parameter `[name, type, doc, has_default, is_constant, constant, decorators]` (below; `decorators` *(1.15)* is a copy of what `decorate` stored for the function / parameter, `[]` if nothing) |
+| `reflect.schema` | 1 | *(1.14)* `t` (a Type, else `TypeMismatch`, `NAME: expected a Type, got TYPE`) → `none` for a primitive, else `["struct", t, doc, type_params, fields, decorators]` (a field is `[name, type, doc, decorators]`) or `["enum", t, doc, type_params, variants, decorators]` (a variant is `[name, doc, fields, decorators]`, its fields `[name, type, doc, []]`); `decorators` *(1.15)* are copies of what `decorate` stored for the type, field or variant |
 | `reflect.methods` | 1 | *(1.14)* `t` → a new Vector of `[name, function, is_method, trait or none]`, one per Mah-code target in the method table (§6.7) under the type's name: the inherent ones sorted by name, then the trait ones sorted by trait name, then method name. Native targets (§6.7) aren't functions, so aren't listed |
 | `reflect.implements` | 2 | *(1.14)* `t, trait_name` → Bool: whether the method table has any target, native or not, under that trait name for the type's name |
 | `reflect.construct` | 2 | *(1.14)* `t, fields` (a Map with String keys) → `[true, value]` with a new struct value of type `t` whose fields, in declaration order, are `fields`' entries, or `[false, message]`: `can't construct T: it isn't a struct`, `T has no field 'f'` (checked first, in the Map's order), `missing field 'f' for T` |
+| `reflect.decorators` | 3 | *(1.15)* `kind, a, b` (whole Numbers, else `TypeMismatch`, `reflect.decorators: NAME must be a whole Number, got TYPE`) → a new Vector holding a copy of the decorators `decorate` (§4.6) stored this run for that target, or `[]`. `b` only matters for kinds 1, 3, 4. A negative index has none. `signature`/`schema` don't call it: they append the same Vectors themselves |
 | `reflect.construct_variant` | 3 | *(1.14)* `t, variant, fields` → likewise a new enum value (`none` for `Option`'s `none`): failures `can't construct a variant of T: it isn't an enum`, `can't construct a Promise`, `T has no variant 'v'`, `T.v has no field 'f'`, `missing field 'f' for T.v` |
 | `math.sin` | 1 | sine of a Number (radians); the result is computed in IEEE-754 double precision and converted to Number via its shortest round-trip decimal text |
 | `math.cos` | 1 | cosine, same rules |
@@ -525,6 +529,7 @@ Opcodes (semantics in §6):
 | `0x3A` | `matchtype` *(1.4)* | value `A`, type `T`, dest `A` |
 | `0x3B` | `loadtype` *(1.14)* | kind `N`, index `N`, dest `A` |
 | `0x3C` | `spread` *(1.14)* | target `A`, source `A`, keyword `B` |
+| `0x3D` | `decorate` *(1.15)* | kind `N`, a `N`, b `N`, values `A*` |
 | `0x40` | `deferpush` | — |
 | `0x41` | `deferadd` | closure `A` |
 | `0x42` | `deferpeek` | dest `A` |
@@ -540,7 +545,27 @@ marked *(1.1)* **must not** appear in a file whose minor version is 0,
 those marked *(1.2)* not in one whose minor version is below 2, those
 marked *(1.3)* not in one whose minor version is below 3, and those
 marked *(1.4)* not in one whose minor version is below 4, and those marked
-*(1.14)* not in one whose minor version is below 14.
+*(1.14)* not in one whose minor version is below 14, and those marked
+*(1.15)* not in one whose minor version is below 15.
+
+`decorate kind a b values` *(1.15)* stores the decorators of one target
+(docs/REFLECTION.md, M41b). `values` are the addresses holding the decorator
+values, **in source order** (the design says "pops `count` values"; this VM is
+register-based, so the values are operands, `A*`, and `count` is the operand
+list's own length). `kind` is a varuint (the same byte as a `u8` for 0–4):
+0 function `a` (a FUNCTIONS index), 1 parameter `b` of function `a`, 2 type
+`a` (a TYPES index), 3 field `b` of struct `a`, 4 variant `b` of enum `a`. `b`
+is 0 for kinds 0 and 2. The VM keeps a Vector of the values in a per-run
+table keyed by the target; a target decorated a second time in one run is a
+runtime `Internal` error (`decorate: the target (kind K, A, B) is decorated
+twice`; the encoder never emits that). The load-time checks (the same message
+on both VMs, `'decorate' at instruction I: ...`): `unknown kind K` (> 4);
+`function index A out of range`; `parameter index B out of range for function
+A`; for kinds 2–4 `type index A is not a user type` (a built-in or out of
+range), for 3 `type index A is not a struct` and `field index B out of range
+for type A`, for 4 `type index A is not an enum` and `variant index B out of
+range for type A`. The encoder puts all of a module's `decorate`s in one run
+before that module's first statement (docs/REFLECTION.md).
 
 In the `*kw` opcodes, `kwnames` names the **last** `len(kwnames)` entries
 of `args`, in order; the entries before them are positional. `len(kwnames)
@@ -1289,6 +1314,10 @@ message
   section (§4.10). Older VMs run a file that only has META (it's skipped);
   the encoder writes 14 only for a file that uses one of the opcodes or
   natives above (§3).
+- **1.15** added decorators as metadata (docs/REFLECTION.md, M41b): the
+  `decorate` opcode (§4.6) and the `reflect.decorators` native (§4.4);
+  `reflect.signature`/`reflect.schema` results gained their `decorators`
+  elements. The encoder writes 15 only for a file that contains `decorate`.
 - Planned growth, for orientation: error-set checking (the static
   checker's `throws` inference and "unhandled error" diagnostics -- M26),
   string utilities, filesystem, networking, and process natives.

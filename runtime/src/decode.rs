@@ -15,7 +15,7 @@ use std::fmt;
 
 pub const MAGIC: &[u8; 4] = b"MAHC";
 pub const MAJOR: u16 = 1;
-pub const MINOR: u16 = 14;
+pub const MINOR: u16 = 15;
 
 const SEC_STRINGS: u8 = 0x01;
 const SEC_CONSTANTS: u8 = 0x02;
@@ -301,6 +301,10 @@ pub enum RawInstr {
     Spread { target: Addr, source: Addr, keyword: bool },
     /// M41a (1.14): a Type value -- `kind` 0 a TYPES index, 1 a primitive code
     LoadType { kind: u8, index: usize, dest: Addr },
+    /// M41b (1.15): store the decorators (`values`, in source order) of one
+    /// target -- `kind` 0 function `a`, 1 parameter `b` of function `a`, 2 type `a`,
+    /// 3 field `b` of struct `a`, 4 variant `b` of enum `a`
+    Decorate { kind: u64, a: usize, b: usize, values: Vec<Addr> },
     Defmethod { closure: Addr, type_name: usize, trait_: Option<usize>, name: usize, is_method: bool },
     Detach { callee: Addr, args: Vec<Addr>, dest: Addr },
     DetachKw { callee: Addr, args: Vec<Addr>, kwnames: Vec<usize>, dest: Addr },
@@ -726,6 +730,8 @@ struct CodeCtx<'a> {
     ntypes: usize,
     types: &'a [TypeDecl],
     nfunctions: usize,
+    /// M41b: each function's parameter count, for `decorate`'s validation.
+    param_counts: Vec<u64>,
     nnatives: usize,
     natives: &'a [NativeRef],
     minor: u16,
@@ -917,6 +923,7 @@ fn opcode_info(op: u8) -> Option<(&'static str, Option<u16>)> {
         0x3A => ("matchtype", Some(4)),
         0x3B => ("loadtype", Some(14)),
         0x3C => ("spread", Some(14)),
+        0x3D => ("decorate", Some(15)),
         0x40 => ("deferpush", None),
         0x41 => ("deferadd", None),
         0x42 => ("deferpeek", None),
@@ -949,6 +956,7 @@ fn native_since_minor(name: &str) -> Option<u16> {
         | "process.env_all" | "process.cwd" | "process.pid" | "process.platform" | "process.run" => Some(13),
         "reflect.type_of" | "reflect.signature" | "reflect.schema" | "reflect.methods" | "reflect.implements"
         | "reflect.construct" | "reflect.construct_variant" => Some(14),
+        "reflect.decorators" => Some(15),
         _ => None,
     }
 }
@@ -1059,6 +1067,13 @@ fn decode_one_instr(name: &str, pr: &mut Reader, ctx: &CodeCtx, _i: u64) -> FRes
             let index = pr.varuint()? as usize;
             let dest = decode_addr(pr)?;
             RawInstr::LoadType { kind: kind.min(255) as u8, index, dest }
+        }
+        "decorate" => {
+            let kind = pr.varuint()?;
+            let a = pr.varuint()? as usize;
+            let b = pr.varuint()? as usize;
+            let values = decode_addr_list(pr)?;
+            RawInstr::Decorate { kind, a, b, values }
         }
         "defmethod" => {
             let closure = decode_addr(pr)?;
@@ -1180,6 +1195,45 @@ fn decode_one_instr(name: &str, pr: &mut Reader, ctx: &CodeCtx, _i: u64) -> FRes
     })
 }
 
+/// M41b: `decorate`'s operands -- mirrors `_validate_decorate` in
+/// `mah/bytecode/decode.py` (same messages).
+fn validate_decorate(kind: u64, a: usize, b: usize, i: usize, ctx: &CodeCtx) -> FResult<()> {
+    if kind > 4 {
+        return err(format!("'decorate' at instruction {i}: unknown kind {kind}"));
+    }
+    if kind <= 1 {
+        if a >= ctx.nfunctions {
+            return err(format!("'decorate' at instruction {i}: function index {a} out of range"));
+        }
+        if kind == 1 && b as u64 >= ctx.param_counts[a] {
+            return err(format!(
+                "'decorate' at instruction {i}: parameter index {b} out of range for function {a}"
+            ));
+        }
+        return Ok(());
+    }
+    if a < ctx.builtin_types || a >= ctx.builtin_types + ctx.ntypes {
+        return err(format!("'decorate' at instruction {i}: type index {a} is not a user type"));
+    }
+    let decl = &ctx.types[a - ctx.builtin_types];
+    match (kind, &decl.body) {
+        (3, TypeBody::Struct(fields)) => {
+            if b >= fields.len() {
+                return err(format!("'decorate' at instruction {i}: field index {b} out of range for type {a}"));
+            }
+        }
+        (3, TypeBody::Enum(_)) => return err(format!("'decorate' at instruction {i}: type index {a} is not a struct")),
+        (4, TypeBody::Enum(variants)) => {
+            if b >= variants.len() {
+                return err(format!("'decorate' at instruction {i}: variant index {b} out of range for type {a}"));
+            }
+        }
+        (4, TypeBody::Struct(_)) => return err(format!("'decorate' at instruction {i}: type index {a} is not an enum")),
+        _ => {}
+    }
+    Ok(())
+}
+
 fn validate_instr(instr: &RawInstr, i: usize, ncode: u64, ctx: &CodeCtx) -> FResult<()> {
     match instr {
         RawInstr::Jmp { target } | RawInstr::Jmpf { target, .. } | RawInstr::Jmpset { target, .. } => {
@@ -1260,6 +1314,7 @@ fn validate_instr(instr: &RawInstr, i: usize, ncode: u64, ctx: &CodeCtx) -> FRes
             }
             other => return err(format!("'loadtype' at instruction {i}: unknown kind {other}")),
         },
+        RawInstr::Decorate { kind, a, b, .. } => validate_decorate(*kind, *a, *b, i, ctx)?,
         RawInstr::Map { pairs, .. } => {
             if pairs.len() % 2 != 0 {
                 return err(format!(
@@ -1661,6 +1716,7 @@ pub fn decode(data: &[u8]) -> FResult<Program> {
         ntypes: types.len(),
         types: &types,
         nfunctions: functions.len(),
+        param_counts: functions.iter().map(|f| f.param_count).collect(),
         nnatives: natives.len(),
         natives: &natives,
         minor,
@@ -1805,6 +1861,25 @@ mod tests {
     }
 
     #[test]
+    fn decodes_decorate_and_validates_it() {
+        // decorate kind 0, function 0, b 0, no values; halt
+        let ok = [2, 0x3D, 0, 0, 0, 0, 0x00];
+        let program = decode(&file_with_code(15, &ok)).expect("should decode");
+        assert_eq!(program.code[0], RawInstr::Decorate { kind: 0, a: 0, b: 0, values: vec![] });
+        for (code, message) in [
+            ([2u8, 0x3D, 5, 0, 0, 0, 0x00], "'decorate' at instruction 0: unknown kind 5"),
+            ([2, 0x3D, 0, 9, 0, 0, 0x00], "'decorate' at instruction 0: function index 9 out of range"),
+            ([2, 0x3D, 1, 0, 3, 0, 0x00], "'decorate' at instruction 0: parameter index 3 out of range for function 0"),
+            ([2, 0x3D, 2, 1, 0, 0, 0x00], "'decorate' at instruction 0: type index 1 is not a user type"),
+            ([2, 0x3D, 3, 3, 0, 0, 0x00], "'decorate' at instruction 0: type index 3 is not a user type"),
+        ] {
+            assert_eq!(decode(&file_with_code(15, &code)).unwrap_err().0, message);
+        }
+        let e = decode(&file_with_code(14, &ok)).unwrap_err();
+        assert_eq!(e.0, "opcode 'decorate' at instruction 0 requires minor version >= 15, but this file's minor version is 14");
+    }
+
+    #[test]
     fn decodes_a_meta_section() {
         // one function without metadata, no user types
         let mut data = minimal_file(14);
@@ -1884,7 +1959,7 @@ mod tests {
         // M27: the current maximum is 5; the file has no sections at all,
         // so there are no natives to name.
         assert_eq!(e.0, format!("unsupported minor version 99 (this VM supports up to minor version {MINOR})"));
-        assert_eq!(MINOR, 14);
+        assert_eq!(MINOR, 15);
     }
 
     #[test]

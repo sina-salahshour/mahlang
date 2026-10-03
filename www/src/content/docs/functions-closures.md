@@ -136,3 +136,7 @@ fn process(name) {
 process("alpha")   # opening alpha / using alpha / closing alpha
 process("bad")     # opening bad / closing bad -- close() still ran
 ```
+
+A function can also carry [decorators](/docs/decorators): values attached
+with `@name(...)` above it or before a parameter, read back with
+`std:reflect`.

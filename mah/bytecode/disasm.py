@@ -144,6 +144,19 @@ def _instr_line(r: _Renderer, i: int, instr) -> str:
     elif op == "loadtype":
         what = r.type_name(a[1]) if a[0] == 0 else PRIMITIVE_TYPE_NAMES[a[1]]
         rendered = f"type={what} dest={_addr(a[2])}"
+    elif op == "decorate":
+        kind, x, y, values = a
+        if kind == 0:
+            target = f"fn {r.func(x)}"
+        elif kind == 1:
+            target = f"param {y} of fn {r.func(x)}"
+        elif kind == 2:
+            target = f"type {r.type_name(x)}"
+        elif kind == 3:
+            target = f"field {y} of {r.type_name(x)}"
+        else:
+            target = f"variant {y} of {r.type_name(x)}"
+        rendered = f"target={target} values={_addr_list(values)}"
     elif op == "ret":
         rendered = f"value={_addr(a[0])}"
     elif op == "retval":

@@ -93,6 +93,8 @@ pub enum NativeFn {
     ReflectImplements,
     ReflectConstruct,
     ReflectConstructVariant,
+    /// M41b (1.15)
+    ReflectDecorators,
 }
 
 /// Whether this VM implements a native of that name (any arity) -- for
@@ -168,6 +170,7 @@ fn native_by_name(name: &str) -> Option<(u64, NativeFn)> {
         "reflect.implements" => Some((2, NativeFn::ReflectImplements)),
         "reflect.construct" => Some((2, NativeFn::ReflectConstruct)),
         "reflect.construct_variant" => Some((3, NativeFn::ReflectConstructVariant)),
+        "reflect.decorators" => Some((3, NativeFn::ReflectDecorators)),
         _ => None,
     }
 }
@@ -226,6 +229,9 @@ pub enum LinkedInstr {
     CallMethodSpread { recv: Addr, name: Rc<str>, args: Addr, kwargs: Addr, trait_: Option<Rc<str>> },
     Spread { target: Addr, source: Addr, keyword: bool },
     LoadType { value: Value, dest: Addr },
+    /// M41b (1.15): `kind` 0 function `a`, 1 parameter `b` of function `a`,
+    /// 2 type `a`, 3 field `b` of struct `a`, 4 variant `b` of enum `a`
+    Decorate { kind: u64, a: usize, b: usize, values: Vec<Addr> },
     Defmethod { closure: Addr, type_name: Rc<str>, trait_: Option<Rc<str>>, name: Rc<str>, is_method: bool },
     Detach { callee: Addr, args: Vec<Addr>, dest: Addr },
     DetachKw { callee: Addr, args: Vec<Addr>, kwnames: Vec<Rc<str>>, dest: Addr },
@@ -438,6 +444,9 @@ fn link_instr(
                 value: Value::Type(Rc::new(TypeData { kind: *kind, index: *index, name })),
                 dest: *dest,
             }
+        }
+        RawInstr::Decorate { kind, a, b, values } => {
+            LinkedInstr::Decorate { kind: *kind, a: *a, b: *b, values: values.clone() }
         }
         RawInstr::Defmethod { closure, type_name, trait_, name, is_method } => LinkedInstr::Defmethod {
             closure: *closure,

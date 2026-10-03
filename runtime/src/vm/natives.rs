@@ -571,5 +571,6 @@ pub fn call_native(vm: &mut Vm, native: NativeFn, args: &[Value]) -> Result<Valu
         NativeFn::ReflectImplements => super::reflect::implements(vm, args),
         NativeFn::ReflectConstruct => super::reflect::construct(vm, args),
         NativeFn::ReflectConstructVariant => super::reflect::construct_variant(vm, args),
+        NativeFn::ReflectDecorators => super::reflect::decorators(vm, args),
     }
 }

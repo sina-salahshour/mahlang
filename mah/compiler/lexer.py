@@ -34,6 +34,8 @@ class TokenType(Enum):
     # docs/TYPES.md). Nothing valid in Mah wrote `->` before this, so no
     # existing program's meaning changes.
     ARROW = "->"
+    # M41b: `@` -- starts a decorator (`@get("/")`, docs/REFLECTION.md).
+    AT = "@"
     # operators
     ADD = "+"
     SUB = "-"
@@ -134,6 +136,7 @@ _SINGLE_CHAR = {
     ",": TokenType.COMMA,
     ".": TokenType.DOT,
     ":": TokenType.COLON,
+    "@": TokenType.AT,
     "+": TokenType.ADD,
     "-": TokenType.SUB,
     "*": TokenType.MUL,

@@ -60,10 +60,10 @@ def generate_code(input_str: str, pp) -> CodeBuffer:
         # exception handling `main()`'s outer `except` block already does.
         raise SyntaxError(_format_parser_errors(pp, parser.errors))
 
-    resolver = Resolver(prelude_start=pp.prelude_start)
+    resolver = Resolver(prelude_start=pp.prelude_start, pp=pp)
     resolver.resolve_program(program)
 
-    codegen = Codegen(resolver.global_frame)
+    codegen = Codegen(resolver.global_frame, pp)
     return codegen.generate(program)
 
 

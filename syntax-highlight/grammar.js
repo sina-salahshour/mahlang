@@ -128,7 +128,36 @@ module.exports = grammar({
         $.defer_stmt,
         $.extern_fn_stmt,
         $.test_block,
+        $.decorated_stmt,
         $.expr_stmt,
+      ),
+
+    // M41b (docs/REFLECTION.md): decorators above a top-level `fn`,
+    // `extern fn`, `struct` or `enum` (and above `export`: `@get("/")
+    // export fn f`). Parameters, fields, variants and impl methods take
+    // their own (see `param`, `field_decl`, `enum_variant`, `impl_item`).
+    // Like the rest of this file, more permissive than the real parser
+    // (which also rejects decorators anywhere else with a compile error).
+    decorated_stmt: ($) =>
+      seq(
+        repeat1($.decorator),
+        choice(
+          $.fn_stmt,
+          $.extern_fn_stmt,
+          $.struct_decl,
+          $.enum_decl,
+          $.export_stmt,
+        ),
+      ),
+
+    // `@NAME.NAME(args)` -- a name (or a dotted path) and optionally a call's
+    // arguments, the same as those in an expression.
+    decorator: ($) =>
+      seq(
+        "@",
+        field("name", $.identifier),
+        repeat(seq(".", field("member", $.identifier))),
+        optional(seq("(", optional($._args), ")")),
       ),
 
     // Sugar handled entirely by preprocessor.py (never reaches the real
@@ -269,7 +298,11 @@ module.exports = grammar({
     _field_decls: ($) => seq($.field_decl, repeat(seq(",", $.field_decl))),
 
     field_decl: ($) =>
-      seq(field("name", $.identifier), optional($._type_annotation)),
+      seq(
+        repeat($.decorator),
+        field("name", $.identifier),
+        optional($._type_annotation),
+      ),
 
     enum_decl: ($) =>
       seq(
@@ -285,6 +318,7 @@ module.exports = grammar({
 
     enum_variant: ($) =>
       seq(
+        repeat($.decorator),
         field("name", $.identifier),
         optional(seq("{", optional($._field_decls), "}")),
       ),
@@ -351,6 +385,7 @@ module.exports = grammar({
 
     impl_item: ($) =>
       seq(
+        repeat($.decorator),
         "fn",
         field("name", $.identifier),
         optional($.type_parameters),
@@ -458,6 +493,7 @@ module.exports = grammar({
     // special-cased); it's simply never given a default in practice.
     param: ($) =>
       seq(
+        repeat($.decorator),
         field("name", $.identifier),
         optional($._type_annotation),
         optional(seq("=", field("default", $.expr))),

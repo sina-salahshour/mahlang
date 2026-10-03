@@ -455,6 +455,9 @@ pub struct Vm<'p> {
     debug: Option<&'p super::link::DebugIndex>,
     pub names: BuiltinTypeNames,
     pub(super) method_table: HashMap<(Rc<str>, Rc<str>), MethodEntry>,
+    /// M41b: the decorators `decorate` stored this run, by target
+    /// `(kind, a, b)` (`b` is 0 for kinds 0 and 2), each a Vector.
+    pub(super) decorators: HashMap<(u64, usize, usize), Value>,
     return_register: Value,
     timers: BinaryHeap<TimerEntry>,
     timer_seq: u64,
@@ -1491,6 +1494,20 @@ impl<'p> Vm<'p> {
             LinkedInstr::Spread { target, source, keyword } => {
                 spread(&rd(*target)?, &rd(*source)?, *keyword, &self.names)?;
             }
+            LinkedInstr::Decorate { kind, a, b, values } => {
+                // M41b: store the decorators of one target (docs/MAHC_FORMAT.md #6.10)
+                let key = (*kind, *a, if matches!(*kind, 1 | 3 | 4) { *b } else { 0 });
+                if self.decorators.contains_key(&key) {
+                    return Err(RuntimeError::new(format!(
+                        "decorate: the target (kind {kind}, {a}, {b}) is decorated twice"
+                    )));
+                }
+                let mut items = Vec::with_capacity(values.len());
+                for addr in values {
+                    items.push(rd(*addr)?);
+                }
+                self.decorators.insert(key, Value::Vector(Rc::new(RefCell::new(items))));
+            }
             LinkedInstr::LoadType { value, dest } => wr!(*dest, value.clone()),
             LinkedInstr::Defmethod { closure, type_name, trait_, name, is_method } => {
                 let closure_v = rd(*closure)?;
@@ -1997,6 +2014,7 @@ fn run(linked: &LinkedProgram, test_slot: Option<usize>, args: &[String]) -> RRe
         debug: linked.debug.as_ref(),
         names,
         method_table,
+        decorators: HashMap::new(),
         return_register: Value::None,
         timers: BinaryHeap::new(),
         timer_seq: 0,

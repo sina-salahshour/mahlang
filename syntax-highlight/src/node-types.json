@@ -65,6 +65,10 @@
           "named": true
         },
         {
+          "type": "decorated_stmt",
+          "named": true
+        },
+        {
           "type": "defer_stmt",
           "named": true
         },
@@ -269,6 +273,85 @@
     }
   },
   {
+    "type": "decorated_stmt",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "decorator",
+          "named": true
+        },
+        {
+          "type": "enum_decl",
+          "named": true
+        },
+        {
+          "type": "export_stmt",
+          "named": true
+        },
+        {
+          "type": "extern_fn_stmt",
+          "named": true
+        },
+        {
+          "type": "fn_stmt",
+          "named": true
+        },
+        {
+          "type": "struct_decl",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "decorator",
+    "named": true,
+    "fields": {
+      "member": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "expr",
+          "named": true
+        },
+        {
+          "type": "keyword_argument",
+          "named": true
+        },
+        {
+          "type": "spread_argument",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "defer_stmt",
     "named": true,
     "fields": {},
@@ -282,6 +365,10 @@
         },
         {
           "type": "continue_stmt",
+          "named": true
+        },
+        {
+          "type": "decorated_stmt",
           "named": true
         },
         {
@@ -603,6 +690,10 @@
       "required": false,
       "types": [
         {
+          "type": "decorator",
+          "named": true
+        },
+        {
           "type": "field_decl",
           "named": true
         }
@@ -918,6 +1009,16 @@
           }
         ]
       }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "decorator",
+          "named": true
+        }
+      ]
     }
   },
   {
@@ -1322,6 +1423,10 @@
       "required": false,
       "types": [
         {
+          "type": "decorator",
+          "named": true
+        },
+        {
           "type": "param",
           "named": true
         },
@@ -1716,6 +1821,16 @@
           }
         ]
       }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "decorator",
+          "named": true
+        }
+      ]
     }
   },
   {
@@ -1913,6 +2028,10 @@
         },
         {
           "type": "continue_stmt",
+          "named": true
+        },
+        {
+          "type": "decorated_stmt",
           "named": true
         },
         {
@@ -2611,6 +2730,10 @@
   },
   {
     "type": ">=",
+    "named": false
+  },
+  {
+    "type": "@",
     "named": false
   },
   {

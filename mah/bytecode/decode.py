@@ -511,6 +511,8 @@ def _parse_code(payload: bytes, ctx: dict) -> list:
                     raise MahcFormatError(f"'loadtype' at instruction {i}: primitive type code {index} out of range")
             else:
                 raise MahcFormatError(f"'loadtype' at instruction {i}: unknown kind {kind}")
+        elif op == "decorate":
+            _validate_decorate(instr.args, ctx, i)
         elif op == "map":
             items, _dest = instr.args
             if len(items) % 2 != 0:
@@ -534,6 +536,38 @@ def _parse_code(payload: bytes, ctx: dict) -> list:
                     f"but this file's minor version is {minor}"
                 )
     return instrs
+
+
+def _validate_decorate(args: tuple, ctx: dict, i: int) -> None:
+    """M41b (docs/MAHC_FORMAT.md #4.6): `decorate kind, a, b, values` -- kind
+    <= 4; a function (0) / a parameter (1) exists; a type (2), field (3) or
+    variant (4) target is a *user* type of the right shape. Messages are the
+    same on both VMs (runtime/src/decode.rs)."""
+    kind, a, b, _values = args
+    if kind > 4:
+        raise MahcFormatError(f"'decorate' at instruction {i}: unknown kind {kind}")
+    if kind <= 1:
+        if a >= ctx["nfunctions"]:
+            raise MahcFormatError(f"'decorate' at instruction {i}: function index {a} out of range")
+        if kind == 1 and b >= ctx["param_counts"][a]:
+            raise MahcFormatError(
+                f"'decorate' at instruction {i}: parameter index {b} out of range for function {a}"
+            )
+        return
+    builtin = len(ctx["builtin_types"])
+    if a < builtin or a >= builtin + ctx["ntypes"]:
+        raise MahcFormatError(f"'decorate' at instruction {i}: type index {a} is not a user type")
+    decl = ctx["types"][a - builtin]
+    if kind == 3:
+        if decl.kind != 0:
+            raise MahcFormatError(f"'decorate' at instruction {i}: type index {a} is not a struct")
+        if b >= len(decl.fields):
+            raise MahcFormatError(f"'decorate' at instruction {i}: field index {b} out of range for type {a}")
+    elif kind == 4:
+        if decl.kind != 1:
+            raise MahcFormatError(f"'decorate' at instruction {i}: type index {a} is not an enum")
+        if b >= len(decl.variants):
+            raise MahcFormatError(f"'decorate' at instruction {i}: variant index {b} out of range for type {a}")
 
 
 def _validate_kwnames(op: str, args: tuple, ctx: dict, i: int) -> None:
@@ -788,6 +822,7 @@ def decode(data: bytes) -> Program:
         "ntypes": len(types),
         "types": types,
         "nfunctions": len(functions),
+        "param_counts": [f.param_count for f in functions],
         "nnatives": len(natives),
         "natives": natives,
         "minor": minor,

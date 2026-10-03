@@ -230,8 +230,8 @@ methods**, **M30 `std:path`, `std:json` and `std:csv`**, and **M31
 cancellable timers), and **M35 `std:fs`** (with handles), and **M36
 `std:process`** (arguments, environment, running programs, `exit`), and
 **M41a type values, `##` docs, spread calls, `std:reflect` and
-`json.decode`** ([`REFLECTION.md`](REFLECTION.md)). Next: decorators and
-hook traits (M41b, M41c), then the network modules per `STDLIB.md`, each with
+`json.decode`**, and **M41b decorators as metadata**
+([`REFLECTION.md`](REFLECTION.md)). Next: hook traits (M41c), then the network modules per `STDLIB.md`, each with
 Mah-level tests.
 `std:test` and the `mah test` runner ([`MAH_TEST.md`](MAH_TEST.md)) come
 right after errors and `std:` resolution.

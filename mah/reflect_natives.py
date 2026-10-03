@@ -15,11 +15,13 @@ crosses as a Vector `[tag, ...]`:
     [6, name, args]                 Trait
 
 `signature` gives `[name or none, doc, type_params, params, returns,
-throws or none]`, each parameter `[name, type, doc, has_default,
-is_constant, constant]`. `schema` gives `none` for a primitive type, else
-`["struct", type, doc, type_params, fields]` (a field `[name, type, doc]`) or
-`["enum", type, doc, type_params, variants]` (a variant `[name, doc,
-fields]`). `methods` gives `[name, function, is_method, trait or none]`
+throws or none, decorators]`, each parameter `[name, type, doc, has_default,
+is_constant, constant, decorators]`. `schema` gives `none` for a primitive
+type, else `["struct", type, doc, type_params, fields, decorators]` (a field
+`[name, type, doc, decorators]`) or `["enum", type, doc, type_params,
+variants, decorators]` (a variant `[name, doc, fields, decorators]`, its
+fields `[name, type, doc, []]`). Every `decorators` is a fresh Vector of what
+`decorate` (M41b) stored for that target, `[]` when none. `methods` gives `[name, function, is_method, trait or none]`
 entries. `construct`/`construct_variant` give `[true, value]` or `[false,
 message]`. Without META (or for a function/type it has no entry for) every
 type is Unknown, docs are "" and defaults are non-constant.
@@ -60,6 +62,9 @@ class ReflectData:
         self.strings = linked.strings
         self.constants = linked.constants
         self.method_table = method_table
+        # M41b: the decorators `decorate` stored this run, by target
+        # `(kind, a, b)` (docs/MAHC_FORMAT.md #4.6).
+        self.decorators: dict = {}
         meta = linked.meta
         self.fn_meta = meta.functions if meta is not None else []
         nbuiltin = len(linked.types) - len(linked.program_types)
@@ -127,6 +132,12 @@ def _unknown_ref():
     return _vec([Decimal(0)])
 
 
+def _decorators(data: ReflectData, kind: int, a: int, b: int = 0) -> VectorValue:
+    """A copy of the decorators stored for a target, or an empty Vector."""
+    stored = data.decorators.get((kind, a, b))
+    return _vec(stored.items) if stored is not None else _vec([])
+
+
 def _doc(data: ReflectData, doc) -> str:
     return data.strings[doc] if doc is not None else ""
 
@@ -181,6 +192,7 @@ def _signature(ctx, args):
                     bool(has_default),
                     constant,
                     data.constants[pm.const] if constant else NONE_VALUE,
+                    _decorators(data, 1, f.index, i),
                 ]
             )
         )
@@ -192,6 +204,7 @@ def _signature(ctx, args):
             _vec(params),
             _ref_value(data, meta.returns) if has_meta else _unknown_ref(),
             _throws_value(data, meta.throws) if has_meta else NONE_VALUE,
+            _decorators(data, 0, f.index),
         ]
     )
 
@@ -217,18 +230,25 @@ def _schema(ctx, args):
         for i, name in enumerate(info.fields):
             ref, fdoc = tm.body[i] if tm is not None else (None, None)
             fields.append(
-                _vec([name, _ref_value(data, ref) if ref is not None else _unknown_ref(), _doc(data, fdoc)])
+                _vec(
+                    [
+                        name,
+                        _ref_value(data, ref) if ref is not None else _unknown_ref(),
+                        _doc(data, fdoc),
+                        _decorators(data, 3, t.index, i),
+                    ]
+                )
             )
-        return _vec(["struct", t, doc, tparams, _vec(fields)])
+        return _vec(["struct", t, doc, tparams, _vec(fields), _decorators(data, 2, t.index)])
     variants = []
     for i, (vname, vfields) in enumerate(info.variants):
         vdoc, refs = tm.body[i] if tm is not None else (None, None)
         fields = [
-            _vec([fname, _ref_value(data, refs[j]) if refs is not None else _unknown_ref(), ""])
+            _vec([fname, _ref_value(data, refs[j]) if refs is not None else _unknown_ref(), "", _vec([])])
             for j, fname in enumerate(vfields)
         ]
-        variants.append(_vec([vname, _doc(data, vdoc), _vec(fields)]))
-    return _vec(["enum", t, doc, tparams, _vec(variants)])
+        variants.append(_vec([vname, _doc(data, vdoc), _vec(fields), _decorators(data, 4, t.index, i)]))
+    return _vec(["enum", t, doc, tparams, _vec(variants), _decorators(data, 2, t.index)])
 
 
 def _methods(ctx, args):
@@ -335,6 +355,19 @@ def _construct_variant(ctx, args):
     return _vec([True, EnumInstance(info.name, variant, built)])
 
 
+def _decorators_native(ctx, args):
+    """`reflect.decorators(kind, a, b)` (1.15): a copy of the decorators
+    stored for the target `decorate` names (docs/MAHC_FORMAT.md #4.4), or []."""
+    kind, a, b = args
+    for label, value in (("kind", kind), ("a", a), ("b", b)):
+        if not isinstance(value, Decimal) or value != value.to_integral_value():
+            raise MahRuntimeError(
+                f"reflect.decorators: {label} must be a whole Number, got {type_name_of(value)}", kind="TypeMismatch"
+            )
+    kind, a, b = int(kind), int(a), int(b)
+    return _decorators(_reflect(ctx), kind, a, b if kind in (1, 3, 4) else 0)
+
+
 NATIVES = {
     "reflect.type_of": (1, _type_of),
     "reflect.signature": (1, _signature),
@@ -343,4 +376,5 @@ NATIVES = {
     "reflect.implements": (2, _implements),
     "reflect.construct": (2, _construct),
     "reflect.construct_variant": (3, _construct_variant),
+    "reflect.decorators": (3, _decorators_native),
 }

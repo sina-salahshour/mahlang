@@ -87,6 +87,45 @@ fn ref_value(vm: &Vm, r: &TypeRef) -> Value {
     }
 }
 
+/// M41b: a copy of the decorators stored for a target, or an empty Vector.
+fn decorators_of(vm: &Vm, kind: u64, a: usize, b: usize) -> Value {
+    match vm.decorators.get(&(kind, a, if matches!(kind, 1 | 3 | 4) { b } else { 0 })) {
+        Some(Value::Vector(items)) => vec_value(items.borrow().clone()),
+        _ => vec_value(Vec::new()),
+    }
+}
+
+/// `reflect.decorators(kind, a, b)` (1.15).
+pub fn decorators(vm: &mut Vm, args: &[Value]) -> R {
+    let mut parts = [0i64; 3];
+    for (slot, (label, value)) in ["kind", "a", "b"].iter().zip(args.iter()).enumerate() {
+        parts[slot] = match value {
+            Value::Number(n) => match n.to_i64().filter(|_| n.is_integer()) {
+                Some(v) => v,
+                None => {
+                    return Err(RuntimeError::with_kind(
+                        format!("reflect.decorators: {label} must be a whole Number, got Number"),
+                        ErrorKind::TypeMismatch,
+                    ))
+                }
+            },
+            other => {
+                return Err(RuntimeError::with_kind(
+                    format!(
+                        "reflect.decorators: {label} must be a whole Number, got {}",
+                        type_name_of(other, &vm.names)
+                    ),
+                    ErrorKind::TypeMismatch,
+                ))
+            }
+        };
+    }
+    if parts.iter().any(|&p| p < 0) {
+        return Ok(vec_value(Vec::new()));
+    }
+    Ok(decorators_of(vm, parts[0] as u64, parts[1] as usize, parts[2] as usize))
+}
+
 fn unknown_ref() -> Value {
     vec_value(vec![number(0)])
 }
@@ -170,6 +209,7 @@ pub fn signature(vm: &mut Vm, args: &[Value]) -> R {
                 Some(c) if constant => vm.linked.constants[c].clone(),
                 _ => Value::None,
             },
+            decorators_of(vm, 1, f.func.index, i),
         ]));
     }
     Ok(vec_value(vec![
@@ -194,6 +234,7 @@ pub fn signature(vm: &mut Vm, args: &[Value]) -> R {
             Some(m) => throws_value(vm, &m.throws),
             None => Value::None,
         },
+        decorators_of(vm, 0, f.func.index, 0),
     ]))
 }
 
@@ -225,9 +266,16 @@ pub fn schema(vm: &mut Vm, args: &[Value]) -> R {
                     Some(TypeMetaBody::Struct(list)) => (ref_value(vm, &list[i].0), doc(vm, list[i].1)),
                     _ => (unknown_ref(), str_value("")),
                 };
-                out.push(vec_value(vec![Value::Str(name.clone()), ty, fdoc]));
+                out.push(vec_value(vec![Value::Str(name.clone()), ty, fdoc, decorators_of(vm, 3, t.index, i)]));
             }
-            Ok(vec_value(vec![str_value("struct"), self_type, type_doc, tparams, vec_value(out)]))
+            Ok(vec_value(vec![
+                str_value("struct"),
+                self_type,
+                type_doc,
+                tparams,
+                vec_value(out),
+                decorators_of(vm, 2, t.index, 0),
+            ]))
         }
         TypeKind::Enum(variants) => {
             let mut out = Vec::new();
@@ -242,11 +290,23 @@ pub fn schema(vm: &mut Vm, args: &[Value]) -> R {
                         Some(r) => ref_value(vm, &r[j]),
                         None => unknown_ref(),
                     };
-                    fields.push(vec_value(vec![Value::Str(fname.clone()), ty, str_value("")]));
+                    fields.push(vec_value(vec![Value::Str(fname.clone()), ty, str_value(""), vec_value(Vec::new())]));
                 }
-                out.push(vec_value(vec![Value::Str(vname.clone()), vdoc, vec_value(fields)]));
+                out.push(vec_value(vec![
+                    Value::Str(vname.clone()),
+                    vdoc,
+                    vec_value(fields),
+                    decorators_of(vm, 4, t.index, i),
+                ]));
             }
-            Ok(vec_value(vec![str_value("enum"), self_type, type_doc, tparams, vec_value(out)]))
+            Ok(vec_value(vec![
+                str_value("enum"),
+                self_type,
+                type_doc,
+                tparams,
+                vec_value(out),
+                decorators_of(vm, 2, t.index, 0),
+            ]))
         }
     }
 }

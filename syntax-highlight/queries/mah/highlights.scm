@@ -117,6 +117,15 @@
 ((comment) @comment.documentation
   (#match? @comment.documentation "^##"))
 
+; M41b: decorators, `@get("/x")` / `@lib.route` (docs/REFLECTION.md). The whole
+; node first (so the strings/numbers/names inside its arguments, captured
+; above and below, keep their own colors), then its `@` and name path, which
+; the generic `(identifier) @variable` would otherwise win.
+(decorator) @attribute
+(decorator "@" @attribute)
+(decorator name: (identifier) @attribute)
+(decorator member: (identifier) @attribute)
+
 ; Type names -- struct/enum/trait declarations and any reference to a
 ; struct/enum/trait/impl-target type name in a literal, pattern, or impl
 ; header.

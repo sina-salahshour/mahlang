@@ -18,6 +18,11 @@
 #   }
 #   reflect.construct(User, ["name": "ada"])   # User { name: ada }
 #
+# Decorators (`@get("/users")` above a declaration, docs/REFLECTION.md) are
+# evaluated once at startup and kept as values: `sig.decorators`,
+# `sig.params[i].decorators`, the `decorators` of a `Schema`, `Field` and
+# `Variant`; `find(sig.decorators, Route)` picks one out by type.
+#
 # A bare type name (`User`, `Number`, `Vector`) is a value of type `Type`.
 # What the descriptors report is what the source *wrote*: annotations
 # resolved to the types they name, `##` doc comments and constant default
@@ -73,6 +78,7 @@ export struct Param {
     ## `none`, or `-` and a Number); `none` for no default or one that
     ## isn't a constant.
     default: Option<Unknown>,
+    ## The decorators written before the parameter, in source order.
     decorators: Vector<Unknown>
 }
 
@@ -159,7 +165,7 @@ fn refs_of(v: Vector<Unknown>) -> Vector<TypeRef> {
 fn fields_of(v: Vector<Unknown>) -> Vector<Field> {
     let out = []
     for let f in v {
-        out.push(Field { name: f[0], type: typeref(f[1]), doc: f[2], decorators: [] })
+        out.push(Field { name: f[0], type: typeref(f[1]), doc: f[2], decorators: f[3] })
     }
     out
 }
@@ -189,7 +195,7 @@ export fn signature(f: Unknown) -> Signature {
                 doc: p[2],
                 has_default: p[3],
                 default: if p[4] { some(p[5]) } else { none },
-                decorators: []
+                decorators: p[6]
             }
         )
     }
@@ -200,7 +206,7 @@ export fn signature(f: Unknown) -> Signature {
         params: params,
         returns: typeref(r[4]),
         throws: if r[5] == none { none } else { some(refs_of(r[5])) },
-        decorators: []
+        decorators: r[6]
     }
 }
 
@@ -216,13 +222,13 @@ export fn schema(t: Type<Unknown>) -> Option<Schema> {
                 doc: r[2],
                 type_params: r[3],
                 fields: fields_of(r[4]),
-                decorators: []
+                decorators: r[5]
             }
         )
     }
     let variants = []
     for let v in r[4] {
-        variants.push(Variant { name: v[0], doc: v[1], fields: fields_of(v[2]), decorators: [] })
+        variants.push(Variant { name: v[0], doc: v[1], fields: fields_of(v[2]), decorators: v[3] })
     }
     some(
         Schema.Enum {
@@ -230,7 +236,7 @@ export fn schema(t: Type<Unknown>) -> Option<Schema> {
             doc: r[2],
             type_params: r[3],
             variants: variants,
-            decorators: []
+            decorators: r[5]
         }
     )
 }
@@ -258,6 +264,22 @@ export fn methods(t: Type<Unknown>) -> Vector<Method> {
 ## its name), natively or with an `impl`: `implements(Number, "Printable")`.
 export fn implements(t: Type<Unknown>, trait_name: String) -> Bool {
     native_implements(t, trait_name)
+}
+
+## The first of `decorators` (a `decorators` field of a `Signature`, `Param`,
+## `Schema`, `Field` or `Variant`) that matches `target`: with a Type
+## (`find(sig.decorators, Route)`) the first whose type is it; with anything
+## else (a function) the first that `==` it. `none` when there is none.
+export fn find(decorators: Vector<Unknown>, target: Unknown) -> Option<Unknown> {
+    let by_type = native_type_of(target) == Type
+    for let d in decorators {
+        if by_type {
+            if native_type_of(d) == target { return some(d) }
+        } else {
+            if d == target { return some(d) }
+        }
+    }
+    none
 }
 
 ## `f(...args, **kwargs)`.

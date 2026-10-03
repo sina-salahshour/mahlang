@@ -287,6 +287,9 @@ class EnumDecl:
     # (parallel to `.variants`, None entries).
     doc: Optional[str] = field(default=None, repr=False)
     variant_docs: list = field(default_factory=list, repr=False)
+    # M41b: decorator expressions before the enum, and one list per variant.
+    decorators: list = field(default_factory=list, repr=False)
+    variant_decorators: list = field(default_factory=list, repr=False)
 
 
 @dataclass
@@ -398,6 +401,11 @@ class LetStmt:
     # M21 (syntax only -- see docs/TYPES.md): this `let`'s `: type`
     # annotation, or `None` when absent.
     type_ann: Optional[object] = field(default=None, repr=False)
+    # M41b: True for the binding the parser makes of a top-level-capable
+    # `fn NAME(...) { ... }` / `extern fn` *declaration* (as opposed to a
+    # `let f = fn(...) { ... }`, which is a statement) -- decorators and the
+    # decorator phase's "declaration vs statement" split (codegen.py) need it.
+    is_decl: bool = field(default=False, repr=False)
 
 
 @dataclass
@@ -559,6 +567,13 @@ class FnExpr:
     # the ones above its parameters (parallel to `params`, None entries).
     doc: Optional[str] = field(default=None, repr=False)
     param_docs: list = field(default_factory=list, repr=False)
+    # M41b (docs/REFLECTION.md, "M41b: decorators"): the decorator
+    # expressions written before this function (Ident / FieldAccess / Call /
+    # MethodCall nodes, in source order) and, parallel to `params`, the ones
+    # before each parameter. Only a top-level `fn`/`extern fn` or an `impl`
+    # method ever has any.
+    decorators: list = field(default_factory=list, repr=False)
+    param_decorators: list = field(default_factory=list, repr=False)
 
 
 @dataclass
@@ -585,6 +600,9 @@ class StructDecl:
     # (parallel to `.fields`, None entries).
     doc: Optional[str] = field(default=None, repr=False)
     field_docs: list = field(default_factory=list, repr=False)
+    # M41b: decorator expressions before the struct, and one list per field.
+    decorators: list = field(default_factory=list, repr=False)
+    field_decorators: list = field(default_factory=list, repr=False)
 
 
 # -- M12: traits / impls / method calls ----------------------------------
@@ -625,6 +643,10 @@ class MethodDecl:
     # M41a: `##` docs -- see `FnExpr.doc`/`param_docs`.
     doc: Optional[str] = field(default=None, repr=False)
     param_docs: list = field(default_factory=list, repr=False)
+    # M41b: same objects as `fn.decorators`/`fn.param_decorators` (an impl
+    # method's; a trait method never has any).
+    decorators: list = field(default_factory=list, repr=False)
+    param_decorators: list = field(default_factory=list, repr=False)
 
     @property
     def is_method(self) -> bool:

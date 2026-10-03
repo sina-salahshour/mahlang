@@ -1,0 +1,27 @@
+# Decorators (M41b): `@name(args)` above a declaration attaches a value to
+# it, evaluated once at startup. Nothing acts on them; std:reflect reads them.
+
+import reflect from "std:reflect"
+
+struct Route { method: String, path: String }
+
+fn get(path: String) -> Route { Route { method: "GET", path: path } }
+fn tag(name: String) -> String { "tag:" + name }
+
+## Fetch one user.
+@get("/users/{id}")
+fn get_user(@tag("path") id: Number, verbose: Bool = false) -> Number { id }
+
+@tag("model")
+struct User {
+    @tag("json:user_name") name: String,
+    age: Number
+}
+
+let sig = reflect.signature(get_user)
+print(sig.doc)
+match reflect.find(sig.decorators, Route) {
+    some(route) => { print(route.method, route.path) }
+    none => { print("not a route") }
+}
+print(sig.params[0].decorators)

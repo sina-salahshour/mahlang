@@ -3380,6 +3380,59 @@ node that resolved to it. Then:
     - Tests: `tests/test_module_types.py` (both VMs where it matters), the
       existing suites updated as listed in the milestone's report.
 
+40. **M41b — decorators. ✅ Landed.**
+    `docs/REFLECTION.md` (the design and its "M41b: what landed" list);
+    bytecode 1.15. A **decorator** `@NAME.NAME(args)` above a top-level
+    `fn`/`extern fn`/`struct`/`enum` (also before `export`), an `impl`
+    method, a struct field, an enum variant or a parameter of those
+    functions is an ordinary expression, evaluated once at startup and kept
+    as a value; nothing acts on it but `std:reflect` (hooks are M41c).
+    Anywhere else is the compile error "decorators are only allowed on
+    top-level functions, structs and enums, impl methods, their parameters,
+    fields and variants" (reported through the parser's M6 recovery).
+
+    - **Front end**: `@` is the `AT` token. The parser builds each decorator
+      as an `Ident`/`FieldAccess`/`Call`/`MethodCall`, kept in `decorators`
+      lists on `FnExpr` (and `param_decorators`), `StructDecl`
+      (`field_decorators`), `EnumDecl` (`variant_decorators`), mirrored on
+      `MethodDecl`. `LetStmt.is_decl` marks `fn` declarations. The
+      preprocessor needed three fixes for decorators in front of names it
+      treats specially: variant names (`_enum_variant_names`), M36's
+      parameter and label exceptions (`_skip_decorators_back`). `##` docs
+      above the decorator lines still document the declaration (the parser
+      asks `doc_above` about the first `@`).
+    - **Resolver/checker**: the names are normal references, resolved in the
+      scope the declaration is in (parameters aren't in scope for a
+      parameter's decorator; a struct's/enum's are resolved in source order,
+      not with the hoisted type). A decorator may not name a top-level `let`
+      of its own module (found from the mangled prefix `__mah_m{idx}_`,
+      `Symbol.top_level_let`, `Resolver(pp=...)`): "a decorator can't use the
+      top-level variable 'x': it runs before it; use a function or a
+      literal". The checker checks each as an expression, no constraint on
+      its type.
+    - **The decorator phase** (`Codegen._decorator_phases`): one per module
+      (source file, from the preprocessor's source map), placed right before
+      that module's first statement (not a `fn`/`struct`/`enum`/`trait`/`impl`/
+      `test` declaration), or, with none, where its code ends (the end of
+      its last segment: before the next statement of anything), in source
+      order. In a program with decorators the closures of the top-level
+      `fn` declarations are created up front, before the phase. A module's
+      code can be split around the modules it imports, so the grouping is by
+      file path, never by contiguous segment.
+    - **Bytecode 1.15**: `decorate kind, a, b, values...` (0x3D) and the
+      native `reflect.decorators(kind, a, b)`; `signature`/`schema` return
+      the decorators themselves (so a program without decorators stays at
+      its old minor and `reflect.mh` needs no 1.15 native). `std:reflect`
+      gains `find`. Decode-time validation and a double decoration (runtime
+      `Internal`) are the same on both VMs.
+    - **Tooling**: formatter (decorators of `fn`/`struct`/`enum`/methods on
+      their own lines, the rest inline), tree-sitter (`decorator`,
+      `decorated_stmt`, `@attribute`), TextMate grammar, LSP (hover,
+      go-to-definition, rename, completion work on names inside decorators,
+      cross-file for `@lib.factory`, with no LSP code changes needed).
+    - Tests: `tests/test_decorators.py` (both VMs), `mah/std/reflect.test.mh`,
+      vm_diff cases, `examples/decorators.mh`, formatter and bytecode tests.
+
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
 it** (`make test` must stay green) — see `docs/TESTING.md` for where
@@ -3391,17 +3444,17 @@ M1 was built and documented that way.
 
 ## Status
 
-M0 through M41a and M41s (and M21b, `mah format`) have all landed; each milestone's
+M0 through M41b and M41s (and M21b, `mah format`) have all landed; each milestone's
 entry above says what changed and where it deliberately deviates from the
 design. The language has traits, generics, typed and checked errors, a
 static type checker, projects and `mah test`, async I/O with timers, and a
-`.mahc` bytecode format (currently 1.14) run by the reference Python VM
+`.mahc` bytecode format (currently 1.15) run by the reference Python VM
 and the native Rust VM in `runtime/`; the standard library (`std:math`,
 `std:json`, `std:csv`, `std:path`, `std:random`, `std:collections`,
 `std:regex`, `std:time`, `std:async`, `std:fs`, `std:process`, `std:reflect`)
 is described in `docs/STDLIB.md`. Type values, `##` docs, spread calls and
-reflection landed with M41a (`docs/REFLECTION.md`); decorators and hook
-traits (M41b, M41c) are designed there but not started. M41s made
+reflection landed with M41a, and decorators as metadata with M41b
+(`docs/REFLECTION.md`); hook traits (M41c) are designed there but not started. M41s made
 struct/enum/trait names module-scoped (a breaking change: export the types a
 module shares, write `lib.Point` to use one). What else is
 deferred and what comes next (the network modules, and the rest) is in

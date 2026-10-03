@@ -596,7 +596,7 @@ def get_diagnostics(text: str, path: Optional[str] = None) -> list[dict]:
     # nothing extra to gain by resolving it anyway, matching today's
     # non-forgiving resolve behavior of reporting exactly one error.
     if not parser.errors:
-        resolver = Resolver(prelude_start=pp.prelude_start)
+        resolver = Resolver(prelude_start=pp.prelude_start, pp=pp)
         try:
             resolver.resolve_program(program)
         except SystemExit:
@@ -1774,7 +1774,7 @@ def _resolve_for_navigation(text: str, path: Optional[str]):
     lexer = Lexer(combined)
     parser = Parser(lexer, allow_tests=_is_test_path(path))
     program = parser.parse_program()
-    resolver = Resolver(prelude_start=pp.prelude_start)
+    resolver = Resolver(prelude_start=pp.prelude_start, pp=pp)
     try:
         resolver.resolve_program(program)
     except Exception:  # noqa: BLE001 - any resolve failure means "no symbol table"
@@ -2408,7 +2408,7 @@ def _rename_variable_cross_file(found, new_name: str, entry_text: str) -> Option
         fprogram = fparser.parse_program()
         if fparser.errors:
             return None
-        fresolver = Resolver(prelude_start=fpp.prelude_start)
+        fresolver = Resolver(prelude_start=fpp.prelude_start, pp=fpp)
         try:
             fresolver.resolve_program(fprogram)
         except Exception:
@@ -2489,7 +2489,7 @@ def _rename_type_cross_file(pp, resolver, kind: str, name: str, new_name: str, e
         fprogram = fparser.parse_program()
         if fparser.errors:
             return None
-        fresolver = Resolver(prelude_start=fpp.prelude_start)
+        fresolver = Resolver(prelude_start=fpp.prelude_start, pp=fpp)
         try:
             fresolver.resolve_program(fprogram)
         except Exception:  # noqa: BLE001

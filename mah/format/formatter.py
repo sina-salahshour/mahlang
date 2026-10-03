@@ -281,6 +281,9 @@ class _Facts:
     # blocks of one if/elif/else chain are inline or broken together.
     if_chains: dict = field(default_factory=dict)
     chain_blocks: set = field(default_factory=set)
+    # M41b: the `@` of each decorator written above a `fn`/`struct`/`enum`/
+    # method -- each on its own line, with no blank line before what follows.
+    decorator_starts: set = field(default_factory=set)
 
 
 def _facts(program: list, toks: list, module_starts: set, prefixes: set = frozenset()) -> _Facts:
@@ -295,6 +298,9 @@ def _facts(program: list, toks: list, module_starts: set, prefixes: set = frozen
         if not positions:
             return None
         idx = index_of(min(positions))
+        # A decorator's node starts at its name, after the `@`.
+        while idx is not None and idx > 0 and toks[idx - 1].type is TokenType.AT:
+            idx -= 1
         # Parentheses have no AST node, so `(g)()` records nothing for its
         # first `(`. A `(` right before a statement's first recorded token
         # can only be part of that statement.
@@ -386,6 +392,16 @@ def _facts(program: list, toks: list, module_starts: set, prefixes: set = frozen
                 facts.generic_opens.add(index_of(node.type_name_position) + 1)
             if node.trait_args:
                 facts.generic_opens.add(index_of(node.trait_name_position) + 1)
+        if isinstance(node, (ast.FnExpr, ast.StructDecl, ast.EnumDecl)) and node.decorators:
+            # M41b: decorators of a declaration go on their own lines above it.
+            for decorator in node.decorators:
+                start = first_index(decorator)
+                if start is not None:
+                    facts.statement_starts.add(start)
+                    facts.decorator_starts.add(start)
+            keyword = index_of(node.position)
+            if keyword is not None and keyword - 1 not in module_starts:
+                facts.statement_starts.add(keyword)
         type_params = getattr(node, "type_params", None)
         if type_params and isinstance(type_params, list) and isinstance(type_params[0], ast.TypeParam):
             facts.generic_opens.add(index_of(type_params[0].position) - 1)
@@ -506,7 +522,7 @@ class _Builder:
 
     def _wanted_space(self, left, right) -> bool:
         a, b = _last_tok(left), _first_tok(right)
-        if b.type in _TIGHT_BEFORE or a.type is TokenType.DOT:
+        if b.type in _TIGHT_BEFORE or a.type is TokenType.DOT or a.type is TokenType.AT:
             return False
         if a.type in _RANGE_OPS or b.type in _RANGE_OPS:
             return False
@@ -697,7 +713,8 @@ class _Builder:
             blank = entry.leading[0].blank_lines_before if entry.leading else entry.blank_lines_before
             if k > 0:
                 parts.append(HARDLINE)
-                parts += self._blank(blank)
+                if _first_tok(statements[k - 1][0]).index not in self.facts.decorator_starts:
+                    parts += self._blank(blank)
             elif allow_leading_blank:
                 parts += self._blank(blank)
             parts += self._leading_comment_lines(first)

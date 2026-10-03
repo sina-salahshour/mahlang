@@ -71,6 +71,12 @@ from .ast_nodes import (
 )
 from .lexer import Lexer, Token, TokenType
 
+# M41b: the one message for a decorator anywhere it isn't allowed.
+DECORATOR_MISPLACED = (
+    "decorators are only allowed on top-level functions, structs and enums, "
+    "impl methods, their parameters, fields and variants"
+)
+
 # A backslash escape: \uXXXX, \UXXXXXXXX, \xXX, a 1-3 digit octal escape,
 # or a backslash followed by any single ASCII character. A backslash before
 # a non-ASCII character is left as written (like any unknown escape).
@@ -288,6 +294,10 @@ class Parser:
                 break
 
             try:
+                if self.current.type is TokenType.AT:
+                    stmts.append(self._parse_decorated_item(end_type))
+                    continue
+
                 if self.current.type in _STATEMENT_LEADING:
                     stmts.append(self.parse_stmt())
                     continue
@@ -297,11 +307,12 @@ class Parser:
                     continue
 
                 if self._at_extern_fn():
-                    stmts.append(self._parse_extern_fn())
+                    stmts.append(self._parse_extern_fn(top_level=end_type is TokenType.EOF))
                     continue
 
                 if self.current.type is TokenType.FN:
-                    fn_expr = self._parse_fn_expr()
+                    top_level_decl = end_type is TokenType.EOF and self.lexer.peek_token().type is TokenType.ID
+                    fn_expr = self._parse_fn_expr(decl=top_level_decl)
                     if fn_expr.name is not None:
                         stmts.append(
                             LetStmt(
@@ -309,6 +320,7 @@ class Parser:
                                 value=fn_expr,
                                 position=fn_expr.position,
                                 name_position=fn_expr.name_position,
+                                is_decl=True,
                             )
                         )
                         continue
@@ -429,6 +441,75 @@ class Parser:
                     # would wrongly eat that legitimate resumption token.
                     self.advance()
         return stmts, tail
+
+    # -- M41b: decorators --------------------------------------------------
+
+    def _decorator_error(self, position: int) -> SyntaxError:
+        return SyntaxError(f"{DECORATOR_MISPLACED} at position '{position}'")
+
+    def _parse_decorators(self) -> list:
+        """M41b: `{ "@" NAME { "." NAME } [ "(" call_args ")" ] }` -- the
+        decorator expressions, built like the same text in expression
+        position: `@a` an Ident, `@a.b` a FieldAccess, `@a(x)` a Call and
+        `@a.b(x)` a MethodCall (so the resolver, checker and LSP treat every
+        name in it as an ordinary reference)."""
+        out = []
+        while self.current.type is TokenType.AT:
+            self.advance()
+            name_tok = self.expect(TokenType.ID)
+            base = Ident(name=name_tok.literal, position=name_tok.position)
+            called = False
+            while self.current.type is TokenType.DOT:
+                self.advance()
+                field_tok = self.expect(TokenType.ID)
+                if self.current.type is TokenType.PAREN_OPEN:
+                    args, kwargs = self._parse_paren_args()
+                    base = MethodCall(
+                        obj=base, method=field_tok.literal, args=args, position=field_tok.position, kwargs=kwargs
+                    )
+                    called = True
+                    break
+                base = FieldAccess(obj=base, field=field_tok.literal, position=field_tok.position)
+            if not called and self.current.type is TokenType.PAREN_OPEN:
+                paren_tok = self.current
+                args, kwargs = self._parse_paren_args()
+                base = Call(callee=base, args=args, position=paren_tok.position, kwargs=kwargs)
+            out.append(base)
+        return out
+
+    def _parse_decorated_item(self, end_type: TokenType):
+        """M41b: decorators before a top-level `fn`/`extern fn`/`struct`/
+        `enum`. (Fields, variants, parameters and impl methods parse their
+        own.) Anywhere else -- nested, before `let`/`trait`/`impl`/a
+        statement or a closure -- is the one 'only allowed on' error."""
+        first = self.current
+        if end_type is not TokenType.EOF:
+            raise self._decorator_error(first.position)
+        decorators = self._parse_decorators()
+        tok = self.current
+        if tok.type is TokenType.STRUCT:
+            node = self._parse_struct_decl(doc_at=first.position)
+            node.decorators = decorators
+            return node
+        if tok.type is TokenType.ENUM:
+            node = self._parse_enum_decl(doc_at=first.position)
+            node.decorators = decorators
+            return node
+        if self._at_extern_fn():
+            stmt = self._parse_extern_fn(top_level=True, doc_at=first.position)
+            stmt.value.decorators = decorators
+            return stmt
+        if tok.type is TokenType.FN and self.lexer.peek_token().type is TokenType.ID:
+            fn_expr = self._parse_fn_expr(decl=True, doc_at=first.position)
+            fn_expr.decorators = decorators
+            return LetStmt(
+                name=fn_expr.name,
+                value=fn_expr,
+                position=fn_expr.position,
+                name_position=fn_expr.name_position,
+                is_decl=True,
+            )
+        raise self._decorator_error(first.position)
 
     def _synchronize(self, end_type: TokenType) -> None:
         """M6 error recovery: discard tokens until reaching a safe
@@ -1010,21 +1091,29 @@ class Parser:
         sub = BindPat(name=name_tok.literal, position=name_tok.position)
         return (name_tok.literal, sub, None)
 
-    def _parse_field_decl(self):
+    def _parse_field_decl(self, allow_decorators: bool = False):
         """M21: `NAME [":" type]` -- a struct field or enum variant field.
-        Returns `(name, position, type_or_None, doc_or_None)` (M41a: the
-        `##` doc comment above the field)."""
+        Returns `(name, position, type_or_None, doc_or_None, decorators)`
+        (M41a: the `##` doc comment above the field; M41b: the decorators
+        before it, only a struct field may have them)."""
+        decorators = []
+        doc_at = None
+        if self.current.type is TokenType.AT:
+            if not allow_decorators:
+                raise self._decorator_error(self.current.position)
+            doc_at = self.current.position
+            decorators = self._parse_decorators()
         field_tok = self.expect(TokenType.ID)
-        doc = self.lexer.doc_above(field_tok.position)
+        doc = self.lexer.doc_above(doc_at if doc_at is not None else field_tok.position)
         ftype = None
         if self.current.type is TokenType.COLON:
             self.advance()
             ftype = self._parse_type()
-        return field_tok.literal, field_tok.position, ftype, doc
+        return field_tok.literal, field_tok.position, ftype, doc, decorators
 
-    def _parse_struct_decl(self) -> StructDecl:
+    def _parse_struct_decl(self, doc_at: Optional[int] = None) -> StructDecl:
         struct_tok = self.advance()  # STRUCT
-        doc = self.lexer.doc_above(struct_tok.position)
+        doc = self.lexer.doc_above(doc_at if doc_at is not None else struct_tok.position)
         name_tok = self.expect(TokenType.ID)
         type_params = self._parse_type_params()
         self.expect(TokenType.BRACE_OPEN)
@@ -1032,19 +1121,22 @@ class Parser:
         field_positions = []
         field_types = []
         field_docs = []
-        if self.current.type is TokenType.ID:
-            fname, fpos, ftype, fdoc = self._parse_field_decl()
+        field_decorators = []
+        if self.current.type in (TokenType.ID, TokenType.AT):
+            fname, fpos, ftype, fdoc, fdecs = self._parse_field_decl(allow_decorators=True)
             fields.append(fname)
             field_positions.append(fpos)
             field_types.append(ftype)
             field_docs.append(fdoc)
+            field_decorators.append(fdecs)
             while self.current.type is TokenType.COMMA:
                 self.advance()
-                fname, fpos, ftype, fdoc = self._parse_field_decl()
+                fname, fpos, ftype, fdoc, fdecs = self._parse_field_decl(allow_decorators=True)
                 fields.append(fname)
                 field_positions.append(fpos)
                 field_types.append(ftype)
                 field_docs.append(fdoc)
+                field_decorators.append(fdecs)
         self.expect(TokenType.BRACE_CLOSE)
         return StructDecl(
             name=name_tok.literal,
@@ -1056,11 +1148,12 @@ class Parser:
             field_types=field_types,
             doc=doc,
             field_docs=field_docs,
+            field_decorators=field_decorators,
         )
 
-    def _parse_enum_decl(self) -> EnumDecl:
+    def _parse_enum_decl(self, doc_at: Optional[int] = None) -> EnumDecl:
         enum_tok = self.advance()  # ENUM
-        doc = self.lexer.doc_above(enum_tok.position)
+        doc = self.lexer.doc_above(doc_at if doc_at is not None else enum_tok.position)
         name_tok = self.expect(TokenType.ID)
         type_params = self._parse_type_params()
         self.expect(TokenType.BRACE_OPEN)
@@ -1069,6 +1162,7 @@ class Parser:
         variant_field_positions_list = []
         variant_field_types_list = []
         variant_docs = []
+        variant_decorators = []
         if self.current.type is not TokenType.BRACE_CLOSE:
             (
                 variant_name,
@@ -1077,7 +1171,9 @@ class Parser:
                 variant_field_positions,
                 variant_field_types,
                 variant_doc,
+                variant_decs,
             ) = self._parse_enum_variant()
+            variant_decorators.append(variant_decs)
             variants.append((variant_name, variant_fields))
             variant_positions.append(variant_pos)
             variant_field_positions_list.append(variant_field_positions)
@@ -1092,7 +1188,9 @@ class Parser:
                     variant_field_positions,
                     variant_field_types,
                     variant_doc,
+                    variant_decs,
                 ) = self._parse_enum_variant()
+                variant_decorators.append(variant_decs)
                 variants.append((variant_name, variant_fields))
                 variant_positions.append(variant_pos)
                 variant_field_positions_list.append(variant_field_positions)
@@ -1110,32 +1208,38 @@ class Parser:
             variant_field_types=variant_field_types_list,
             doc=doc,
             variant_docs=variant_docs,
+            variant_decorators=variant_decorators,
         )
 
     def _parse_enum_variant(self):
+        decorators = []
+        doc_at = None
+        if self.current.type is TokenType.AT:
+            doc_at = self.current.position
+            decorators = self._parse_decorators()
         name_tok = self.expect(TokenType.ID)
-        doc = self.lexer.doc_above(name_tok.position)
+        doc = self.lexer.doc_above(doc_at if doc_at is not None else name_tok.position)
         if self.current.type is TokenType.BRACE_OPEN:
             self.advance()
             fields = []
             field_positions = []
             field_types = []
-            if self.current.type is TokenType.ID:
-                fname, fpos, ftype, _fdoc = self._parse_field_decl()
+            if self.current.type in (TokenType.ID, TokenType.AT):
+                fname, fpos, ftype, _fdoc, _fdecs = self._parse_field_decl()
                 fields.append(fname)
                 field_positions.append(fpos)
                 field_types.append(ftype)
                 while self.current.type is TokenType.COMMA:
                     self.advance()
-                    fname, fpos, ftype, _fdoc = self._parse_field_decl()
+                    fname, fpos, ftype, _fdoc, _fdecs = self._parse_field_decl()
                     fields.append(fname)
                     field_positions.append(fpos)
                     field_types.append(ftype)
             self.expect(TokenType.BRACE_CLOSE)
-            return (name_tok.literal, fields, name_tok.position, field_positions, field_types, doc)
-        return (name_tok.literal, [], name_tok.position, [], [], doc)
+            return (name_tok.literal, fields, name_tok.position, field_positions, field_types, doc, decorators)
+        return (name_tok.literal, [], name_tok.position, [], [], doc, decorators)
 
-    def _parse_param_list(self) -> tuple:
+    def _parse_param_list(self, allow_decorators: bool = False) -> tuple:
         """M12: consumes `(` ... `)` and returns `(params, param_positions,
         param_types, defaults)` -- factored out of `_parse_fn_expr` so
         `_parse_method_decl` (trait/impl `fn` items) can share the exact
@@ -1151,34 +1255,48 @@ class Parser:
         M21 (see docs/TYPES.md): each parameter may also be preceded by
         `: type` (before the default) -- `param_types` is parallel too, one
         entry (a TypeExpr or `None`) per parameter. `self` can't be
-        annotated (it's always `Self`)."""
+        annotated (it's always `Self`).
+
+        M41b: `allow_decorators` (a top-level fn's or an impl method's list)
+        lets each parameter be preceded by decorators; the result's sixth
+        element is parallel to the others (one list per parameter)."""
         self.expect(TokenType.PAREN_OPEN)
         params = []
         param_positions = []
         param_types = []
         defaults = []
         docs = []
-        if self.current.type is TokenType.ID:
-            name, pos, ptype, default, doc = self._parse_one_param()
+        decorators = []
+        if self.current.type in (TokenType.ID, TokenType.AT):
+            name, pos, ptype, default, doc, decs = self._parse_one_param(allow_decorators)
             params.append(name)
             param_positions.append(pos)
             param_types.append(ptype)
             defaults.append(default)
             docs.append(doc)
+            decorators.append(decs)
             while self.current.type is TokenType.COMMA:
                 self.advance()
-                name, pos, ptype, default, doc = self._parse_one_param()
+                name, pos, ptype, default, doc, decs = self._parse_one_param(allow_decorators)
                 params.append(name)
                 param_positions.append(pos)
                 param_types.append(ptype)
                 defaults.append(default)
                 docs.append(doc)
+                decorators.append(decs)
         self.expect(TokenType.PAREN_CLOSE)
-        return params, param_positions, param_types, defaults, docs
+        return params, param_positions, param_types, defaults, docs, decorators
 
-    def _parse_one_param(self):
+    def _parse_one_param(self, allow_decorators: bool = False):
+        decorators = []
+        doc_at = None
+        if self.current.type is TokenType.AT:
+            if not allow_decorators:
+                raise self._decorator_error(self.current.position)
+            doc_at = self.current.position
+            decorators = self._parse_decorators()
         param_tok = self.expect(TokenType.ID)
-        doc = self.lexer.doc_above(param_tok.position)
+        doc = self.lexer.doc_above(doc_at if doc_at is not None else param_tok.position)
         ptype = None
         if self.current.type is TokenType.COLON:
             colon_tok = self.current
@@ -1190,7 +1308,7 @@ class Parser:
             self.advance()
             ptype = self._parse_type()
         default = self._parse_optional_default()
-        return param_tok.literal, param_tok.position, ptype, default, doc
+        return param_tok.literal, param_tok.position, ptype, default, doc, decorators
 
     def _parse_optional_default(self):
         if self.current.type is TokenType.ASSIGN:
@@ -1278,9 +1396,11 @@ class Parser:
             default = self._parse_type()
         return TypeParam(name=name_tok.literal, bounds=bounds, default=default, position=name_tok.position)
 
-    def _parse_fn_expr(self) -> FnExpr:
+    def _parse_fn_expr(self, decl: bool = False, doc_at: Optional[int] = None) -> FnExpr:
+        """`decl`: a top-level named `fn` declaration -- its parameters may
+        carry decorators (M41b)."""
         fn_tok = self.advance()  # FN
-        doc = self.lexer.doc_above(fn_tok.position)
+        doc = self.lexer.doc_above(doc_at if doc_at is not None else fn_tok.position)
         name = None
         name_position = None
         if self.current.type is TokenType.ID:
@@ -1288,7 +1408,9 @@ class Parser:
             name = name_tok.literal
             name_position = name_tok.position
         type_params = self._parse_type_params()
-        params, param_positions, param_types, defaults, param_docs = self._parse_param_list()
+        params, param_positions, param_types, defaults, param_docs, param_decorators = self._parse_param_list(
+            allow_decorators=decl
+        )
         return_type = None
         if self.current.type is TokenType.ARROW:
             self.advance()
@@ -1309,6 +1431,7 @@ class Parser:
             throws=throws,
             doc=doc,
             param_docs=param_docs,
+            param_decorators=param_decorators,
         )
 
     # -- M28: test blocks ------------------------------------------------------
@@ -1360,18 +1483,20 @@ class Parser:
             and self.lexer.peek_token().type is TokenType.FN
         )
 
-    def _parse_extern_fn(self) -> LetStmt:
+    def _parse_extern_fn(self, top_level: bool = False, doc_at: Optional[int] = None) -> LetStmt:
         """`extern fn NAME[<T>](params) [-> T] [throws E] = "module.native"`
         (docs/STDLIB.md, Phase 0) -- desugared to an ordinary named function
         whose body calls the native with its parameters. Only standard
         library modules may use it (the preprocessor enforces that);
         parameters can't have defaults, since a native's arity is fixed."""
         extern_tok = self.advance()  # `extern`
-        doc = self.lexer.doc_above(extern_tok.position)
+        doc = self.lexer.doc_above(doc_at if doc_at is not None else extern_tok.position)
         self.advance()  # FN
         name_tok = self.expect(TokenType.ID)
         type_params = self._parse_type_params()
-        params, param_positions, param_types, defaults, param_docs = self._parse_param_list()
+        params, param_positions, param_types, defaults, param_docs, param_decorators = self._parse_param_list(
+            allow_decorators=top_level
+        )
         if any(d is not None for d in defaults):
             raise SyntaxError(f"an extern fn's parameters can't have defaults at position '{name_tok.position}'")
         return_type = None
@@ -1398,9 +1523,12 @@ class Parser:
             throws=throws,
             doc=doc,
             param_docs=param_docs,
+            param_decorators=param_decorators,
         )
         fn.native = native
-        return LetStmt(name=fn.name, value=fn, position=extern_tok.position, name_position=name_tok.position)
+        return LetStmt(
+            name=fn.name, value=fn, position=extern_tok.position, name_position=name_tok.position, is_decl=True
+        )
 
     # -- M12: trait / impl / method decls ---------------------------------
 
@@ -1473,11 +1601,20 @@ class Parser:
         )
 
     def _parse_method_decl(self, require_body: bool) -> MethodDecl:
+        decorators = []
+        doc_at = None
+        if self.current.type is TokenType.AT:
+            if not require_body:  # a trait's method
+                raise self._decorator_error(self.current.position)
+            doc_at = self.current.position
+            decorators = self._parse_decorators()
         fn_tok = self.expect(TokenType.FN)
-        doc = self.lexer.doc_above(fn_tok.position)
+        doc = self.lexer.doc_above(doc_at if doc_at is not None else fn_tok.position)
         name_tok = self.expect(TokenType.ID)
         type_params = self._parse_type_params()
-        params, param_positions, param_types, defaults, param_docs = self._parse_param_list()
+        params, param_positions, param_types, defaults, param_docs, param_decorators = self._parse_param_list(
+            allow_decorators=require_body
+        )
         return_type = None
         if self.current.type is TokenType.ARROW:
             self.advance()
@@ -1499,6 +1636,8 @@ class Parser:
                 throws=throws,
                 doc=doc,
                 param_docs=param_docs,
+                decorators=decorators,
+                param_decorators=param_decorators,
             )
         elif require_body:
             raise SyntaxError(
@@ -1521,6 +1660,8 @@ class Parser:
             throws=throws,
             doc=doc,
             param_docs=param_docs,
+            decorators=decorators,
+            param_decorators=param_decorators,
         )
 
     # -- expressions (precedence chain, lowest to highest binding) --------
@@ -1775,6 +1916,8 @@ class Parser:
                 )
             )
 
+        if tok.type is TokenType.AT:
+            raise self._decorator_error(tok.position)
         raise SyntaxError(f"Invalid syntax '{tok}' at position '{tok.position}'")
 
     # -- helpers -----------------------------------------------------------

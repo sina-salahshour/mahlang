@@ -1,6 +1,6 @@
 ---
 title: Standard library
-order: 17
+order: 18
 section: Language
 ---
 
@@ -553,6 +553,7 @@ print(reflect.call(add, [1], ["b": 5]))                   # 6
 | `implements(T, "Trait")` | whether the type has methods for that trait, native ones included |
 | `call(f, args = [], kwargs = [:])` | `f(...args, **kwargs)` |
 | `construct(T, fields)`, `construct_variant(T, "Variant", fields)` | a new struct or enum value from exactly its fields; a missing or unknown field throws `reflect.ReflectError` naming it |
+| `find(decorators, target)` | the first of a `decorators` Vector (see [Decorators](/docs/decorators)) whose type is `target` (a Type), or that `==` it (a function); `none` if there is none |
 
 A type annotation comes back as a `reflect.TypeRef`: `Unknown`, `Named { type,
 args }`, `Fn { params, returns, throws }`, `Param { name }`, `SelfType`,

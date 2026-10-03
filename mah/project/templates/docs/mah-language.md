@@ -1040,10 +1040,56 @@ print(reflect.implements(User, "Printable"), reflect.call(add, [1], ["b": 5]))  
   (throw `reflect.ReflectError` for a missing or unknown field).
 - A `reflect.TypeRef` is `Unknown`, `Named { type, args }`, `Fn { params, returns,
   throws }`, `Param { name }`, `SelfType`, `Never` or `Trait { name, args }`.
-  `decorators` fields are empty for now.
+  Every `decorators` field is the Vector of that declaration's decorators (see Decorators).
 - `Signature`, `Param`, `Field`, `Variant`, `Schema`, `Method`, `TypeRef` and
   `ReflectError` are exported by `std:reflect`: write `reflect.TypeRef`,
   `reflect.Schema.Struct { ... }`, `reflect.ReflectError`, ...
+
+## Decorators
+
+`@name` or `@name(args)` (also `@lib.name(...)`) written above a top-level
+`fn`/`struct`/`enum` (and above `export`), an `impl` method, or before a
+parameter, struct field or enum variant attaches a value to it. The
+expression is evaluated **once, at startup**, and kept in source order;
+nothing acts on it except `std:reflect`, which returns them as the
+`decorators` Vector of a `Signature`, `Param`, `Schema`, `Field` or
+`Variant`. `reflect.find(decorators, Route)` is the first one whose type is
+`Route`; `reflect.find(decorators, my_fn)` the first that `==` the function.
+
+```mah
+import reflect from "std:reflect"
+
+struct Route { method: String, path: String }
+
+fn get(path: String) -> Route { Route { method: "GET", path: path } }
+fn tag(name: String) -> String { "tag:" + name }
+
+## Fetch one user.
+@get("/users/{id}")
+fn get_user(@tag("path") id: Number, verbose: Bool = false) -> Number { id }
+
+@tag("model")
+struct User { @tag("json:user_name") name: String, age: Number }
+
+let sig = reflect.signature(get_user)
+print(reflect.find(sig.decorators, Route))   # some(Route { method: GET, path: /users/{id} })
+print(sig.params[0].decorators)              # [tag:path]
+```
+
+- Each module's decorators run in one phase before that module's first
+  statement (other than declarations), after every function exists; a
+  module's imports have already run. A decorator may call any function or
+  use a type or literal, but may not name a top-level `let` of **its own**
+  module (compile error: it hasn't run yet); another module's `let`s are fine.
+- A factory that reads its own module's top-level `let` sees `none` when used
+  on that same module's declarations (the `let`s haven't run yet); an importing
+  module sees the initialized value. Keep constants inside the factory, or in a
+  function that returns them. A decorator may name a function or type declared
+  later in the module.
+- Put the `##` doc comment above the decorator lines. Decorators of a
+  `fn`/`struct`/`enum`/method go one per line above it; a parameter's, field's
+  or variant's stay inline (`@a @b(1) name: T`).
+- A decorator anywhere else is a compile error.
 
 ## Errors
 
@@ -1175,8 +1221,9 @@ test "not ready yet" {
 - Type-checking trait-typed values, bounds, and the prelude's iterator methods (the checker skips these for now); classes/inheritance.
 - Variadic *parameters* (`*args`, `...rest`, `**kwargs`): a function has a fixed
   parameter list (a call can spread a Vector or Map into it, see Spread calls);
-  only `print` takes any number of arguments. Decorators (`@name`) and
-  hooks.
+  only `print` takes any number of arguments. Hook traits (a decorator that
+  *changes* behavior); a decorator only attaches a value.
+- Decorators on `let`s, traits, `impl` blocks, nested functions or closures.
 - Network access, spawning a process to stream from, binary file data, and every other planned
   `std:` module besides `std:math`, `std:path`, `std:json`, `std:csv`,
   `std:random`, `std:collections`, `std:regex`, `std:time`, `std:async`,

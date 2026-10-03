@@ -64,7 +64,14 @@ class LexerTests(unittest.TestCase):
 
     def test_invalid_character_raises(self):
         with self.assertRaises(SyntaxError):
-            token_types("@")
+            token_types("?")
+
+    def test_at_is_the_decorator_token(self):
+        # M41b: `@` starts a decorator.
+        self.assertEqual(
+            token_types("@get.x"),
+            [TokenType.AT, TokenType.ID, TokenType.DOT, TokenType.ID, TokenType.EOF],
+        )
 
     def test_trait_impl_for_are_keywords_self_stays_a_plain_id(self):
         # M12: `self`/`Self` deliberately stay plain `ID`s (see

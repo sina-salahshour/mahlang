@@ -395,6 +395,8 @@ def _link_instr(instr, strings: list, constants: list, types: list, natives: lis
         )
     if op == "spread":
         return ("spread", a[0], a[1], a[2])
+    if op == "decorate":
+        return ("decorate", a[0], a[1], a[2], a[3])
     if op == "loadtype":
         kind, index, dest = a
         name = types[index].name if kind == 0 else PRIMITIVE_TYPE_NAMES[index]
@@ -1636,6 +1638,15 @@ def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, dead
                 enter_closure(task, closure, bound)
             case ("spread", target_addr, source_addr, keyword):
                 _spread(_read(frame, target_addr), _read(frame, source_addr), keyword)
+            case ("decorate", kind, x, y, value_addrs):
+                # M41b: store the decorators of one target (docs/MAHC_FORMAT.md #6.10)
+                key = (kind, x, y if kind in (1, 3, 4) else 0)
+                table = ctx.reflect.decorators
+                if key in table:
+                    raise MahRuntimeError(
+                        f"decorate: the target (kind {kind}, {x}, {y}) is decorated twice", kind="Internal"
+                    )
+                table[key] = VectorValue([_read(frame, a) for a in value_addrs])
             case ("loadtype", type_value, dest):
                 _write(frame, dest, type_value)
             case ("jmpset", param_addr, target):

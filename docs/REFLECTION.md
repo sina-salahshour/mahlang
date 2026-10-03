@@ -1,10 +1,11 @@
 # Reflection, decorators, and hooks
 
-Status: **designed 2026-09-30; M41a landed** (type values, metadata, spread
-calls, `std:reflect`, `json.decode`; bytecode 1.14). M41b (decorators as
-metadata, bytecode 1.15) and M41c (hook traits, function-item impls, rest
-parameters, bytecode 1.16) are not started. See "M41a: what landed" below for
-where the implementation differs from or adds to this design.
+Status: **designed 2026-09-30; M41a and M41b landed** (type values, metadata,
+spread calls, `std:reflect`, `json.decode`; bytecode 1.14; decorators as
+metadata, bytecode 1.15). M41c (hook traits, function-item impls, rest
+parameters, bytecode 1.16) is not started. See "M41a: what landed" and
+"M41b: what landed" below for where the implementation differs from or adds
+to this design.
 
 The motivating user is a backend web framework written in Mah, in the
 style of NestJS and FastAPI:
@@ -380,6 +381,57 @@ the top-level-`let` rule above), checker (each decorator is type-checked
 as an expression; no constraint on its type), formatter, tree-sitter
 grammar and highlights, LSP hover/go-to-definition/rename inside
 decorators, the project templates' language reference.
+
+---
+
+### M41b: what landed
+
+Everything above, as specified, with these choices (each unspecified or
+forced):
+
+- **Function closures are created up front** in a program that has
+  decorators (the phase needs every function to exist, and top-level
+  functions weren't hoisted before). Nothing can observe it: a function can't
+  be named before its declaration. A `let f = fn ...` is a statement, not a
+  declaration, so it counts as a top-level `let` for the phase and for the
+  top-level-variable rule.
+- **What "statement" means for the phase**: anything that isn't a `fn`,
+  `extern fn`, `struct`, `enum`, `trait`, `impl` or `test`. Modules are
+  found with the preprocessor's source map (file of the decorator, file of
+  the statement); a module with no statement runs its phase before the next
+  statement of any module after the end of its code. A decorator that calls a
+  function reading its own module's `let` sees `none`: only the *name* of a
+  `let` is rejected.
+- **Forward references**: a decorator may name a top-level function or type
+  declared later in the module (they're resolved once every top-level name is
+  declared; the closures exist when the phase runs). A top-level `let`, early
+  or late, is still the compile error. Ordinary code keeps declaration order.
+- **Factories that read a `let`**: a decorator factory that reads its own
+  module's top-level `let`, used on that same module's declarations, sees
+  `none` (the module's `let`s haven't run); used from an importing module it
+  sees the initialized value. Keep constants inside the factory, or in a
+  function that returns them.
+- **`decorate` takes its values as operands** (`A*`), not from a stack: this
+  VM has registers. `kind` is a varuint like `loadtype`'s. The target of a
+  `struct`/`enum` is told apart by name, so a struct and an enum sharing a
+  name are decorated separately.
+- **`reflect.signature` and `reflect.schema` carry the decorators** (one more
+  element on the function/parameter/type/field/variant descriptors), so
+  `reflect.mh` doesn't call `reflect.decorators` and a program that imports
+  `std:reflect` without decorators stays at minor 14. The native exists (arity
+  3, since 15) and returns a copy; it isn't reachable from Mah code without
+  indices, which aren't public API.
+- **Decorator expression shapes**: `@a` is an `Ident`, `@a.b` a
+  `FieldAccess`, `@a(x)` a `Call`, `@a.b(x)` a `MethodCall`, so `@Route.make("x")`
+  works like it does in an expression. A decorator on a closure parameter,
+  nested `fn`, trait method or its parameters, or a variant's field is the same
+  compile error as the other misplacements.
+- **Docs and decorators**: a doc run above the decorator lines documents the
+  declaration; a parameter/field/variant's doc is looked up above its first
+  decorator.
+- **`find`** is plain Mah over `type_of`/`==`.
+- **Formatter** puts a decorator of a `fn`/`struct`/`enum`/method on its
+  own line with no blank line before the declaration; the rest stay inline.
 
 ---
 

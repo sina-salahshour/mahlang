@@ -346,7 +346,14 @@ class CodeBuffer:
 
 
 class Codegen:
-    def __init__(self, global_frame_level):
+    def __init__(self, global_frame_level, pp=None):
+        # M41b: the `Preprocessed` result, when there is one -- the decorator
+        # phase (`_decorator_phases`) needs to know which module (source
+        # file) a declaration or statement belongs to.
+        self._pp = pp
+        # M41b: ids of the top-level `fn` declarations whose closures were
+        # created up front (only in a program that has decorators).
+        self._hoisted_fns: set = set()
         self.buf = CodeBuffer()
         self.frame_stack = [global_frame_level]
         self._while_stack: list[dict] = []
@@ -390,6 +397,18 @@ class Codegen:
         # since a trait impl's registrations can reference an inherited
         # trait-default slot that a DIFFERENT statement (the `trait`
         # itself) populated.
+        # M41b: decorators are evaluated in a phase that needs every
+        # function to exist, so in a program that has decorators the
+        # closures of the top-level `fn` declarations are created up front
+        # too (no observable difference: creating a closure has no effect
+        # and nothing can name a function before its declaration).
+        phases = self._decorator_phases(stmts)
+        if phases:
+            for stmt in stmts:
+                if self._is_fn_decl(stmt):
+                    addr = self.gen_expr(stmt.value)
+                    self.buf.emit(("=", addr, None, (0, stmt.address)))
+                    self._hoisted_fns.add(id(stmt))
         for stmt in stmts:
             if isinstance(stmt, (TraitDecl, ImplDecl)):
                 self._tparam_scopes.append(frozenset(tp.name for tp in stmt.type_params))
@@ -432,8 +451,19 @@ class Codegen:
         if has_defer:
             self.buf.emit(("deferpush", None, None, None))
             self._defer_depth += 1
+        last_position = 0
         for stmt in stmts:
+            position = getattr(stmt, "position", None)
+            if position is not None:
+                last_position = position
+            if phases and not self._is_declaration(stmt):
+                # M41b: each module's decorator phase goes right before its
+                # first statement (or, with none, where its code ends).
+                while phases and phases[0][0] <= last_position:
+                    self._gen_decorator_phase(phases.pop(0)[1])
             self.gen_stmt(stmt)
+        while phases:
+            self._gen_decorator_phase(phases.pop(0)[1])
         if has_defer:
             self._emit_defer_unwind(1)
             self._defer_depth -= 1
@@ -452,6 +482,84 @@ class Codegen:
 
         self.buf.global_slot_count = self.frame_stack[-1].next_slot
         return self.buf
+
+    # -- M41b: the decorator phase -------------------------------------------
+
+    @staticmethod
+    def _is_fn_decl(stmt) -> bool:
+        return isinstance(stmt, LetStmt) and stmt.is_decl and isinstance(stmt.value, FnExpr)
+
+    def _is_declaration(self, stmt) -> bool:
+        """What the decorator phase doesn't count as a 'statement': the
+        declarations (`fn`, `struct`, `enum`, `trait`, `impl`, `test`)."""
+        return self._is_fn_decl(stmt) or isinstance(stmt, (StructDecl, EnumDecl, TraitDecl, ImplDecl, TestDecl))
+
+    def _module_key(self, position):
+        return self._pp.map_to_source(position)[0] if self._pp is not None and position is not None else None
+
+    def _decorator_phases(self, stmts: list) -> list:
+        """docs/REFLECTION.md (M41b, "Evaluation"): `[(trigger, decorations)]`
+        sorted by trigger, one entry per module (source file) that has
+        decorated declarations. `decorations` are `(position, target, exprs)`
+        in source order; `trigger` is the combined-text offset the phase goes
+        before -- the position of the module's first statement, or, if it has
+        none, the end of its code (the end of its last source segment), so
+        the phase then runs right after everything the module declares and
+        before the next statement of anything. A module is a source file,
+        found with the preprocessor's source map (its code can be split
+        around the modules it imports)."""
+        by_module: dict = {}
+
+        def add(target, exprs) -> None:
+            if exprs:
+                by_module.setdefault(self._module_key(exprs[0].position), []).append((exprs[0].position, target, exprs))
+
+        def add_fn(fn: FnExpr) -> None:
+            add(("fn", fn, None), fn.decorators)
+            for index, decorators in enumerate(fn.param_decorators):
+                add(("param", fn, index), decorators)
+
+        for stmt in stmts:
+            if self._is_fn_decl(stmt):
+                add_fn(stmt.value)
+            elif isinstance(stmt, StructDecl):
+                add(("struct", stmt.name, None), stmt.decorators)
+                for index, decorators in enumerate(stmt.field_decorators):
+                    add(("field", stmt.name, index), decorators)
+            elif isinstance(stmt, EnumDecl):
+                add(("enum", stmt.name, None), stmt.decorators)
+                for index, decorators in enumerate(stmt.variant_decorators):
+                    add(("variant", stmt.name, index), decorators)
+            elif isinstance(stmt, ImplDecl):
+                for method in stmt.methods:
+                    if method.fn is not None:
+                        add_fn(method.fn)
+        if not by_module:
+            return []
+        first_statement: dict = {}
+        for stmt in stmts:
+            position = getattr(stmt, "position", None)
+            if not self._is_declaration(stmt) and position is not None:
+                first_statement.setdefault(self._module_key(position), position)
+        phases = []
+        for key, decorations in by_module.items():
+            if key in first_statement:
+                trigger = first_statement[key]
+            elif self._pp is not None:
+                trigger = max(seg.start + seg.length for seg in self._pp.segments if seg.path == key)
+            else:
+                trigger = float("inf")
+            phases.append((trigger, sorted(decorations, key=lambda d: d[0])))
+        phases.sort(key=lambda phase: phase[0])
+        return phases
+
+    def _gen_decorator_phase(self, decorations: list) -> None:
+        for _position, target, exprs in decorations:
+            saved = self.buf.current_pos
+            self.buf.current_pos = exprs[0].position
+            addrs = tuple(self.gen_expr(expr) for expr in exprs)
+            self.buf.emit(("decorate", target, addrs, None))
+            self.buf.current_pos = saved
 
     # -- statements ------------------------------------------------------
 
@@ -474,6 +582,8 @@ class Codegen:
 
     def _gen_stmt(self, stmt) -> None:
         if isinstance(stmt, LetStmt):
+            if id(stmt) in self._hoisted_fns:
+                return  # M41b: its closure was created up front
             src = self.gen_expr(stmt.value)
             self.buf.emit(("=", src, None, (0, stmt.address)))
         elif isinstance(stmt, AssignStmt):
