@@ -2,74 +2,80 @@
 
 > ماه — "moon" in Persian.
 
-Mah is a small programming language built entirely from scratch: a
-hand-written lexer, recursive-descent parser, resolver, bytecode compiler,
-and a VM for its portable bytecode format, plus a formatter, a real LSP
-server, and editor integrations for Neovim and VS Code — **every one of
-them pure Python**, standard library only, with zero third-party runtime
-dependencies anywhere in the toolchain.
+Mah is a small programming language built from scratch, with a hand-written
+compiler, a portable bytecode VM, a static type checker, a standard
+library, reflection, an LSP server, a formatter, and editor integrations
+for Neovim and VS Code.
+
+- **Language:** structs, enums, pattern matching, traits, closures that
+  capture by reference, lazy iterators, `async`-style `detach`/`.await`,
+  `defer`, typed `throw`/`try`/`catch` errors, decorators, and runtime
+  reflection.
+- **Types:** optional annotations, generics, and a static checker that
+  infers most types (including which errors a function can throw). Types
+  never change what a program does at runtime.
+- **Two runtimes for one bytecode format:** the compiler emits portable
+  `.mahc` bytecode (fully specified in `docs/MAHC_FORMAT.md`), which runs on
+  a Python VM or on a native Rust VM. The Rust VM can also produce a single
+  self-contained executable.
+- **Standard library:** `std:math`, `json`, `csv`, `path`, `regex`,
+  `random`, `collections`, `time`, `async`, `fs`, `process`, `reflect`, and
+  `test`, mostly written in Mah itself.
+- **Tooling:** `mah run`/`build`/`check`/`test`/`format`/`init`, project
+  manifests, and `mah lsp` (diagnostics, typed hover, completion, go to
+  definition, cross-file rename, formatting).
+
+Website and docs: [mahlang.dev](https://mahlang.dev).
 
 ## Why it's built this way
 
-Mah exists as a from-the-ground-up exploration of how a language and its
-tooling actually work, so a few choices run through the whole project on
-purpose:
+Mah is a from-the-ground-up exploration of how a language and its tooling
+actually work, so a few choices run through the whole project on purpose:
 
-- **Pure Python, standard library only.** The lexer, parser, resolver,
-  codegen, VM, and the LSP server import nothing beyond `python3`'s own
-  stdlib — no parser-generator library, no LSP framework, no third-party
-  CLI library (the `mah` command's `run`/`build`/`format`/`lsp`
-  subcommands are plain `argparse`). Clone the repo, and everything runs with nothing to
-  `pip install`. The only place this project reaches for `npm`/Node is the
-  optional VS Code extension client, since that's simply what a VS Code
-  extension is — the language server it talks to is still pure Python.
-- **Hand-written, not generated.** There's no grammar DSL feeding a parser
-  generator (an earlier version of this project worked that way — see
-  `compiler-generator/` and `docs/GRAMMAR_DSL.md`, kept only as history).
-  The current compiler is entirely hand-written, which is slower to build
-  by hand but means every stage is something you can actually read and
-  reason about end to end.
+- **Hand-written, not generated.** Lexer, recursive-descent parser,
+  resolver, type checker, codegen, and formatter are all written by hand.
+  There's no grammar DSL feeding a parser generator. An earlier version
+  of this project worked that way; `compiler-generator/` and
+  `docs/GRAMMAR_DSL.md` are kept only as history. It's slower to build,
+  but every stage is something you can read end to end.
+- **Few dependencies.** The compiler, Python VM, formatter, and language
+  server use only the Python standard library: no parser library, no LSP
+  framework, no CLI library. Clone the repo and `python -m mah` works with
+  nothing to `pip install`. The Rust runtime uses the Rust standard library
+  plus the `regex` crate. The only Node code is the optional VS Code
+  extension client and the website.
+- **The bytecode is the contract.** Both VMs run only `.mahc`, and its
+  format is written down in enough detail to implement a third VM in any
+  language. The two existing ones run the same test suite.
 - **Heap-allocated closures over a native call stack.** Every function
-  call gets a heap-allocated `Frame`, linked to its lexically enclosing
-  frame by a static chain pointer (and, at runtime, a caller-return chain
-  — the classic SCP/DCP activation-record technique). This is what lets
-  Mah closures capture outer variables **by reference, like JavaScript**
-  (not by value/name like Python) — a closure that outlives the call that
-  created it still sees later mutations of its captured variables. There's
-  no garbage collector yet, but the object model (heap `Frame`s,
-  `Closure`s, `StructInstance`s, `EnumInstance`s, all with reference
-  semantics) is deliberately shaped so one can be added later without a
-  redesign.
+  call gets a heap-allocated `Frame` linked to its lexically enclosing
+  frame by a static chain pointer (the classic SCP/DCP activation-record
+  technique). That's what lets closures capture outer variables **by
+  reference, like JavaScript**: a closure that outlives its call still sees
+  later changes to what it captured. There's no garbage collector yet, but
+  the object model is shaped so one can be added without a redesign.
 - **A forgiving parser, for tooling's sake.** The parser recovers from a
-  syntax error instead of aborting the whole parse, producing an `ErrorNode`
-  in place of what it couldn't read and continuing — so the language
-  server can report every mistake in a file in one pass, not just the
-  first one. (Running a file, as opposed to editing it, still refuses
+  syntax error instead of stopping, so the language server can report
+  every mistake in a file in one pass. (Running a file still refuses
   outright if there's any parse error.)
 
 ## A quick tour
 
 ```mah
-# variables, structs, and closures that capture by reference
+# closures capture by reference
 let counter = fn() {
     let count = 0
-    return fn() {
+    fn() {
         count = count + 1
-        return count
+        count
     }
 }
 let next = counter()
 print(next())   # 1
 print(next())   # 2
 
+# structs, enums, pattern matching
 struct Point { x, y }
-fn add(a, b) {
-    return Point { x: a.x + b.x, y: a.y + b.y }
-}
-let p = add(Point { x: 1, y: 2 }, Point { x: 3, y: 4 })
-print(p)        # Point { x: 4, y: 6 }
-
-# enums (unit or struct-shaped variants), plus the built-in Option type
 enum Shape {
     Circle { r },
     Square { s },
@@ -83,48 +89,25 @@ fn area(s) {
         Shape.Empty => { 0 }
     }
 }
-print(area(Shape.Circle { r: 5 }))
+print(area(Shape.Circle { r: 5 }))      # 75
 
-fn half(n) {
-    if n % 2 == 0 { return some(n // 2) }
-    return none
-}
-match half(7) {
-    some(v) => { print(v) }
-    none => { print("no half for an odd number") }
-}
+# if/match/blocks are expressions; a function body's last expression is
+# its return value
+fn abs(n) { if n < 0 { -n } else { n } }
 
-# if/match/bare blocks are expressions, and a function body is just a
-# block -- so its trailing expression is its implicit return value
-fn abs(n) {
-    if n < 0 { -n } else { n }
-}
-
-# defer -- Zig-style, block-scoped, LIFO, runs on every exit path
-struct Resource { name }
-fn open(name) {
-    print("opening " + name)
-    return Resource { name: name }
-}
-fn close(r) {
-    print("closing " + r.name)
-}
+# defer: block-scoped, LIFO, runs on every exit path
 fn process(name) {
-    let r = open(name)
-    defer close(r)          # runs whether this returns early or falls through
-    if r.name == "bad" {
-        return
-    }
-    print("using " + r.name)
+    print("opening " + name)
+    defer print("closing " + name)
+    if name == "bad" { return }
+    print("using " + name)
 }
-process("alpha")   # opening alpha / using alpha / closing alpha
-process("bad")     # opening bad / closing bad -- close() still ran
+process("bad")     # opening bad / closing bad
 ```
 
-And the newer parts of the language:
+Traits, iterators, collections, keyword arguments, and async:
 
 ```mah
-# traits and methods
 struct Rect { w, h }
 trait Shape {
     fn area(self)
@@ -135,7 +118,6 @@ impl Shape for Rect {
 }
 print(Rect { w: 2, h: 3 }.describe())   # a shape with area 6
 
-# Vectors, Maps, lazy iterators, for loops
 let odd_squares = (1..=5).map(fn(n) { n * n }).filter(fn(n) { n % 2 == 1 }).reduce()
 print(odd_squares)                      # [1, 9, 25]
 let ages = ["ada": 36, "alan": 41]
@@ -143,58 +125,83 @@ for let name, let i in ages {
     print(i, name, ages[name])          # 0 ada 36, then 1 alan 41
 }
 
-# default values, keyword arguments, match guards
 fn greet(name, greeting = "Hello") { greeting + ", " + name + "!" }
 print(greet("Mah", greeting: "Salam"))  # Salam, Mah!
-fn sign(n) {
-    match n {
-        0 => { "zero" }
-        x if x < 0 => { "negative" }
-        _ => { "positive" }
-    }
-}
-print(sign(-4))                         # negative
 
-# async: detach any call or expression, then .await its Promise
 fn slow(n) { sleep_async(10); n * 2 }
 let a = detach slow(21)
 let b = detach { sleep_async(5); "from a block" }
 print(a.await, b.await)                 # 42 from a block
-
-# optional type annotations and generics
-fn first<T>(v: Vector<T>) -> T { v[0] }
-let pick: fn(Vector<Number>) -> Number = first
-print(pick([7, 8]))                     # 7
 ```
 
-Type annotations are optional and are checked for valid type names today.
-The static type checker that will use them (with inference, so most code
-needs no annotations) is the next milestone; see "Where this is going".
+Types and errors. Annotations are optional. The checker infers the rest,
+including which errors each function can throw, and `mah check` reports
+anything left unhandled:
 
-See `examples/*.mh` for many more (structs, enums, pattern matching,
-traits, iterators, Vectors and Maps, `for` loops, keyword arguments,
-async, `defer`, closures/recursion, imports, strings, number-base
-conversions) and `docs/V2_DESIGN.md` for the full language design writeup,
-milestone by milestone.
+```mah
+fn first<T>(v: Vector<T>) -> T { v[0] }
+print(first([7, 8]))                    # 7
+
+enum ParseError { Empty, BadDigit }
+impl Error for ParseError {}
+
+fn first_digit(s: String) -> String {   # inferred: throws ParseError
+    if s.len() == 0 { throw ParseError.Empty }
+    let c = s.char_at(0)
+    if c < "0" | c > "9" { throw ParseError.BadDigit }
+    c
+}
+
+print(try { first_digit("") } catch {
+    ParseError.Empty => { "was empty" }
+    e: ParseError => { "other: " + e.message() }
+})                                      # was empty
+print(try first_digit("x") else "none") # none
+```
+
+Decorators and reflection. A decorator is a plain value attached to a
+declaration, and `std:reflect` reads it back along with the declaration's
+written types and doc comments. A decorator whose type implements a hook
+trait can also wrap a function, transform an argument, or validate a
+struct:
+
+```mah
+import reflect from "std:reflect"
+
+struct Route { method: String, path: String }
+fn get(path: String) -> Route { Route { method: "GET", path: path } }
+
+## Fetch one user.
+@get("/users/{id}")
+fn get_user(id: Number, verbose: Bool = false) -> Number { id }
+
+let sig = reflect.signature(get_user)
+print(sig.doc)                          # Fetch one user.
+match reflect.find(sig.decorators, Route) {
+    some(route) => { print(route.method, route.path) }   # GET /users/{id}
+    none => { print("not a route") }
+}
+```
+
+See `examples/*.mh` for much more (modules, strings, files, processes,
+regex, JSON/CSV, timers, hooks, tests), and the docs listed at the end.
 
 ### Modules
 
 ```mah
 # mathlib.mh
-export fn square(n) { return n ** 2 }
+export fn square(n) { n ** 2 }
 export let answer = 42
-
-fn helper() { return 1 }    # private: not visible to importers
-export helper                # ...unless explicitly exported
+fn helper() { 1 }            # private: not visible to importers
 ```
 
 ```mah
-import math from "mathlib"   # namespaced -- math.square(4), math.answer
-# or
-import "mathlib"             # flat -- square(4) directly in scope
+import math from "mathlib"   # namespaced: math.square(4), math.answer
+import "mathlib"             # or flat: square(4) directly in scope
+import json from "std:json"  # standard library modules use the std: prefix
 ```
 
-Only `export`ed names are reachable; each file is inlined at most once, so
+Only `export`ed names are reachable. Each file is included at most once, so
 diamond imports and cycles are safe, and errors inside an imported file are
 reported with their real `file:line:column`.
 
@@ -207,7 +214,7 @@ python -m mah build ./examples/structs.mh --target release -o out.mahc   # no de
 python -m mah runc ./examples/structs.mahc           # run compiled bytecode
 python -m mah dis ./examples/structs.mahc            # show it as readable instructions
 python -m mah format ./examples                      # rewrite .mh files in the standard layout
-python -m mah check ./examples/structs.mh             # run the static type checker
+python -m mah check ./examples/structs.mh            # run the static type checker
 ```
 
 `mah format` only ever changes whitespace, and checks that before writing
@@ -243,6 +250,7 @@ mah run                # runs the entry point from mah-project.toml (src/main.mh
 mah build              # writes every [[target]], e.g. build/my-app.mahc
 mah build --target release
 mah check              # runs the static type checker, at the project's [types] check level
+mah test               # runs every *.test.mh file (std:test; see docs/MAH_TEST.md)
 ```
 
 `mah init` creates `mah-project.toml` (package name, version, entry point,
@@ -320,125 +328,103 @@ Point your editor's LSP client at that command for `.mh` files.
 
 ## The language server
 
-`mah lsp` is a dependency-free (standard library only) implementation of
-the Language Server Protocol, built directly on the same resolver the
-compiler uses — not a second, independent analysis of the source. It
-currently provides:
+`mah lsp` implements the Language Server Protocol using only the Python
+standard library, on top of the same resolver and type checker the
+compiler uses, not a second analysis of the source. It provides:
 
-- live diagnostics as you type, including syntax and resolve errors inside
-  imported files
-- hover, with docs for keywords and builtins, the declaration a variable/
-  function/parameter resolved to (with its doc comment), struct/enum
-  shapes, and trait and method signatures
+- live diagnostics as you type: syntax, resolve and type errors, including
+  ones inside imported files
+- hover: docs for keywords and builtins, inferred types, the declaration a
+  name resolved to (with its doc comment), struct/enum shapes, and trait
+  and method signatures
 - completion: keywords, builtins, names in scope, imported and namespaced
   names, methods/fields after a `.` based on the receiver's type, and `.mh`
   files and `std:` modules inside an `import "..."` string
-- go to definition — scope-aware (locals, then globals), and it follows
-  imports: jumping from a namespaced call, the namespace name itself, or
-  an `import` path string, into the file it points at
+- go to definition, scope-aware and across imports
 - rename: variables and functions across every file that imports them,
-  and struct/enum/variant/field names (including their uses in type
-  annotations)
+  and struct/enum/variant/field names (including in type annotations)
 - document formatting, the same as `mah format`
-
-(Document symbols and code actions existed in an earlier version of the
-server and are still disabled, pending a rewrite onto the same
-resolver-backed foundation as the features above.)
 
 ## Testing
 
 ```sh
-make test
+make test          # the Python implementation (stdlib unittest)
+make test-rust     # the Rust runtime against the same programs
 ```
 
-Runs the full suite (stdlib `unittest`, no extra dependencies) — every
-language feature and LSP capability above ships with automated tests, not
-just an example file; see `docs/TESTING.md`.
+Every language feature and LSP capability ships with automated tests, not
+just an example file; see `docs/TESTING.md`. (For testing *Mah programs*,
+see `mah test` and `docs/MAH_TEST.md`.)
 
 ## How it's built
 
 ```
-source --> preprocessor --> lexer --> parser --> resolver --> codegen --> lower --> VM
-           (imports)                  (AST)      (scopes,      (flat IR)   (.mahc     (runs .mahc
-                                                   addresses)               bytecode)  only)
+source --> preprocessor --> lexer --> parser --> resolver --> type checker
+           (imports)                  (AST)      (scopes,     (advisory; never
+                                                  addresses)   feeds codegen)
+                                                      |
+                                                      v
+                                    codegen --> lower --> .mahc --> Python VM
+                                   (flat IR)                    \-> Rust VM
 ```
 
-- `mah/preprocessor.py` inlines `import`/`export` directives into one
-  combined source text (tracking original file positions for error
-  messages), before anything else runs.
-- `mah/compiler/lexer.py` / `parser.py` hand-write tokenizing and a
-  recursive-descent parse into an AST (`ast_nodes.py`), recovering from
-  syntax errors instead of aborting (see "A forgiving parser" above).
-- `mah/compiler/resolve.py` walks the AST once, assigning every variable a
-  `(depth, slot)` address relative to its enclosing function's frame, and
-  building the symbol table the LSP's hover/definition/rename read
-  directly.
-- `mah/compiler/codegen.py` lowers the AST into a flat, 3-address IR, and
-  `mah/bytecode/lower.py` turns that into the portable `.mahc` format
-  (specified in `docs/MAHC_FORMAT.md`).
-- `mah/code_interpreter.py` is the VM, and it runs only `.mahc`: heap
-  `Frame`s linked by a static chain pointer for lexical scoping and
-  closures (see "Heap-allocated closures" above), an explicit
-  return-address stack for calls, tagged heap values for structs/enums,
-  and a single-threaded task scheduler for `detach`/`.await`.
-- `mah/std/prelude.mh` is the part of the standard library written in Mah
-  itself (ranges, iterators and their adapters), included automatically
-  when a program uses it.
-- `mah/format/` is `mah format`: it uses the lexer and parser to lay code
-  out, and verifies that only whitespace changed before writing.
+- `mah/preprocessor.py` inlines `import`/`export` (and `std:` modules)
+  into one combined source, keeping original file positions for errors.
+- `mah/compiler/lexer.py` / `parser.py` tokenize and parse into an AST
+  (`ast_nodes.py`), recovering from syntax errors.
+- `mah/compiler/resolve.py` gives every variable a `(depth, slot)` address
+  in its function's frame and builds the symbol table the LSP reads.
+- `mah/compiler/typecheck.py` / `types.py` are the static checker:
+  inference, generics, traits, and error sets. Its output is diagnostics
+  only, so the bytecode is the same whatever it decides.
+- `mah/compiler/codegen.py` lowers the AST into a flat IR, and
+  `mah/bytecode/lower.py` turns that into `.mahc`.
+- `mah/code_interpreter.py` is the Python VM; `runtime/` is the Rust VM
+  (`mah-vm`). Both use heap `Frame`s with a static chain for closures,
+  tagged heap values for structs/enums, and a single-threaded task
+  scheduler for `detach`/`.await` and async I/O.
+- `mah/std/*.mh` is the standard library, written in Mah over a small set
+  of native functions (`extern fn`) that each VM implements.
+- `mah/format/` is `mah format`, and `mah/lsp/` is the language server.
 
-`docs/V2_DESIGN.md` is the full design document — every language feature
-above landed as its own milestone (M0 through M21 so far) with the
-reasoning, deviations, and test coverage for each written up in place.
+`docs/V2_DESIGN.md` and the per-feature design docs record every milestone
+(M0 through M41c so far) with its reasoning, deviations, and test coverage.
 
 ## Where this is going
 
-Next up, designed in `docs/TYPES.md`:
+Next, mostly in service of a NestJS/FastAPI-style web framework written in
+Mah (routes from decorators, request binding and OpenAPI from types):
 
-- **A static type checker** (M22–M24). Types are inferred wherever
-  possible: locals, return types, closure parameters from where the
-  closure is passed (`"abc".map(fn(c) { ... })` knows `c` is a `String`),
-  and even a parameter's type from how the body uses it. Annotations stay
-  optional, with an explicit `Unknown` as an escape hatch. Generic
-  functions, structs, enums and traits, and a fully typed prelude. Three
-  strictness levels in `mah-project.toml`: `loose` (the default: editor
-  warnings only), `strict` (type errors fail the build and show in the
-  editor), and `explicit` (also requires an annotation wherever a type
-  can't be inferred). A `mah check` command, and hover/completion driven
-  by the inferred types. Types have no runtime cost: the bytecode doesn't
-  change.
-
-Further out, tracked in `docs/NEXT_PHASES.md` and `docs/TYPES.md`:
-
-- **Formatter settings** in a `[format]` section of `mah-project.toml`
-  (line width, indentation); the options already exist internally
-- **Pattern matching on Vectors** (`[a, b]`, `[head, ...rest]`) and
-  **exhaustiveness checking** for `match`
-- **Nullable types** (`T?`), so the checker can catch "this might be
-  `none`" bugs
-- **Types as runtime values**, for narrowing with `if`/`match` on a type
-- **Renaming a field everywhere it's accessed** (`p.x`), which needs the
-  type checker to know what `p` is
-- **Errors you can handle** (today a runtime error always ends the
-  program), and built-ins for files, the network and the OS
+- **`Bytes`**, then **`std:socket`**, **`std:url`** and an **HTTP client**
+- **An HTTP server** (with form and multipart bodies)
 - **Third-party packages** (`[dependencies]` in the manifest is already
   reserved for them)
-- **Document symbols and code actions** in the language server
-- A garbage collector, once the heap object model settles
+
+Further out (`docs/NEXT_PHASES.md`, `docs/TYPES.md`): the rest of the
+checker's trait and completion work, pattern matching on Vectors and
+`match` exhaustiveness, nullable types, formatter settings in
+`mah-project.toml`, document symbols and code actions in the LSP, and a
+garbage collector.
 
 ## Docs
 
-- `docs/V2_DESIGN.md` — the language design doc and milestone-by-milestone
+The website at [mahlang.dev](https://mahlang.dev) has the user-facing
+guide and changelog. The design docs in this repo:
+
+- `docs/V2_DESIGN.md`: the language design and milestone-by-milestone
   build log
-- `docs/TYPES.md` — the static type system: syntax, inference,
-  strictness levels, generics, and the milestone plan
-- `docs/FORMAT.md` — `mah format`: its layout rules and the
-  whitespace-only guarantee
-- `docs/NEXT_PHASES.md` — design notes for the rest of "Where this is
-  going" above
-- `docs/TRAITS.md` — traits, `impl`, method dispatch, and system traits
-- `docs/MAHC_FORMAT.md` — the portable `.mahc` bytecode format (normative)
-- `docs/RUST_VM.md` — the Rust runtime (`mah-vm`), `--vm rust`, self-contained executables
-- `docs/TESTING.md` — the testing policy referenced above
-- `docs/DEVELOPMENT_WORKFLOW.md` — how this project's own development is
-  split across planning, implementation, and verification
+- `docs/TYPES.md`: the static type system (syntax, inference, strictness
+  levels, generics)
+- `docs/ERRORS.md`: `throw`/`try`/`catch` and checked error sets
+- `docs/TRAITS.md`: traits, `impl`, method dispatch, and system traits
+- `docs/STDLIB.md`: the standard library, module by module
+- `docs/REFLECTION.md`: type values, metadata, decorators, and hooks
+- `docs/MAH_TEST.md`: `std:test` and `mah test`
+- `docs/FORMAT.md`: `mah format` and its whitespace-only guarantee
+- `docs/MAHC_FORMAT.md`: the portable `.mahc` bytecode format (normative)
+- `docs/RUST_VM.md`: the Rust runtime, `--vm rust`, self-contained
+  executables
+- `docs/NEXT_PHASES.md`: design notes for future work
+- `docs/TESTING.md`: how the implementation itself is tested
+- `docs/DEVELOPMENT_WORKFLOW.md`: how this project's development is split
+  across planning, implementation, and verification
