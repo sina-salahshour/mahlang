@@ -1,0 +1,45 @@
+# std:url and std:http (M39): parse and build URLs, then talk HTTP to a tiny
+# server this program runs itself (std:socket), so it works offline. Point
+# `http.get` at any https:// URL for the real thing.
+
+import url from "std:url"
+import http from "std:http"
+import socket from "std:socket"
+
+let u = url.parse("https://example.com/docs/guide?lang=en#install")
+print(u.host, u.effective_port(), u.path, u.query, u.fragment)
+print(u.resolve("../api/v2?q=1"))
+print(url.encode_query(["q": "mah lang", "page": 2]), url.decode("caf%C3%A9"))
+
+# Answers each request with its request line, as JSON, until `count` are done.
+fn serve(server: socket.Listener, count: Number) throws socket.SocketError {
+    for let i in 0..count {
+        let conn = server.accept()
+        defer conn.close()
+        let line = conn.read_line()
+        let header = conn.read_line()
+        while header != "" { header = conn.read_line() }
+        let body = "{\"you_sent\": \"" + line + "\"}"
+        conn.send_text(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + body.len() + "\r\n\r\n" + body
+        )
+    }
+}
+
+fn demo() throws socket.SocketError | http.HttpError {
+    let server = socket.listen(0)
+    defer server.close()
+    let serving = detach serve(server, 2)
+    let base = "http://127.0.0.1:" + server.port
+    let r = http.get(base + "/hello?name=mah")
+    print(r.status, r.header("content-type"), r.json()["you_sent"])
+    let posted = http.post(base + "/items", json: ["name": "mah"])
+    print(posted.is_success(), posted.json()["you_sent"])
+    serving.await
+}
+
+try { demo() } catch {
+    e: http.HttpError => { print("http error:", e.message()) }
+    e: socket.SocketError => { print("socket error:", e.message()) }
+};
+print(try { http.get("ftp://example.com/") } catch { e: http.HttpError => { e.kind } })

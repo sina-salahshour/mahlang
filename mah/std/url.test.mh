@@ -1,0 +1,160 @@
+# Tests for std:url, run by tests/test_stdlib.py (or
+# `mah test --file mah/std/url.test.mh`).
+import "std:test"
+import url from "./url"
+import json from "./json"
+
+test "parse splits every piece" {
+    let u = url.parse("HTTPS://user:pw@Example.COM:8443/a/b?q=1#top")
+    assert_eq(u.scheme, "https")
+    assert_eq(u.username, "user")
+    assert_eq(u.password, "pw")
+    assert_eq(u.host, "example.com")
+    assert_eq(u.port, 8443)
+    assert_eq(u.path, "/a/b")
+    assert_eq(u.query, "q=1")
+    assert_eq(u.fragment, "top")
+    assert_eq(u.to_string(), "https://user:pw@example.com:8443/a/b?q=1#top")
+}
+
+test "absent pieces" {
+    let u = url.parse("http://example.com")
+    assert_eq(u.port, none)
+    assert_eq(u.path, "")
+    assert_eq(u.query, none)
+    assert_eq(u.fragment, none)
+    assert_eq(u.effective_port(), 80)
+    assert_eq(u.request_target(), "/")
+    assert_eq(url.parse("http://h/?").query, "")
+    assert_eq(url.parse("http://h/?").to_string(), "http://h/?")
+}
+
+test "hosts, ports and other schemes" {
+    assert_eq(url.parse("http://[::1]:8080/x").host, "[::1]")
+    assert_eq(url.parse("http://[::1]:8080/x").port, 8080)
+    assert_eq(url.parse("https://h").effective_port(), 443)
+    assert_eq(url.parse("ftp://h/f").effective_port(), 21)
+    assert_eq(url.parse("mailto:someone@example.com").path, "someone@example.com")
+    assert_eq(url.parse("mailto:someone@example.com").host, "")
+    assert_eq(url.parse("file:///etc/hosts").to_string(), "file:///etc/hosts")
+    assert_eq(url.default_port("wss"), 443)
+    assert_eq(url.default_port("gopher"), none)
+}
+
+test "origin, authority and request target" {
+    let u = url.parse("https://a:b@h.com:443/p/q?x=1#f")
+    assert_eq(u.origin(), "https://h.com")
+    assert_eq(u.authority(), "a:b@h.com:443")
+    assert_eq(u.request_target(), "/p/q?x=1")
+    assert_eq(url.parse("http://h.com:81").origin(), "http://h.com:81")
+}
+
+test "parse errors" {
+    fn kind_of(text: String) -> String {
+        try {
+            url.parse(text);
+            "ok"
+        } catch { e: url.UrlError => { e.kind } }
+    }
+    assert_eq(kind_of("example.com/x"), "invalid_url")
+    assert_eq(kind_of("http://"), "invalid_url")
+    assert_eq(kind_of("http://h:99999/"), "invalid_url")
+    assert_eq(kind_of("http://h:8x/"), "invalid_url")
+    assert_eq(kind_of("http://h/a b"), "invalid_url")
+    assert_eq(kind_of("http://[::1/"), "invalid_url")
+    assert(url.is_valid("http://h"))
+    assert(!url.is_valid("1http://h"))
+    let e = assert_throws(fn() { url.parse("nope") })
+    assert_eq(e.message(), "a URL needs a scheme, like https:: nope")
+}
+
+test "resolve: RFC 3986 normal and abnormal examples" {
+    let base = url.parse("http://a/b/c/d;p?q")
+    let cases = [
+        ["g:h", "g:h"],
+        ["g", "http://a/b/c/g"],
+        ["./g", "http://a/b/c/g"],
+        ["g/", "http://a/b/c/g/"],
+        ["/g", "http://a/g"],
+        ["//g", "http://g"],
+        ["?y", "http://a/b/c/d;p?y"],
+        ["g?y", "http://a/b/c/g?y"],
+        ["#s", "http://a/b/c/d;p?q#s"],
+        ["g#s", "http://a/b/c/g#s"],
+        ["g?y#s", "http://a/b/c/g?y#s"],
+        [";x", "http://a/b/c/;x"],
+        ["g;x", "http://a/b/c/g;x"],
+        ["", "http://a/b/c/d;p?q"],
+        [".", "http://a/b/c/"],
+        ["./", "http://a/b/c/"],
+        ["..", "http://a/b/"],
+        ["../", "http://a/b/"],
+        ["../g", "http://a/b/g"],
+        ["../..", "http://a/"],
+        ["../../", "http://a/"],
+        ["../../g", "http://a/g"],
+        ["../../../g", "http://a/g"],
+        ["../../../../g", "http://a/g"],
+        ["/./g", "http://a/g"],
+        ["/../g", "http://a/g"],
+        ["g.", "http://a/b/c/g."],
+        [".g", "http://a/b/c/.g"],
+        ["g..", "http://a/b/c/g.."],
+        ["..g", "http://a/b/c/..g"],
+        ["./../g", "http://a/b/g"],
+        ["./g/.", "http://a/b/c/g/"],
+        ["g/./h", "http://a/b/c/g/h"],
+        ["g/../h", "http://a/b/c/h"],
+        ["g;x=1/./y", "http://a/b/c/g;x=1/y"],
+        ["g;x=1/../y", "http://a/b/c/y"]
+    ]
+    for let c in cases {
+        assert_eq(base.resolve(c[0]).to_string(), c[1], c[0])
+    }
+    assert_eq(url.parse("http://h").resolve("x").to_string(), "http://h/x")
+}
+
+test "encode and decode" {
+    assert_eq(url.encode("a b/c"), "a%20b%2Fc")
+    assert_eq(url.encode("a b/c", safe: "/"), "a%20b/c")
+    assert_eq(url.encode("héllo~-._"), "h%C3%A9llo~-._")
+    assert_eq(url.decode("h%C3%A9llo%20x+y"), "héllo x+y")
+    assert_eq(url.decode("plain"), "plain")
+    assert_eq(url.decode(url.encode("ü & 日本")), "ü & 日本")
+    fn kind_of(text: String) -> String {
+        try {
+            url.decode(text);
+            "ok"
+        } catch { e: url.UrlError => { e.kind } }
+    }
+    assert_eq(kind_of("%zz"), "invalid_encoding")
+    assert_eq(kind_of("abc%4"), "invalid_encoding")
+    assert_eq(kind_of("%ff"), "invalid_encoding")
+}
+
+test "query strings" {
+    assert_eq(url.encode_query(["q": "mah lang", "page": 2]), "q=mah+lang&page=2")
+    assert_eq(url.encode_query(["t": ["a", "b&c"]]), "t=a&t=b%26c")
+    assert_eq(url.encode_query([["b", "1"], ["a", "x=y"]]), "b=1&a=x%3Dy")
+    assert_eq(url.encode_query([:]), "")
+    # Vectors compare by identity, so these compare their JSON
+    assert_eq(
+        json.stringify(url.parse_query("a=1&b=x+y&a=2&flag&&c=%C3%A9")),
+        "[[\"a\",\"1\"],[\"b\",\"x y\"],[\"a\",\"2\"],[\"flag\",\"\"],[\"c\",\"é\"]]"
+    )
+    assert_eq(url.parse_query("").len(), 0)
+    assert_eq(
+        json.stringify(url.parse("http://h/?a=1&b=2").query_pairs()),
+        "[[\"a\",\"1\"],[\"b\",\"2\"]]"
+    )
+    assert_eq(url.parse("http://h/").query_pairs().len(), 0)
+    let e = assert_throws(fn() { url.encode_query(5) })
+    assert_eq(e.message, "encode_query: params must be a Map or a Vector of pairs, got Number")
+}
+
+test "with_query" {
+    let u = url.parse("http://h/p?old=1#f")
+    assert_eq(u.with_query(["n": "a b"]).to_string(), "http://h/p?n=a+b#f")
+    assert_eq(u.with_query([:]).to_string(), "http://h/p#f")
+    assert_eq(u.query, "old=1")
+}

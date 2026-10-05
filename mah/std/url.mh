@@ -1,0 +1,486 @@
+# std:url -- URLs: parsing, formatting, percent-encoding, query strings and
+# relative references (docs/STDLIB.md). Pure string logic, like std:path.
+#
+#   import url from "std:url"
+#   let u = url.parse("https://example.com:8443/a/b?q=1#top")
+#   print(u.host, u.port, u.path, u.query)     # example.com 8443 /a/b q=1
+#   print(u.resolve("../c").to_string())       # https://example.com:8443/c
+#   print(url.encode("a b/c"))                 # a%20b%2Fc
+#   print(url.encode_query(["q": "mah lang", "page": 2]))   # q=mah+lang&page=2
+#
+# A Url keeps `path`, `query` and `fragment` as written, still
+# percent-encoded (decode a piece with `decode`); the scheme and host are
+# lowercased. `query` and `fragment` are `none` when absent, which differs
+# from present but empty (`http://h/?`).
+
+extern fn type_name(value: Unknown) -> String = "value.type_name"
+extern fn chars(s: String) -> Vector<String> = "string.chars"
+extern fn code_point(c: String) -> Number = "string.code_point"
+
+## What went wrong: `kind` is "invalid_url" (`parse`, `resolve`) or
+## "invalid_encoding" (`decode`, `parse_query`: a bad `%` escape, or bytes
+## that aren't UTF-8 text); `text` is the input.
+export struct UrlError { kind: String, text: String, description: String }
+
+impl Error for UrlError {
+    fn message(self) -> String { self.description + ": " + self.text }
+}
+
+fn invalid(text: String, description: String) -> Unknown throws UrlError {
+    throw UrlError { kind: "invalid_url", text: text, description: description }
+}
+
+## A parsed URL. `port` is a Number or `none` (see `effective_port`);
+## `username` and `password` are "" when absent.
+export struct Url {
+    scheme: String,
+    username: String,
+    password: String,
+    host: String,
+    port: Unknown,
+    path: String,
+    query: Unknown,
+    fragment: Unknown
+}
+
+# -- percent-encoding ---------------------------------------------------------------
+
+let unreserved = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+let hex_digits = "0123456789ABCDEFabcdef"
+
+fn escape_char(c: String) -> String {
+    let hex = c.to_bytes().to_hex().to_upper()
+    let out = ""
+    let i = 0
+    while i < hex.len() {
+        out = out + "%" + hex[i..i + 2]
+        i = i + 2
+    }
+    out
+}
+
+## `text` with every character except letters, digits and `-._~` (and those
+## in `safe`) written as `%XX` escapes of its UTF-8 bytes:
+## `encode("a b/c")` is "a%20b%2Fc", `encode("a b/c", safe: "/")` "a%20b/c".
+export fn encode(text: String, safe: String = "") -> String {
+    let out = ""
+    for let c in chars(text) {
+        if unreserved.contains(c) | (c != "" & safe.contains(c)) {
+            out = out + c
+        } else {
+            out = out + escape_char(c)
+        }
+    }
+    out
+}
+
+fn hex_value(c: String) -> Number {
+    let at = hex_digits.index_of(c).unwrap()
+    if at >= 16 { at - 6 } else { at }
+}
+
+# `decode` with `+` read as a space when `plus` is set (query strings).
+fn decode_with(text: String, plus: Bool) -> String throws UrlError {
+    fn bad(description: String) -> Unknown throws UrlError {
+        throw UrlError { kind: "invalid_encoding", text: text, description: description }
+    }
+    if !text.contains("%") & !(plus & text.contains("+")) { return text }
+    let out = "".to_bytes()
+    let cs = chars(text)
+    let i = 0
+    while i < cs.len() {
+        let c = cs[i]
+        if c == "%" {
+            let a = cs[i + 1]
+            let b = cs[i + 2]
+            if a == none | b == none { bad("a % escape needs two hex digits") }
+            if !hex_digits.contains(a) | !hex_digits.contains(b) {
+                bad("a % escape needs two hex digits")
+            }
+            out.push(hex_value(a) * 16 + hex_value(b))
+            i = i + 3
+        } else {
+            if plus & c == "+" { out.push(32) } else { out.extend(c.to_bytes()) }
+            i = i + 1
+        }
+    }
+    match out.to_text() {
+        some(s) => { s }
+        none => { bad("the escapes aren't UTF-8 text") }
+    }
+}
+
+## `text` with each `%XX` escape replaced by its byte; throws kind
+## "invalid_encoding" for a `%` without two hex digits, or bytes that aren't
+## UTF-8. `+` stays `+` (see `parse_query`).
+export fn decode(text: String) -> String throws UrlError { decode_with(text, false) }
+
+# -- query strings ----------------------------------------------------------------
+
+# Form encoding: a space is `+`.
+fn encode_form(text: String) -> String { encode(text, safe: " ").replace_all(" ", "+") }
+
+## A query string from `params`: a Map (each value a String or Number, or a
+## Vector of them for a repeated key) or a Vector of `[key, value]` pairs, in
+## order. Form style: a space is `+`, everything else but letters, digits
+## and `-._~` is `%XX`. `encode_query(["q": "a b", "n": 1])` is "q=a+b&n=1".
+export fn encode_query(params: Unknown) -> String {
+    let pairs = []
+    let kind = type_name(params)
+    if kind == "Map" {
+        for let key in params {
+            let value = params[key]
+            if type_name(value) == "Vector" {
+                for let item in value { pairs.push([key, item]) }
+            } else {
+                pairs.push([key, value])
+            }
+        }
+    } elif kind == "Vector" {
+        for let pair in params {
+            if type_name(pair) != "Vector" | pair.len() != 2 {
+                throw RuntimeError.ArgumentError {
+                    message: "encode_query: each pair must be a Vector [key, value]"
+                }
+            }
+            pairs.push(pair)
+        }
+    } else {
+        throw RuntimeError.ArgumentError {
+            message: "encode_query: params must be a Map or a Vector of pairs, got " + kind
+        }
+    }
+    let parts = []
+    for let pair in pairs {
+        parts.push(encode_form("" + pair[0]) + "=" + encode_form("" + pair[1]))
+    }
+    parts.join("&")
+}
+
+## The `[key, value]` pairs of a query string (without its `?`), decoded, in
+## order; `+` is a space and a piece without `=` has value "".
+## `parse_query("a=1&b=x+y&a=2")` is [[a, 1], [b, x y], [a, 2]].
+export fn parse_query(query: String) -> Vector<Vector<String>> throws UrlError {
+    let out = []
+    if query == "" { return out }
+    for let piece in query.split("&") {
+        if piece == "" { continue }
+        let at = piece.index_of("=")
+        if at == none {
+            out.push([decode_with(piece, true), ""])
+        } else {
+            let i = at.unwrap()
+            out.push([decode_with(piece[..i], true), decode_with(piece[i + 1..], true)])
+        }
+    }
+    out
+}
+
+# -- parsing -----------------------------------------------------------------------
+
+# The pieces of a reference (RFC 3986 #3, #4.1); an absent piece is none.
+struct Parts {
+    scheme: Unknown,
+    authority: Unknown,
+    path: String,
+    query: Unknown,
+    fragment: Unknown
+}
+
+let scheme_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+-."
+
+fn scheme_end(text: String) -> Number {
+    let at = text.index_of(":")
+    if at == none { return 0 - 1 }
+    let n = at.unwrap()
+    if n == 0 { return 0 - 1 }
+    if !"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ".contains(text[0]) {
+        return 0 - 1
+    }
+    for let c in chars(text[..n]) {
+        if !scheme_chars.contains(c) { return 0 - 1 }
+    }
+    n
+}
+
+# The position of the first of `stops` in `text` at or after `from`, or its length.
+fn find_any(text: String, stops: String, from: Number) -> Number {
+    let i = from
+    while i < text.len() {
+        if stops.contains(text[i]) { return i }
+        i = i + 1
+    }
+    text.len()
+}
+
+fn split(text: String) -> Parts throws UrlError {
+    for let c in chars(text) {
+        if code_point(c) <= 32 | code_point(c) == 127 {
+            invalid(text, "a URL can't contain spaces or control characters")
+        }
+    }
+    let rest = text
+    let scheme = none
+    let end = scheme_end(rest)
+    if end > 0 {
+        scheme = rest[..end].to_lower()
+        rest = rest[end + 1..]
+    }
+    let fragment = none
+    let hash = rest.index_of("#")
+    if hash != none {
+        fragment = rest[hash.unwrap() + 1..]
+        rest = rest[..hash.unwrap()]
+    }
+    let query = none
+    let mark = rest.index_of("?")
+    if mark != none {
+        query = rest[mark.unwrap() + 1..]
+        rest = rest[..mark.unwrap()]
+    }
+    let authority = none
+    if rest.starts_with("//") {
+        let stop = find_any(rest, "/", 2)
+        authority = rest[2..stop]
+        rest = rest[stop..]
+    }
+    Parts { scheme: scheme, authority: authority, path: rest, query: query, fragment: fragment }
+}
+
+# `[userinfo@]host[:port]` into the Url's fields.
+fn read_authority(u: Url, authority: String, text: String) throws UrlError {
+    let hostport = authority
+    let at = 0 - 1
+    let i = 0
+    while i < authority.len() {
+        if authority[i] == "@" { at = i }
+        i = i + 1
+    }
+    if at >= 0 {
+        let info = authority[..at]
+        hostport = authority[at + 1..]
+        let colon = info.index_of(":")
+        if colon == none {
+            u.username = info
+        } else {
+            u.username = info[..colon.unwrap()]
+            u.password = info[colon.unwrap() + 1..]
+        }
+    }
+    let port_text = none
+    if hostport.starts_with("[") {
+        let close = hostport.index_of("]")
+        if close == none { invalid(text, "an IPv6 address needs a closing ]") }
+        let c = close.unwrap()
+        u.host = hostport[..c + 1].to_lower()
+        let after = hostport[c + 1..]
+        if after != "" {
+            if !after.starts_with(":") { invalid(text, "unexpected text after the IPv6 address") }
+            port_text = after[1..]
+        }
+    } else {
+        let colon = hostport.index_of(":")
+        if colon == none {
+            u.host = hostport.to_lower()
+        } else {
+            u.host = hostport[..colon.unwrap()].to_lower()
+            port_text = hostport[colon.unwrap() + 1..]
+        }
+    }
+    if port_text != none & port_text != "" {
+        for let c in chars(port_text) {
+            if !"0123456789".contains(c) { invalid(text, "the port must be a number") }
+        }
+        let port = port_text.parse_number()
+        if port > 65535 { invalid(text, "the port must be at most 65535") }
+        u.port = port
+    }
+}
+
+## Parses an absolute URL (`scheme:...`). Throws kind "invalid_url" when
+## there is no scheme, the text has spaces or control characters, the port
+## isn't a number up to 65535, or an `http`/`https` URL has no host.
+export fn parse(text: String) -> Url throws UrlError {
+    let parts = split(text)
+    if parts.scheme == none { invalid(text, "a URL needs a scheme, like https:") }
+    let u = Url {
+        scheme: parts.scheme,
+        username: "",
+        password: "",
+        host: "",
+        port: none,
+        path: parts.path,
+        query: parts.query,
+        fragment: parts.fragment
+    }
+    if parts.authority != none { read_authority(u, parts.authority, text) }
+    if (u.scheme == "http" | u.scheme == "https") & u.host == "" {
+        invalid(text, "an " + u.scheme + " URL needs a host")
+    }
+    u
+}
+
+## Whether `text` parses as an absolute URL.
+export fn is_valid(text: String) -> Bool {
+    try {
+        parse(text);
+        true
+    } catch { _: UrlError => { false } }
+}
+
+# -- resolving (RFC 3986 #5.2) -----------------------------------------------------
+
+# RFC 3986 #5.2.4: `.` and `..` segments applied.
+fn remove_dots(path: String) -> String {
+    if !path.contains(".") { return path }
+    let segments = path.split("/")
+    let out = []
+    let i = 0
+    while i < segments.len() {
+        let s = segments[i]
+        let last = i == segments.len() - 1
+        if s == "." {
+            if last { out.push("") }
+        } elif s == ".." {
+            if out.len() > 1 | (out.len() == 1 & out[0] != "") { out.pop() }
+            if last { out.push("") }
+        } else {
+            out.push(s)
+        }
+        i = i + 1
+    }
+    let joined = out.join("/")
+    if path.starts_with("/") & !joined.starts_with("/") { joined = "/" + joined }
+    joined
+}
+
+fn authority_of(u: Url) -> String {
+    let out = ""
+    if u.username != "" | u.password != "" {
+        out = u.username
+        if u.password != "" { out = out + ":" + u.password }
+        out = out + "@"
+    }
+    out = out + u.host
+    if u.port != none { out = out + ":" + u.port }
+    out
+}
+
+## The port a scheme uses by default: 80 for http and ws, 443 for https
+## and wss, 21 for ftp, else `none`.
+export fn default_port(scheme: String) -> Unknown {
+    if scheme == "http" | scheme == "ws" { return 80 }
+    if scheme == "https" | scheme == "wss" { return 443 }
+    if scheme == "ftp" { return 21 }
+    none
+}
+
+impl Url {
+    ## The port to connect to: `port`, else the scheme's `default_port`.
+    fn effective_port(self) -> Unknown {
+        if self.port != none { return self.port }
+        default_port(self.scheme)
+    }
+
+    ## `[user[:password]@]host[:port]`.
+    fn authority(self) -> String { authority_of(self) }
+
+    ## `scheme://host[:port]`, with the port only when it isn't the default.
+    fn origin(self) -> String {
+        let out = self.scheme + "://" + self.host
+        if self.port != none & self.port != default_port(self.scheme) {
+            out = out + ":" + self.port
+        }
+        out
+    }
+
+    ## What an HTTP request line names: the path ("/" when empty) and the
+    ## query, without the fragment.
+    fn request_target(self) -> String {
+        let out = if self.path == "" { "/" } else { self.path }
+        if self.query != none { out = out + "?" + self.query }
+        out
+    }
+
+    ## The query's decoded `[key, value]` pairs (see `parse_query`); empty
+    ## without a query.
+    fn query_pairs(self) -> Vector<Vector<String>> throws UrlError {
+        if self.query == none { return [] }
+        parse_query(self.query)
+    }
+
+    ## The URL `reference` (absolute, or relative like "../x?y" or "//host/p")
+    ## points to when read relative to this one (RFC 3986 #5.2).
+    fn resolve(self, reference: String) -> Url throws UrlError {
+        let r = split(reference)
+        if r.scheme != none { return parse(reference) }
+        let out = Url {
+            scheme: self.scheme,
+            username: self.username,
+            password: self.password,
+            host: self.host,
+            port: self.port,
+            path: "",
+            query: r.query,
+            fragment: r.fragment
+        }
+        if r.authority != none {
+            out.username = ""
+            out.password = ""
+            out.host = ""
+            out.port = none
+            read_authority(out, r.authority, reference)
+            out.path = remove_dots(r.path)
+        } elif r.path == "" {
+            out.path = self.path
+            if r.query == none { out.query = self.query }
+        } elif r.path.starts_with("/") {
+            out.path = remove_dots(r.path)
+        } else {
+            # merge (#5.2.3): the base's path up to its last "/", then the reference
+            let merged = ""
+            if self.host != "" & self.path == "" {
+                merged = "/" + r.path
+            } else {
+                let cut = 0
+                let i = 0
+                while i < self.path.len() {
+                    if self.path[i] == "/" { cut = i + 1 }
+                    i = i + 1
+                }
+                merged = self.path[..cut] + r.path
+            }
+            out.path = remove_dots(merged)
+        }
+        out
+    }
+
+    ## A copy with `query` replaced by `encode_query(params)` (`none` for an
+    ## empty one).
+    fn with_query(self, params: Unknown) -> Url {
+        let q = encode_query(params)
+        Url {
+            scheme: self.scheme,
+            username: self.username,
+            password: self.password,
+            host: self.host,
+            port: self.port,
+            path: self.path,
+            query: if q == "" { none } else { q },
+            fragment: self.fragment
+        }
+    }
+}
+
+impl Printable for Url {
+    fn to_string(self) {
+        let out = self.scheme + ":"
+        if self.host != "" | self.scheme == "file" | self.port != none {
+            out = out + "//" + authority_of(self)
+        }
+        out = out + self.path
+        if self.query != none { out = out + "?" + self.query }
+        if self.fragment != none { out = out + "#" + self.fragment }
+        out
+    }
+}

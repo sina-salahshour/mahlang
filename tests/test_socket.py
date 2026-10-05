@@ -102,8 +102,9 @@ class ArgumentErrorTests(unittest.TestCase):
 
 class RuntimeBehaviorTests(unittest.TestCase):
     def test_bytecode_minor(self):
-        self.assertEqual(MINOR, 18)
-        self.assertEqual(minor_of(SOCKET + 'print(socket.listen(0))'), 18)
+        self.assertEqual(MINOR, 19)
+        # M39: std:socket declares `socket.start_tls` (1.19) too
+        self.assertEqual(minor_of(SOCKET + 'print(socket.listen(0))'), 19)
         self.assertEqual(minor_of('print("a")'), 4)
         for name in (
             "connect", "listen", "accept", "send", "recv", "shutdown", "close",
@@ -113,7 +114,7 @@ class RuntimeBehaviorTests(unittest.TestCase):
             {k: v for k, v in NATIVE_ARITIES.items() if k.startswith("socket.")},
             {
                 "socket.connect": 3, "socket.listen": 3, "socket.accept": 2, "socket.send": 2,
-                "socket.recv": 3, "socket.shutdown": 1, "socket.close": 1,
+                "socket.recv": 3, "socket.shutdown": 1, "socket.close": 1, "socket.start_tls": 3,
             },
         )
 

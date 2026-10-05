@@ -34,10 +34,15 @@ extern fn native_recv(id: Number, max: Number, timeout: Unknown) -> Promise<
 > = "socket.recv"
 extern fn native_shutdown(id: Number) -> Promise<Vector<Unknown>> = "socket.shutdown"
 extern fn native_close(id: Number) -> Promise<Vector<Unknown>> = "socket.close"
+extern fn native_start_tls(id: Number, server_name: String, timeout: Unknown) -> Promise<
+    Vector<Unknown>
+> = "socket.start_tls"
 
 ## What went wrong: `kind` is "connection_refused", "connection_reset",
 ## "timed_out", "address_in_use", "address_not_available", "host_not_found",
 ## "permission_denied", "closed" (a closed socket or listener),
+## "tls_certificate" (the server's certificate isn't trusted or doesn't
+## name the server), "tls" (any other TLS failure),
 ## "closed_early" (`recv_exactly` ran out of data), "invalid_utf8"
 ## (`read_line`) or "other"; `op` the function; `address` the `host:port`
 ## involved.
@@ -80,6 +85,23 @@ export fn connect(
 ) -> Socket throws SocketError {
     let r = result(native_connect(host, port, timeout).await, "connect", address_of(host, port))
     Socket { id: r[0], peer_host: r[1], peer_port: r[2], local_port: r[3], buffer: "".to_bytes() }
+}
+
+## Opens a TLS connection to `host:port`: `connect`, then `start_tls(host)`.
+## `timeout` applies to each of the two steps.
+export fn connect_tls(
+    host: String,
+    port: Number,
+    timeout: Unknown = none
+) -> Socket throws SocketError {
+    let conn = connect(host, port, timeout)
+    try { conn.start_tls(host, timeout) } catch {
+        e: SocketError => {
+            conn.close()
+            throw e
+        }
+    };
+    conn
 }
 
 ## Starts listening on `host:port`; port 0 picks a free one (see the
@@ -224,6 +246,21 @@ impl Socket {
     ## everything sent. This side can still receive.
     fn shutdown(self) throws SocketError {
         result(native_shutdown(self.id).await, "shutdown", self.address())
+    }
+
+    ## Makes this a TLS connection, as a client: the server's certificate must
+    ## be valid, name `server_name`, and chain to a trusted root (the system's,
+    ## or those in the PEM file the SSL_CERT_FILE environment variable names).
+    ## Everything sent and received afterwards is encrypted. A TLS socket's
+    ## `shutdown` ends the sending side without TLS's close notice, and a peer
+    ## closing without one is a normal end.
+    fn start_tls(self, server_name: String, timeout: Unknown = none) throws SocketError {
+        if self.buffer.len() > 0 {
+            throw RuntimeError.ArgumentError {
+                message: "start_tls: the socket has unread bytes in its buffer"
+            }
+        }
+        result(native_start_tls(self.id, server_name, timeout).await, "start_tls", self.address())
     }
 
     ## Closes the connection; a call waiting on it fails with kind "closed".

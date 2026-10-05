@@ -596,5 +596,6 @@ pub fn call_native(vm: &mut Vm, native: NativeFn, args: &[Value]) -> Result<Valu
         NativeFn::SocketRecv => super::socket::recv(vm, args),
         NativeFn::SocketShutdown => super::socket::shutdown(vm, args),
         NativeFn::SocketClose => super::socket::close(vm, args),
+        NativeFn::SocketStartTls => super::socket::start_tls(vm, args),
     }
 }

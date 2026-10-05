@@ -1,0 +1,372 @@
+# Tests for std:http, run by tests/test_stdlib.py (or
+# `mah test --file mah/std/http.test.mh`) on both VMs. Each test runs a tiny
+# scripted server on 127.0.0.1 (std:socket) that answers with canned
+# responses and records the requests it got. HTTPS is covered by
+# tests/test_http.py, which needs a certificate.
+import "std:test"
+import http from "./http"
+import socket from "./socket"
+import process from "./process"
+
+## One request as the server saw it: the request line, the header lines and
+## the body.
+struct Seen { line: String, headers: Vector<String>, body: String }
+
+impl Seen {
+    fn header(self, name: String) -> Unknown {
+        for let h in self.headers {
+            if h.to_lower().starts_with(name.to_lower() + ":") {
+                return h[name.len() + 1..].trim()
+            }
+        }
+        none
+    }
+}
+
+struct Server { listener: socket.Listener, seen: Vector<Seen>, done: Promise<Unknown> }
+
+impl Server {
+    fn url(self, path: String) -> String { "http://127.0.0.1:" + self.listener.port + path }
+
+    # Waits for the script to finish (surfacing its errors) and stops listening.
+    fn finish(self) {
+        self.done.await
+        self.listener.close()
+    }
+}
+
+# A server answering each of `responses` (raw HTTP text) to one connection,
+# in order. A `{port}` in a response is replaced by the server's port.
+fn serve(responses: Vector<String>) -> Server {
+    let listener = socket.listen(0)
+    let seen = []
+    fn run() {
+        for let raw in responses {
+            let conn = listener.accept(5000)
+            defer conn.close()
+            let line = conn.read_line(5000)
+            let headers = []
+            let h = conn.read_line(5000)
+            while h != "" & h != none {
+                headers.push(h)
+                h = conn.read_line(5000)
+            }
+            let request = Seen { line: line, headers: headers, body: "" }
+            let length = request.header("content-length")
+            if length != none {
+                if length != "0" {
+                    request.body = conn.recv_exactly(length.to_number(), 5000).to_text_lossy()
+                }
+            }
+            seen.push(request)
+            conn.send_text(raw.replace_all("{port}", "" + listener.port))
+        }
+    }
+    Server { listener: listener, seen: seen, done: detach run() }
+}
+
+fn ok_text(body: String) -> String {
+    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: " + body.to_bytes().len() + "\r\n\r\n" + body
+}
+
+fn http_error(f: fn() -> Unknown) -> String {
+    let e = assert_throws(f)
+    match e {
+        http.HttpError { kind, method, url, description } => { kind + ": " + description }
+        _ => { "not an HttpError: " + e.message() }
+    }
+}
+
+test "a GET with Content-Length" {
+    let s = serve([ok_text("hello")])
+    let r = http.get(s.url("/a/b?x=1#frag"), headers: ["X-Test": "yes"])
+    s.finish()
+    assert_eq(r.status, 200)
+    assert_eq(r.reason, "OK")
+    assert_eq(r.text(), "hello")
+    assert_eq(r.body, "hello".to_bytes())
+    assert_eq(r.header("content-type"), "text/plain")
+    assert_eq(r.header("CONTENT-LENGTH"), "5")
+    assert_eq(r.header("missing"), none)
+    assert(r.is_success())
+    assert_eq(r.url, s.url("/a/b?x=1#frag"))
+    let seen = s.seen[0]
+    assert_eq(seen.line, "GET /a/b?x=1 HTTP/1.1")
+    assert_eq(seen.header("host"), "127.0.0.1:" + s.listener.port)
+    assert_eq(seen.header("user-agent"), "mah")
+    assert_eq(seen.header("connection"), "close")
+    assert_eq(seen.header("x-test"), "yes")
+    assert_eq(seen.header("content-length"), none)
+    assert_eq(r.to_string(), "Response(200 OK, " + s.url("/a/b?x=1#frag") + ")")
+}
+
+test "chunked and close-delimited bodies" {
+    let chunked = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5;ext=1\r\nhello\r\n7\r\n, world\r\n0\r\nX-Trailer: t\r\n\r\n"
+    let closing = "HTTP/1.0 200 OK\r\n\r\nuntil the end"
+    let s = serve([chunked, closing])
+    assert_eq(http.get(s.url("/")).text(), "hello, world")
+    assert_eq(http.get(s.url("/")).text(), "until the end")
+    s.finish()
+}
+
+test "repeated headers, 100 Continue, empty responses" {
+    let s = serve(
+        [
+            "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 201 Created\r\nSet-Cookie: a=1\r\nSet-Cookie: b=2\r\nContent-Length: 2\r\n\r\nok",
+            "HTTP/1.1 204 No Content\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nContent-Length: 50\r\n\r\n"
+        ]
+    )
+    let r = http.post(s.url("/"), body: "x")
+    assert_eq(r.status, 201)
+    assert_eq(r.text(), "ok")
+    assert_eq(r.header_all("set-cookie").join(";"), "a=1;b=2")
+    assert_eq(http.delete(s.url("/")).body.len(), 0)
+    let h = http.head(s.url("/"))
+    assert_eq(h.header("content-length"), "50")
+    assert_eq(h.body.len(), 0)
+    s.finish()
+    assert_eq(s.seen[1].line, "DELETE / HTTP/1.1")
+    assert_eq(s.seen[2].line, "HEAD / HTTP/1.1")
+}
+
+test "request bodies: text, Bytes, json, form" {
+    let s = serve([ok_text("1"), ok_text("2"), ok_text("3"), ok_text("4"), ok_text("5")])
+    http.post(s.url("/t"), body: "héllo")
+    http.put(
+        s.url("/b"),
+        body: "raw".to_bytes(),
+        headers: [["Content-Type", "application/octet-stream"]]
+    )
+    let r = http.post(s.url("/j"), json: ["name": "mah", "tags": [1, 2]])
+    http.patch(s.url("/f"), form: ["q": "a b", "n": 1])
+    http.post(s.url("/e"))
+    s.finish()
+    assert_eq(s.seen[0].body, "héllo")
+    assert_eq(s.seen[0].header("content-length"), "6")
+    assert_eq(s.seen[0].header("content-type"), none)
+    assert_eq(s.seen[1].line, "PUT /b HTTP/1.1")
+    assert_eq(s.seen[1].header("content-type"), "application/octet-stream")
+    assert_eq(s.seen[1].body, "raw")
+    assert_eq(s.seen[2].header("content-type"), "application/json")
+    assert_eq(s.seen[2].body, "{\"name\":\"mah\",\"tags\":[1,2]}")
+    assert_eq(s.seen[3].line, "PATCH /f HTTP/1.1")
+    assert_eq(s.seen[3].header("content-type"), "application/x-www-form-urlencoded")
+    assert_eq(s.seen[3].body, "q=a+b&n=1")
+    assert_eq(s.seen[4].header("content-length"), "0")
+    assert_eq(r.text(), "3")
+}
+
+test "json responses" {
+    let s = serve(
+        [
+            "HTTP/1.1 200 OK\r\nContent-Length: 18\r\n\r\n{\"id\": 7, \"a\": []}",
+            ok_text("not json")
+        ]
+    )
+    assert_eq(http.get(s.url("/")).json()["id"], 7)
+    let r = http.get(s.url("/"))
+    s.finish()
+    assert_throws(fn() { r.json() })
+}
+
+test "redirects" {
+    let s = serve(
+        [
+            "HTTP/1.1 301 Moved\r\nLocation: /next?a=1\r\nContent-Length: 0\r\n\r\n",
+            "HTTP/1.1 307 Temporary\r\nLocation: http://127.0.0.1:{port}/kept\r\nContent-Length: 0\r\n\r\n",
+            ok_text("landed"),
+            "HTTP/1.1 303 See Other\r\nLocation: done\r\nContent-Length: 0\r\n\r\n",
+            ok_text("after post")
+        ]
+    )
+    let r = http.get(s.url("/start"), headers: ["Authorization": "secret"])
+    assert_eq(r.text(), "landed")
+    assert_eq(r.url, s.url("/kept"))
+    let p = http.post(s.url("/dir/form"), body: "data")
+    s.finish()
+    assert_eq(p.text(), "after post")
+    assert_eq(s.seen[1].line, "GET /next?a=1 HTTP/1.1")
+    assert_eq(s.seen[2].line, "GET /kept HTTP/1.1")
+    # same origin: Authorization stays
+    assert_eq(s.seen[2].header("authorization"), "secret")
+    assert_eq(s.seen[3].body, "data")
+    # 303 turns a POST into a bodiless GET
+    assert_eq(s.seen[4].line, "GET /dir/done HTTP/1.1")
+    assert_eq(s.seen[4].body, "")
+    assert_eq(s.seen[4].header("content-length"), none)
+}
+
+test "a 307 keeps the method and body; max_redirects" {
+    let s = serve(
+        [
+            "HTTP/1.1 307 Temporary\r\nLocation: /again\r\nContent-Length: 0\r\n\r\n",
+            ok_text("ok"),
+            "HTTP/1.1 302 Found\r\nLocation: /x\r\nContent-Length: 0\r\n\r\n",
+            "HTTP/1.1 302 Found\r\nLocation: /x\r\nContent-Length: 0\r\n\r\n",
+            "HTTP/1.1 302 Found\r\nLocation: /y\r\nContent-Length: 0\r\n\r\n"
+        ]
+    )
+    http.put(s.url("/"), json: [1])
+    assert_eq(
+        http_error(fn() { http.get(s.url("/"), max_redirects: 1) }),
+        "too_many_redirects: more than 1 redirects"
+    )
+    let r = http.request("GET", s.url("/"), max_redirects: 0)
+    s.finish()
+    assert_eq(s.seen[1].line, "PUT /again HTTP/1.1")
+    assert_eq(s.seen[1].body, "[1]")
+    assert_eq(r.status, 302)
+    assert_eq(r.header("location"), "/y")
+}
+
+test "error statuses are Responses" {
+    let s = serve(["HTTP/1.1 404 Not Found\r\nContent-Length: 4\r\n\r\nnope"])
+    let r = http.get(s.url("/missing"))
+    s.finish()
+    assert_eq(r.status, 404)
+    assert(!r.is_success())
+    assert_eq(r.text(), "nope")
+    assert_eq(http_error(fn() { r.check_status() }), "status: the server answered 404 Not Found")
+    let e = assert_throws(fn() { r.check_status() })
+    assert_eq(e.message(), "GET " + s.url("/missing") + ": the server answered 404 Not Found")
+}
+
+test "invalid responses" {
+    let s = serve(
+        [
+            "SSH-2.0-OpenSSH\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nbroken header\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort",
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n"
+        ]
+    )
+    assert_eq(
+        http_error(fn() { http.get(s.url("/")) }),
+        "invalid_response: not an HTTP/1.x status line: SSH-2.0-OpenSSH"
+    )
+    assert_eq(
+        http_error(fn() { http.get(s.url("/")) }),
+        "invalid_response: a header line without ':': broken header"
+    )
+    assert_eq(
+        http_error(fn() { http.get(s.url("/")) }),
+        "closed_early: the connection closed before 10 bytes arrived"
+    )
+    assert_eq(http_error(fn() { http.get(s.url("/")) }), "invalid_response: a bad chunk size: zz")
+    s.finish()
+}
+
+test "bad URLs and unreachable servers" {
+    assert_eq(
+        http_error(fn() { http.get("example.com") }),
+        "invalid_url: a URL needs a scheme, like https:"
+    )
+    assert_eq(
+        http_error(fn() { http.get("ftp://example.com/x") }),
+        "unsupported_scheme: only http and https URLs are supported"
+    )
+    let closed = socket.listen(0)
+    let port = closed.port
+    closed.close()
+    assert_eq(
+        http_error(fn() { http.get("http://127.0.0.1:" + port + "/", timeout: 2000) }),
+        "connection_refused: connection refused"
+    )
+    let e = assert_throws(fn() { http.get("http://127.0.0.1:" + port + "/x") })
+    assert_eq(e.message(), "GET http://127.0.0.1:" + port + "/x: connection refused")
+}
+
+test "timeouts" {
+    let listener = socket.listen(0)
+    let accepted = detach listener.accept()
+    assert_eq(
+        http_error(fn() { http.get("http://127.0.0.1:" + listener.port + "/", timeout: 100) }),
+        "timed_out: timed out"
+    )
+    accepted.await.close()
+    listener.close()
+}
+
+test "argument errors" {
+    let bad_body = assert_throws(fn() { http.post("http://127.0.0.1:1/", body: 5) })
+    assert_eq(bad_body.message, "http: body must be a String or Bytes, got Number")
+    let bad_headers = assert_throws(fn() { http.get("http://127.0.0.1:1/", headers: "x") })
+    assert_eq(bad_headers.message, "http: headers must be a Map or a Vector of pairs, got String")
+    let injected = assert_throws(
+        fn() { http.get("http://127.0.0.1:1/", headers: ["X": "a\r\nB: c"]) }
+    )
+    assert_eq(injected.message, "http: invalid header X")
+    let looped = [:]
+    looped["self"] = looped
+    let bad_json = assert_throws(fn() { http.post("http://127.0.0.1:1/", json: looped) })
+    assert_eq(bad_json.message, "http: json stringify: a value contains itself")
+}
+
+# The proxy variables, set for `f` and restored afterwards.
+fn with_env(values: Map<String, String>, f: fn() -> Unknown) {
+    let names = ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"]
+    let saved = [:]
+    for let name in names {
+        saved[name] = process.env_get(name)
+        process.env_remove(name)
+    }
+    for let name in values { process.env_set(name, values[name]) }
+    defer {
+        for let name in names {
+            match saved[name] {
+                some(v) => { process.env_set(name, v) }
+                none => { process.env_remove(name) }
+            }
+        }
+    }
+    f()
+}
+
+test "an http proxy gets the whole URL" {
+    let proxy = serve([ok_text("via proxy"), ok_text("direct")])
+    with_env(["HTTP_PROXY": "http://user:p%40ss@127.0.0.1:" + proxy.listener.port], fn() {
+        assert_eq(http.get("http://example.invalid:8080/p?q=1").text(), "via proxy")
+    })
+    with_env(["http_proxy": "127.0.0.1:1", "NO_PROXY": "other.org, 127.0.0.1"], fn() {
+        assert_eq(http.get(proxy.url("/d")).text(), "direct")
+    })
+    proxy.finish()
+    assert_eq(proxy.seen[0].line, "GET http://example.invalid:8080/p?q=1 HTTP/1.1")
+    assert_eq(proxy.seen[0].header("host"), "example.invalid:8080")
+    assert_eq(proxy.seen[0].header("proxy-authorization"), "Basic dXNlcjpwQHNz")
+    assert_eq(proxy.seen[1].line, "GET /d HTTP/1.1")
+}
+
+test "an https proxy is asked to CONNECT" {
+    let proxy = serve(["HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n"])
+    with_env(["HTTPS_PROXY": "http://127.0.0.1:" + proxy.listener.port], fn() {
+        assert_eq(
+            http_error(fn() { http.get("https://example.invalid/x") }),
+            "proxy: the proxy refused to connect: it answered HTTP/1.1 403 Forbidden"
+        )
+    })
+    proxy.finish()
+    assert_eq(proxy.seen[0].line, "CONNECT example.invalid:443 HTTP/1.1")
+    assert_eq(proxy.seen[0].header("host"), "example.invalid:443")
+}
+
+test "NO_PROXY matching" {
+    let cases = [
+        ["*", "anything.com", true],
+        ["example.com", "example.com", true],
+        ["example.com", "api.example.com", true],
+        [".example.com", "api.example.com", true],
+        ["*.example.com", "api.example.com", true],
+        ["example.com", "badexample.com", false],
+        ["example.com:8080", "example.com", true],
+        ["[::1]", "[::1]", true],
+        ["a.org,b.org", "b.org", true],
+        ["", "b.org", false]
+    ]
+    for let c in cases {
+        with_env(["NO_PROXY": c[0]], fn() {
+            assert_eq(http.bypasses_proxy(c[1]), c[2], c[0] + " / " + c[1])
+        })
+    }
+}

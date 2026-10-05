@@ -399,10 +399,10 @@ class MetaAndDecoderTests(unittest.TestCase):
         with self.assertRaises(MahcFormatError):
             decode(encode(program))
 
-    def test_unsupported_minor_is_19(self):
+    def test_unsupported_minor_is_20(self):
         data = compile_bytes(text="print(1)")
         with self.assertRaises(MahcFormatError):
-            decode(_sections_with_minor(data, 19))
+            decode(_sections_with_minor(data, 20))
 
 
 class ReflectionTests(unittest.TestCase):

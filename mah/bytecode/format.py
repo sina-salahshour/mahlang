@@ -80,6 +80,9 @@ code 8 (`loadtype 1, 8`, the Type `Bytes`). Bytes values only come from
 M38 bumps MINOR to 18: new natives only (`socket.*`, behind std:socket;
 sockets and listeners are ids in the VM's socket table) --
 docs/MAHC_FORMAT.md #4.4.
+
+M39 bumps MINOR to 19: a new native (`socket.start_tls`, TLS on an open
+socket, behind std:http) -- docs/MAHC_FORMAT.md #4.4.
 """
 
 from __future__ import annotations
@@ -92,7 +95,7 @@ MAGIC = b"MAHC"
 # `.mahc` extension).
 SHEBANG = b"#!/usr/bin/env -S mah runc\n"
 MAJOR = 1
-MINOR = 18
+MINOR = 19
 
 # -- section ids (docs/MAHC_FORMAT.md #3) -----------------------------------
 SEC_STRINGS = 0x01
@@ -277,6 +280,8 @@ NATIVE_ARITIES = {
     "socket.recv": 3,
     "socket.shutdown": 1,
     "socket.close": 1,
+    # M39 (1.19): TLS, for std:http.
+    "socket.start_tls": 3,
 }
 
 # M16: which minor version introduced each 1.1+ native -- a 1.0 file
@@ -369,6 +374,7 @@ NATIVE_SINCE_MINOR = {
     "socket.recv": 18,
     "socket.shutdown": 18,
     "socket.close": 18,
+    "socket.start_tls": 19,
 }
 
 # M29: native inherent methods added after 1.0, by the minor that added

@@ -1,0 +1,694 @@
+# std:http -- an HTTP/1.1 client, over std:socket (docs/STDLIB.md).
+#
+#   import http from "std:http"
+#   let r = http.get("https://example.com/")
+#   print(r.status, r.header("content-type"))   # 200 text/html; charset=UTF-8
+#   print(r.text().len())
+#   let created = http.post("https://api.example.com/items", json: ["name": "mah"])
+#   print(created.json()["id"])
+#
+# One connection per request (`Connection: close`), HTTPS through the
+# socket's TLS, redirects followed (up to `max_redirects`), and the proxy
+# from the HTTP_PROXY / HTTPS_PROXY / NO_PROXY environment variables (an
+# HTTPS request goes through the proxy with CONNECT). No compression is
+# asked for. A 4xx or 5xx status is a normal Response (see `check_status`);
+# HttpError is for requests that couldn't complete.
+
+import url from "std:url"
+import socket from "std:socket"
+import process from "std:process"
+import json_lib from "std:json"
+
+extern fn type_name(value: Unknown) -> String = "value.type_name"
+
+## Why a request couldn't complete: `kind` is a SocketError kind for a
+## network failure ("connection_refused", "host_not_found", "timed_out",
+## "tls_certificate", "tls", "connection_reset", ...), or "invalid_url",
+## "unsupported_scheme" (not http or https), "invalid_response" (the server
+## didn't speak HTTP/1.x), "too_many_redirects", "proxy" (the proxy refused
+## a CONNECT) or "status" (from `check_status`). `method` and `url` are the
+## request's (the last one, after redirects).
+export struct HttpError { kind: String, method: String, url: String, description: String }
+
+impl Error for HttpError {
+    fn message(self) -> String { self.method + " " + self.url + ": " + self.description }
+}
+
+## A response. `headers` are the `[name, value]` pairs as received (names as
+## the server wrote them; see `header`), `body` the raw bytes, and `url` the
+## address that answered (after redirects).
+export struct Response {
+    status: Number,
+    reason: String,
+    headers: Vector<Vector<String>>,
+    body: Bytes,
+    url: String,
+    method: String
+}
+
+fn lower_name(name: String) -> String { name.to_lower() }
+
+impl Response {
+    ## The first value of header `name` (any case), or `none`.
+    fn header(self, name: String) -> Unknown {
+        let wanted = name.to_lower()
+        for let pair in self.headers {
+            if pair[0].to_lower() == wanted { return pair[1] }
+        }
+        none
+    }
+
+    ## Every value of header `name` (any case), in order.
+    fn header_all(self, name: String) -> Vector<String> {
+        let wanted = name.to_lower()
+        let out = []
+        for let pair in self.headers {
+            if pair[0].to_lower() == wanted { out.push(pair[1]) }
+        }
+        out
+    }
+
+    ## The body as text: UTF-8, each invalid sequence replaced by U+FFFD.
+    fn text(self) -> String { self.body.to_text_lossy() }
+
+    ## The body parsed as JSON (std:json's `parse`).
+    fn json(self) -> Unknown throws json_lib.JsonError { json_lib.parse(self.body.to_text_lossy()) }
+
+    ## Whether the status is 2xx.
+    fn is_success(self) -> Bool { self.status >= 200 & self.status < 300 }
+
+    ## The Response itself, or throws HttpError kind "status" for a 4xx or
+    ## 5xx status.
+    fn check_status(self) -> Response throws HttpError {
+        if self.status >= 400 {
+            throw HttpError {
+                kind: "status",
+                method: self.method,
+                url: self.url,
+                description: "the server answered " + self.status + " " + self.reason
+            }
+        }
+        self
+    }
+}
+
+impl Printable for Response {
+    fn to_string(self) { "Response(" + self.status + " " + self.reason + ", " + self.url + ")" }
+}
+
+# -- headers --------------------------------------------------------------------
+
+# `headers` (a Map, or a Vector of [name, value] pairs) as pairs of Strings.
+fn header_pairs(headers: Unknown) -> Vector<Vector<String>> {
+    let out = []
+    let kind = type_name(headers)
+    if kind == "Map" {
+        for let name in headers { out.push(["" + name, "" + headers[name]]) }
+    } elif kind == "Vector" {
+        for let pair in headers {
+            if type_name(pair) != "Vector" | pair.len() != 2 {
+                throw RuntimeError.ArgumentError {
+                    message: "http: each header must be a Vector [name, value]"
+                }
+            }
+            out.push(["" + pair[0], "" + pair[1]])
+        }
+    } else {
+        throw RuntimeError.ArgumentError {
+            message: "http: headers must be a Map or a Vector of pairs, got " + kind
+        }
+    }
+    for let pair in out {
+        let bad = pair[0] == "" | pair[0].contains(":")
+        for let c in ["\r", "\n"] {
+            if pair[0].contains(c) | pair[1].contains(c) { bad = true }
+        }
+        if bad {
+            throw RuntimeError.ArgumentError { message: "http: invalid header " + pair[0] }
+        }
+    }
+    out
+}
+
+fn has_header(pairs: Vector<Vector<String>>, name: String) -> Bool {
+    for let pair in pairs {
+        if pair[0].to_lower() == name { return true }
+    }
+    false
+}
+
+fn without_header(pairs: Vector<Vector<String>>, name: String) -> Vector<Vector<String>> {
+    let out = []
+    for let pair in pairs {
+        if pair[0].to_lower() != name { out.push(pair) }
+    }
+    out
+}
+
+# -- proxies --------------------------------------------------------------------
+
+# The lowercase variable if set and not empty, else the uppercase one, else "".
+fn env_either(upper: String) -> String {
+    let a = process.env_get(upper.to_lower())
+    if a != none {
+        if a.unwrap() != "" { return a.unwrap() }
+    }
+    let b = process.env_get(upper)
+    if b != none {
+        if b.unwrap() != "" { return b.unwrap() }
+    }
+    ""
+}
+
+# Whether NO_PROXY's comma-separated list covers `host` ("*" covers all; an
+# entry covers itself and its subdomains; a leading "." is ignored).
+fn bypasses_proxy(host: String) -> Bool {
+    let list = env_either("NO_PROXY")
+    if list == "" { return false }
+    let bare = if host.starts_with("[") { host[1..host.len() - 1] } else { host }
+    for let raw in list.split(",") {
+        let entry = raw.trim().to_lower()
+        if entry == "*" { return true }
+        if entry.starts_with("*.") { entry = entry[1..] }
+        if entry.starts_with(".") { entry = entry[1..] }
+        # drop a port (but not from a bare IPv6 address)
+        if entry.starts_with("[") {
+            let close = entry.index_of("]")
+            if close != none { entry = entry[1..close.unwrap()] }
+        } elif entry.split(":").len() == 2 {
+            entry = entry.split(":")[0]
+        }
+        if entry != "" {
+            if bare == entry | bare.ends_with("." + entry) { return true }
+        }
+    }
+    false
+}
+
+# The proxy Url for a request to `target`, or none.
+fn proxy_for(target: url.Url, method: String) -> Unknown throws HttpError {
+    let name = if target.scheme == "https" { "HTTPS_PROXY" } else { "HTTP_PROXY" }
+    let text = env_either(name)
+    if text == "" { return none }
+    if bypasses_proxy(target.host) { return none }
+    let spec = if text.contains("://") { text } else { "http://" + text }
+    let proxy = try { url.parse(spec) } catch {
+        _: url.UrlError => {
+            throw HttpError {
+                kind: "proxy",
+                method: method,
+                url: target.to_string(),
+                description: name + " isn't a valid URL: " + text
+            }
+        }
+    }
+    if proxy.scheme != "http" {
+        throw HttpError {
+            kind: "proxy",
+            method: method,
+            url: target.to_string(),
+            description: "only http:// proxies are supported, got " + text
+        }
+    }
+    proxy
+}
+
+fn basic_auth(user: String, password: String) -> String throws url.UrlError {
+    "Basic " + (url.decode(user) + ":" + url.decode(password)).to_bytes().to_base64()
+}
+
+# -- one exchange -------------------------------------------------------------------
+
+# A failure while talking to `target`, as an HttpError.
+fn transport(e: socket.SocketError, method: String, target: String) -> HttpError {
+    HttpError { kind: e.kind, method: method, url: target, description: e.description }
+}
+
+fn invalid_response(method: String, target: String, description: String) -> HttpError {
+    HttpError { kind: "invalid_response", method: method, url: target, description: description }
+}
+
+fn parse_hex(text: String) -> Unknown {
+    let digits = "0123456789abcdef"
+    let t = text.trim().to_lower()
+    if t == "" { return none }
+    let n = 0
+    for let c in t {
+        let at = digits.index_of(c)
+        if at == none { return none }
+        n = n * 16 + at.unwrap()
+    }
+    n
+}
+
+# The next line, or an invalid_response for the end of the stream.
+fn line_of(
+    conn: socket.Socket,
+    timeout: Unknown,
+    method: String,
+    target: String
+) -> String throws HttpError | socket.SocketError {
+    let line = conn.read_line(timeout)
+    if line == none { throw invalid_response(method, target, "the connection closed mid-response") }
+    line
+}
+
+# The body framed by chunked transfer coding (RFC 9112 #7.1).
+fn read_chunked(
+    conn: socket.Socket,
+    timeout: Unknown,
+    method: String,
+    target: String
+) -> Bytes throws HttpError | socket.SocketError {
+    let body = "".to_bytes()
+    while true {
+        let size_line = line_of(conn, timeout, method, target)
+        let semi = size_line.index_of(";")
+        let size_text = if semi == none { size_line } else { size_line[..semi.unwrap()] }
+        let size = parse_hex(size_text)
+        if size == none {
+            throw invalid_response(method, target, "a bad chunk size: " + size_line)
+        }
+        if size == 0 {
+            # trailers, up to an empty line
+            while line_of(conn, timeout, method, target) != "" { }
+            return body
+        }
+        body.extend(conn.recv_exactly(size, timeout))
+        if line_of(conn, timeout, method, target) != "" {
+            throw invalid_response(method, target, "a chunk isn't followed by a line end")
+        }
+    }
+    body
+}
+
+fn read_to_end(conn: socket.Socket, timeout: Unknown) -> Bytes throws socket.SocketError {
+    let body = "".to_bytes()
+    while true {
+        let chunk = conn.recv(65536, timeout)
+        if chunk.len() == 0 { return body }
+        body.extend(chunk)
+    }
+    body
+}
+
+# Sends the request on an open connection and reads the response.
+fn exchange(
+    conn: socket.Socket,
+    method: String,
+    target: url.Url,
+    request_target: String,
+    headers: Vector<Vector<String>>,
+    body: Unknown,
+    timeout: Unknown
+) -> Response throws HttpError | socket.SocketError {
+    let shown = target.to_string()
+    let head = method + " " + request_target + " HTTP/1.1\r\n"
+    for let pair in headers { head = head + pair[0] + ": " + pair[1] + "\r\n" }
+    let data = (head + "\r\n").to_bytes()
+    if body != none { data.extend(body) }
+    conn.send(data)
+    let status = 100
+    let reason = ""
+    let pairs = []
+    # 1xx responses (100 Continue, ...) come before the real one
+    while status >= 100 & status < 200 {
+        let status_line = line_of(conn, timeout, method, shown)
+        let parts = status_line.split(" ", 2)
+        let code = if parts.len() >= 2 { parts[1].parse_number() } else { none }
+        if !parts[0].starts_with("HTTP/1.") | code == none {
+            throw invalid_response(method, shown, "not an HTTP/1.x status line: " + status_line)
+        }
+        status = code
+        if status < 100 | status > 999 | status % 1 != 0 {
+            throw invalid_response(method, shown, "not an HTTP/1.x status line: " + status_line)
+        }
+        reason = if parts.len() == 3 { parts[2] } else { "" }
+        pairs = []
+        let line = line_of(conn, timeout, method, shown)
+        while line != "" {
+            let colon = line.index_of(":")
+            if colon == none {
+                throw invalid_response(method, shown, "a header line without ':': " + line)
+            }
+            pairs.push([line[..colon.unwrap()].trim(), line[colon.unwrap() + 1..].trim()])
+            line = line_of(conn, timeout, method, shown)
+        }
+    }
+    let response = Response {
+        status: status,
+        reason: reason,
+        headers: pairs,
+        body: "".to_bytes(),
+        url: shown,
+        method: method
+    }
+    if method == "HEAD" | status == 204 | status == 304 { return response }
+    let coding = response.header("transfer-encoding")
+    let length = response.header("content-length")
+    if coding != none {
+        if coding.to_lower().contains("chunked") {
+            response.body = read_chunked(conn, timeout, method, shown)
+            return response
+        }
+    }
+    if length != none {
+        let n = length.parse_number()
+        if n == none | n < 0 | n % 1 != 0 {
+            throw invalid_response(method, shown, "a bad Content-Length: " + length)
+        }
+        response.body = if n == 0 { "".to_bytes() } else { conn.recv_exactly(n, timeout) }
+        return response
+    }
+    response.body = read_to_end(conn, timeout)
+    response
+}
+
+fn secure(conn: socket.Socket, target: url.Url, timeout: Unknown) throws socket.SocketError {
+    let name = target.host
+    if name.starts_with("[") { name = name[1..name.len() - 1] }
+    try { conn.start_tls(name, timeout) } catch {
+        e: socket.SocketError => {
+            conn.close()
+            throw e
+        }
+    };
+}
+
+# `host[:port]`, the port only when it isn't the scheme's default (Host's form).
+fn host_header(target: url.Url) -> String {
+    if target.port == none | target.port == url.default_port(target.scheme) { return target.host }
+    target.host + ":" + target.port
+}
+
+# `host:port` with the port always (CONNECT's form).
+fn host_port(target: url.Url) -> String { target.host + ":" + target.effective_port() }
+
+# An open connection and the request target to send on it.
+struct Opened { conn: socket.Socket, request_target: String }
+
+# Opens the connection for `target` (through `proxy` if set) and returns it
+# with the request target to send.
+fn open(
+    target: url.Url,
+    proxy: Unknown,
+    headers: Vector<Vector<String>>,
+    method: String,
+    timeout: Unknown
+) -> Opened throws HttpError | socket.SocketError | url.UrlError {
+    let port = target.effective_port()
+    if proxy == none {
+        let conn = socket.connect(target.host, port, timeout)
+        if target.scheme == "https" { secure(conn, target, timeout) }
+        return Opened { conn: conn, request_target: target.request_target() }
+    }
+    let conn = socket.connect(proxy.host, proxy.effective_port(), timeout)
+    let auth = none
+    if proxy.username != "" { auth = basic_auth(proxy.username, proxy.password) }
+    if target.scheme == "http" {
+        # a plain request to the proxy, naming the whole URL
+        if auth != none { headers.push(["Proxy-Authorization", auth]) }
+        let whole = target.scheme + "://" + host_header(target) + target.request_target()
+        return Opened { conn: conn, request_target: whole }
+    }
+    let where = host_port(target)
+    let connect = "CONNECT " + where + " HTTP/1.1\r\nHost: " + where + "\r\n"
+    if auth != none { connect = connect + "Proxy-Authorization: " + auth + "\r\n" }
+    conn.send_text(connect + "\r\n")
+    let status_line = conn.read_line(timeout)
+    let fine = false
+    if status_line != none {
+        let parts = status_line.split(" ")
+        if parts.len() >= 2 { fine = parts[0].starts_with("HTTP/1.") & parts[1] == "200" }
+    }
+    # the proxy's headers, up to an empty line
+    let line = if status_line == none { none } else { conn.read_line(timeout) }
+    while line != none & line != "" { line = conn.read_line(timeout) }
+    if !fine {
+        conn.close()
+        let said = if status_line == none {
+            "closed the connection"
+        } else {
+            "answered " + status_line
+        }
+        throw HttpError {
+            kind: "proxy",
+            method: method,
+            url: target.to_string(),
+            description: "the proxy refused to connect: it " + said
+        }
+    }
+    secure(conn, target, timeout)
+    Opened { conn: conn, request_target: target.request_target() }
+}
+
+# -- requests ---------------------------------------------------------------------------
+
+fn same_origin(a: url.Url, b: url.Url) -> Bool {
+    a.scheme == b.scheme & a.host == b.host & a.effective_port() == b.effective_port()
+}
+
+## Sends a request and returns the Response. `body` is a String or Bytes;
+## `json` (any value std:json can write) sends that as JSON with
+## Content-Type application/json; `form` (a Map or pairs, see std:url's
+## `encode_query`) sends a form. `headers` is a Map or a Vector of `[name,
+## value]` pairs and overrides the defaults (Host, User-Agent: mah, Accept,
+## Content-Length, Content-Type). `timeout` (milliseconds, or none) applies
+## to each wait: connecting, the TLS handshake and each read. Redirects
+## (301, 302, 303, 307, 308) are followed up to `max_redirects` times (0
+## returns the redirect itself): 303, and 301/302 after a POST, continue
+## as a GET without a body; Authorization and Cookie headers are dropped
+## when a redirect leaves the origin.
+export fn request(
+    method: String,
+    target: String,
+    body: Unknown = none,
+    json: Unknown = none,
+    form: Unknown = none,
+    headers: Unknown = [:],
+    timeout: Unknown = 30000,
+    max_redirects: Number = 10
+) -> Response throws HttpError {
+    let verb = method.to_upper()
+    let given = header_pairs(headers)
+    let payload = none
+    let content_type = none
+    if body != none {
+        let kind = type_name(body)
+        if kind == "String" {
+            payload = body.to_bytes()
+        } elif kind == "Bytes" {
+            payload = body
+        } else {
+            throw RuntimeError.ArgumentError {
+                message: "http: body must be a String or Bytes, got " + kind
+            }
+        }
+    }
+    if json != none {
+        let text = try { json_lib.stringify(json) } catch {
+            e: json_lib.JsonError => {
+                throw RuntimeError.ArgumentError { message: "http: json " + e.message() }
+            }
+        }
+        payload = text.to_bytes()
+        content_type = "application/json"
+    }
+    if form != none {
+        payload = url.encode_query(form).to_bytes()
+        content_type = "application/x-www-form-urlencoded"
+    }
+    let current = target
+    let hops = 0
+    while true {
+        let u = try { url.parse(current) } catch {
+            e: url.UrlError => {
+                throw HttpError {
+                    kind: "invalid_url",
+                    method: verb,
+                    url: current,
+                    description: e.description
+                }
+            }
+        }
+        if u.scheme != "http" & u.scheme != "https" {
+            throw HttpError {
+                kind: "unsupported_scheme",
+                method: verb,
+                url: current,
+                description: "only http and https URLs are supported"
+            }
+        }
+        let proxy = proxy_for(u, verb)
+        let all = [
+            ["Host", host_header(u)],
+            ["User-Agent", "mah"],
+            ["Accept", "*/*"],
+            ["Connection", "close"]
+        ]
+        if payload != none {
+            all.push(["Content-Length", "" + payload.len()])
+            if content_type != none { all.push(["Content-Type", content_type]) }
+        } elif verb == "POST" | verb == "PUT" | verb == "PATCH" {
+            all.push(["Content-Length", "0"])
+        }
+        for let pair in given { all = without_header(all, pair[0].to_lower()) }
+        for let pair in given { all.push(pair) }
+        let shown = u.to_string()
+        let response = try {
+            let opened = open(u, proxy, all, verb, timeout)
+            let conn = opened.conn
+            let r = try {
+                exchange(conn, verb, u, opened.request_target, all, payload, timeout)
+            } catch {
+                e: socket.SocketError => {
+                    conn.close()
+                    throw e
+                }
+                e: HttpError => {
+                    conn.close()
+                    throw e
+                }
+            }
+            conn.close()
+            r
+        } catch {
+            e: socket.SocketError => { throw transport(e, verb, shown) }
+            e: url.UrlError => {
+                throw HttpError {
+                    kind: "proxy",
+                    method: verb,
+                    url: shown,
+                    description: "the proxy's user name or password: " + e.description
+                }
+            }
+        }
+        let location = response.header("location")
+        let redirect = response.status == 301 | response.status == 302 | response.status == 303 | response.status == 307 | response.status == 308
+        if !redirect | location == none | max_redirects == 0 { return response }
+        if hops >= max_redirects {
+            throw HttpError {
+                kind: "too_many_redirects",
+                method: verb,
+                url: shown,
+                description: "more than " + max_redirects + " redirects"
+            }
+        }
+        hops = hops + 1
+        let next = try { u.resolve(location) } catch {
+            _: url.UrlError => {
+                throw invalid_response(verb, shown, "a bad Location: " + location)
+            }
+        }
+        if response.status == 303 | (
+            (response.status == 301 | response.status == 302) & verb == "POST"
+        ) {
+            if verb != "HEAD" { verb = "GET" }
+            payload = none
+            content_type = none
+            given = without_header(without_header(given, "content-type"), "content-length")
+        }
+        if !same_origin(u, next) {
+            given = without_header(without_header(given, "authorization"), "cookie")
+        }
+        next.fragment = if next.fragment == none { u.fragment } else { next.fragment }
+        current = next.to_string()
+    }
+    throw invalid_response(verb, current, "unreachable")
+}
+
+## A GET request (see `request`).
+export fn get(
+    target: String,
+    headers: Unknown = [:],
+    timeout: Unknown = 30000,
+    max_redirects: Number = 10
+) -> Response throws HttpError {
+    request("GET", target, headers: headers, timeout: timeout, max_redirects: max_redirects)
+}
+
+## A POST request with `body`, `json` or `form` (see `request`).
+export fn post(
+    target: String,
+    body: Unknown = none,
+    json: Unknown = none,
+    form: Unknown = none,
+    headers: Unknown = [:],
+    timeout: Unknown = 30000,
+    max_redirects: Number = 10
+) -> Response throws HttpError {
+    request(
+        "POST",
+        target,
+        body: body,
+        json: json,
+        form: form,
+        headers: headers,
+        timeout: timeout,
+        max_redirects: max_redirects
+    )
+}
+
+## A PUT request (see `post`).
+export fn put(
+    target: String,
+    body: Unknown = none,
+    json: Unknown = none,
+    form: Unknown = none,
+    headers: Unknown = [:],
+    timeout: Unknown = 30000,
+    max_redirects: Number = 10
+) -> Response throws HttpError {
+    request(
+        "PUT",
+        target,
+        body: body,
+        json: json,
+        form: form,
+        headers: headers,
+        timeout: timeout,
+        max_redirects: max_redirects
+    )
+}
+
+## A PATCH request (see `post`).
+export fn patch(
+    target: String,
+    body: Unknown = none,
+    json: Unknown = none,
+    form: Unknown = none,
+    headers: Unknown = [:],
+    timeout: Unknown = 30000,
+    max_redirects: Number = 10
+) -> Response throws HttpError {
+    request(
+        "PATCH",
+        target,
+        body: body,
+        json: json,
+        form: form,
+        headers: headers,
+        timeout: timeout,
+        max_redirects: max_redirects
+    )
+}
+
+## A DELETE request (see `request`).
+export fn delete(
+    target: String,
+    headers: Unknown = [:],
+    timeout: Unknown = 30000,
+    max_redirects: Number = 10
+) -> Response throws HttpError {
+    request("DELETE", target, headers: headers, timeout: timeout, max_redirects: max_redirects)
+}
+
+## A HEAD request: the status and headers, no body.
+export fn head(
+    target: String,
+    headers: Unknown = [:],
+    timeout: Unknown = 30000,
+    max_redirects: Number = 10
+) -> Response throws HttpError {
+    request("HEAD", target, headers: headers, timeout: timeout, max_redirects: max_redirects)
+}
