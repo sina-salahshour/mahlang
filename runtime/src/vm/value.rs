@@ -278,6 +278,9 @@ impl MapData {
 
 pub type MapRef = Rc<RefCell<MapData>>;
 
+/// M37 (1.17): a Bytes value -- mutable, by reference, `==` by content.
+pub type BytesRef = Rc<RefCell<Vec<u8>>>;
+
 // ---------------------------------------------------------------------------
 // Type values (M41a, docs/MAHC_FORMAT.md #5)
 // ---------------------------------------------------------------------------
@@ -293,7 +296,9 @@ pub struct TypeData {
 }
 
 /// M41a: the primitive types a `Type` can be, by code (`loadtype 1, code`).
-pub const PRIMITIVE_TYPE_NAMES: [&str; 8] = ["Number", "String", "Bool", "Function", "Vector", "Map", "None", "Type"];
+/// M37 (1.17) adds `Bytes`, code 8.
+pub const PRIMITIVE_TYPE_NAMES: [&str; 9] =
+    ["Number", "String", "Bool", "Function", "Vector", "Map", "None", "Type", "Bytes"];
 
 // ---------------------------------------------------------------------------
 // The value type
@@ -316,6 +321,8 @@ pub enum Value {
     Map(MapRef),
     /// M41a (1.14): a `Type` value -- a bare type name.
     Type(Rc<TypeData>),
+    /// M37 (1.17): Bytes.
+    Bytes(BytesRef),
     /// Interpreter-internal only: a defaulted-but-unbound parameter slot,
     /// until the callee's own `jmpset`-guarded default-computation code
     /// runs. Type name "Unknown"; never a real Mah value.
@@ -338,6 +345,7 @@ pub struct BuiltinTypeNames {
     pub vector: Rc<str>,
     pub map_: Rc<str>,
     pub type_: Rc<str>,
+    pub bytes: Rc<str>,
     pub unknown: Rc<str>,
 }
 
@@ -353,6 +361,7 @@ impl BuiltinTypeNames {
             vector: Rc::from("Vector"),
             map_: Rc::from("Map"),
             type_: Rc::from("Type"),
+            bytes: Rc::from("Bytes"),
             unknown: Rc::from("Unknown"),
         }
     }
@@ -432,6 +441,7 @@ pub fn type_name_of(v: &Value, names: &BuiltinTypeNames) -> Rc<str> {
         Value::Vector(_) => names.vector.clone(),
         Value::Map(_) => names.map_.clone(),
         Value::Type(_) => names.type_.clone(),
+        Value::Bytes(_) => names.bytes.clone(),
         Value::Absent => names.unknown.clone(),
     }
 }
@@ -451,7 +461,7 @@ pub fn truthy(v: &Value) -> bool {
 /// docs/MAHC_FORMAT.md #6.2: Numbers/Strings/Bools compare by value, `none`
 /// equals only `none`; everything else (struct/enum -- including
 /// `some(x)` -- Function, Promise, Vector, Map) is equal only to itself
-/// (identity).
+/// (identity). M37: Bytes compare by content.
 pub fn values_equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::None, Value::None) => true,
@@ -465,6 +475,7 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Vector(x), Value::Vector(y)) => Rc::ptr_eq(x, y),
         (Value::Map(x), Value::Map(y)) => Rc::ptr_eq(x, y),
         (Value::Type(x), Value::Type(y)) => x.kind == y.kind && x.index == y.index,
+        (Value::Bytes(x), Value::Bytes(y)) => *x.borrow() == *y.borrow(),
         _ => false,
     }
 }

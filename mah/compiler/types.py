@@ -221,8 +221,9 @@ STRING = TCon("String")
 BOOL = TCon("Bool")
 NONE = TCon("None")
 NEVER = TCon("Never")
+BYTES = TCon("Bytes")  # M37
 
-PRIMITIVES = {"Number": NUMBER, "String": STRING, "Bool": BOOL, "None": NONE, "Never": NEVER}
+PRIMITIVES = {"Number": NUMBER, "String": STRING, "Bool": BOOL, "None": NONE, "Never": NEVER, "Bytes": BYTES}
 # Built-in generic types whose arguments are covariant (docs/TYPES.md,
 # assignability rule 5); every other nominal type is invariant.
 COVARIANT = {"Option", "Promise"}

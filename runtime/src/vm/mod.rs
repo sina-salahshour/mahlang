@@ -7,6 +7,7 @@
 //! (decode + link + run) and [`run_program`] (an already-decoded
 //! `crate::decode::Program`).
 
+mod bytes;
 mod error;
 mod exec;
 mod fs;

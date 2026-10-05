@@ -556,3 +556,8 @@ NATIVES.update(_PROCESS_NATIVES)
 from .reflect_natives import NATIVES as _REFLECT_NATIVES  # noqa: E402
 
 NATIVES.update(_REFLECT_NATIVES)
+
+# M37 (1.17): std:bytes -- mah/bytes_methods.py.
+from .bytes_methods import NATIVES as _BYTES_NATIVES  # noqa: E402
+
+NATIVES.update(_BYTES_NATIVES)

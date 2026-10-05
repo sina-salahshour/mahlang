@@ -24,7 +24,7 @@ import shutil
 import tempfile
 from decimal import Decimal
 
-from .runtime_values import NONE_VALUE, MahRuntimeError, VectorValue, type_name_of
+from .runtime_values import NONE_VALUE, BytesValue, MahRuntimeError, VectorValue, type_name_of
 
 DESCRIPTIONS = {
     "not_found": "no such file or directory",
@@ -112,6 +112,40 @@ def _write(mode: str, name: str):
     def native(ctx, args):
         path = _string(name, "path", args[0])
         data = _string(name, "text", args[1]).encode("utf-8")
+
+        def job():
+            with open(path, mode) as f:
+                f.write(data)
+            return NONE_VALUE
+
+        return _async(ctx, job)
+
+    return native
+
+
+def _bytes(name: str, value) -> bytes:
+    """M37: a Bytes argument, copied now (the VM's thread) so the worker
+    never sees later changes to it."""
+    if not isinstance(value, BytesValue):
+        raise MahRuntimeError(f"{name}: data must be Bytes, got {type_name_of(value)}", kind="TypeMismatch")
+    return bytes(value.data)
+
+
+def _read_bytes(ctx, args):
+    """M37 (1.17): the whole file as Bytes."""
+    path = _string("read_bytes", "path", args[0])
+
+    def job():
+        with open(path, "rb") as f:
+            return BytesValue(f.read())
+
+    return _async(ctx, job)
+
+
+def _write_bytes(mode: str, name: str):
+    def native(ctx, args):
+        path = _string(name, "path", args[0])
+        data = _bytes(name, args[1])
 
         def job():
             with open(path, mode) as f:
@@ -241,8 +275,12 @@ def _file_op(name: str, op):
     def native(ctx, args):
         if name == "write":
             _string("write", "text", args[1])
-        f = _file(ctx, name, args[0])
         rest = args[1:]
+        if name == "file_write_bytes":
+            rest = [_bytes(name, args[1])]
+        elif name == "file_read_bytes":
+            rest = [_max_bytes(args[1])]
+        f = _file(ctx, name, args[0])
         if f is None:
             from .runtime_values import PromiseInstance
 
@@ -282,6 +320,48 @@ def _write_op(ctx, file_id, f, rest):
     return NONE_VALUE
 
 
+def _max_bytes(value):
+    """`file_read_bytes`'s `max`: `none` (to the end) or a whole Number >= 0."""
+    if value is NONE_VALUE:
+        return None
+    if isinstance(value, bool) or not isinstance(value, Decimal):
+        raise MahRuntimeError(
+            f"file_read_bytes: max must be a Number or none, got {type_name_of(value)}", kind="TypeMismatch"
+        )
+    if value != value.to_integral_value() or value < 0:
+        from .bytes_methods import _format_decimal
+
+        raise MahRuntimeError(
+            f"file_read_bytes: max must be a whole number of at least 0, got {_format_decimal(value)}",
+            kind="ArgumentError",
+        )
+    return int(value)
+
+
+def _read_bytes_op(ctx, file_id, f, rest):
+    """M37: up to `max` bytes (all the rest when it's none); empty Bytes at
+    the end."""
+    if "r" not in f.mode:
+        raise OSError(errno.EBADF, "the file isn't open for reading")
+    limit = rest[0]
+    if limit is None:
+        return BytesValue(f.read())
+    out = bytearray()
+    while len(out) < limit:
+        chunk = f.read(limit - len(out))
+        if not chunk:
+            break
+        out += chunk
+    return BytesValue(out)
+
+
+def _write_bytes_op(ctx, file_id, f, rest):
+    if "r" in f.mode:
+        raise OSError(errno.EBADF, "the file isn't open for writing")
+    f.write(rest[0])
+    return NONE_VALUE
+
+
 def _close(ctx, args):
     f = _file(ctx, "close", args[0])
     if f is not None:
@@ -311,4 +391,10 @@ NATIVES = {
     "fs.read_all": (1, _file_op("read_all", _read_all_op)),
     "fs.write": (2, _file_op("write", _write_op)),
     "fs.close": (1, _close),
+    # M37 (1.17): binary data
+    "fs.read_bytes": (1, _read_bytes),
+    "fs.write_bytes": (2, _write_bytes("wb", "write_bytes")),
+    "fs.append_bytes": (2, _write_bytes("ab", "append_bytes")),
+    "fs.file_read_bytes": (2, _file_op("file_read_bytes", _read_bytes_op)),
+    "fs.file_write_bytes": (2, _file_op("file_write_bytes", _write_bytes_op)),
 }

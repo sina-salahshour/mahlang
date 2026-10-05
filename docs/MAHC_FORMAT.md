@@ -1,4 +1,4 @@
-# The `.mahc` bytecode format (version 1.16)
+# The `.mahc` bytecode format (version 1.17)
 
 `mah build prog.mh` compiles a program (its entry file plus everything it
 imports) into a single `.mahc` file; `mah runc prog.mahc` runs one. This
@@ -64,7 +64,7 @@ sections   (id u8, length varuint, payload bytes(length))*   until end of file
   version whose features it uses. *(1.5)* The reference encoder writes 4
   (every file it produces has 1.4's TYPES layout and HANDLERS section),
   or the highest `(1.x)` marker among the natives the file lists (5 for
-  the `std:math` natives, 7 for the ones behind `std:json`/`std:csv`, 8 for `std:random`'s, 9 for `std:regex`'s, 10 for `io.read_line`, 11 for `std:time`/`std:async`'s, 12 for `std:fs`'s, 13 for `std:process`'s, 14 for `std:reflect`'s), so a program that doesn't call newer natives
+  the `std:math` natives, 7 for the ones behind `std:json`/`std:csv`, 8 for `std:random`'s, 9 for `std:regex`'s, 10 for `io.read_line`, 11 for `std:time`/`std:async`'s, 12 for `std:fs`'s, 13 for `std:process`'s, 14 for `std:reflect`'s, 17 for the `bytes.*` natives and the binary `fs.*` ones), so a program that doesn't call newer natives
   still runs on an older VM. *(1.6)* Native methods (§6.7) are called by
   name, so it also writes the minor that added any native method whose
   *name* a `callmethod`/`callmethodkw`/`detachmethod`/`detachmethodkw` in
@@ -83,7 +83,15 @@ sections   (id u8, length varuint, payload bytes(length))*   until end of file
   `construct` and hook helpers use them), so every program that imports it
   or `std:json`, and every program with a decorator (which imports
   `std:reflect` implicitly, docs/REFLECTION.md), is 16; one with none of
-  these keeps its lower minor.
+  these keeps its lower minor. *(1.17)* It writes 17 when the file lists a
+  1.17 native (§4.4), when the program's own code (outside the prelude)
+  calls a method named `to_bytes` (§6.7), or when the code has
+  `loadtype 1, 8` (§5). `std:fs` declares the binary natives, so every
+  program that imports it is 17, whether or not it uses them (as 1.16 is for
+  `std:json` via `std:reflect`); a program with none of these keeps its lower
+  minor. A `Bytes` annotation in META (§4.10) is written as primitive code 8
+  only in a 1.17 file; in a lower-minor file it is written as `unknown`
+  (tag 0), so that 1.14–1.16 VMs, which refuse code 8, still load it.
 - **Required sections**, each present exactly once and in increasing id
   order: STRINGS (`0x01`), CONSTANTS (`0x02`), TYPES (`0x03`), NATIVES
   (`0x04`), FUNCTIONS (`0x05`), CODE (`0x06`), — in files with minor ≥ 1 —
@@ -254,6 +262,14 @@ Version 1.0 defines:
 | `hooks.of` | 1 | *(1.16)* `value` → the data `hooks.set_type` stored for `value`'s type if `value` is a struct instance, else `none` |
 | `hooks.get_field` | 2 | *(1.16)* `value, name` → the field's current value, read raw. `value` a struct or enum instance (else `TypeMismatch`, `hooks.get_field: expected a struct, got TYPE`), `name` a String naming one of its fields (`NoSuchField`, `hooks.get_field: 'T' has no field 'f'`) |
 | `hooks.set_field` | 3 | *(1.16)* `value, name, new` → `none`, writing the field raw; the same checks (`hooks.set_field: ...`) |
+| `bytes.new` | 2 | *(1.17)* `size, fill` → a new Bytes of `size` copies of the byte `fill`. `size` not a Number: `TypeMismatch`, `new: size must be a Number, got TYPE`; not a whole Number ≥ 0: `ArgumentError`, `new: size must be a whole number of at least 0, got N`; `fill` follows the byte rule (§6.9) with the prefix `new: fill` |
+| `bytes.from_vector` | 1 | *(1.17)* `items` (a Vector, else `TypeMismatch`, `from_vector: items must be a Vector, got TYPE`) → a new Bytes of its items; each item follows the byte rule (§6.9) with the prefix `from_vector: item I`, `I` its 0-based index |
+| `bytes.from_hex` | 1 | *(1.17)* `text` (a String, else `TypeMismatch`, `from_hex: text must be a String, got TYPE`) → `some(Bytes)`, two hex digits (either case) per byte; `none` unless `text` is an even number of hex digits (`""` gives `some` of empty Bytes) |
+| `bytes.from_base64` | 1 | *(1.17)* `text` (a String, else `TypeMismatch`, `from_base64: text must be a String, got TYPE`) → `some(Bytes)` decoded with the standard alphabet (RFC 4648 §4), or `none` unless the length is a multiple of 4, every character is in the alphabet or is `=`, and `=` occurs only as the last 1 or 2 characters of the last group (`""` gives `some` of empty Bytes; whitespace is not allowed). The unused low bits of the last group are ignored (`Zh==` decodes like `Zg==`) |
+| `fs.read_bytes` | 1 | *(1.17)* `path` → the whole file as a new Bytes, exactly as stored (a Promise of a result, like the other `fs.*` natives) |
+| `fs.write_bytes` / `fs.append_bytes` | 2 | *(1.17)* `path, data` (Bytes, else `TypeMismatch`, `NAME: data must be Bytes, got TYPE`, with `NAME` `write_bytes` / `append_bytes`) → `none`; write replaces (creating), append adds (creating). The bytes are copied when the native is called, so later changes to `data` don't affect the write |
+| `fs.file_read_bytes` | 2 | *(1.17)* `id, max` → a new Bytes of up to `max` bytes from the open file's current position, or all the rest when `max` is `none`; fewer than `max` only at the end of the file, and empty Bytes once it is reached. `max` neither a Number nor `none`: `TypeMismatch`, `file_read_bytes: max must be a Number or none, got TYPE`; not a whole Number ≥ 0: `ArgumentError`, `file_read_bytes: max must be a whole number of at least 0, got N`. A file opened for writing: failure kind `other`, `the file isn't open for reading` |
+| `fs.file_write_bytes` | 2 | *(1.17)* `id, data` → `none`, writing the bytes as `fs.write` writes text (unbuffered); `data` not Bytes: `TypeMismatch`, `file_write_bytes: data must be Bytes, got TYPE`. A file opened for reading: failure kind `other`, `the file isn't open for writing` |
 | `math.sin` | 1 | sine of a Number (radians); the result is computed in IEEE-754 double precision and converted to Number via its shortest round-trip decimal text |
 | `math.cos` | 1 | cosine, same rules |
 | `time.sleep_async` | 1 | returns a new pending Promise that the scheduler settles with `none` after the argument's number of milliseconds (§6.4) |
@@ -386,6 +402,15 @@ id that isn't open (closed, or never opened) settles with `[false,
 "closed", ...]`. A non-String path or text, or a non-Number id, is a
 `RuntimeError.TypeMismatch` at once (`NAME: path must be a String, got
 TYPE`; `NAME: expected a file id, got TYPE`).
+
+*(1.17)* The binary `fs.*` natives use the same results, failure kinds and
+argument checks, but move bytes as they are: no UTF-8 decoding (so no `not
+valid UTF-8 text` failure) and no newline translation. `fs.file_write_bytes`
+writes at the end of what has been written, like `fs.write`. A file has one
+position, shared by all reads, so text reads (`fs.read_line`,
+`fs.read_all`) and `fs.file_read_bytes` may be mixed on one open file, each
+continuing where the last stopped. The Bytes a native returns is new, and
+one it is given isn't kept.
 
 The `(1.11)` natives are `std:time`'s clocks and the building blocks of
 `std:async`. A non-Promise argument to `time.cancel`, `promise.resolve`
@@ -624,7 +649,7 @@ equal the native's declared arity (validated at load). `struct`/`enum`'s
 `values` count **must** equal the type's/variant's field count. `map`'s
 `pairs` count **must** be even (validated at load). `loadtype`'s `kind` is
 `0` (`index` a type index `T`, in range) or `1` (`index` a primitive code,
-0-7, §5); encoded as a `varuint` each, which for these values is the same
+0-7, *(1.17)* 0-8 when the file's minor is ≥ 17, §5); encoded as a `varuint` each, which for these values is the same
 single byte a `u8` would be.
 
 ### 4.7 DEBUG (`0x80`, optional)
@@ -725,7 +750,9 @@ typeref = tag u8, payload
   1 named: kind u8, index varuint, nargs varuint, nargs × typeref
            kind 0: a type index T (the built-in enums 0-2, then user types); kind 1: a
            primitive code -- `0` Number, `1` String, `2` Bool, `3` Function, `4` Vector,
-           `5` Map, `6` None, `7` Type (the codes of `loadtype`)
+           `5` Map, `6` None, `7` Type, *(1.17)* `8` Bytes (the codes of `loadtype`).
+           A 1.14–1.16 file never uses code 8: its encoder writes `Bytes` as `unknown`
+           (tag 0) there, and a decoder takes code 8 only when the file's minor is ≥ 17
   2 fn:    nparams varuint, nparams × typeref, returns typeref,
            throws u8 (0 | 1 then n varuint, n × typeref)
   3 param: name str                 (a type parameter, `T`)
@@ -759,13 +786,14 @@ most one space after it, joined by `\n` (docs/REFLECTION.md).
 | `Function` | a closure: (function index, defining frame) |
 | `Vector` *(1.3)* | an ordered, growable list of values, indexed from `0`; **mutable, by reference** |
 | `Map` *(1.3)* | an insertion-ordered table from keys (Strings, Numbers, Bools) to values; **mutable, by reference** (§6.9) |
-| `Type` *(1.14)* | a type: `(kind, index)` with kind 0 a type index `T` (§4.3: the built-in enums, structs, user enums) or kind 1 a primitive code (`0` Number, `1` String, `2` Bool, `3` Function, `4` Vector, `5` Map, `6` None, `7` Type). Immutable; two Types are `==` when kind and index match; not usable as a Map key (§6.9); `to_string` is the type's name (§6.6) |
+| `Bytes` *(1.17)* | an ordered, growable sequence of bytes, each a whole Number 0–255, indexed from `0`; **mutable, by reference**. Unlike a Vector, two Bytes are `==` when their contents are equal (§6.2); always truthy; not usable as a Map key (§6.9). It has no literal and no opcode: it comes from the 1.17 natives (§4.4) and `String.to_bytes` (§6.7). `to_string` is `Bytes[68 69]` (§6.6) |
+| `Type` *(1.14)* | a type: `(kind, index)` with kind 0 a type index `T` (§4.3: the built-in enums, structs, user enums) or kind 1 a primitive code (`0` Number, `1` String, `2` Bool, `3` Function, `4` Vector, `5` Map, `6` None, `7` Type, *(1.17)* `8` Bytes). Immutable; two Types are `==` when kind and index match; not usable as a Map key (§6.9); `to_string` is the type's name (§6.6) |
 | user struct | (type, field values in declaration order), **mutable, by reference**; *(1.4)* also a hidden `thrown_at` slot (§6.8), never visible to Mah code |
 | user enum | (type, variant, field values), mutable, by reference; *(1.4)* also a hidden `thrown_at` slot (§6.8) |
 
 The **type name** of a value (used by method dispatch): `Number`,
 `String`, `Bool`, `Function`, `Option`, `Promise`, `Vector`, `Map`,
-`RuntimeError` *(1.4)*, `Type` *(1.14)*, or the user type's name.
+`RuntimeError` *(1.4)*, `Type` *(1.14)*, `Bytes` *(1.17)*, or the user type's name.
 
 **Truthiness** (`jmpf`, `and`, `or`): `false`, `none`, the Number `0`, and
 the empty String are falsy; every other value is truthy.
@@ -872,6 +900,9 @@ the empty String are falsy; every other value is truthy.
 - `jmp L`; `jmpf cond L`: jump if `cond` is falsy.
 - `add`: if either operand is a String, the result is
   `to_string(a) ++ to_string(b)` (§6.6); if both are Numbers, their sum;
+  *(1.17)* if both are Bytes, a new Bytes: the bytes of `a` followed by
+  those of `b` (neither operand changes; with a String on the other side
+  the String rule above applies, so `"x" + b` is `"x" ++ to_string(b)`);
   otherwise a runtime error.
 - `sub`, `div`, `pow`: Numbers only. `div` by zero is a runtime error.
 - `mul`: Numbers; or a String and an integer Number in either order,
@@ -882,7 +913,9 @@ the empty String are falsy; every other value is truthy.
 - `eq`/`neq`: Numbers compare numerically, Strings by content, Bools by
   value, `none` equals only `none`; every other value (structs, enums
   including `some(..)`, functions, promises, Vectors, Maps) is equal only to itself
-  (identity). Values of different types are never equal. Result: Bool.
+  (identity); *(1.17)* two Bytes are equal when they have the same length and
+  the same bytes (by content, unlike Vectors), and a Bytes never equals a
+  Vector or any other type. Values of different types are never equal. Result: Bool.
 - `lt`/`gt`, and *(1.2)* `le`/`ge` (≤ / ≥): two Numbers, or two Strings
   (by Unicode code point sequence); anything else is a runtime error.
   Result: Bool.
@@ -1019,6 +1052,8 @@ Encoders drain scopes with ordinary `call`/`retval` instructions.
      (`[]` when empty).
    - Map *(1.3)*: `[` + `to_string(k) + ": " + to_string(v)` for each entry
      in insertion order, joined by `, `, + `]`; `[:]` when empty.
+   - Bytes *(1.17)*: `Bytes[` + each byte as two lowercase hex digits,
+     joined by one space, + `]` (`Bytes[68 69]`; `Bytes[]` when empty).
 
 ### 6.7 Methods
 (Terminology: a *native target* here is the VM's own built-in
@@ -1030,7 +1065,7 @@ entry holds at most one *inherent* target and at most one target per trait
 name. A target is (function value or native, `is_method`).
 - Initially: for every built-in type name (`Number`, `String`, `Bool`,
   `Function`, `Option`, `Promise`, and *(1.3)* `Vector`, `Map`, *(1.4)*
-  `RuntimeError`, *(1.14)* `Type`), a native target for trait `Printable`,
+  `RuntimeError`, *(1.14)* `Type`, *(1.17)* `Bytes`), a native target for trait `Printable`,
   method `to_string`, `is_method` true, computing §6.6 step 2.
 - Also initially *(1.3)*, native targets for `Vector`, `Map`, and
   `String` for trait `Index`, method `index` (one argument, `key`), and for
@@ -1039,7 +1074,8 @@ name. A target is (function value or native, `is_method`).
   `is_method` true, behaving as §6.9 describes. Encoders compile `x[k]` to `callmethod x
   "index" [k] "Index"` and `x[k] = v` to `callmethod x "index_assign" [k,
   v] "IndexAssign"` (each followed by `retval`), so a user type that
-  `defmethod`s those traits is indexable the same way.
+  `defmethod`s those traits is indexable the same way. *(1.17)* `Bytes` has
+  native targets for both traits too (§6.9).
 - Also initially *(1.2)*, native **inherent** methods (all `is_method`
   true; arguments after the receiver are positional, and keyword arguments
   are a runtime error, except that *(1.3)* a parameter shown below as
@@ -1070,6 +1106,18 @@ name. A target is (function value or native, `is_method`).
   | `String` *(1.6)* | `lines()` | a Vector of the lines: split at each `\n`, dropping a `\r` immediately before it (a `\r` not followed by `\n` stays); a final `\n` doesn't start another line; `""` has none |
   | `String` *(1.6)* | `parse_number()` | the Number the String spells, or `none`: after trimming whitespace it must match `[+-]?(D+(.D*)? \| .D+)([eE][+-]?D{1,5})?` (D an ASCII digit), converted exactly as a CONSTANTS decimal (§4.2) |
   | `Vector` *(1.6)* | `join(sep = "")` | every item's `to_string` (§6.6), with `sep` between |
+  | `String` *(1.17)* | `to_bytes()` | a new Bytes: the String's UTF-8 encoding |
+  | `Bytes` *(1.17)* | `len()` | the number of bytes |
+  | `Bytes` *(1.17)* | `push(n)` | append the byte `n`; returns `none`. A bad byte is an error with the prefix `push: the value` (§6.9), e.g. `push: the value must be a whole number from 0 to 255, got -1` |
+  | `Bytes` *(1.17)* | `pop()` | remove and return the last byte as a Number, or `none` if empty |
+  | `Bytes` *(1.17)* | `extend(other)` | append the bytes of `other`, which must be Bytes (else `TypeMismatch`, `extend: other must be Bytes, got TYPE`); `b.extend(b)` doubles `b`; returns `none` |
+  | `Bytes` *(1.17)* | `copy()` | a new Bytes with the same bytes (there is no `deep` parameter: the items are Numbers) |
+  | `Bytes` *(1.17)* | `to_vector()` | a new Vector of the bytes as Numbers |
+  | `Bytes` *(1.17)* | `to_text()` | `some(String)` if the bytes are valid UTF-8 (no surrogates, no overlong forms, nothing above U+10FFFF), else `none` |
+  | `Bytes` *(1.17)* | `to_text_lossy()` | the String decoded as UTF-8, with each invalid sequence (its maximal invalid subpart, as in the Unicode recommendation) replaced by one U+FFFD |
+  | `Bytes` *(1.17)* | `to_hex()` | the bytes as lowercase hex, two digits per byte (`""` when empty) |
+  | `Bytes` *(1.17)* | `to_base64()` | standard alphabet (RFC 4648 §4), padded with `=` to a multiple of 4 characters (`""` when empty) |
+  | `Bytes` *(1.17)* | `index_of(needle)` | `some(i)`, the byte position of the first occurrence of the Bytes `needle` (`some(0)` for an empty one), or `none`; a non-Bytes `needle` is a `TypeMismatch`, `index_of: needle must be Bytes, got TYPE` |
 
   *(1.6)* Positions and lengths count Unicode code points, and
   "whitespace" is exactly the Unicode White_Space property. An argument
@@ -1079,7 +1127,11 @@ name. A target is (function value or native, `is_method`).
   at least 0, got N`, or `must be a Number, got TYPE` for a non-Number);
   an empty `sep`/`fill` is an `ArgumentError` (`split: sep can't be
   empty`, `NAME: fill can't be empty`). `mah/string_methods.py` is the
-  reference implementation.
+  reference implementation. *(1.17)* The `Bytes` methods follow the same
+  conventions (positional arguments only, the usual wrong-count error), and
+  `mah/bytes_methods.py` is their reference implementation; the Bytes
+  methods need no minor of their own, since a Bytes value exists only in a
+  1.17 file (§3), but `to_bytes` does (§3, §7).
   Wrong argument counts give the usual `Argument Count is invalid.
   method 'NAME' accepts N arguments but M was given`.
 - *(1.16)* **Function identity and item types.** Every Function value has an
@@ -1257,13 +1309,37 @@ instruction index -- unchanged from 1.0–1.3.
   `none` when `i` names none, and a range index returns the substring with
   the Vector slice rules (clamped, never an error). A non-Number index, or
   a non-integer slice bound, is a runtime error.
+- **Bytes** *(1.17)* index like Vectors, with bytes as the items.
+  `index(b, i)` returns the byte at `i` as a Number (negative from the end),
+  or `none` when `i` names no item; a non-Number `i` is a `TypeMismatch`,
+  `Bytes index must be a Number, got TYPE`. A range index (`Range`,
+  `FromRange`, `ToRange`) returns a **new** Bytes with exactly the Vector
+  slice rules above (clamped, never an error; a non-integer bound is the
+  Vector slice's runtime error). `index_assign(b, i, n)` sets the byte at
+  `i` and returns `none`. The **byte rule**, for every place a byte is given
+  (`index_assign`, `push`, the `bytes.*` natives): a value that isn't a
+  Number is a `TypeMismatch`, `P must be a Number, got TYPE`; a Number that
+  isn't a whole number from 0 to 255 is an `ArgumentError`, `P must be a
+  whole number from 0 to 255, got N` (`N` formatted as by `to_string`);
+  `P` is the prefix the caller gives, `Bytes item` for `index_assign`. The
+  other `index_assign` errors: `i` naming no item is an `IndexOutOfRange`,
+  `Bytes index N is out of range for Bytes of length L (use push to add
+  items)`; a range `i` is a `TypeMismatch`, `Can't assign to a Bytes slice
+  (b[a..b] = ...); assign items one at a time`; a non-Number `i` as above.
+  The checks run in that order: index (or range) first, then the byte.
+  `==` compares contents (§6.2), and Bytes isn't a Map key (below).
+  Iterating Bytes is prelude code (`impl Iterable<Number> for Bytes`,
+  reusing the Vector's iterator, which needs only `len()` and `[i]`), so it
+  is live like a Vector's and gives Numbers.
 - **Deep copy** (`copy(deep: true)`): copies every Vector, Map, and struct
-  and enum instance reachable from the receiver; every other value
+  and enum instance reachable from the receiver, and *(1.17)* every Bytes
+  (a copy with the same bytes, made once per original like the others;
+  a shallow copy shares them); every other value
   (Numbers, Strings, Bools, Functions, `none`, Promises) is shared, not
   copied. An object reachable twice is copied once, so sharing (and cycles)
   inside the original is reproduced in the copy. `index_assign(v, i, x)` replaces
   the item and returns `none`; when `i` names no item it's a runtime error.
-- **Map keys** must be Strings, Numbers, or Bools; any other key given to
+- **Map keys** must be Strings, Numbers, or Bools (so not a Bytes); any other key given to
   `index`, `index_assign`, `has`, `remove`, or `map` is a runtime error.
   Two keys are the same key when they're equal by `eq` (§6.2): so `1` and
   `1.0` are one key, while `1`, `"1"`, and `true` are three.
@@ -1408,6 +1484,18 @@ message
   encoder writes 16 for a file with a rest flag, `paramhooks`, a `hooks.*`
   native or a `fn#` key (§3) -- which includes every file that imports
   `std:reflect`, `std:json` or has a decorator.
+- **1.17** added `Bytes` (docs/STDLIB.md, M37): the value type (§5), its
+  `+`, `==` and `to_string` (§6.2, §6.6), its native methods, `Index`/
+  `IndexAssign` targets and `String.to_bytes` (§6.7, §6.9), the primitive
+  type code 8 (`loadtype 1, 8`, §5, and in META, §4.10), the four `bytes.*`
+  natives behind `std:bytes` and the five binary `fs.*` ones behind
+  `std:fs` (§4.4). The encoder writes 17 for a file that lists one of those
+  natives (so every file that imports `std:fs`), that calls a method named
+  `to_bytes` outside the prelude, or that has `loadtype 1, 8` (§3). Since
+  1.14–1.16 decoders refuse code 8, a file below 17 that annotates a type
+  `Bytes` has the META `typeref` written as `unknown` (tag 0), not as code 8;
+  a decoder accepts code 8 (in `loadtype` and META) only from minor 17, and
+  otherwise reports `'loadtype' at instruction I: primitive type code 8 out of range` / `META: primitive type code 8 out of range`.
 - Planned growth, for orientation: error-set checking (the static
   checker's `throws` inference and "unhandled error" diagnostics -- M26),
   string utilities, filesystem, networking, and process natives.

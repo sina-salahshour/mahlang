@@ -1,0 +1,504 @@
+# Tests for Bytes and std:bytes (M37), run by tests/test_stdlib.py (or
+# `mah test --file mah/std/bytes.test.mh`) on both VMs. The runtime error
+# texts are also pinned in tests/test_bytes.py.
+import "std:test"
+import bytes from "./bytes"
+
+fn b(items: Vector<Number>) -> Bytes { bytes.from_vector(items) }
+
+# The kind and message of the runtime error `f` throws.
+fn error_of(f: fn() -> Unknown) -> String {
+    let e = assert_throws(f)
+    match e {
+        RuntimeError.TypeMismatch { message } => { "TypeMismatch: " + message }
+        RuntimeError.ArgumentError { message } => { "ArgumentError: " + message }
+        RuntimeError.IndexOutOfRange { message } => { "IndexOutOfRange: " + message }
+        _ => { "other: " + e.message() }
+    }
+}
+
+fn bytes_error(f: fn() -> Unknown) -> String {
+    let e = assert_throws(f)
+    match e {
+        bytes.BytesError { kind, description } => { kind + " | " + description }
+        _ => { "not a BytesError: " + e.message() }
+    }
+}
+
+test "making Bytes" {
+    assert_eq("" + bytes.new(), "Bytes[]")
+    assert_eq("" + bytes.new(3), "Bytes[00 00 00]")
+    assert_eq("" + bytes.new(2, 255), "Bytes[ff ff]")
+    assert_eq("" + b([1, 2, 255]), "Bytes[01 02 ff]")
+    assert_eq("" + b([]), "Bytes[]")
+    assert_eq("" + "hi".to_bytes(), "Bytes[68 69]")
+    assert_eq("" + "".to_bytes(), "Bytes[]")
+    assert_eq("" + "é€".to_bytes(), "Bytes[c3 a9 e2 82 ac]")
+    assert_eq(bytes.new(5).len(), 5)
+}
+
+test "to_string and truthiness" {
+    assert_eq("x" + b([10, 171]), "xBytes[0a ab]")
+    assert_eq("" + b([]), "Bytes[]")
+    assert(bytes.new())
+    assert(b([0]))
+    assert_eq(if bytes.new() { "yes" } else { "no" }, "yes")
+}
+
+test "len, push and pop" {
+    let x = b([1])
+    assert_eq(x.len(), 1)
+    assert_eq(x.push(2), none)
+    x.push(255)
+    x.push(0)
+    assert_eq("" + x, "Bytes[01 02 ff 00]")
+    assert_eq(x.pop(), 0)
+    assert_eq(x.pop(), 255)
+    assert_eq(x.len(), 2)
+    assert_eq(bytes.new().pop(), none)
+    let e = bytes.new()
+    e.push(7)
+    assert_eq(e.pop(), 7)
+    assert_eq(e.pop(), none)
+}
+
+test "push checks the byte" {
+    let x = bytes.new()
+    assert_eq(
+        error_of(fn() { x.push(-1) }),
+        "ArgumentError: push: the value must be a whole number from 0 to 255, got -1"
+    )
+    assert_eq(
+        error_of(fn() { x.push(256) }),
+        "ArgumentError: push: the value must be a whole number from 0 to 255, got 256"
+    )
+    assert_eq(
+        error_of(fn() { x.push(1.5) }),
+        "ArgumentError: push: the value must be a whole number from 0 to 255, got 1.5"
+    )
+    assert_eq(
+        error_of(fn() { x.push("a") }),
+        "TypeMismatch: push: the value must be a Number, got String"
+    )
+    assert_eq(x.len(), 0)
+}
+
+test "indexing" {
+    let x = b([10, 20, 30])
+    assert_eq(x[0], 10)
+    assert_eq(x[2], 30)
+    assert_eq(x[-1], 30)
+    assert_eq(x[-3], 10)
+    assert_eq(x[3], none)
+    assert_eq(x[-4], none)
+    assert_eq(bytes.new()[0], none)
+}
+
+test "index assignment" {
+    let x = b([1, 2, 3])
+    x[0] = 255
+    x[-1] = 0
+    assert_eq("" + x, "Bytes[ff 02 00]")
+    assert_eq(
+        error_of(fn() { x[3] = 1 }),
+        "IndexOutOfRange: Bytes index 3 is out of range for Bytes of length 3 (use push to add items)"
+    )
+    assert_eq(
+        error_of(fn() { x[-4] = 1 }),
+        "IndexOutOfRange: Bytes index -4 is out of range for Bytes of length 3 (use push to add items)"
+    )
+    assert_eq(
+        error_of(fn() { x[0] = 256 }),
+        "ArgumentError: Bytes item must be a whole number from 0 to 255, got 256"
+    )
+    assert_eq(
+        error_of(fn() { x[0] = -1 }),
+        "ArgumentError: Bytes item must be a whole number from 0 to 255, got -1"
+    )
+    assert_eq(
+        error_of(fn() { x[0] = 0.5 }),
+        "ArgumentError: Bytes item must be a whole number from 0 to 255, got 0.5"
+    )
+    assert_eq(
+        error_of(fn() { x[0] = "a" }),
+        "TypeMismatch: Bytes item must be a Number, got String"
+    )
+    assert_eq(
+        error_of(fn() { x["a"] = 1 }),
+        "TypeMismatch: Bytes index must be a Number, got String"
+    )
+    assert_eq("" + x, "Bytes[ff 02 00]")
+}
+
+test "slicing" {
+    let x = b([0, 1, 2, 3, 4])
+    assert_eq("" + x[1..3], "Bytes[01 02]")
+    assert_eq("" + x[1..=3], "Bytes[01 02 03]")
+    assert_eq("" + x[..2], "Bytes[00 01]")
+    assert_eq("" + x[3..], "Bytes[03 04]")
+    assert_eq("" + x[-2..], "Bytes[03 04]")
+    assert_eq("" + x[2..2], "Bytes[]")
+    assert_eq("" + x[3..1], "Bytes[]")
+    assert_eq("" + x[3..99], "Bytes[03 04]")
+    # a slice is a copy
+    let s = x[0..2]
+    s.push(9)
+    s[0] = 99
+    assert_eq("" + x, "Bytes[00 01 02 03 04]")
+    assert_eq(
+        error_of(fn() { x[0..2] = b([1]) }),
+        "TypeMismatch: Can't assign to a Bytes slice (b[a..b] = ...); assign items one at a time"
+    )
+}
+
+test "equality" {
+    assert(b([1, 2]) == b([1, 2]))
+    assert(b([1, 2]) != b([1, 3]))
+    assert(b([1, 2]) != b([1]))
+    assert(bytes.new() == b([]))
+    assert(b([104, 105]) == "hi".to_bytes())
+    assert(b([1, 2]) != [1, 2])
+    assert(b([]) != [])
+    assert([1, 2] != b([1, 2]))
+    assert(b([1]) != "x")
+    let x = b([1])
+    assert(x == x)
+    assert_eq(b([5]), b([5]))
+    assert_ne(b([5]), b([6]))
+    # contents, not identity, even after mutation
+    let y = b([1])
+    y.push(2)
+    assert(y == b([1, 2]))
+}
+
+test "Bytes is mutable and shared by reference" {
+    let x = b([1, 2])
+    let y = x
+    y.push(3)
+    y[0] = 9
+    assert_eq("" + x, "Bytes[09 02 03]")
+    fn grow(v: Bytes) { v.push(4) }
+    grow(x)
+    assert_eq(y.len(), 4)
+}
+
+test "plus makes a new Bytes" {
+    let x = b([1, 2])
+    let y = b([3])
+    let z = x + y
+    assert_eq("" + z, "Bytes[01 02 03]")
+    z.push(4)
+    z[0] = 0
+    assert_eq("" + x, "Bytes[01 02]")
+    assert_eq("" + y, "Bytes[03]")
+    assert_eq("" + (x + bytes.new()), "Bytes[01 02]")
+    assert_eq("" + (bytes.new() + bytes.new()), "Bytes[]")
+    assert_eq("" + (x + x), "Bytes[01 02 01 02]")
+    # String + Bytes is still the String rule
+    assert_eq("x" + y, "xBytes[03]")
+}
+
+test "extend" {
+    let x = b([1])
+    assert_eq(x.extend(b([2, 3])), none)
+    assert_eq("" + x, "Bytes[01 02 03]")
+    x.extend(x)
+    assert_eq("" + x, "Bytes[01 02 03 01 02 03]")
+    x.extend(bytes.new())
+    assert_eq(x.len(), 6)
+    assert_eq(
+        error_of(fn() { x.extend([1]) }),
+        "TypeMismatch: extend: other must be Bytes, got Vector"
+    )
+    assert_eq(
+        error_of(fn() { x.extend("a") }),
+        "TypeMismatch: extend: other must be Bytes, got String"
+    )
+}
+
+test "copy" {
+    let x = b([1, 2])
+    let y = x.copy()
+    assert(x == y)
+    y.push(3)
+    y[0] = 7
+    assert_eq("" + x, "Bytes[01 02]")
+    assert_eq("" + y, "Bytes[07 02 03]")
+    assert_eq("" + bytes.new().copy(), "Bytes[]")
+}
+
+test "copy of a Vector shares Bytes unless deep" {
+    let x = b([1])
+    let v = [x]
+    let shallow = v.copy()
+    let deep = v.copy(deep: true)
+    x.push(2)
+    assert_eq("" + shallow[0], "Bytes[01 02]")
+    assert_eq("" + deep[0], "Bytes[01]")
+    deep[0].push(3)
+    assert_eq("" + x, "Bytes[01 02]")
+    # nested deeper
+    let w = [[x]]
+    let wd = w.copy(deep: true)
+    x[0] = 200
+    assert_eq("" + wd[0][0], "Bytes[01 02]")
+}
+
+test "to_vector" {
+    assert_eq("" + b([1, 2, 255]).to_vector(), "[1, 2, 255]")
+    assert_eq(bytes.new().to_vector().len(), 0)
+    let x = b([1])
+    let v = x.to_vector()
+    v.push(5)
+    assert_eq(x.len(), 1)
+    assert(x.to_vector() != x)
+}
+
+test "to_text" {
+    assert_eq("hello".to_bytes().to_text().unwrap(), "hello")
+    assert_eq("é€😀".to_bytes().to_text().unwrap(), "é€😀")
+    assert_eq(bytes.new().to_text().unwrap(), "")
+    assert_eq(b([255]).to_text(), none)
+    assert_eq(b([195]).to_text(), none)
+    assert_eq(b([192, 128]).to_text(), none)
+    assert_eq(b([237, 160, 128]).to_text(), none)
+    assert_eq(b([104, 255, 105]).to_text(), none)
+    assert_eq(b([0, 1]).to_text().unwrap(), "\u0000\u0001")
+}
+
+test "to_text_lossy" {
+    assert_eq("héllo".to_bytes().to_text_lossy(), "héllo")
+    assert_eq(bytes.new().to_text_lossy(), "")
+    assert_eq(b([104, 255, 105]).to_text_lossy(), "h�i")
+    assert_eq(b([255, 254]).to_text_lossy(), "��")
+    # a truncated sequence is one U+FFFD (maximal subpart)
+    assert_eq(b([226, 130]).to_text_lossy(), "�")
+    assert_eq(b([226, 130, 65]).to_text_lossy(), "�A")
+    assert_eq(b([240, 159, 152]).to_text_lossy(), "�")
+    assert_eq(b([195]).to_text_lossy(), "�")
+    # an overlong or surrogate encoding is one per byte
+    assert_eq(b([192, 128]).to_text_lossy(), "��")
+    assert_eq(b([237, 160, 128]).to_text_lossy(), "���")
+}
+
+test "to_hex and to_base64" {
+    assert_eq(bytes.new().to_hex(), "")
+    assert_eq(b([0, 15, 16, 255]).to_hex(), "000f10ff")
+    assert_eq(bytes.new().to_base64(), "")
+    assert_eq("f".to_bytes().to_base64(), "Zg==")
+    assert_eq("fo".to_bytes().to_base64(), "Zm8=")
+    assert_eq("foo".to_bytes().to_base64(), "Zm9v")
+    assert_eq("foob".to_bytes().to_base64(), "Zm9vYg==")
+    assert_eq("fooba".to_bytes().to_base64(), "Zm9vYmE=")
+    assert_eq("foobar".to_bytes().to_base64(), "Zm9vYmFy")
+    assert_eq(b([251, 255, 254]).to_base64(), "+//+")
+    assert_eq(b([0, 0, 0]).to_base64(), "AAAA")
+}
+
+test "index_of" {
+    let x = "hello world".to_bytes()
+    assert_eq(x.index_of("o".to_bytes()).unwrap(), 4)
+    assert_eq(x.index_of("world".to_bytes()).unwrap(), 6)
+    assert_eq(x.index_of("hello world".to_bytes()).unwrap(), 0)
+    assert_eq(x.index_of("hello world!".to_bytes()), none)
+    assert_eq(x.index_of("z".to_bytes()), none)
+    assert_eq(x.index_of(bytes.new()).unwrap(), 0)
+    assert_eq(bytes.new().index_of(bytes.new()).unwrap(), 0)
+    assert_eq(bytes.new().index_of(b([1])), none)
+    assert_eq(b([1, 1, 2]).index_of(b([1, 2])).unwrap(), 1)
+    assert_eq(
+        error_of(fn() { x.index_of("o") }),
+        "TypeMismatch: index_of: needle must be Bytes, got String"
+    )
+    assert_eq(
+        error_of(fn() { x.index_of(111) }),
+        "TypeMismatch: index_of: needle must be Bytes, got Number"
+    )
+}
+
+test "iteration" {
+    let seen = []
+    for let x in b([3, 2, 1]) { seen.push(x) }
+    assert_eq("" + seen, "[3, 2, 1]")
+    let n = 0
+    for let x in bytes.new() { n = n + 1 }
+    assert_eq(n, 0)
+    let total = 0
+    for let x in "AB".to_bytes() { total = total + x }
+    assert_eq(total, 131)
+    for let x, let i in b([5, 6]) { assert_eq(x, 5 + i) }
+}
+
+test "iteration is live" {
+    let x = b([1])
+    let seen = []
+    for let v in x {
+        seen.push(v)
+        if x.len() < 3 { x.push(v + 1) }
+    }
+    assert_eq("" + seen, "[1, 2, 3]")
+}
+
+test "from_vector" {
+    assert_eq("" + bytes.from_vector([0, 255]), "Bytes[00 ff]")
+    assert_eq(
+        error_of(fn() { bytes.from_vector([1, 256]) }),
+        "ArgumentError: from_vector: item 1 must be a whole number from 0 to 255, got 256"
+    )
+    assert_eq(
+        error_of(fn() { bytes.from_vector([-1]) }),
+        "ArgumentError: from_vector: item 0 must be a whole number from 0 to 255, got -1"
+    )
+    assert_eq(
+        error_of(fn() { bytes.from_vector([0, 0, "x"]) }),
+        "TypeMismatch: from_vector: item 2 must be a Number, got String"
+    )
+}
+
+test "new checks its arguments" {
+    assert_eq(
+        error_of(fn() { bytes.new(-1) }),
+        "ArgumentError: new: size must be a whole number of at least 0, got -1"
+    )
+    assert_eq(
+        error_of(fn() { bytes.new(1.5) }),
+        "ArgumentError: new: size must be a whole number of at least 0, got 1.5"
+    )
+    assert_eq(
+        error_of(fn() { bytes.new(2, 256) }),
+        "ArgumentError: new: fill must be a whole number from 0 to 255, got 256"
+    )
+    assert_eq(
+        error_of(fn() { bytes.new(2, "a") }),
+        "TypeMismatch: new: fill must be a Number, got String"
+    )
+}
+
+test "from_hex" {
+    assert_eq("" + bytes.from_hex("686921"), "Bytes[68 69 21]")
+    assert_eq("" + bytes.from_hex("FFaB"), "Bytes[ff ab]")
+    assert_eq("" + bytes.from_hex(""), "Bytes[]")
+    assert_eq(bytes.from_hex("00ff10").to_hex(), "00ff10")
+}
+
+test "from_hex errors" {
+    for let text in ["abc", "0", "zz", "0", "00 ff", " 00", "gg", "é1"] {
+        let e = bytes_error(fn() { bytes.from_hex(text) })
+        assert_eq(e, "invalid_hex | from_hex: not valid hexadecimal: \"" + text + "\"")
+    }
+    let long = "z".repeat(50)
+    assert_eq(
+        bytes_error(fn() { bytes.from_hex(long) }),
+        "invalid_hex | from_hex: not valid hexadecimal: \"" + "z".repeat(40) + "...\""
+    )
+    let exact = "z".repeat(40)
+    assert_eq(
+        bytes_error(fn() { bytes.from_hex(exact) }),
+        "invalid_hex | from_hex: not valid hexadecimal: \"" + exact + "\""
+    )
+    let e = assert_throws(fn() { bytes.from_hex("q") })
+    assert_eq(e.message(), "from_hex: not valid hexadecimal: \"q\"")
+}
+
+test "from_base64" {
+    assert_eq("" + bytes.from_base64(""), "Bytes[]")
+    assert_eq("" + bytes.from_base64("Zg=="), "Bytes[66]")
+    assert_eq("" + bytes.from_base64("Zm8="), "Bytes[66 6f]")
+    assert_eq("" + bytes.from_base64("Zm9v"), "Bytes[66 6f 6f]")
+    assert_eq(bytes.from_base64("Zm9vYmFy").to_text().unwrap(), "foobar")
+    assert_eq("" + bytes.from_base64("+//+"), "Bytes[fb ff fe]")
+    # the unused low bits of the last group are ignored
+    assert_eq("" + bytes.from_base64("Zh=="), "Bytes[66]")
+    assert_eq("" + bytes.from_base64("Zg=="), "" + bytes.from_base64("Zh=="))
+    assert_eq("" + bytes.from_base64("Zm9="), "" + bytes.from_base64("Zm8="))
+}
+
+test "from_base64 errors" {
+    for let text in [
+        "Zg=",
+        "Z===",
+        "Zg==Zg==",
+        "Zg",
+        "Zm9",
+        "Zm9v\n",
+        " Zm9v",
+        "Zm 9v",
+        "Zm9-",
+        "Zm9_",
+        "=Zg=",
+        "Z=g=",
+        "Zg=a",
+        "é==="
+    ] {
+        let e = bytes_error(fn() { bytes.from_base64(text) })
+        assert_eq(e, "invalid_base64 | from_base64: not valid base64: \"" + text + "\"")
+    }
+    let long = "!".repeat(41)
+    assert_eq(
+        bytes_error(fn() { bytes.from_base64(long) }),
+        "invalid_base64 | from_base64: not valid base64: \"" + "!".repeat(40) + "...\""
+    )
+    let e = assert_throws(fn() { bytes.from_base64("Z") })
+    assert_eq(e.message(), "from_base64: not valid base64: \"Z\"")
+}
+
+test "BytesError is caught by type and kind" {
+    let r = try { bytes.from_hex("x") } catch {
+        e: bytes.BytesError => { e.kind }
+    }
+    assert_eq(r, "invalid_hex")
+    let r2 = try { bytes.from_base64("x") } catch {
+        bytes.BytesError { kind, description } => { kind }
+    }
+    assert_eq(r2, "invalid_base64")
+}
+
+test "hex and base64 round trip" {
+    let all = bytes.new()
+    for let i in 0..256 { all.push(i) }
+    assert_eq(all.len(), 256)
+    assert(bytes.from_hex(all.to_hex()) == all)
+    assert(bytes.from_base64(all.to_base64()) == all)
+    assert_eq(all.to_hex().len(), 512)
+    assert_eq(all.to_base64().len(), 344)
+    for let n in 0..8 {
+        let part = all[..n]
+        assert(bytes.from_base64(part.to_base64()) == part)
+        assert(bytes.from_hex(part.to_hex()) == part)
+    }
+    assert(bytes.from_hex("DEADBEEF") == bytes.from_hex("deadbeef"))
+}
+
+test "text round trip" {
+    for let s in ["", "a", "héllo wörld", "日本語", "😀 emoji", "tab\tnewline\n"] {
+        assert_eq(s.to_bytes().to_text().unwrap(), s)
+        assert_eq(s.to_bytes().to_text_lossy(), s)
+    }
+    assert_eq("日本語".to_bytes().len(), 9)
+}
+
+test "concat" {
+    assert_eq("" + bytes.concat([]), "Bytes[]")
+    let a = b([1])
+    let c = bytes.concat([a, b([2, 3]), bytes.new(), b([4])])
+    assert_eq("" + c, "Bytes[01 02 03 04]")
+    c.push(5)
+    assert_eq("" + a, "Bytes[01]")
+    assert_eq("" + bytes.concat([a, a]), "Bytes[01 01]")
+}
+
+test "Bytes as a type and a value" {
+    fn first(x: Bytes) -> Number { x[0] }
+    assert_eq(first(b([7])), 7)
+    assert_eq("" + Bytes, "Bytes")
+    assert(Bytes == Bytes)
+    assert(Bytes != Vector)
+}
+
+test "Bytes is not a Map key" {
+    let e = assert_throws(fn() {
+        let m = [b([1]): 1]
+        m
+    })
+    assert_eq(e.message().contains("Bytes"), true)
+}

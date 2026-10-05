@@ -580,5 +580,14 @@ pub fn call_native(vm: &mut Vm, native: NativeFn, args: &[Value]) -> Result<Valu
         NativeFn::HooksOf => super::reflect::hooks_of(vm, args),
         NativeFn::HooksGetField => super::reflect::hooks_get_field(vm, args),
         NativeFn::HooksSetField => super::reflect::hooks_set_field(vm, args),
+        NativeFn::BytesNew => super::bytes::native_new(vm, args),
+        NativeFn::BytesFromVector => super::bytes::native_from_vector(vm, args),
+        NativeFn::BytesFromHex => super::bytes::native_from_hex(vm, args),
+        NativeFn::BytesFromBase64 => super::bytes::native_from_base64(vm, args),
+        NativeFn::FsReadBytes => super::fs::read_bytes(vm, args),
+        NativeFn::FsWriteBytes => super::fs::write_bytes(vm, args, false),
+        NativeFn::FsAppendBytes => super::fs::write_bytes(vm, args, true),
+        NativeFn::FsFileReadBytes => super::fs::file_read_bytes(vm, args),
+        NativeFn::FsFileWriteBytes => super::fs::file_write_bytes(vm, args),
     }
 }

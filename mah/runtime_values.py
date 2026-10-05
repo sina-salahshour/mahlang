@@ -33,8 +33,9 @@ from decimal import Decimal
 # redeclare it (the same rule as redeclaring `Option`).
 # M41a (1.14, docs/REFLECTION.md): `Type`, the runtime value a bare type name
 # evaluates to, joins them (Printable, like every built-in type).
+# M37 (1.17, docs/STDLIB.md): `Bytes`, a mutable sequence of bytes.
 BUILTIN_TYPE_NAMES = (
-    "Number", "String", "Bool", "Function", "Option", "Promise", "Vector", "Map", "RuntimeError", "Type",
+    "Number", "String", "Bool", "Function", "Option", "Promise", "Vector", "Map", "RuntimeError", "Type", "Bytes",
 )
 
 # M12: system traits -- trait name -> {method name -> parameter names}.
@@ -48,18 +49,18 @@ SYSTEM_TRAITS = {
 
 # M19: which built-in types natively implement each system trait (the VM's
 # initial method table, docs/MAHC_FORMAT.md #6.7). Every built-in type is
-# Printable; Vector, Map, and String are indexable, and Strings, being
-# immutable, don't implement IndexAssign.
+# Printable; Vector, Map, String and (M37) Bytes are indexable, and Strings,
+# being immutable, don't implement IndexAssign.
 SYSTEM_TRAIT_NATIVE_TYPES = {
     "Printable": BUILTIN_TYPE_NAMES,
-    "Index": ("Vector", "Map", "String"),
-    "IndexAssign": ("Vector", "Map"),
+    "Index": ("Vector", "Map", "String", "Bytes"),
+    "IndexAssign": ("Vector", "Map", "Bytes"),
 }
 
 
 # M41a (docs/MAHC_FORMAT.md #5, `loadtype`): the primitive types a `Type` can
-# be, by code -- `loadtype 1, code`.
-PRIMITIVE_TYPE_NAMES = ("Number", "String", "Bool", "Function", "Vector", "Map", "None", "Type")
+# be, by code -- `loadtype 1, code`. M37 (1.17) adds `Bytes`, code 8.
+PRIMITIVE_TYPE_NAMES = ("Number", "String", "Bool", "Function", "Vector", "Map", "None", "Type", "Bytes")
 
 
 _MANGLED = re.compile(r"__mah_m\d+_(?=\w)")
@@ -166,6 +167,16 @@ class VectorValue:
 
     def __init__(self, items):
         self.items = items  # list[Any]
+
+
+class BytesValue:
+    """M37: Bytes -- a growable sequence of bytes (whole numbers 0 to 255),
+    mutable and by reference like a Vector, but `==` by content."""
+
+    __slots__ = ("data",)
+
+    def __init__(self, data=b""):
+        self.data = bytearray(data)
 
 
 class MapValue:
@@ -382,6 +393,8 @@ def type_name_of(value) -> str:
         return "Vector"
     if isinstance(value, MapValue):
         return "Map"
+    if isinstance(value, BytesValue):
+        return "Bytes"
     if isinstance(value, TypeValue):
         return "Type"
     return "Unknown"

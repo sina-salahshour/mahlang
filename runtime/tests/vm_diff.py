@@ -685,6 +685,80 @@ print("never printed: the decorator phase runs first")
 @bad
 fn doomed() { }
 """, b""),
+    # M37: Bytes -- methods, indexing, operators, std:bytes, and every
+    # error message (same text on both VMs).
+    ("bytes", """
+import bytes from "std:bytes"
+let b = "h\u00e9llo".to_bytes()
+print(b, b.len(), b[0], b[-1], b[99], b[1.5], b[1..3], b[..-2], b[10..])
+b[0] = 72
+b.push(33)
+print(b.to_text(), b.to_hex(), b.to_base64(), b.pop(), b.to_vector())
+let c = b.copy()
+print(c == b, c == b.to_vector(), b + c, b.index_of("l".to_bytes()), b.index_of("".to_bytes()), b.index_of("zz".to_bytes()))
+b.extend(b)
+print(b.len(), [b].copy(deep: true)[0] == b, Bytes, bytes.new(), bytes.new(3, 255))
+let total = 0
+for let x in bytes.from_vector([1, 2, 3]) { total = total + x }
+print(total, bytes.concat([bytes.new(1), "a".to_bytes()]), "x" + bytes.new(1))
+for let t in ["", "Zg==", "Zm8=", "Zm9v", "Zm9vYg==", "Zh==", "Zg=", "Z===", "Zg==Zg==", "Z=g=", "a b="] {
+    print(t, try { bytes.from_base64(t).to_hex() } catch { e: bytes.BytesError => { e.kind } })
+}
+for let t in ["", "00fFaB", "abc", "zz", "0g"] {
+    print(t, try { bytes.from_hex(t).to_hex() } catch { e: bytes.BytesError => { e.message() } })
+}
+for let h in ["80", "c3", "e282", "eda080", "f4908080", "c0af", "61ff62", "f09f98", "f09f9880"] {
+    let raw = bytes.from_hex(h)
+    print(h, raw.to_text(), raw.to_text_lossy().to_bytes().to_hex())
+}
+let probes = [
+    fn() { b[0] = 256 },
+    fn() { b[0] = "a" },
+    fn() { b[0] = 1.5 },
+    fn() { b[99] = 1 },
+    fn() { b[0..1] = 1 },
+    fn() { b["x"] },
+    fn() { b.push(0 - 1) },
+    fn() { b.extend([1]) },
+    fn() { b.index_of("a") },
+    fn() { b + 1 },
+    fn() { bytes.new(0 - 1) },
+    fn() { bytes.new(1.5) },
+    fn() { bytes.new("a") },
+    fn() { bytes.new(1, 300) },
+    fn() { bytes.from_vector([1, "a"]) },
+    fn() { bytes.from_vector([1, 2.5]) },
+    fn() { [b: 1] },
+]
+for let p in probes {
+    print(try { p() } catch { e: RuntimeError => { e.message() } })
+}
+""", b""),
+    # M37: binary std:fs.
+    ("std_fs_bytes", """
+import fs from "std:fs"
+import bytes from "std:bytes"
+let dir = fs.temp_dir()
+let p = dir + "/x.bin"
+fs.write_bytes(p, bytes.from_vector([0, 1, 255, 10, 13]))
+fs.append_bytes(p, bytes.from_hex("fffe"))
+print(fs.read_bytes(p), try { fs.read_text(p) } catch { e: fs.FsError => { e.kind } })
+let f = fs.open(p)
+print(f.read_bytes(2), try { f.read_line() } catch { e: fs.FsError => { e.kind } }, f.read_bytes(max: 0), f.read_bytes(100), f.read_bytes())
+print(try { f.write_bytes(bytes.new(1)) } catch { e: fs.FsError => { e.description } })
+print(try { f.read_bytes(1.5) } catch { e: RuntimeError => { e.message() } })
+print(try { f.read_bytes("a") } catch { e: RuntimeError => { e.message() } })
+f.close()
+print(try { f.read_bytes() } catch { e: fs.FsError => { e.kind } })
+let w = fs.open(p, "w")
+w.write_bytes("ab".to_bytes())
+w.write("c")
+print(try { w.read_bytes() } catch { e: fs.FsError => { e.description } })
+w.close()
+print(fs.read_text(p), try { fs.read_bytes(dir + "/zz") } catch { e: fs.FsError => { e.kind + " " + e.op } })
+print(try { fs.write_bytes(p, "text") } catch { e: RuntimeError => { e.message() } })
+fs.remove(dir, recursive: true)
+""", b""),
     ("std_csv", """
 import csv from "std:csv"
 print(csv.parse("a,\\"b,c\\"\\r\\n\\n\\"q\\"\\"x\\",\\n"), csv.parse_records("n,v\\nx,1\\n"))

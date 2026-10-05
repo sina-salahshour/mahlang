@@ -243,6 +243,23 @@ class ExampleTests(unittest.TestCase):
             'not_found: no-such-program-mah: no such file or directory\n'
         )
 
+    def test_bytes(self):
+        # M37: Bytes, hex/base64 and binary files (in a temporary directory).
+        out = run_file(example_path("bytes.mh"))
+        self.assertEqual(
+            out,
+            'Bytes[68 69] 2 104 none\n'
+            'Bytes[48 69 21] some(Hi!) true\n'
+            'Bytes[01 02 fa] Bytes[fb ff] Bytes[00 01 02 fa fb ff 48 69 21]\n'
+            'sum: 759\n'
+            '000102fafbff AAEC+vv/\n'
+            'true some(Hi!)\n'
+            'invalid_hex: from_hex: not valid hexadecimal: "xyz"\n'
+            'none h\ufffdi some(2)\n'
+            '8 true\n'
+            'Bytes[00 01 02] 5 0\n'
+        )
+
     def test_decorators(self):
         # M41b: decorators as metadata.
         self.assertEqual(

@@ -7,12 +7,14 @@
 #   let f = fs.open("big.log")
 #   defer f.close()
 #   for let line in f.lines() { ... }         # one line at a time
+#   fs.write_bytes("logo.png", data)          # binary data is Bytes
 #
 # Every function waits for the file system like a call, but the work runs
 # off the program's own thread: `detach fs.read_text(p)` gives a Promise and
 # lets other tasks and timers run meanwhile. Failures throw FsError. Text is
-# UTF-8, read and written exactly (no newline translation); paths are
-# relative to the current directory.
+# UTF-8, read and written exactly (no newline translation); `read_bytes`/
+# `write_bytes` take the bytes as they are. Paths are relative to the
+# current directory.
 
 extern fn native_read_text(path: String) -> Promise<Vector<Unknown>> = "fs.read_text"
 extern fn native_write_text(path: String, text: String) -> Promise<
@@ -33,6 +35,19 @@ extern fn native_read_line(id: Number) -> Promise<Vector<Unknown>> = "fs.read_li
 extern fn native_read_all(id: Number) -> Promise<Vector<Unknown>> = "fs.read_all"
 extern fn native_write(id: Number, text: String) -> Promise<Vector<Unknown>> = "fs.write"
 extern fn native_close(id: Number) -> Promise<Vector<Unknown>> = "fs.close"
+extern fn native_read_bytes(path: String) -> Promise<Vector<Unknown>> = "fs.read_bytes"
+extern fn native_write_bytes(path: String, data: Bytes) -> Promise<
+    Vector<Unknown>
+> = "fs.write_bytes"
+extern fn native_append_bytes(path: String, data: Bytes) -> Promise<
+    Vector<Unknown>
+> = "fs.append_bytes"
+extern fn native_file_read_bytes(id: Number, max: Unknown) -> Promise<
+    Vector<Unknown>
+> = "fs.file_read_bytes"
+extern fn native_file_write_bytes(id: Number, data: Bytes) -> Promise<
+    Vector<Unknown>
+> = "fs.file_write_bytes"
 
 # What went wrong: `kind` is "not_found", "permission_denied",
 # "already_exists", "is_a_directory", "not_a_directory",
@@ -66,6 +81,21 @@ export fn write_text(path: String, text: String) throws FsError {
 # Adds `text` to the end of the file, creating it if need be.
 export fn append_text(path: String, text: String) throws FsError {
     result(native_append_text(path, text).await, "append_text", path)
+}
+
+# The whole file as Bytes, exactly as stored.
+export fn read_bytes(path: String) -> Bytes throws FsError {
+    result(native_read_bytes(path).await, "read_bytes", path)
+}
+
+# Writes `data` to the file, creating it or replacing what it held.
+export fn write_bytes(path: String, data: Bytes) throws FsError {
+    result(native_write_bytes(path, data).await, "write_bytes", path)
+}
+
+# Adds `data` to the end of the file, creating it if need be.
+export fn append_bytes(path: String, data: Bytes) throws FsError {
+    result(native_append_bytes(path, data).await, "append_bytes", path)
 }
 
 # -- paths ----------------------------------------------------------------------
@@ -158,6 +188,16 @@ impl File {
 
     fn write(self, text: String) throws FsError {
         result(native_write(self.id, text).await, "write", self.path)
+    }
+
+    # Up to `max` bytes from here (the rest of the file when `max` is
+    # none) -- fewer only at the end, and empty Bytes once it's reached.
+    fn read_bytes(self, max: Unknown = none) -> Bytes throws FsError {
+        result(native_file_read_bytes(self.id, max).await, "read_bytes", self.path)
+    }
+
+    fn write_bytes(self, data: Bytes) throws FsError {
+        result(native_file_write_bytes(self.id, data).await, "write_bytes", self.path)
     }
 
     # Closing twice does nothing.

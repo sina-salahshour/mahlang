@@ -93,6 +93,7 @@ pub fn format_value(val: &Value, recurse: &mut dyn FnMut(&Value) -> RResult<Stri
             }
         }
         Value::Type(t) => display_name(&t.name).to_string(),
+        Value::Bytes(b) => super::bytes::to_string(&b.borrow()),
         Value::Absent => "<absent>".to_string(),
     })
 }
@@ -123,7 +124,7 @@ pub fn string_char_at(s: &str, i: &Value, names: &BuiltinTypeNames) -> RResult<V
 /// The position a (possibly negative) index names in a sequence of length
 /// `n`, or `None` when it names no item (fractional, or outside
 /// `-n <= i < n`). A non-Number index is a runtime error.
-fn seq_position(n: usize, i: &Value, type_label: &str, names: &BuiltinTypeNames) -> RResult<Option<usize>> {
+pub(super) fn seq_position(n: usize, i: &Value, type_label: &str, names: &BuiltinTypeNames) -> RResult<Option<usize>> {
     let num = match i {
         Value::Number(num) => num,
         other => {
@@ -146,7 +147,7 @@ fn seq_position(n: usize, i: &Value, type_label: &str, names: &BuiltinTypeNames)
     Ok(Some(pos as usize))
 }
 
-fn is_range(v: &Value) -> Option<Rc<RefCell<StructData>>> {
+pub(super) fn is_range(v: &Value) -> Option<Rc<RefCell<StructData>>> {
     if let Value::Struct(s) = v {
         let is_range_type = matches!(s.borrow().type_name.as_ref(), "Range" | "FromRange" | "ToRange");
         if is_range_type {
@@ -177,7 +178,7 @@ fn slice_bound(v: &Value, type_label: &str, names: &BuiltinTypeNames) -> RResult
 
 /// `x[a..b]` and friends -- docs/MAHC_FORMAT.md #6.9: negative bounds count
 /// from the end, then both are clamped into `0..n` (never an error).
-fn slice_bounds(n: usize, r: &StructData, type_label: &str, names: &BuiltinTypeNames) -> RResult<(usize, usize)> {
+pub(super) fn slice_bounds(n: usize, r: &StructData, type_label: &str, names: &BuiltinTypeNames) -> RResult<(usize, usize)> {
     let n = n as i64;
     let mut start = match r.get("start") {
         Some(v) => slice_bound(v, type_label, names)?,
@@ -360,6 +361,15 @@ pub fn deep_copy(value: &Value, memo: &mut HashMap<usize, Value>) -> Value {
             Value::Enum(out)
         }
         Value::Type(_) | Value::Absent => value.clone(),
+        Value::Bytes(b) => {
+            let key = Rc::as_ptr(b) as usize;
+            if let Some(done) = memo.get(&key) {
+                return done.clone();
+            }
+            let out = Value::Bytes(Rc::new(RefCell::new(b.borrow().clone())));
+            memo.insert(key, out.clone());
+            out
+        }
     }
 }
 
@@ -459,6 +469,11 @@ pub enum NativeMethodKind {
     StringLines,
     StringParseNumber,
     VectorJoin,
+    // M37 (1.17): Bytes (runtime/src/vm/bytes.rs) and String.to_bytes.
+    StringToBytes,
+    Bytes(super::bytes::BytesMethod),
+    BytesIndex,
+    BytesIndexAssign,
 }
 
 /// The default of a native method's optional parameter.
@@ -492,6 +507,10 @@ impl NativeMethodKind {
             StringPadStart | StringPadEnd | StringStartsWith | StringEndsWith | StringContains | StringIndexOf
             | StringRepeat => 1,
             StringReplace | StringReplaceAll => 2,
+            StringToBytes => 0,
+            Bytes(m) => m.required_arity(),
+            BytesIndex => 1,
+            BytesIndexAssign => 2,
         }
     }
 
@@ -614,6 +633,22 @@ pub fn call_native_method(kind: NativeMethodKind, bound: &[Value], vm: &mut supe
                 }
                 Ok(str_value(&parts.join(&sep)))
             }
+            _ => unreachable!(),
+        },
+        NativeMethodKind::StringToBytes => match &bound[0] {
+            Value::Str(s) => Ok(super::bytes::string_to_bytes(s)),
+            _ => unreachable!(),
+        },
+        NativeMethodKind::Bytes(m) => match &bound[0] {
+            Value::Bytes(b) => super::bytes::call_method(m, b, &bound[1..], names),
+            _ => unreachable!(),
+        },
+        NativeMethodKind::BytesIndex => match &bound[0] {
+            Value::Bytes(b) => super::bytes::index(b, &bound[1], names),
+            _ => unreachable!(),
+        },
+        NativeMethodKind::BytesIndexAssign => match &bound[0] {
+            Value::Bytes(b) => super::bytes::index_assign(b, &bound[1], &bound[2], names),
             _ => unreachable!(),
         },
         kind => match &bound[0] {

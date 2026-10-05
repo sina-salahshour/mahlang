@@ -368,6 +368,12 @@ impl<T> Iterator<T> for VectorIterator<T> {
     }
 }
 
+# Bytes (M37) iterate over their bytes, as Numbers, with the Vector's
+# iterator (it only needs `len()` and `[i]`): live, like a Vector's.
+impl Iterable<Number> for Bytes {
+    fn iter(self) { VectorIterator { vec: self, index: 0 } }
+}
+
 # A Map iterates over its keys, in insertion order. `keys()` is a snapshot,
 # so changing the map while looping over it is safe.
 impl<K, V> Iterable<K> for Map<K, V> {

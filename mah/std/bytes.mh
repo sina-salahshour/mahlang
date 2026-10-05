@@ -1,0 +1,78 @@
+# std:bytes -- making Bytes, and hex/base64 (docs/STDLIB.md).
+#
+#   import bytes from "std:bytes"
+#   let b = "hi".to_bytes()               # Bytes[68 69] (UTF-8)
+#   b.push(33)
+#   b.to_text()                           # some("hi!")
+#   b.to_hex()                            # "686921"
+#   bytes.from_hex("686921")              # Bytes[68 69 21]
+#   bytes.from_base64("aGkh")             # the same
+#   bytes.new(4)                          # Bytes[00 00 00 00]
+#   bytes.from_vector([1, 2, 255])
+#
+# Bytes is a built-in type: a growable sequence of bytes (whole numbers
+# from 0 to 255), mutable and shared by reference like a Vector, but `==`
+# compares contents. `b[i]` is a byte (`none` past the end), `b[a..b]` a new
+# Bytes, `a + b` a new Bytes, and `for let x in b` goes through the bytes.
+# Its methods (`len`, `push`, `pop`, `extend`, `copy`, `index_of`,
+# `to_vector`, `to_text`, `to_text_lossy`, `to_hex`, `to_base64`) need no
+# import; this module is for making Bytes from other things.
+
+extern fn native_new(size: Number, fill: Number) -> Bytes = "bytes.new"
+extern fn native_from_vector(items: Vector<Number>) -> Bytes = "bytes.from_vector"
+extern fn native_from_hex(text: String) -> Option<Bytes> = "bytes.from_hex"
+extern fn native_from_base64(text: String) -> Option<Bytes> = "bytes.from_base64"
+
+## Text that couldn't be decoded: `kind` is "invalid_hex" or
+## "invalid_base64".
+export struct BytesError { kind: String, description: String }
+
+impl Error for BytesError {
+    fn message(self) -> String { self.description }
+}
+
+# The text for an error message, cut short when it's long.
+fn quoted(text: String) -> String {
+    if text.len() > 40 { "\"" + text[..40] + "...\"" } else { "\"" + text + "\"" }
+}
+
+## `size` bytes, each `fill`.
+export fn new(size: Number = 0, fill: Number = 0) -> Bytes { native_new(size, fill) }
+
+## The bytes in a Vector of whole numbers from 0 to 255.
+export fn from_vector(items: Vector<Number>) -> Bytes { native_from_vector(items) }
+
+## The bytes spelled by hexadecimal text, two digits per byte, in either
+## case (`"ff00"`).
+export fn from_hex(text: String) -> Bytes throws BytesError {
+    match native_from_hex(text) {
+        some(b) => { b }
+        none => {
+            throw BytesError {
+                kind: "invalid_hex",
+                description: "from_hex: not valid hexadecimal: " + quoted(text)
+            }
+        }
+    }
+}
+
+## The bytes encoded by base64 text: the standard alphabet (`A-Z a-z 0-9 +
+## /`), padded with `=` to a multiple of four characters, no whitespace.
+export fn from_base64(text: String) -> Bytes throws BytesError {
+    match native_from_base64(text) {
+        some(b) => { b }
+        none => {
+            throw BytesError {
+                kind: "invalid_base64",
+                description: "from_base64: not valid base64: " + quoted(text)
+            }
+        }
+    }
+}
+
+## All of `parts`, one after another, in a new Bytes.
+export fn concat(parts: Vector<Bytes>) -> Bytes {
+    let out = native_new(0, 0)
+    for let part in parts { out.extend(part) }
+    out
+}

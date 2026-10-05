@@ -155,6 +155,7 @@ pub fn type_of(vm: &mut Vm, args: &[Value]) -> R {
         Value::Function(_) => prim(vm, "Function"),
         Value::Vector(_) => prim(vm, "Vector"),
         Value::Map(_) => prim(vm, "Map"),
+        Value::Bytes(_) => prim(vm, "Bytes"),
         Value::Type(_) => prim(vm, "Type"),
         Value::Struct(st) => match find(true, &st.borrow().type_name) {
             Some(i) => type_value(vm, 0, i),

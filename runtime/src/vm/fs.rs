@@ -28,6 +28,8 @@ pub enum IoValue {
     Str(String),
     Num(u64),
     List(Vec<IoValue>),
+    /// M37: binary data, a Bytes value.
+    Bytes(Vec<u8>),
 }
 
 impl IoValue {
@@ -41,6 +43,7 @@ impl IoValue {
                 let items: Vec<Value> = items.into_iter().map(IoValue::into_value).collect();
                 Value::Vector(Rc::new(std::cell::RefCell::new(items)))
             }
+            IoValue::Bytes(data) => super::bytes::bytes_value(data),
         }
     }
 }
@@ -172,6 +175,39 @@ pub fn write_text(vm: &mut Vm, args: &[Value], append: bool) -> Result<Value, Ru
             File::create(&path)?
         };
         f.write_all(text.as_bytes())?;
+        Ok(IoValue::None)
+    }))
+}
+
+/// M37: a Bytes argument, copied now (on the VM's thread) so the worker
+/// never sees later changes to it.
+fn bytes_arg(vm: &Vm, name: &str, v: &Value) -> Result<Vec<u8>, RuntimeError> {
+    match v {
+        Value::Bytes(b) => Ok(b.borrow().clone()),
+        other => Err(RuntimeError::with_kind(
+            format!("{name}: data must be Bytes, got {}", type_name_of(other, &vm.names)),
+            ErrorKind::TypeMismatch,
+        )),
+    }
+}
+
+/// M37 (1.17): the whole file as Bytes.
+pub fn read_bytes(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
+    let path = string_arg(vm, "read_bytes", "path", &args[0])?;
+    Ok(spawn(vm, move || Ok(IoValue::Bytes(fs::read(&path)?))))
+}
+
+pub fn write_bytes(vm: &mut Vm, args: &[Value], append: bool) -> Result<Value, RuntimeError> {
+    let name = if append { "append_bytes" } else { "write_bytes" };
+    let path = string_arg(vm, name, "path", &args[0])?;
+    let data = bytes_arg(vm, name, &args[1])?;
+    Ok(spawn(vm, move || {
+        let mut f = if append {
+            OpenOptions::new().append(true).create(true).open(&path)?
+        } else {
+            File::create(&path)?
+        };
+        f.write_all(&data)?;
         Ok(IoValue::None)
     }))
 }
@@ -372,6 +408,56 @@ pub fn write(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
         let mut state = file.lock().expect("file");
         let FileState::Writer(f) = &mut *state else { return Err(other("the file isn't open for writing")) };
         f.write_all(text.as_bytes())?;
+        Ok(IoValue::None)
+    }))
+}
+
+/// `file_read_bytes`'s `max`: `none` (to the end) or a whole Number >= 0.
+fn max_bytes(vm: &Vm, v: &Value) -> Result<Option<usize>, RuntimeError> {
+    match v {
+        Value::None => Ok(None),
+        Value::Number(n) => match n.to_i64() {
+            Some(i) if n.is_integer() && i >= 0 => Ok(Some(i as usize)),
+            _ => Err(RuntimeError::with_kind(
+                format!("file_read_bytes: max must be a whole number of at least 0, got {}", n.format()),
+                ErrorKind::ArgumentError,
+            )),
+        },
+        other => Err(RuntimeError::with_kind(
+            format!("file_read_bytes: max must be a Number or none, got {}", type_name_of(other, &vm.names)),
+            ErrorKind::TypeMismatch,
+        )),
+    }
+}
+
+/// M37: up to `max` bytes (all the rest when it's none); empty Bytes at the
+/// end.
+pub fn file_read_bytes(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
+    let limit = max_bytes(vm, &args[1])?;
+    let Some(file) = open_file(vm, "file_read_bytes", args)? else { return Ok(closed()) };
+    Ok(spawn(vm, move || {
+        let mut state = file.lock().expect("file");
+        let FileState::Reader(reader) = &mut *state else { return Err(other("the file isn't open for reading")) };
+        let mut data = Vec::new();
+        match limit {
+            None => {
+                reader.read_to_end(&mut data)?;
+            }
+            Some(n) => {
+                reader.by_ref().take(n as u64).read_to_end(&mut data)?;
+            }
+        }
+        Ok(IoValue::Bytes(data))
+    }))
+}
+
+pub fn file_write_bytes(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
+    let data = bytes_arg(vm, "file_write_bytes", &args[1])?;
+    let Some(file) = open_file(vm, "file_write_bytes", args)? else { return Ok(closed()) };
+    Ok(spawn(vm, move || {
+        let mut state = file.lock().expect("file");
+        let FileState::Writer(f) = &mut *state else { return Err(other("the file isn't open for writing")) };
+        f.write_all(&data)?;
         Ok(IoValue::None)
     }))
 }

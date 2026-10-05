@@ -210,7 +210,7 @@
 ; -- also matched generically by text wherever else they appear.
 ((identifier) @type.builtin
   (#any-of? @type.builtin
-    "Number" "String" "Bool" "Function" "Option" "Promise" "Vector" "Map" "Type" "RuntimeError"
+    "Number" "String" "Bool" "Function" "Option" "Promise" "Vector" "Map" "Bytes" "Type" "RuntimeError"
     "Printable" "Index" "IndexAssign" "Unknown" "Never" "None"))
 
 ; M28: the contextual `test` of a test block -- last, so it wins over the

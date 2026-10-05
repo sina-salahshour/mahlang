@@ -58,13 +58,14 @@ from typing import Any, NamedTuple
 from .bytecode.decode import decode
 from .bytecode.format import MahcFormatError
 from .bytecode.program import Program
-from . import string_methods
+from . import bytes_methods, string_methods
 from .natives import NATIVES, NativeContext
 from .process_natives import snapshot_environment
 from .test_outcome import TestOutcome
 from .runtime_values import (
     BUILTIN_TYPE_NAMES,
     PRIMITIVE_TYPE_NAMES,
+    BytesValue,
     Closure,
     EnumInstance,
     Frame,
@@ -619,6 +620,8 @@ def _values_equal(a: Any, b: Any) -> bool:
         return a == b
     if ta == "Type":
         return a.kind == b.kind and a.index == b.index
+    if ta == "Bytes":
+        return bytes_methods.equal(a, b)  # M37: by content
     return a is b
 
 
@@ -797,7 +800,7 @@ def _deep_copy(value: Any, memo: dict) -> Any:
     shared in the copy and cycles terminate -- like Python's deepcopy."""
     if value is NONE_VALUE or isinstance(value, PromiseInstance):
         return value
-    if isinstance(value, (VectorValue, MapValue, StructInstance, EnumInstance)):
+    if isinstance(value, (VectorValue, MapValue, StructInstance, EnumInstance, BytesValue)):
         done = memo.get(id(value))
         if done is not None:
             return done
@@ -805,6 +808,10 @@ def _deep_copy(value: Any, memo: dict) -> Any:
         out = VectorValue([])
         memo[id(value)] = out
         out.items = [_deep_copy(v, memo) for v in value.items]
+        return out
+    if isinstance(value, BytesValue):
+        out = BytesValue(value.data)
+        memo[id(value)] = out
         return out
     if isinstance(value, MapValue):
         out = MapValue()
@@ -907,6 +914,8 @@ def _format_value(val: Any, recurse) -> str:
         if not val.entries:
             return "[:]"
         return "[" + ", ".join(f"{recurse(k)}: {recurse(v)}" for k, v in val.entries.values()) + "]"
+    if isinstance(val, BytesValue):
+        return bytes_methods.to_string(val)
     if isinstance(val, Decimal):
         return _format_number(val)
     if isinstance(val, str):
@@ -1183,6 +1192,25 @@ def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, dead
             native,
             True,
         )
+    # M37 (1.17): Bytes and `String.to_bytes` (mah/bytes_methods.py).
+    for (type_name, method_name), native in {
+        ("String", "to_bytes"): NativeMethod(0, bytes_methods.string_to_bytes),
+        ("Bytes", "len"): NativeMethod(0, bytes_methods.length),
+        ("Bytes", "push"): NativeMethod(1, bytes_methods.push),
+        ("Bytes", "pop"): NativeMethod(0, bytes_methods.pop),
+        ("Bytes", "extend"): NativeMethod(1, bytes_methods.extend),
+        ("Bytes", "copy"): NativeMethod(0, bytes_methods.copy),
+        ("Bytes", "to_vector"): NativeMethod(0, bytes_methods.to_vector),
+        ("Bytes", "to_text"): NativeMethod(0, bytes_methods.to_text),
+        ("Bytes", "to_text_lossy"): NativeMethod(0, bytes_methods.to_text_lossy),
+        ("Bytes", "to_hex"): NativeMethod(0, bytes_methods.to_hex),
+        ("Bytes", "to_base64"): NativeMethod(0, bytes_methods.to_base64),
+        ("Bytes", "index_of"): NativeMethod(1, bytes_methods.index_of),
+    }.items():
+        method_table.setdefault((type_name, method_name), {"inherent": None, "traits": {}})["inherent"] = (
+            native,
+            True,
+        )
     method_table.setdefault(("String", "index"), {"inherent": None, "traits": {}})["traits"]["Index"] = (
         NativeMethod(1, _string_index),
         True,
@@ -1190,6 +1218,7 @@ def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, dead
     for type_name, index, index_assign in (
         ("Vector", _vector_index, _vector_index_assign),
         ("Map", _map_index, _map_index_assign),
+        ("Bytes", bytes_methods.index, bytes_methods.index_assign),
     ):
         method_table.setdefault((type_name, "index"), {"inherent": None, "traits": {}})["traits"]["Index"] = (
             NativeMethod(1, index),
@@ -1379,6 +1408,8 @@ def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, dead
             return to_str(a) + to_str(b)
         if _is_number(a) and _is_number(b):
             return a + b
+        if isinstance(a, BytesValue) and isinstance(b, BytesValue):
+            return bytes_methods.concat(a, b)  # M37
         raise MahRuntimeError(f"Cannot apply '+' to {type_name_of(a)} and {type_name_of(b)}", kind="TypeMismatch")
 
     def _op_mul(a, b):

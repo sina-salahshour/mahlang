@@ -551,7 +551,8 @@ def _parse_code(payload: bytes, ctx: dict) -> list:
                 if index >= len(ctx["builtin_types"]) + ctx["ntypes"]:
                     raise MahcFormatError(f"'loadtype' at instruction {i}: type index {index} out of range")
             elif kind == 1:
-                if index >= 8:
+                # M37 (1.17): code 8, Bytes
+                if index >= (9 if ctx["minor"] >= 17 else 8):
                     raise MahcFormatError(f"'loadtype' at instruction {i}: primitive type code {index} out of range")
             else:
                 raise MahcFormatError(f"'loadtype' at instruction {i}: unknown kind {kind}")
@@ -692,6 +693,7 @@ def _parse_meta(payload: bytes, functions: list, types: list, ctx: dict) -> Meta
     nstrings = ctx["nstrings"]
     nbuiltin = len(ctx["builtin_types"])
     ntypes_total = nbuiltin + len(types)
+    minor = ctx["minor"]
 
     def str_idx() -> int:
         idx = pr.varuint()
@@ -732,7 +734,7 @@ def _parse_meta(payload: bytes, functions: list, types: list, ctx: dict) -> Meta
                 if index >= ntypes_total:
                     raise MahcFormatError(f"META: type index {index} out of range")
             elif kind == 1:
-                if index >= 8:
+                if index >= (9 if minor >= 17 else 8):  # M37: code 8, Bytes
                     raise MahcFormatError(f"META: primitive type code {index} out of range")
             else:
                 raise MahcFormatError(f"META: unknown named-type kind {kind}")

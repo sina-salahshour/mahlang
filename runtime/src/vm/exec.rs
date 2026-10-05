@@ -72,6 +72,7 @@ fn build_initial_method_table(names: &BuiltinTypeNames) -> HashMap<(Rc<str>, Rc<
         &names.vector,
         &names.map_,
         &names.type_,
+        &names.bytes,
     ] {
         let entry = table.entry((tn.clone(), to_string.clone())).or_insert_with(MethodEntry::empty);
         entry.traits.insert(printable.clone(), (Callable::Native(NativeMethodKind::ToString), true));
@@ -119,6 +120,26 @@ fn build_initial_method_table(names: &BuiltinTypeNames) -> HashMap<(Rc<str>, Rc<
     set_inherent(&names.map_, "has", NativeMethodKind::MapHas);
     set_inherent(&names.map_, "remove", NativeMethodKind::MapRemove);
     set_inherent(&names.map_, "copy", NativeMethodKind::MapCopy);
+    // M37 (1.17): Bytes and String.to_bytes (runtime/src/vm/bytes.rs).
+    set_inherent(&names.string, "to_bytes", NativeMethodKind::StringToBytes);
+    {
+        use super::bytes::BytesMethod as B;
+        for (mname, m) in [
+            ("len", B::Len),
+            ("push", B::Push),
+            ("pop", B::Pop),
+            ("extend", B::Extend),
+            ("copy", B::Copy),
+            ("to_vector", B::ToVector),
+            ("to_text", B::ToText),
+            ("to_text_lossy", B::ToTextLossy),
+            ("to_hex", B::ToHex),
+            ("to_base64", B::ToBase64),
+            ("index_of", B::IndexOf),
+        ] {
+            set_inherent(&names.bytes, mname, NativeMethodKind::Bytes(m));
+        }
+    }
     drop(set_inherent);
 
     let index_trait: Rc<str> = Rc::from("Index");
@@ -127,6 +148,7 @@ fn build_initial_method_table(names: &BuiltinTypeNames) -> HashMap<(Rc<str>, Rc<
         (&names.string, NativeMethodKind::StringIndex),
         (&names.vector, NativeMethodKind::VectorIndex),
         (&names.map_, NativeMethodKind::MapIndex),
+        (&names.bytes, NativeMethodKind::BytesIndex),
     ] {
         table
             .entry((tn.clone(), Rc::from("index")))
@@ -134,9 +156,11 @@ fn build_initial_method_table(names: &BuiltinTypeNames) -> HashMap<(Rc<str>, Rc<
             .traits
             .insert(index_trait.clone(), (Callable::Native(kind), true));
     }
-    for (tn, kind) in
-        [(&names.vector, NativeMethodKind::VectorIndexAssign), (&names.map_, NativeMethodKind::MapIndexAssign)]
-    {
+    for (tn, kind) in [
+        (&names.vector, NativeMethodKind::VectorIndexAssign),
+        (&names.map_, NativeMethodKind::MapIndexAssign),
+        (&names.bytes, NativeMethodKind::BytesIndexAssign),
+    ] {
         table
             .entry((tn.clone(), Rc::from("index_assign")))
             .or_insert_with(MethodEntry::empty)
@@ -861,6 +885,9 @@ impl<'p> Vm<'p> {
         }
         if let (Value::Number(x), Value::Number(y)) = (a, b) {
             return x.add(y).map(Value::Number).map_err(|e| RuntimeError::new(e.message()));
+        }
+        if let (Value::Bytes(x), Value::Bytes(y)) = (a, b) {
+            return Ok(super::bytes::concat(x, y)); // M37
         }
         Err(RuntimeError::with_kind(
             format!("Cannot apply '+' to {} and {}", type_name_of(a, &self.names), type_name_of(b, &self.names)),

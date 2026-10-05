@@ -77,6 +77,7 @@ def line_col(text: str, offset: int) -> tuple[int, int]:
 class _Lowerer:
     def __init__(self, resolver, pp, target: str, buf):
         self.resolver = resolver
+        self.file_minor = 17  # set by `lower` before META is built
         self.pp = pp
         self.target = target
         self.buf = buf
@@ -525,7 +526,13 @@ class _Lowerer:
         if name in self.enum_index:
             return TypeRef(1, kind=0, index=self.enum_index[name], args=args)
         if name in PRIMITIVE_TYPE_NAMES:
-            return TypeRef(1, kind=1, index=PRIMITIVE_TYPE_NAMES.index(name), args=args)
+            index = PRIMITIVE_TYPE_NAMES.index(name)
+            if index >= 8 and self.file_minor < 17:
+                # M37: a 1.14-1.16 VM reading META refuses the code 8 (Bytes),
+                # so a file that doesn't otherwise need 1.17 (one importing
+                # std:fs for text only, say) describes it as Unknown.
+                return TypeRef(0)
+            return TypeRef(1, kind=1, index=index, args=args)
         if name in self.resolver.trait_decls:
             return TypeRef(6, name=self.intern_str(name), args=args)
         return TypeRef(0)
@@ -679,6 +686,10 @@ def lower(buf, resolver, pp, target: str = "debug") -> Program:
     lowerer = _Lowerer(resolver, pp, target, buf)
     lowerer.build_types()
     lowerer.lower_code()
+    minor = _file_minor(
+        lowerer.natives, lowerer.strings, lowerer.code, buf.positions, pp.prelude_start, lowerer.functions
+    )
+    lowerer.file_minor = minor
     meta = lowerer.build_meta()
     debug = lowerer.build_debug() if target == "debug" else None
     return Program(
@@ -689,9 +700,7 @@ def lower(buf, resolver, pp, target: str = "debug") -> Program:
         functions=lowerer.functions,
         code=lowerer.code,
         debug=debug,
-        minor=_file_minor(
-            lowerer.natives, lowerer.strings, lowerer.code, buf.positions, pp.prelude_start, lowerer.functions
-        ),
+        minor=minor,
         handlers=list(buf.handlers),
         tests=[
             TestEntry(lowerer.intern_str(name), slot, lowerer.line_of(position)) for name, slot, position in buf.tests
@@ -731,6 +740,8 @@ def _file_minor(
         # M41a: a 1.14 opcode (type values, spread calls) needs 1.14; META
         # doesn't -- it's optional, and older VMs skip it.
         minor = max(minor, OPCODE_SINCE_MINOR.get(instr.op, 0))
+        if instr.op == "loadtype" and instr.args[0] == 1 and instr.args[1] >= 8:
+            minor = max(minor, 17)  # M37: the primitive type code 8, Bytes
         position = positions[pc] if pc < len(positions) else None
         if prelude_start is not None and position is not None and position >= prelude_start:
             continue

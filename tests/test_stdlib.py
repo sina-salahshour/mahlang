@@ -617,7 +617,8 @@ class FsTests(unittest.TestCase):
     def test_bytecode_minor(self):
         from mah.bytecode.decode import decode
 
-        self.assertEqual(decode(compile_bytes(text='import fs from "std:fs"\nprint(fs.exists("x"))')).minor, 12)
+        # M37: std:fs also declares the 1.17 binary natives
+        self.assertEqual(decode(compile_bytes(text='import fs from "std:fs"\nprint(fs.exists("x"))')).minor, 17)
 
     def test_invalid_utf8(self):
         path = os.path.join(self.dir, "bad.txt")

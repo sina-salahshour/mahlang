@@ -93,6 +93,7 @@ from .ast_nodes import (
 from .types import (
     ALL,
     BOOL,
+    BYTES,
     EMPTY,
     NEVER,
     NONE,
@@ -473,6 +474,10 @@ class Checker:
                 return ("ok", unknown)
             if is_con(L, "Number") and is_con(R, "Number"):
                 return ("ok", NUMBER)
+            # M37: Bytes + Bytes concatenates
+            for a, b in ((L, R), (R, L)):
+                if is_con(a, "Bytes") and (is_con(b, "Bytes") or (isinstance(b, TVar) and self._try_unify(b, BYTES))):
+                    return ("ok", BYTES)
             if isinstance(L, TVar) or isinstance(R, TVar):
                 return None
         elif op == "*":
@@ -1071,8 +1076,24 @@ class Checker:
                 "to_lower": ([], STRING),
                 "lines": ([], strings),
                 "parse_number": ([], NUMBER),
+                "to_bytes": ([], BYTES),  # M37
             }
             optional = {"split": 0, "pad_start": 1, "pad_end": 1}
+        elif receiver.name == "Bytes":
+            # M37: docs/STDLIB.md's Bytes methods.
+            table = {
+                "len": ([], NUMBER),
+                "push": ([("value", NUMBER)], NONE),
+                "pop": ([], NUMBER),
+                "extend": ([("other", BYTES)], NONE),
+                "copy": ([], BYTES),
+                "to_vector": ([], TCon("Vector", [NUMBER])),
+                "to_text": ([], TCon("Option", [STRING])),
+                "to_text_lossy": ([], STRING),
+                "to_hex": ([], STRING),
+                "to_base64": ([], STRING),
+                "index_of": ([("needle", BYTES)], TCon("Option", [NUMBER])),
+            }
         elif receiver.name == "Vector" and len(receiver.args) == 1:
             (t,) = receiver.args
             table = {
@@ -1109,7 +1130,7 @@ class Checker:
         info = self.structs.get(type_name) or self.enums.get(type_name)
         if info is not None:
             return TCon(type_name, info.fresh_args(self.level))
-        if type_name in ("String", "Number", "Bool"):
+        if type_name in ("String", "Number", "Bool", "Bytes"):
             return PRIMITIVES[type_name]
         if type_name == "Vector":
             return TCon("Vector", [self._fresh()])
@@ -1148,6 +1169,11 @@ class Checker:
         for type_name, sample in (("String", STRING), ("Vector", TCon("Vector", [NONE])), ("Map", TCon("Map", [NONE, NONE]))):
             if name != "to_string" and self._native_method(sample, name) is not None:
                 found.add(type_name)
+        # M37: Bytes shares `push`/`pop`/`len`/`index_of`... with older types;
+        # it's inferred only from a method nothing else has (`to_hex`), so
+        # `v.push(x)` still means a Vector.
+        if not found and name != "to_string" and self._native_method(BYTES, name) is not None:
+            found.add("Bytes")
         if len(found) != 1:
             return
         instance = self._instance(found.pop())
@@ -1354,6 +1380,9 @@ class Checker:
             elif is_con(obj, "Map"):
                 self._expect(key, obj.args[0], target.key.position, "in the key")
                 self._expect(value, obj.args[1], stmt.value.position)
+            elif is_con(obj, "Bytes"):
+                self._expect(key, NUMBER, target.key.position, "in the index")
+                self._expect(value, NUMBER, stmt.value.position)
             elif isinstance(obj, TCon) and obj.name in ("Number", "String", "Bool", "None"):
                 self._error(target.position, f"{show(obj)} doesn't support index assignment")
         else:
@@ -1750,6 +1779,12 @@ class Checker:
             if not is_range:
                 self._expect(key, NUMBER, expr.key.position, "in the index")
             return STRING
+        if is_con(obj, "Bytes"):
+            # M37: a byte (`none` past the end, like a Vector), or a slice
+            if is_range:
+                return BYTES
+            self._expect(key, NUMBER, expr.key.position, "in the index")
+            return NUMBER
         if is_con(obj, "Map"):
             self._expect(key, obj.args[0], expr.key.position, "in the key")
             return obj.args[1]
@@ -1895,6 +1930,8 @@ class Checker:
             return iterable.args[0]
         if is_con(iterable, "String"):
             return STRING
+        if is_con(iterable, "Bytes"):
+            return NUMBER
         if is_con(iterable, "Range") or is_con(iterable, "FromRange"):
             return NUMBER
         if isinstance(iterable, TUnknown):

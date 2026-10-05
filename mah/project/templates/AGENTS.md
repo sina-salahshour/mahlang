@@ -81,7 +81,7 @@ test with every change, and make sure `mah test` passes.
   file. The standard library is imported the same
   way, as `"std:<name>"`: `std:math`, `std:path`, `std:json`, `std:csv`,
   `std:random`, `std:collections`, `std:regex`, `std:time`, `std:async`,
-  `std:fs`, `std:process`, `std:reflect` (types, `##` docs, decorators and their hooks at run time,
+  `std:bytes` (the mutable `Bytes` type's helpers), `std:fs`, `std:process`, `std:reflect` (types, `##` docs, decorators and their hooks at run time,
   which `json.decode` uses to read JSON into your structs) and `std:test` for
   tests (see `docs/mah-language.md`).
 - Model data with `struct`/`enum` + `match`, and give behavior to types with

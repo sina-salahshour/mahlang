@@ -44,6 +44,7 @@ from .runtime_values import (
     StructInstance,
     TypeValue,
     VectorValue,
+    BytesValue,
     map_key,
     display_name,
     type_name_of,
@@ -166,6 +167,8 @@ def _type_of(ctx, args):
         return data.type_value(1, _PRIM["Vector"])
     if isinstance(value, MapValue):
         return data.type_value(1, _PRIM["Map"])
+    if isinstance(value, BytesValue):
+        return data.type_value(1, _PRIM["Bytes"])
     if isinstance(value, TypeValue):
         return data.type_value(1, _PRIM["Type"])
     if isinstance(value, StructInstance) and value.type_name in data.struct_index:

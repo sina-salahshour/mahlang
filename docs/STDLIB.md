@@ -9,7 +9,7 @@ first module; **M29 landed the String methods** (Phase 1's first item);
 **M33 made `input` async** (Phase 0 step 7, and step 4's I/O half);
 **M34 landed `std:time` and `std:async`** (Phase 2, with step 4's
 cancellable timers); **M35 landed `std:fs`** (with Phase 0 step 3,
-handles); **M36 landed `std:process`**; **M41a landed `std:reflect`** and `json.decode`
+handles); **M36 landed `std:process`**; **M37 landed `Bytes`, `std:bytes` and `std:fs`'s binary I/O**; **M41a landed `std:reflect`** and `json.decode`
 (see [`REFLECTION.md`](REFLECTION.md)). The rest is design. Agreed 2026-09-28. Depends on
 [`ERRORS.md`](ERRORS.md) (every failure below is a thrown, typed error)
 and on the static checker in [`TYPES.md`](TYPES.md).
@@ -532,6 +532,51 @@ arithmetic, `format(time, pattern)` and `parse(text, pattern)`.
 
 ## Phase 3: OS access
 
+### Bytes and `std:bytes`
+
+✅ **Landed (M37)**: the built-in `Bytes` type (docs/MAHC_FORMAT.md §5, §6.7,
+§6.9), the module `mah/std/bytes.mh`, and `std:fs`'s binary functions below.
+Decisions:
+
+- **A growable sequence of bytes**, each a whole Number 0 to 255, **mutable
+  and by reference** like a Vector (`push`, `pop`, `extend`, `b[i] = n`,
+  and a copy is explicit: `copy()`).
+- **No literal syntax yet.** Bytes come from `"text".to_bytes()` (UTF-8),
+  `bytes.new`, `bytes.from_vector`, `bytes.from_hex`, `bytes.from_base64`,
+  `fs.read_bytes` and slicing. `Bytes` is also a type name and a Type value
+  (`reflect.type_of(b)` is `Bytes`).
+- **Equality is by content**: two Bytes with the same bytes are `==`, and a
+  Bytes never equals a Vector. `a + b` (both Bytes) is a new Bytes, the
+  concatenation; `"x" + b` stays the String rule. A Bytes is always truthy
+  and isn't a Map key. `to_string` is `Bytes[68 69]` (lowercase hex, one
+  space between bytes), `Bytes[]` when empty.
+- **Indexing follows Vector's rules**: `b[i]` is a Number or `none` (negative
+  counts from the end), `b[a..b]` a new Bytes, `for let x in b` gives
+  Numbers (live, like a Vector's). A byte that isn't a whole 0..255 Number
+  is an error (`TypeMismatch` or `ArgumentError`), never wrapped or
+  clamped. `Vector.copy(deep: true)` copies the Bytes it reaches.
+- **Methods**: `len`, `push`, `pop`, `extend`, `copy`, `to_vector`,
+  `to_text`, `to_text_lossy`, `to_hex`, `to_base64`, `index_of(needle)`.
+  `to_text()` returns an `Option<String>` (`none` for invalid UTF-8, no
+  error), `to_text_lossy()` always a String with U+FFFD for each invalid
+  sequence. Hex is lowercase when written and accepts either case; base64 is
+  the standard alphabet with `=` padding, required when decoding.
+- **`std:bytes`**: `new(size = 0, fill = 0)`, `from_vector(items)`,
+  `from_hex(text)`, `from_base64(text)` (both throw `BytesError` for text
+  that isn't valid; whitespace isn't ignored) and `concat(parts)`. `BytesError
+  { kind, description }` has kind `invalid_hex` or `invalid_base64`; the
+  description quotes the text, cut to 40 characters plus `...`.
+- **Binary file I/O lives in `std:fs`**: `read_bytes(path)`,
+  `write_bytes(path, data)`, `append_bytes(path, data)`, and on `File`
+  `read_bytes(max = none)` and `write_bytes(data)`; all throw `FsError`
+  (ops `read_bytes`, `write_bytes`, `append_bytes`). Text and binary reads
+  can be mixed on one open file.
+- **Bytecode 1.17**: four `bytes.*` and five `fs.*` natives, the primitive
+  type code 8 and the method `to_bytes`. Since `std:fs` declares the binary
+  natives, every program that imports it is 1.17.
+- **Later**: a literal syntax, and sockets, which will read and write
+  Bytes.
+
 ### `std:fs`
 
 - Whole files: `read_text`, `write_text`, `append_text`.
@@ -539,7 +584,9 @@ arithmetic, `format(time, pattern)` and `parse(text, pattern)`.
   `mkdir(path, parents = false)`, `list_dir`, `glob(pattern)`.
 - Handles: `open(path, mode)` returns a `File` with `read_line()`,
   `lines()` (Iterable), `write(s)` and `close()`.
-- Throws `FsError`. Binary reads/writes wait for a `Bytes` type.
+- Throws `FsError`. *(M37)* Binary I/O is `read_bytes`, `write_bytes`,
+  `append_bytes` and `File.read_bytes(max = none)` / `File.write_bytes(data)`,
+  on `Bytes` (see "Bytes and `std:bytes`" above).
 
 ✅ **Landed (M35)**, in `mah/std/fs.mh`, with these decisions:
 
@@ -608,8 +655,8 @@ arithmetic, `format(time, pattern)` and `parse(text, pattern)`.
   [ARGS...]`, and a self-contained executable's own command line); `mah
   test` passes none.
 - **Later**: `spawn(...)` (a `Process` handle for streaming), signals and
-  a way to change the working directory wait for a `Bytes` type and the
-  network work.
+  a way to change the working directory wait for the network work (`Bytes`
+  landed in M37, so a spawned process's streams can use it).
 
 ### `std:reflect`
 

@@ -70,6 +70,12 @@ M41c bumps MINOR to 16: rest parameters (PARAMS flag bits 1 and 2), the
 function-item impls (`defmethod` keys spelled `fn#<function index>`) --
 docs/MAHC_FORMAT.md #4.4/#4.5a/#4.6/#6.7. A file uses 1.16 only when it
 uses one of those.
+
+M37 bumps MINOR to 17: the `Bytes` value (docs/MAHC_FORMAT.md #5/#6.9),
+its native methods and `String.to_bytes` (#6.7), the `bytes.*` natives
+behind std:bytes and the binary `fs.*` ones (#4.4), and the primitive type
+code 8 (`loadtype 1, 8`, the Type `Bytes`). Bytes values only come from
+1.17 natives and methods, so a file uses 1.17 only when it calls one.
 """
 
 from __future__ import annotations
@@ -82,7 +88,7 @@ MAGIC = b"MAHC"
 # `.mahc` extension).
 SHEBANG = b"#!/usr/bin/env -S mah runc\n"
 MAJOR = 1
-MINOR = 16
+MINOR = 17
 
 # -- section ids (docs/MAHC_FORMAT.md #3) -----------------------------------
 SEC_STRINGS = 0x01
@@ -250,6 +256,15 @@ NATIVE_ARITIES = {
     "hooks.of": 1,
     "hooks.get_field": 2,
     "hooks.set_field": 3,
+    "bytes.new": 2,
+    "bytes.from_vector": 1,
+    "bytes.from_hex": 1,
+    "bytes.from_base64": 1,
+    "fs.read_bytes": 1,
+    "fs.write_bytes": 2,
+    "fs.append_bytes": 2,
+    "fs.file_read_bytes": 2,
+    "fs.file_write_bytes": 2,
 }
 
 # M16: which minor version introduced each 1.1+ native -- a 1.0 file
@@ -326,6 +341,15 @@ NATIVE_SINCE_MINOR = {
     "hooks.of": 16,
     "hooks.get_field": 16,
     "hooks.set_field": 16,
+    "bytes.new": 17,
+    "bytes.from_vector": 17,
+    "bytes.from_hex": 17,
+    "bytes.from_base64": 17,
+    "fs.read_bytes": 17,
+    "fs.write_bytes": 17,
+    "fs.append_bytes": 17,
+    "fs.file_read_bytes": 17,
+    "fs.file_write_bytes": 17,
 }
 
 # M29: native inherent methods added after 1.0, by the minor that added
@@ -342,6 +366,10 @@ NATIVE_METHOD_SINCE_MINOR = {
         "to_number",
     )
 }
+# M37 (1.17): `String.to_bytes`, the only way to make Bytes without a 1.17
+# native. The Bytes methods themselves need no entry: a Bytes value only
+# exists in a file that already uses 1.17.
+NATIVE_METHOD_SINCE_MINOR["to_bytes"] = 17
 
 # The opcodes that call a method by name: operand 1 is the method's name.
 METHOD_CALL_OPCODES = ("callmethod", "callmethodkw", "detachmethod", "detachmethodkw", "callmethodspread")

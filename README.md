@@ -19,8 +19,9 @@ for Neovim and VS Code.
   a Python VM or on a native Rust VM. The Rust VM can also produce a single
   self-contained executable.
 - **Standard library:** `std:math`, `json`, `csv`, `path`, `regex`,
-  `random`, `collections`, `time`, `async`, `fs`, `process`, `reflect`, and
-  `test`, mostly written in Mah itself.
+  `random`, `collections`, `time`, `async`, `fs`, `process`, `reflect`,
+  `bytes` (with the built-in `Bytes` type), and `test`, mostly written in Mah
+  itself.
 - **Tooling:** `mah run`/`build`/`check`/`test`/`format`/`init`, project
   manifests, and `mah lsp` (diagnostics, typed hover, completion, go to
   definition, cross-file rename, formatting).
@@ -388,14 +389,14 @@ source --> preprocessor --> lexer --> parser --> resolver --> type checker
 - `mah/format/` is `mah format`, and `mah/lsp/` is the language server.
 
 `docs/V2_DESIGN.md` and the per-feature design docs record every milestone
-(M0 through M41c so far) with its reasoning, deviations, and test coverage.
+(M0 through M41c, including M37, so far) with its reasoning, deviations, and test coverage.
 
 ## Where this is going
 
 Next, mostly in service of a NestJS/FastAPI-style web framework written in
 Mah (routes from decorators, request binding and OpenAPI from types):
 
-- **`Bytes`**, then **`std:socket`**, **`std:url`** and an **HTTP client**
+- **`std:socket`**, **`std:url`** and an **HTTP client** (`Bytes` landed in M37)
 - **An HTTP server** (with form and multipart bodies)
 - **Third-party packages** (`[dependencies]` in the manifest is already
   reserved for them)

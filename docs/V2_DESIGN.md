@@ -3481,6 +3481,64 @@ node that resolved to it. Then:
       vm_diff cases (`hooks`, malformed PARAMS/`paramhooks`/`fn#`), Rust
       decode tests.
 
+42. **M37 — Bytes. ✅ Landed.** The `Bytes` value type, `std:bytes` and
+    binary file I/O; `docs/STDLIB.md` ("Bytes and `std:bytes`"), bytecode 1.17
+    in `docs/MAHC_FORMAT.md` §3/§4.4/§5/§6/§7. Decisions taken with the user:
+    `Bytes` is **mutable and by reference** (like a Vector, but `==` compares
+    contents), has **no literal syntax yet**, and the scope includes **fs
+    binary I/O and hex/base64**. The design is the one in STDLIB.md; what the
+    milestone added:
+
+    - **The value**: a growable sequence of bytes (whole Numbers 0 to 255).
+      `b[i]` (a Number, or `none`), `b[a..b]` (a new Bytes) and `b[i] = n`
+      are native `Index`/`IndexAssign` targets with Vector's position rules;
+      `+` of two Bytes concatenates; always truthy; not a Map key;
+      `to_string` is `Bytes[68 69]`; `Vector.copy(deep: true)` copies the
+      Bytes it reaches. It's a primitive type (code 8: `loadtype 1, 8`, the
+      Type `Bytes`, `reflect.type_of`), a type annotation and a checker type
+      (`BYTES`). Iteration is `impl Iterable<Number> for Bytes` in the
+      prelude, over the Vector's iterator.
+    - **Methods**: `len`, `push`, `pop`, `extend`, `copy`, `to_vector`,
+      `to_text` (an Option), `to_text_lossy`, `to_hex`, `to_base64`,
+      `index_of`, and `String.to_bytes()`. The reference implementation is
+      `mah/bytes_methods.py`; `runtime/src/vm/bytes.rs` mirrors every rule and
+      message.
+    - **Natives**: four `bytes.*` (`new`, `from_vector`, `from_hex`,
+      `from_base64`) and five `fs.*` (`read_bytes`, `write_bytes`,
+      `append_bytes`, `file_read_bytes`, `file_write_bytes`; the binary file
+      reads and writes share a position with the text ones, so they can be
+      mixed). The hex/base64 decoders return an Option; `std:bytes` turns
+      `none` into a `BytesError` (`invalid_hex` / `invalid_base64`).
+    - **Modules**: `mah/std/bytes.mh` (`new`, `from_vector`, `from_hex`,
+      `from_base64`, `concat`, `BytesError`) and additions to `mah/std/fs.mh`
+      (`read_bytes`, `write_bytes`, `append_bytes`, `File.read_bytes(max =
+      none)`, `File.write_bytes`).
+    - **Versioning**: MINOR 17. A file is 1.17 when it lists a 1.17 native,
+      calls a method named `to_bytes` outside the prelude
+      (`NATIVE_METHOD_SINCE_MINOR["to_bytes"] = 17`), or has `loadtype 1, 8`.
+      Consequence: `std:fs` now declares the binary natives, so **every
+      program that imports `std:fs` is 1.17**, whether or not it uses them
+      (as `std:json` is 1.16 through `std:reflect`). The other Bytes methods
+      need no entry, since a Bytes only exists in a file that is already 1.17.
+      **META downgrade**: a `Bytes` annotation is written as primitive code 8
+      only in a 1.17 file, and as Unknown (tag 0) in a lower one, so a 1.14 to
+      1.16 VM still loads a file that only annotates a type `Bytes` (the
+      lowerer computes the file's minor before it builds META). Decoders
+      accept code 8 (in `loadtype` and META) only from minor 17.
+    - **Tooling**: checker (the methods' signatures, `b[i]` is Number,
+      `Bytes + Bytes` is Bytes, iteration elements Number; an unannotated
+      receiver is inferred as Bytes only from a method no other type has, so
+      `v.push(x)` still infers a Vector), LSP and editor
+      highlighting, the project templates' language reference, and
+      `examples/bytes.mh`.
+    - **Test changes**: the MINOR pins went from 16 to 17; the minor expected
+      for `examples/files.mh` and for programs importing `std:fs` went from 12
+      to 17; the unsupported-minor tests now use 18 (they used 17). Tests
+      added: `mah/std/bytes.test.mh` and additions to `mah/std/fs.test.mh`
+      (both VMs), `tests/test_bytes.py` (runtime errors, checker types,
+      bytecode minors, the META downgrade, the decoder refusing code 8 below
+      1.17, reflection), `vm_diff.py` cases `bytes` and `std_fs_bytes`.
+
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
 it** (`make test` must stay green) — see `docs/TESTING.md` for where
@@ -3492,15 +3550,16 @@ M1 was built and documented that way.
 
 ## Status
 
-M0 through M41c and M41s (and M21b, `mah format`) have all landed; each milestone's
+M0 through M41c, M37 and M41s (and M21b, `mah format`) have all landed; each milestone's
 entry above says what changed and where it deliberately deviates from the
 design. The language has traits, generics, typed and checked errors, a
 static type checker, projects and `mah test`, async I/O with timers, and a
-`.mahc` bytecode format (currently 1.16) run by the reference Python VM
+`.mahc` bytecode format (currently 1.17) run by the reference Python VM
 and the native Rust VM in `runtime/`; the standard library (`std:math`,
 `std:json`, `std:csv`, `std:path`, `std:random`, `std:collections`,
-`std:regex`, `std:time`, `std:async`, `std:fs`, `std:process`, `std:reflect`)
-is described in `docs/STDLIB.md`. Type values, `##` docs, spread calls and
+`std:regex`, `std:time`, `std:async`, `std:fs`, `std:process`, `std:reflect`,
+`std:bytes`) and the built-in `Bytes` type (M37)
+are described in `docs/STDLIB.md`. Type values, `##` docs, spread calls and
 reflection landed with M41a, decorators as metadata with M41b, and hooks,
 function-item impls and rest parameters with M41c (`docs/REFLECTION.md`). M41s made
 struct/enum/trait names module-scoped (a breaking change: export the types a

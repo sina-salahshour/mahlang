@@ -3,6 +3,7 @@
 # temporary directory, removed at the end.
 import "std:test"
 import fs from "./fs"
+import bytes from "./bytes"
 
 fn scratch() -> String { fs.temp_dir() }
 
@@ -10,6 +11,8 @@ fn error_of(f: fn() -> Unknown) -> String {
     let e = assert_throws(f)
     match e {
         fs.FsError { kind, op, path, description } => { kind + " " + op + ": " + description }
+        RuntimeError.TypeMismatch { message } => { "TypeMismatch: " + message }
+        RuntimeError.ArgumentError { message } => { "ArgumentError: " + message }
         _ => { "not an FsError: " + e.message() }
     }
 }
@@ -195,4 +198,214 @@ test "detached reads run alongside timers" {
     let pb = detach fs.read_text(dir + "/b")
     sleep_async(5)
     assert_eq(pa.await + pb.await, "AB")
+}
+
+test "whole binary files" {
+    let dir = scratch()
+    defer fs.remove(dir, recursive: true)
+    let p = dir + "/data.bin"
+    let all = bytes.new()
+    for let i in 0..256 { all.push(i) }
+    fs.write_bytes(p, all)
+    assert(fs.read_bytes(p) == all)
+    assert_eq(fs.info(p).size, 256)
+    fs.append_bytes(p, bytes.from_vector([1, 2]))
+    assert_eq(fs.read_bytes(p).len(), 258)
+    assert_eq(fs.read_bytes(p)[256], 1)
+    fs.write_bytes(p, "hi".to_bytes())
+    assert_eq("" + fs.read_bytes(p), "Bytes[68 69]")
+    fs.append_bytes(dir + "/new.bin", bytes.from_vector([255]))
+    assert_eq("" + fs.read_bytes(dir + "/new.bin"), "Bytes[ff]")
+    fs.write_bytes(dir + "/empty.bin", bytes.new())
+    assert_eq(fs.read_bytes(dir + "/empty.bin").len(), 0)
+    # bytes that aren't UTF-8 come back untouched
+    fs.write_bytes(p, bytes.from_vector([255, 254, 0, 10, 13]))
+    assert_eq("" + fs.read_bytes(p), "Bytes[ff fe 00 0a 0d]")
+}
+
+test "binary and text files agree" {
+    let dir = scratch()
+    defer fs.remove(dir, recursive: true)
+    let p = dir + "/a.txt"
+    fs.write_text(p, "héllo\r\n")
+    assert_eq("" + fs.read_bytes(p), "Bytes[68 c3 a9 6c 6c 6f 0d 0a]")
+    fs.write_bytes(p, "wörld".to_bytes())
+    assert_eq(fs.read_text(p), "wörld")
+    fs.append_bytes(p, "!".to_bytes())
+    assert_eq(fs.read_text(p), "wörld!")
+}
+
+test "write_bytes copies the data when called" {
+    let dir = scratch()
+    defer fs.remove(dir, recursive: true)
+    let p = dir + "/a.bin"
+    let data = bytes.from_vector([1, 2, 3])
+    let pending = detach fs.write_bytes(p, data)
+    data.push(4)
+    data[0] = 9
+    pending.await
+    assert_eq("" + fs.read_bytes(p), "Bytes[01 02 03]")
+}
+
+test "binary errors" {
+    let dir = scratch()
+    defer fs.remove(dir, recursive: true)
+    assert_eq(
+        error_of(fn() { fs.read_bytes(dir + "/missing") }),
+        "not_found read_bytes: no such file or directory"
+    )
+    assert_eq(error_of(fn() { fs.read_bytes(dir) }), "is_a_directory read_bytes: is a directory")
+    assert_eq(
+        error_of(fn() { fs.write_bytes(dir + "/no/dir/x", bytes.new()) }),
+        "not_found write_bytes: no such file or directory"
+    )
+    assert_eq(
+        error_of(fn() { fs.append_bytes(dir, bytes.new()) }),
+        "is_a_directory append_bytes: is a directory"
+    )
+    let e = assert_throws(fn() { fs.read_bytes(dir + "/missing") })
+    assert_eq(e.path, dir + "/missing")
+}
+
+test "reading bytes from an open file" {
+    let dir = scratch()
+    defer fs.remove(dir, recursive: true)
+    let p = dir + "/data.bin"
+    fs.write_bytes(p, bytes.from_vector([1, 2, 3, 4, 5]))
+    let f = fs.open(p)
+    defer f.close()
+    assert_eq("" + f.read_bytes(2), "Bytes[01 02]")
+    assert_eq("" + f.read_bytes(0), "Bytes[]")
+    assert_eq("" + f.read_bytes(2), "Bytes[03 04]")
+    assert_eq("" + f.read_bytes(10), "Bytes[05]")
+    assert_eq("" + f.read_bytes(1), "Bytes[]")
+    assert_eq("" + f.read_bytes(), "Bytes[]")
+    let g = fs.open(p)
+    defer g.close()
+    assert_eq("" + g.read_bytes(), "Bytes[01 02 03 04 05]")
+    assert_eq("" + g.read_bytes(), "Bytes[]")
+    let h = fs.open(p)
+    defer h.close()
+    h.read_bytes(1)
+    assert_eq("" + h.read_bytes(none), "Bytes[02 03 04 05]")
+    fs.write_bytes(dir + "/empty.bin", bytes.new())
+    let z = fs.open(dir + "/empty.bin")
+    defer z.close()
+    assert_eq(z.read_bytes(4).len(), 0)
+}
+
+test "read_bytes checks max" {
+    let dir = scratch()
+    defer fs.remove(dir, recursive: true)
+    fs.write_bytes(dir + "/a", bytes.new(3))
+    let f = fs.open(dir + "/a")
+    defer f.close()
+    assert_eq(
+        error_of(fn() { f.read_bytes(-1) }),
+        "ArgumentError: file_read_bytes: max must be a whole number of at least 0, got -1"
+    )
+    assert_eq(
+        error_of(fn() { f.read_bytes(1.5) }),
+        "ArgumentError: file_read_bytes: max must be a whole number of at least 0, got 1.5"
+    )
+    assert_eq(
+        error_of(fn() { f.read_bytes("2") }),
+        "TypeMismatch: file_read_bytes: max must be a Number or none, got String"
+    )
+}
+
+test "writing bytes to an open file" {
+    let dir = scratch()
+    defer fs.remove(dir, recursive: true)
+    let p = dir + "/out.bin"
+    let w = fs.open(p, "w")
+    w.write_bytes(bytes.from_vector([0, 1]))
+    w.write_bytes(bytes.new())
+    w.write_bytes(bytes.from_vector([255]))
+    w.close()
+    assert_eq("" + fs.read_bytes(p), "Bytes[00 01 ff]")
+    let a = fs.open(p, "a")
+    a.write_bytes(bytes.from_vector([7]))
+    a.close()
+    assert_eq("" + fs.read_bytes(p), "Bytes[00 01 ff 07]")
+    let t = fs.open(p, "w")
+    t.write_bytes(bytes.from_vector([9]))
+    t.close()
+    assert_eq("" + fs.read_bytes(p), "Bytes[09]")
+}
+
+test "text and bytes mix on one file" {
+    let dir = scratch()
+    defer fs.remove(dir, recursive: true)
+    let p = dir + "/mixed"
+    let w = fs.open(p, "w")
+    w.write("head\n")
+    w.write_bytes(bytes.from_vector([0, 255]))
+    w.write("tail\n")
+    w.close()
+    assert_eq(fs.read_bytes(p).len(), 12)
+    let f = fs.open(p)
+    defer f.close()
+    assert_eq(f.read_line(), "head")
+    assert_eq("" + f.read_bytes(2), "Bytes[00 ff]")
+    assert_eq(f.read_line(), "tail")
+    assert_eq(f.read_line(), none)
+    let g = fs.open(p)
+    defer g.close()
+    assert_eq("" + g.read_bytes(5), "Bytes[68 65 61 64 0a]")
+    assert_eq(g.read_bytes(2).len(), 2)
+    assert_eq(g.read_all(), "tail\n")
+}
+
+test "binary open-mode errors" {
+    let dir = scratch()
+    defer fs.remove(dir, recursive: true)
+    let p = dir + "/a.bin"
+    fs.write_bytes(p, bytes.from_vector([1]))
+    let r = fs.open(p)
+    defer r.close()
+    assert_eq(
+        error_of(fn() { r.write_bytes(bytes.new()) }),
+        "other write_bytes: the file isn't open for writing"
+    )
+    let w = fs.open(dir + "/w.bin", "w")
+    defer w.close()
+    assert_eq(
+        error_of(fn() { w.read_bytes(1) }),
+        "other read_bytes: the file isn't open for reading"
+    )
+    assert_eq(
+        error_of(fn() { w.read_bytes() }),
+        "other read_bytes: the file isn't open for reading"
+    )
+    assert_eq(
+        error_of(fn() { fs.write_bytes(p, "text") }),
+        "TypeMismatch: write_bytes: data must be Bytes, got String"
+    )
+    assert_eq(
+        error_of(fn() { fs.append_bytes(p, [1]) }),
+        "TypeMismatch: append_bytes: data must be Bytes, got Vector"
+    )
+    assert_eq(
+        error_of(fn() { w.write_bytes("x") }),
+        "TypeMismatch: file_write_bytes: data must be Bytes, got String"
+    )
+    let c = fs.open(p)
+    c.close()
+    assert_eq(error_of(fn() { c.read_bytes(1) }), "closed read_bytes: the file is closed")
+    assert_eq(
+        error_of(fn() { c.write_bytes(bytes.new()) }),
+        "closed write_bytes: the file is closed"
+    )
+}
+
+test "bytes reads run alongside timers" {
+    let dir = scratch()
+    defer fs.remove(dir, recursive: true)
+    fs.write_bytes(dir + "/a", bytes.from_vector([1]))
+    fs.write_bytes(dir + "/b", bytes.from_vector([2]))
+    let pa = detach fs.read_bytes(dir + "/a")
+    let pb = detach fs.read_bytes(dir + "/b")
+    sleep_async(5)
+    assert_eq(pa.await + pb.await, bytes.from_vector([1, 2]))
 }

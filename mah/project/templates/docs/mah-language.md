@@ -49,8 +49,9 @@ let y = {
 | `Promise` | from `detach` / `sleep_async` | see Async |
 | `Vector` | `[1, 2, 3]`, `[]` | growable zero-indexed list, by reference; see Vectors and Maps |
 | `Map` | `["a": 1, "b": 2]`, `[:]` | String/Number/Bool keys, insertion-ordered, by reference; see Vectors and Maps |
+| `Bytes` | `"hi".to_bytes()`, `bytes.new(n)` (no literal) | a growable sequence of bytes (Numbers 0 to 255), mutable and by reference; see Bytes |
 | `Range`, `FromRange`, `ToRange` | `5..10`, `1..`, `..10` | built-in structs, see Ranges |
-| `Type` | `Number`, `User`, `Vector` (a bare type name) | a type as a value; `==` compares them, `print` shows the name; see Type values and reflection |
+| `Type` | `Number`, `User`, `Vector`, `Bytes` (a bare type name) | a type as a value; `==` compares them, `print` shows the name; see Type values and reflection |
 
 **Truthiness**: `false`, `none`, `0`, and `""` are falsy; everything else is
 truthy.
@@ -82,8 +83,9 @@ loosest of all, `&`/`|` share one level, and `%` shares a level with
 - `//` truncates toward zero; `%` takes the sign of the left operand.
 - `==` compares Numbers/Strings/Bools/`none` by value and everything else
   (structs, enums, `some(..)`, functions, Vectors, Maps) by identity:
-  `[1] == [1]` is `false`. Different types are
-  never equal (`true == 1` is `false`).
+  `[1] == [1]` is `false`. **Bytes** are the exception: they compare by
+  contents. Different types are never equal (`true == 1` is `false`).
+- `a + b` on two Bytes is a new Bytes, the concatenation (see Bytes).
 - Parenthesize whenever you're unsure.
 
 ## Built-ins
@@ -348,7 +350,7 @@ print("mah".map(fn(c) { c + "!" }).reduce(fn(a, b) { a + b }))   # m!a!h!
 - A range's end must be on the same line as its `..`: `let f = 1..` at the
   end of a line is an open-ended `FromRange`, and the next line is a new
   statement.
-- Every **`Iterable`** (ranges except `ToRange`, Strings, Vectors, Maps, and your own types
+- Every **`Iterable`** (ranges except `ToRange`, Strings, Vectors, Maps, Bytes, and your own types
   that implement it) has these methods, all lazy except `reduce`:
   - `map(f)`: `f(value)` or `f(value, index)` gives each new item.
   - `filter(f)`: keeps items where `f(value)` or `f(value, index)` is truthy.
@@ -496,7 +498,49 @@ print("42".to_number() + 1, " 7 ".parse_number(), "x".parse_number())     # 43 7
 
 Also `v.join(sep = "")` on a Vector (each item's `to_string`), and on
 an Option value such as `index_of`'s result: `unwrap()` (the value; throws
-on `none`), `unwrap_or(default)`, `is_some()`, `is_none()`.
+on `none`), `unwrap_or(default)`, `is_some()`, `is_none()`, and
+`to_bytes()` on a String (its UTF-8 encoding, as Bytes; see Bytes).
+
+### Bytes
+
+`Bytes` is a growable sequence of bytes (whole Numbers 0 to 255) for binary
+data. It's mutable and by reference like a Vector, and there's no literal:
+make one with `"text".to_bytes()` or the `std:bytes` functions.
+
+```mah
+import bytes from "std:bytes"
+let b = "hi".to_bytes()
+print(b, b.len(), b[0], b[-1], b[9])       # Bytes[68 69] 2 104 105 none
+b.push(33)
+b[0] = 72
+print(b.to_text(), b.to_hex(), b.to_base64())   # some(Hi!) 486921 SGkh
+print(b[1..], b == bytes.from_hex("486921"))    # Bytes[69 21] true
+print(b + bytes.new(2, 0), b.index_of(bytes.from_vector([105])))   # Bytes[48 69 21 00 00] some(1)
+for let x in b { print(x) }                # 72, 105, 33
+print(bytes.concat([b, b]).len())          # 6
+```
+
+- **Indexing** works like a Vector's: `b[i]` is the byte as a Number (`none`
+  when `i` names no item; negative counts from the end), `b[a..b]` (any
+  range form) is a **new** Bytes with a Vector's slice rules, and `b[i] = n`
+  sets a byte. Writing needs an existing index (use `push` to add) and a
+  whole Number from 0 to 255; anything else is a runtime error, as is
+  assigning to a slice or a non-Number index.
+- `==` compares **contents**, so `"hi".to_bytes() == "hi".to_bytes()` is
+  `true`; a Bytes never equals a Vector. A Bytes is always truthy, isn't a
+  Map key, and prints as `Bytes[68 69]` (two lowercase hex digits per byte,
+  `Bytes[]` when empty). `a + b` on two Bytes is a new Bytes.
+- **Methods**: `len()`, `push(n)` (appends a byte), `pop()` (the removed
+  byte, or `none`), `extend(other)` (appends another Bytes' bytes),
+  `copy()`, `to_vector()` (a Vector of Numbers), `to_text()` (`some(String)`
+  if the bytes are valid UTF-8, else `none`), `to_text_lossy()` (a String,
+  each invalid sequence replaced by U+FFFD), `to_hex()` (lowercase),
+  `to_base64()` (standard alphabet, `=` padded), `index_of(needle)` (`some(i)`
+  of the first occurrence of the Bytes `needle`, `none` if absent).
+- A Bytes is **Iterable** over its Numbers (live, like a Vector). A Vector's
+  `copy(deep: true)` copies the Bytes inside it; a shallow `copy()` shares them.
+- `Bytes` is also a type annotation and a Type value
+  (`reflect.type_of(b)` is `Bytes`).
 
 - **Your own types** can support `x[k]` by implementing the `Index` trait
   (`fn index(self, key)`) and `x[k] = v` with `IndexAssign`
@@ -552,7 +596,7 @@ print(Shape.area(r))            # trait-qualified call
 - `impl Type { }` only works for your own structs/enums. `impl Trait for
   Type { }` works if the trait or the type is yours, so `impl MyTrait for
   Number` is fine. Built-in type names: `Number`, `String`, `Bool`,
-  `Function`, `Option`, `Promise`, `Vector`, `Map`. Built-in traits:
+  `Function`, `Option`, `Promise`, `Vector`, `Map`, `Bytes`. Built-in traits:
   `Printable`, `Index`, `IndexAssign`.
 - The impl must define every required method, with the same parameters.
 - A top-level `fn` can be an impl target too: `impl Tr for somefn { ... }`
@@ -692,7 +736,7 @@ for let v: Number, let i: Number in [10, 20] { print(i, v) }
 print(add(label.len()), scale(4), first([5]), show(Pair { left: 1, right: "x" }.left))
 ```
 
-- Types: `Number`, `String`, `Bool`, `Vector<T>`, `Map<K, V>`, `Option<T>`,
+- Types: `Number`, `String`, `Bool`, `Bytes`, `Vector<T>`, `Map<K, V>`, `Option<T>`,
   `Promise<T>`, `Type<T>` (the type of the value `T`, see Type values and
   reflection), your structs/enums/traits (with their `<...>` arguments),
   a type parameter, `fn(A, B) -> R` (no `->` means it returns `none`),
@@ -756,8 +800,8 @@ own type with such a name.
 
 Standard library modules are imported as `"std:<name>"`, the same two ways
 as a file: `std:math`, `std:path`, `std:json`, `std:csv`, `std:random`,
-`std:collections`, `std:regex`, `std:time`, `std:async`, `std:fs`, `std:process`,
-`std:reflect` (and `std:test`, below).
+`std:collections`, `std:regex`, `std:time`, `std:async`, `std:bytes`, `std:fs`,
+`std:process`, `std:reflect` (and `std:test`, below).
 
 ```mah
 import math from "std:math"
@@ -953,6 +997,14 @@ print(count[0] > 0)                              # true
 `set_timeout(f, ms)` / `clear_timeout(id)` likewise. Timer callbacks are
 `fn() throws never`: handle errors inside them.
 
+`std:bytes`: binary data (see Bytes). `new(size = 0, fill = 0)`,
+`from_vector(items)`, `concat(parts)` (a Vector of Bytes joined into one),
+and `from_hex(text)` / `from_base64(text)`, which throw `bytes.BytesError {
+kind, description }` (`kind` is `"invalid_hex"` or `"invalid_base64"`) unless
+the text is an even number of hex digits (either case) or valid padded standard
+base64 (no whitespace). A bad byte or size in `new`/`from_vector`/`push`/`b[i] = n`
+is a runtime error, not a `BytesError`.
+
 `std:fs`: files and directories. Every function waits like a call (`detach`
 one to run it alongside other work) and throws `fs.FsError { kind, op, path,
 description }`, `kind` being `"not_found"`, `"permission_denied"`,
@@ -983,6 +1035,13 @@ Also `info(path)` (`fs.FileInfo { kind, size, modified }`), `mkdir(path,
 parents = false)`, `remove(path, recursive = false)`, `rename(from, to)`,
 `copy(from, to)`, and a File's `read_line()` (`none` at the end),
 `read_all()` and `write(text)`.
+
+Binary I/O uses Bytes: `read_bytes(path)`, `write_bytes(path, data)` (replace
+or create), `append_bytes(path, data)`, and a File's `read_bytes(max = none)`
+(up to `max` bytes, all the rest without it; fewer only at the end, empty
+Bytes at the end) and `write_bytes(data)`. They throw `FsError` like the rest.
+Text and binary reads can be mixed on one open file. A program importing
+`std:fs` needs a 1.17 VM.
 
 `std:process`: the program's arguments and environment, and running other
 programs. `args()` is what follows `--` in `mah run FILE -- ARGS...` (also
@@ -1017,7 +1076,7 @@ try {
 ### Type values and reflection
 
 A bare type name in an expression is a **`Type` value**: `Number`, `String`,
-`Bool`, `Function`, `Vector`, `Map`, `Option`, `Promise`, `RuntimeError`,
+`Bool`, `Function`, `Vector`, `Map`, `Bytes`, `Option`, `Promise`, `RuntimeError`,
 `None`, `Type`, or any struct or enum. A variable in scope with that name
 wins, exactly like an enum's unit variant. Types have no type arguments in a
 value (`Vector`, not `Vector<User>`), compare with `==` (same declared type),
@@ -1336,8 +1395,8 @@ test "not ready yet" {
 - Hooks for enums or variants, field *get* hooks, and `impl` for a nested
   `fn` or closure (only top-level `fn`s and types are impl targets).
 - Decorators on `let`s, traits, `impl` blocks, nested functions or closures.
-- Network access, spawning a process to stream from, binary file data, and every other planned
+- Network access, spawning a process to stream from, and every other planned
   `std:` module besides `std:math`, `std:path`, `std:json`, `std:csv`,
   `std:random`, `std:collections`, `std:regex`, `std:time`, `std:async`,
-  `std:fs`, `std:process`, `std:reflect` and `std:test`. Time zones (`std:time` is UTC only).
+  `std:bytes`, `std:fs`, `std:process`, `std:reflect` and `std:test`. A Bytes literal. Time zones (`std:time` is UTC only).
 - `null`/`nil`/`undefined`: use `none`.

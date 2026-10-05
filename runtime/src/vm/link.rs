@@ -104,6 +104,16 @@ pub enum NativeFn {
     HooksOf,
     HooksGetField,
     HooksSetField,
+    /// M37 (1.17): std:bytes (runtime/src/vm/bytes.rs) and binary std:fs.
+    BytesNew,
+    BytesFromVector,
+    BytesFromHex,
+    BytesFromBase64,
+    FsReadBytes,
+    FsWriteBytes,
+    FsAppendBytes,
+    FsFileReadBytes,
+    FsFileWriteBytes,
 }
 
 /// Whether this VM implements a native of that name (any arity) -- for
@@ -188,6 +198,15 @@ fn native_by_name(name: &str) -> Option<(u64, NativeFn)> {
         "hooks.of" => Some((1, NativeFn::HooksOf)),
         "hooks.get_field" => Some((2, NativeFn::HooksGetField)),
         "hooks.set_field" => Some((3, NativeFn::HooksSetField)),
+        "bytes.new" => Some((2, NativeFn::BytesNew)),
+        "bytes.from_vector" => Some((1, NativeFn::BytesFromVector)),
+        "bytes.from_hex" => Some((1, NativeFn::BytesFromHex)),
+        "bytes.from_base64" => Some((1, NativeFn::BytesFromBase64)),
+        "fs.read_bytes" => Some((1, NativeFn::FsReadBytes)),
+        "fs.write_bytes" => Some((2, NativeFn::FsWriteBytes)),
+        "fs.append_bytes" => Some((2, NativeFn::FsAppendBytes)),
+        "fs.file_read_bytes" => Some((2, NativeFn::FsFileReadBytes)),
+        "fs.file_write_bytes" => Some((2, NativeFn::FsFileWriteBytes)),
         _ => None,
     }
 }

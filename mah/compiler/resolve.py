@@ -256,6 +256,7 @@ _BUILTIN_TYPE_ARITY = {
     "Option": 1,
     "Promise": 1,
     "Map": 2,
+    "Bytes": 0,  # M37
     "Type": 1,  # M41a: `Type<T>`, the type of a type value (docs/REFLECTION.md)
 }
 _SYSTEM_TRAIT_ARITY = {"Printable": 0, "Index": 2, "IndexAssign": 2}
@@ -551,6 +552,19 @@ class Resolver:
             ("String", "lines", [], "Vector"),
             ("String", "parse_number", [], None),
             ("Vector", "join", ["sep"], "String"),
+            # M37 (1.17): Bytes and String.to_bytes (docs/STDLIB.md).
+            ("String", "to_bytes", [], "Bytes"),
+            ("Bytes", "len", [], "Number"),
+            ("Bytes", "push", ["value"], None),
+            ("Bytes", "pop", [], None),
+            ("Bytes", "extend", ["other"], None),
+            ("Bytes", "copy", [], "Bytes"),
+            ("Bytes", "to_vector", [], "Vector"),
+            ("Bytes", "to_text", [], "Option"),
+            ("Bytes", "to_text_lossy", [], "String"),
+            ("Bytes", "to_hex", [], "String"),
+            ("Bytes", "to_base64", [], "String"),
+            ("Bytes", "index_of", ["needle"], "Option"),
         ):
             self.impls[type_name]["inherent"][method_name] = {
                 "slot": None,
@@ -722,7 +736,7 @@ class Resolver:
     # aren't struct/enum declarations. Everything else that can be a type
     # value (a struct, an enum -- including the built-in Option/Promise/
     # RuntimeError -- ) is in struct_decls/enum_decls.
-    _PRIMITIVE_TYPE_VALUES = ("Number", "String", "Bool", "Function", "Vector", "Map", "None", "Type")
+    _PRIMITIVE_TYPE_VALUES = ("Number", "String", "Bool", "Function", "Vector", "Map", "None", "Type", "Bytes")
 
     def _resolve_ident(self, expr: Ident) -> None:
         """A bare identifier in expression position. A variable in scope

@@ -1,0 +1,53 @@
+# Bytes (M37): raw binary data -- making it, reading and changing it,
+# hex and base64, and writing it to a file and back.
+
+import bytes from "std:bytes"
+import fs from "std:fs"
+import path from "std:path"
+
+# A String's UTF-8 encoding; Bytes prints as hex.
+let hi = "hi".to_bytes()
+print(hi, hi.len(), hi[0], hi[9])
+
+# Bytes is mutable, like a Vector; == compares contents.
+hi.push(33)
+hi[0] = 72
+print(hi, hi.to_text(), hi == "Hi!".to_bytes())
+
+# Slices and + make new Bytes.
+let data = bytes.from_vector([0, 1, 2, 250, 251, 255])
+print(data[1..4], data[-2..], data + hi.copy())
+let sum = 0
+for let x in data { sum = sum + x }
+print("sum:", sum)
+
+# Hex and base64, both ways; bad text throws a BytesError.
+print(data.to_hex(), data.to_base64())
+let decoded = try bytes.from_hex("48692100") else bytes.new()
+print(decoded == "Hi!\u0000".to_bytes(), (try bytes.from_base64("SGkh") else bytes.new()).to_text())
+print(try { bytes.from_hex("xyz") } catch {
+    e: bytes.BytesError => { e.kind + ": " + e.message() }
+})
+
+# Not every byte sequence is text.
+let bad = bytes.from_vector([104, 255, 105])
+print(bad.to_text(), bad.to_text_lossy(), bad.index_of(bytes.from_vector([105])))
+
+# Binary files, in a temporary directory removed at the end.
+let root = try fs.temp_dir() else "."
+defer {
+    try fs.remove(root, recursive: true) else none
+}
+
+let file = path.join(root, "blob.bin")
+try {
+    fs.write_bytes(file, data)
+    fs.append_bytes(file, bytes.from_vector([7, 7]))
+    let back = fs.read_bytes(file)
+    print(back.len(), back == data + bytes.from_vector([7, 7]))
+    let f = fs.open(file)
+    defer f.close()
+    print(f.read_bytes(3), f.read_bytes().len(), f.read_bytes().len())
+} catch {
+    e: fs.FsError => { print("failed:", e.message()) }
+}

@@ -15,7 +15,7 @@ use std::fmt;
 
 pub const MAGIC: &[u8; 4] = b"MAHC";
 pub const MAJOR: u16 = 1;
-pub const MINOR: u16 = 16;
+pub const MINOR: u16 = 17;
 
 const SEC_STRINGS: u8 = 0x01;
 const SEC_CONSTANTS: u8 = 0x02;
@@ -1018,7 +1018,19 @@ fn native_since_minor(name: &str) -> Option<u16> {
         "reflect.decorators" => Some(15),
         "hooks.has" | "hooks.adopt" | "hooks.same_fn" | "hooks.set_type" | "hooks.set_param" | "hooks.of"
         | "hooks.get_field" | "hooks.set_field" => Some(16),
+        "bytes.new" | "bytes.from_vector" | "bytes.from_hex" | "bytes.from_base64" | "fs.read_bytes"
+        | "fs.write_bytes" | "fs.append_bytes" | "fs.file_read_bytes" | "fs.file_write_bytes" => Some(17),
         _ => None,
+    }
+}
+
+/// How many primitive type codes (`loadtype 1, code`, META) a file of this
+/// minor may use: M37 (1.17) adds code 8, Bytes.
+fn primitive_type_count(minor: u16) -> usize {
+    if minor >= 17 {
+        9
+    } else {
+        8
     }
 }
 
@@ -1375,7 +1387,7 @@ fn validate_instr(instr: &RawInstr, i: usize, ncode: u64, ctx: &CodeCtx) -> FRes
                 }
             }
             1 => {
-                if *index >= 8 {
+                if *index >= primitive_type_count(ctx.minor) {
                     return err(format!("'loadtype' at instruction {i}: primitive type code {index} out of range"));
                 }
             }
@@ -1623,7 +1635,7 @@ fn parse_meta(payload: &[u8], functions: &[FunctionDecl], types: &[TypeDecl], ct
                             }
                         }
                         1 => {
-                            if index >= 8 {
+                            if index >= primitive_type_count(self.ctx.minor) {
                                 return err(format!("META: primitive type code {index} out of range"));
                             }
                         }
@@ -2116,7 +2128,7 @@ mod tests {
         // M27: the current maximum is 5; the file has no sections at all,
         // so there are no natives to name.
         assert_eq!(e.0, format!("unsupported minor version 99 (this VM supports up to minor version {MINOR})"));
-        assert_eq!(MINOR, 16);
+        assert_eq!(MINOR, 17);
     }
 
     #[test]
