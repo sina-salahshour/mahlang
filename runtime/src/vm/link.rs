@@ -114,6 +114,14 @@ pub enum NativeFn {
     FsAppendBytes,
     FsFileReadBytes,
     FsFileWriteBytes,
+    /// M38 (1.18): std:socket (runtime/src/vm/socket.rs).
+    SocketConnect,
+    SocketListen,
+    SocketAccept,
+    SocketSend,
+    SocketRecv,
+    SocketShutdown,
+    SocketClose,
 }
 
 /// Whether this VM implements a native of that name (any arity) -- for
@@ -207,6 +215,13 @@ fn native_by_name(name: &str) -> Option<(u64, NativeFn)> {
         "fs.append_bytes" => Some((2, NativeFn::FsAppendBytes)),
         "fs.file_read_bytes" => Some((2, NativeFn::FsFileReadBytes)),
         "fs.file_write_bytes" => Some((2, NativeFn::FsFileWriteBytes)),
+        "socket.connect" => Some((3, NativeFn::SocketConnect)),
+        "socket.listen" => Some((3, NativeFn::SocketListen)),
+        "socket.accept" => Some((2, NativeFn::SocketAccept)),
+        "socket.send" => Some((2, NativeFn::SocketSend)),
+        "socket.recv" => Some((3, NativeFn::SocketRecv)),
+        "socket.shutdown" => Some((1, NativeFn::SocketShutdown)),
+        "socket.close" => Some((1, NativeFn::SocketClose)),
         _ => None,
     }
 }

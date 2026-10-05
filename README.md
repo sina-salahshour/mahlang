@@ -389,14 +389,14 @@ source --> preprocessor --> lexer --> parser --> resolver --> type checker
 - `mah/format/` is `mah format`, and `mah/lsp/` is the language server.
 
 `docs/V2_DESIGN.md` and the per-feature design docs record every milestone
-(M0 through M41c, including M37, so far) with its reasoning, deviations, and test coverage.
+(M0 through M41c, including M37 and M38, so far) with its reasoning, deviations, and test coverage.
 
 ## Where this is going
 
 Next, mostly in service of a NestJS/FastAPI-style web framework written in
 Mah (routes from decorators, request binding and OpenAPI from types):
 
-- **`std:socket`**, **`std:url`** and an **HTTP client** (`Bytes` landed in M37)
+- **`std:url`** and an **HTTP client** (`Bytes` landed in M37 and `std:socket`, TCP, in M38)
 - **An HTTP server** (with form and multipart bodies)
 - **Third-party packages** (`[dependencies]` in the manifest is already
   reserved for them)

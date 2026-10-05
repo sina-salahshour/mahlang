@@ -1,0 +1,238 @@
+# std:socket -- TCP connections (docs/STDLIB.md).
+#
+#   import socket from "std:socket"
+#   let server = socket.listen(0)               # 127.0.0.1, a free port
+#   let incoming = detach server.accept()       # a Promise of a Socket
+#   let client = socket.connect("127.0.0.1", server.port)
+#   let conn = incoming.await
+#   client.send_text("hello\n")
+#   print(conn.read_line())                     # "hello"
+#   conn.send("hi".to_bytes())
+#   print(client.recv())                        # Bytes[68 69]
+#   client.close()
+#   conn.close()
+#   server.close()
+#
+# Every function waits for the network like a call, but the work runs off the
+# program's own thread like std:fs: `detach conn.recv()` gives a Promise and
+# lets other tasks and timers run meanwhile, and a pending `accept` or `recv`
+# keeps the program running. Failures throw SocketError. Timeouts are in
+# milliseconds (like std:async's); `none` waits forever and 0 takes only what
+# is already there. Closing a socket or listener ends any call waiting on it,
+# which fails with kind "closed".
+
+extern fn native_connect(host: String, port: Number, timeout: Unknown) -> Promise<
+    Vector<Unknown>
+> = "socket.connect"
+extern fn native_listen(host: String, port: Number, backlog: Number) -> Promise<
+    Vector<Unknown>
+> = "socket.listen"
+extern fn native_accept(id: Number, timeout: Unknown) -> Promise<Vector<Unknown>> = "socket.accept"
+extern fn native_send(id: Number, data: Bytes) -> Promise<Vector<Unknown>> = "socket.send"
+extern fn native_recv(id: Number, max: Number, timeout: Unknown) -> Promise<
+    Vector<Unknown>
+> = "socket.recv"
+extern fn native_shutdown(id: Number) -> Promise<Vector<Unknown>> = "socket.shutdown"
+extern fn native_close(id: Number) -> Promise<Vector<Unknown>> = "socket.close"
+
+## What went wrong: `kind` is "connection_refused", "connection_reset",
+## "timed_out", "address_in_use", "address_not_available", "host_not_found",
+## "permission_denied", "closed" (a closed socket or listener),
+## "closed_early" (`recv_exactly` ran out of data), "invalid_utf8"
+## (`read_line`) or "other"; `op` the function; `address` the `host:port`
+## involved.
+export struct SocketError { kind: String, op: String, address: String, description: String }
+
+impl Error for SocketError {
+    fn message(self) -> String { self.op + ": " + self.description + ": " + self.address }
+}
+
+# A native's result, `[true, value]` or `[false, kind, description]`
+# (docs/MAHC_FORMAT.md #4.4), as its value or a thrown SocketError.
+fn result(r: Vector<Unknown>, op: String, address: String) -> Unknown throws SocketError {
+    if r[0] { return r[1] }
+    throw SocketError { kind: r[1], op: op, address: address, description: r[2] }
+}
+
+fn address_of(host: String, port: Number) -> String { host + ":" + port }
+
+## A connection: `peer_host` and `peer_port` are the other end, `local_port`
+## this end's. `buffer` holds bytes already read from the network but not yet
+## handed out (by `read_line`, for one).
+export struct Socket {
+    id: Number,
+    peer_host: String,
+    peer_port: Number,
+    local_port: Number,
+    buffer: Bytes
+}
+
+## A server socket waiting for connections, bound to `host` and `port`.
+export struct Listener { id: Number, host: String, port: Number }
+
+## Opens a connection to `host:port` (a name or an IP address), trying each
+## address the name has. `timeout` (milliseconds, or none) covers the whole
+## attempt.
+export fn connect(
+    host: String,
+    port: Number,
+    timeout: Unknown = none
+) -> Socket throws SocketError {
+    let r = result(native_connect(host, port, timeout).await, "connect", address_of(host, port))
+    Socket { id: r[0], peer_host: r[1], peer_port: r[2], local_port: r[3], buffer: "".to_bytes() }
+}
+
+## Starts listening on `host:port`; port 0 picks a free one (see the
+## Listener's `port`).
+export fn listen(
+    port: Number,
+    host: String = "127.0.0.1",
+    backlog: Number = 128
+) -> Listener throws SocketError {
+    let r = result(native_listen(host, port, backlog).await, "listen", address_of(host, port))
+    Listener { id: r[0], host: host, port: r[1] }
+}
+
+impl Listener {
+    ## Waits for the next connection. With a `timeout` (milliseconds), throws
+    ## kind "timed_out" if none arrives in time.
+    fn accept(self, timeout: Unknown = none) -> Socket throws SocketError {
+        let r = result(
+            native_accept(self.id, timeout).await,
+            "accept",
+            address_of(self.host, self.port)
+        )
+        Socket {
+            id: r[0],
+            peer_host: r[1],
+            peer_port: r[2],
+            local_port: r[3],
+            buffer: "".to_bytes()
+        }
+    }
+
+    ## Stops listening; an `accept` waiting on it fails with kind "closed".
+    ## Closing twice does nothing.
+    fn close(self) throws SocketError {
+        result(native_close(self.id).await, "close", address_of(self.host, self.port))
+    }
+}
+
+impl Printable for Listener {
+    fn to_string(self) { "Listener(" + address_of(self.host, self.port) + ")" }
+}
+
+impl Socket {
+    fn address(self) -> String { address_of(self.peer_host, self.peer_port) }
+
+    ## Sends all of `data`.
+    fn send(self, data: Bytes) throws SocketError {
+        result(native_send(self.id, data).await, "send", self.address())
+    }
+
+    ## Sends the UTF-8 bytes of `text`.
+    fn send_text(self, text: String) throws SocketError {
+        result(native_send(self.id, text.to_bytes()).await, "send", self.address())
+    }
+
+    ## Up to `max` bytes: what `buffer` holds first (without waiting), else
+    ## whatever arrives next. Empty Bytes means the peer has closed its side.
+    ## With a `timeout` (milliseconds), throws kind "timed_out" if nothing
+    ## arrives in time.
+    fn recv(self, max: Number = 65536, timeout: Unknown = none) -> Bytes throws SocketError {
+        # a bad `max` is the native's argument error even when bytes are buffered
+        let usable = try { max >= 1 & max % 1 == 0 } catch { _: RuntimeError => { false } }
+        if self.buffer.len() > 0 & usable {
+            let n = if max < self.buffer.len() { max } else { self.buffer.len() }
+            let out = self.buffer[..n]
+            self.buffer = self.buffer[n..]
+            return out
+        }
+        result(native_recv(self.id, max, timeout).await, "recv", self.address())
+    }
+
+    ## Exactly `n` bytes, waiting for them all (`timeout` applies to each
+    ## wait). Throws kind "closed_early" if the peer closes first; what had
+    ## arrived stays in `buffer`.
+    fn recv_exactly(self, n: Number, timeout: Unknown = none) -> Bytes throws SocketError {
+        while self.buffer.len() < n {
+            let chunk = result(
+                native_recv(self.id, 65536, timeout).await,
+                "recv_exactly",
+                self.address()
+            )
+            if chunk.len() == 0 {
+                throw SocketError {
+                    kind: "closed_early",
+                    op: "recv_exactly",
+                    address: self.address(),
+                    description: "the connection closed before " + n + " bytes arrived"
+                }
+            }
+            self.buffer.extend(chunk)
+        }
+        let out = self.buffer[..n]
+        self.buffer = self.buffer[n..]
+        out
+    }
+
+    ## The next line as text, without its `\n` or `\r\n`, or `none` once the
+    ## peer has closed and nothing is left (a last line without `\n` is still
+    ## returned). Bytes after the line stay in `buffer`; `timeout` applies to
+    ## each wait for more data. Text that isn't UTF-8 throws kind
+    ## "invalid_utf8".
+    fn read_line(self, timeout: Unknown = none) -> Unknown throws SocketError {
+        let newline = "\n".to_bytes()
+        let line = none
+        while line == none {
+            let at = self.buffer.index_of(newline)
+            if at != none {
+                line = self.buffer[..at.unwrap()]
+                self.buffer = self.buffer[at.unwrap() + 1..]
+            } else {
+                let chunk = result(
+                    native_recv(self.id, 65536, timeout).await,
+                    "read_line",
+                    self.address()
+                )
+                if chunk.len() == 0 {
+                    if self.buffer.len() == 0 { return none }
+                    line = self.buffer
+                    self.buffer = "".to_bytes()
+                } else {
+                    self.buffer.extend(chunk)
+                }
+            }
+        }
+        if line.len() > 0 {
+            if line[line.len() - 1] == 13 { line = line[..line.len() - 1] }
+        }
+        match line.to_text() {
+            some(text) => { text }
+            none => {
+                throw SocketError {
+                    kind: "invalid_utf8",
+                    op: "read_line",
+                    address: self.address(),
+                    description: "not valid UTF-8 text"
+                }
+            }
+        }
+    }
+
+    ## Stops sending: the peer's `recv` sees the end once it has read
+    ## everything sent. This side can still receive.
+    fn shutdown(self) throws SocketError {
+        result(native_shutdown(self.id).await, "shutdown", self.address())
+    }
+
+    ## Closes the connection; a call waiting on it fails with kind "closed".
+    ## Closing twice does nothing.
+    fn close(self) throws SocketError {
+        result(native_close(self.id).await, "close", self.address())
+    }
+}
+
+impl Printable for Socket {
+    fn to_string(self) { "Socket(" + address_of(self.peer_host, self.peer_port) + ")" }
+}

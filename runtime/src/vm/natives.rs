@@ -589,5 +589,12 @@ pub fn call_native(vm: &mut Vm, native: NativeFn, args: &[Value]) -> Result<Valu
         NativeFn::FsAppendBytes => super::fs::write_bytes(vm, args, true),
         NativeFn::FsFileReadBytes => super::fs::file_read_bytes(vm, args),
         NativeFn::FsFileWriteBytes => super::fs::file_write_bytes(vm, args),
+        NativeFn::SocketConnect => super::socket::connect(vm, args),
+        NativeFn::SocketListen => super::socket::listen(vm, args),
+        NativeFn::SocketAccept => super::socket::accept(vm, args),
+        NativeFn::SocketSend => super::socket::send(vm, args),
+        NativeFn::SocketRecv => super::socket::recv(vm, args),
+        NativeFn::SocketShutdown => super::socket::shutdown(vm, args),
+        NativeFn::SocketClose => super::socket::close(vm, args),
     }
 }

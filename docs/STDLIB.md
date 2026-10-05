@@ -9,7 +9,7 @@ first module; **M29 landed the String methods** (Phase 1's first item);
 **M33 made `input` async** (Phase 0 step 7, and step 4's I/O half);
 **M34 landed `std:time` and `std:async`** (Phase 2, with step 4's
 cancellable timers); **M35 landed `std:fs`** (with Phase 0 step 3,
-handles); **M36 landed `std:process`**; **M37 landed `Bytes`, `std:bytes` and `std:fs`'s binary I/O**; **M41a landed `std:reflect`** and `json.decode`
+handles); **M36 landed `std:process`**; **M37 landed `Bytes`, `std:bytes` and `std:fs`'s binary I/O**; **M38 landed `std:socket`** (TCP, Phase 4's first module); **M41a landed `std:reflect`** and `json.decode`
 (see [`REFLECTION.md`](REFLECTION.md)). The rest is design. Agreed 2026-09-28. Depends on
 [`ERRORS.md`](ERRORS.md) (every failure below is a thrown, typed error)
 and on the static checker in [`TYPES.md`](TYPES.md).
@@ -574,8 +574,7 @@ Decisions:
 - **Bytecode 1.17**: four `bytes.*` and five `fs.*` natives, the primitive
   type code 8 and the method `to_bytes`. Since `std:fs` declares the binary
   natives, every program that imports it is 1.17.
-- **Later**: a literal syntax, and sockets, which will read and write
-  Bytes.
+- **Later**: a literal syntax. (Sockets landed in M38 and read and write Bytes.)
 
 ### `std:fs`
 
@@ -693,9 +692,53 @@ section) and §5 (the `Type` value). In short:
 
 ### `std:socket`
 
-TCP: `connect(host, port)` returns a `Socket`; `listen(port)` returns a
-`Listener` whose `accept()` gives Sockets. `send`, `recv`, `close`.
-Throws `SocketError`. UDP later.
+✅ **Landed (M38)**, in `mah/std/socket.mh`, with these decisions:
+
+- **Surface**: `connect(host, port, timeout = none)` returns a `Socket`;
+  `listen(port, host = "127.0.0.1", backlog = 128)` returns a `Listener`
+  (port 0 picks a free one; `Listener.port` is the real one) whose
+  `accept(timeout = none)` gives Sockets and whose `close()` stops it. A
+  `Socket` has `send(data: Bytes)` (sends all of it), `send_text(text)`,
+  `recv(max = 65536, timeout = none)` (up to `max` bytes, **empty Bytes once
+  the peer has closed its side**), `recv_exactly(n, timeout = none)`,
+  `read_line(timeout = none)`, `shutdown()` (stops sending, so the peer's
+  `recv` sees the end) and `close()` (closing twice does nothing). Both
+  print as `Socket(127.0.0.1:5000)` / `Listener(127.0.0.1:5000)` (the peer's
+  address, the listen address).
+- **TCP only.** UDP and TLS come later (TLS with the HTTP client).
+- **Timeouts are in milliseconds**, like `std:async`'s; `none` waits
+  forever, 0 means "only what is already there", and running out throws kind
+  `timed_out`.
+- **Ids in a socket table, wrapped by structs**: the seven 1.18 `socket.*`
+  natives take positive whole-Number ids from a per-VM table (separate from
+  the file table); `Socket { id, peer_host, peer_port, local_port, buffer }`
+  and `Listener { id, host, port }` wrap them, like `File`.
+- **Buffered `read_line`**: it reads from the socket into the Socket's
+  `buffer` (Bytes) until a `\n`, and returns the line as a String without
+  `\n` or `\r\n`; bytes after the line stay in `buffer`. A final line with no
+  `\n` is still returned, then `none`. Text that isn't valid UTF-8 throws
+  `invalid_utf8`. `recv` returns buffered bytes first, without waiting;
+  `recv_exactly` throws `closed_early` ("the connection closed before N bytes
+  arrived") if the peer closes first.
+- **Errors**: `SocketError { kind, op, address, description }` with
+  `message()` = `op + ": " + description + ": " + address`. Kinds:
+  `connection_refused`, `connection_reset`, `timed_out`, `address_in_use`,
+  `address_not_available`, `host_not_found`, `permission_denied`, `closed`,
+  `closed_early`, `invalid_utf8` and `other` (the OS's text). `op` is the
+  function's name; `address` is `host:port` (the peer's for Socket methods,
+  the listen address for Listener methods and `listen`, the target for
+  `connect`).
+- **Async like std:fs**: every function waits like a call and the work runs
+  on a worker thread, so `detach server.accept()` runs in the background. A
+  pending `accept` or `recv` keeps the program running (the scheduler's
+  pending-I/O rule). **Closing the socket or listener ends the wait**: the
+  waiting call fails with kind `closed` (within about 50 ms: waiting workers
+  poll in slices of at most 50 ms, checking the deadline and the table).
+- `listen` sets `SO_REUSEADDR` on Unix so a restarted server can rebind at
+  once; `connect` tries every address the name resolves to (IPv4 or IPv6).
+  When the VM finishes, every open socket and listener is closed.
+- Bytecode 1.18 (docs/MAHC_FORMAT.md §4.4): only programs importing
+  `std:socket` are 1.18.
 
 ### `std:http`
 

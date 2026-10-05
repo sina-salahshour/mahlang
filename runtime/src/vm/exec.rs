@@ -567,6 +567,15 @@ struct IoHub {
     /// M35 (std:fs): open files by id -- the VM's handle table. Shared with
     /// the workers, since an `fs.open` job adds its file itself.
     pub files: super::fs::FileTable,
+    /// M38 (std:socket): open sockets and listeners by id.
+    pub sockets: super::socket::SocketTable,
+}
+
+/// M38: every open socket is closed when the VM finishes.
+impl Drop for IoHub {
+    fn drop(&mut self) {
+        self.sockets.close_all();
+    }
 }
 
 /// What a worker reports: a line of standard input (`None` at its end), or
@@ -587,6 +596,7 @@ impl IoHub {
             next_id: 0,
             stdin_requests: None,
             files: super::fs::FileTable::default(),
+            sockets: super::socket::SocketTable::default(),
         }
     }
 
@@ -669,6 +679,11 @@ impl<'p> Vm<'p> {
     /// M35: the open-file table (std:fs).
     pub fn files(&self) -> &super::fs::FileTable {
         &self.io.files
+    }
+
+    /// M38: the socket table (std:socket).
+    pub fn sockets(&self) -> &super::socket::SocketTable {
+        &self.io.sockets
     }
 
     /// M34: drop `promise`'s pending timer, if it has one.

@@ -1046,6 +1046,10 @@ class _IoHub:
         # M35 (std:fs): open files by id -- the VM's handle table.
         self.files: dict = {}
         self._next_file = 1
+        # M38 (std:socket): open sockets and listeners by id, numbered from 1
+        # (mah/socket_natives.py). Closing removes the id at once.
+        self.sockets: dict = {}
+        self._next_socket = 1
 
     def submit(self, promise, job) -> None:
         """M35: run `job()` on a worker thread; its result (a Mah value
@@ -1063,6 +1067,12 @@ class _IoHub:
         self._next_file += 1
         self.files[file_id] = f
         return file_id
+
+    def add_socket(self, entry) -> int:
+        socket_id = self._next_socket
+        self._next_socket += 1
+        self.sockets[socket_id] = entry
+        return socket_id
 
     def read_line(self, promise) -> None:
         self.pending += 1
@@ -1101,6 +1111,12 @@ class _IoHub:
             except OSError:
                 pass
         self.files.clear()
+        for entry in list(self.sockets.values()):
+            try:
+                entry.sock.close()
+            except OSError:
+                pass
+        self.sockets.clear()
 
 
 def _execute(linked: LinkedProgram, test_slot: int | None = None, deadline: float | None = None, args=()):

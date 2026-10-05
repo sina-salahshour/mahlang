@@ -1,0 +1,70 @@
+# std:socket (M38): an echo server and its clients in one program, over
+# TCP on this machine. The server runs in the background (`detach`) while
+# the main task connects, talks and finishes.
+
+import socket from "std:socket"
+
+# Echoes every line back in capitals until the client hangs up.
+fn serve_one(conn: socket.Socket) throws socket.SocketError {
+    defer conn.close()
+    while true {
+        let line = conn.read_line()
+        if line == none { return none }
+        conn.send_text(line.to_upper() + "\n")
+    }
+}
+
+# Accepts `count` clients, one after the other.
+fn serve(server: socket.Listener, count: Number) throws socket.SocketError {
+    for let i in 0..count {
+        serve_one(server.accept())
+    }
+}
+
+fn demo() throws socket.SocketError {
+    let server = socket.listen(0)
+    defer server.close()
+    print("listening:", server.port > 0)
+
+    let serving = detach serve(server, 2)
+
+    let client = socket.connect("127.0.0.1", server.port)
+    for let word in ["hello", "sockets", "world"] {
+        client.send_text(word + "\n")
+        print(word, "->", client.read_line())
+    }
+    client.shutdown()
+    print("after shutdown:", client.read_line())
+    client.close()
+
+    # A second client sends raw bytes and reads exactly as many back.
+    let second = socket.connect("127.0.0.1", server.port)
+    second.send_text("bytes\n")
+    print(second.recv_exactly(6))
+    second.close()
+    serving.await
+
+    # Nothing is listening on the port any more once the server is closed.
+    let port = server.port
+    server.close()
+    try {
+        socket.connect("127.0.0.1", port)
+    } catch {
+        e: socket.SocketError => { print("connect failed:", e.kind) }
+    }
+
+    # A wait that ends: nobody connects within 50 ms.
+    let lonely = socket.listen(0)
+    try {
+        lonely.accept(timeout: 50)
+    } catch {
+        e: socket.SocketError => { print("accept:", e.kind) }
+    }
+    lonely.close()
+}
+
+try {
+    demo()
+} catch {
+    e: socket.SocketError => { print("failed:", e.message()) }
+}

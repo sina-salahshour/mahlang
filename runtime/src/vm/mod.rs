@@ -16,6 +16,7 @@ mod methods;
 mod natives;
 mod process;
 mod reflect;
+mod socket;
 mod value;
 
 pub use error::RuntimeError;

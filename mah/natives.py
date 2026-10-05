@@ -561,3 +561,8 @@ NATIVES.update(_REFLECT_NATIVES)
 from .bytes_methods import NATIVES as _BYTES_NATIVES  # noqa: E402
 
 NATIVES.update(_BYTES_NATIVES)
+
+# M38 (1.18): std:socket -- mah/socket_natives.py.
+from .socket_natives import NATIVES as _SOCKET_NATIVES  # noqa: E402
+
+NATIVES.update(_SOCKET_NATIVES)

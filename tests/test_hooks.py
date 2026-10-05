@@ -1073,7 +1073,7 @@ class BytecodeTests(unittest.TestCase):
     REST_SRC = "fn f(a, ...r, **k) { }\nprint(1)\n"
 
     def test_the_format_constants_are_pinned(self):
-        self.assertEqual(MINOR, 17)  # M37
+        self.assertEqual(MINOR, 18)  # M38
         self.assertEqual(OPCODES["paramhooks"], (0x3E, ("N", "N", "A")))
         self.assertEqual(OPCODE_SINCE_MINOR["paramhooks"], 16)
         arities = {

@@ -759,6 +759,69 @@ print(fs.read_text(p), try { fs.read_bytes(dir + "/zz") } catch { e: fs.FsError 
 print(try { fs.write_bytes(p, "text") } catch { e: RuntimeError => { e.message() } })
 fs.remove(dir, recursive: true)
 """, b""),
+    # M38: std:socket -- TCP on 127.0.0.1, results, error kinds and messages.
+    ("std_socket", """
+import socket from "std:socket"
+let server = socket.listen(0)
+let incoming = detach server.accept()
+let client = socket.connect("127.0.0.1", server.port)
+let conn = incoming.await
+print(client.peer_host, client.peer_port == server.port, conn.peer_port == client.local_port)
+client.send_text("one\\r\\ntwo\\nrest")
+print(conn.read_line(), conn.read_line(), conn.buffer, conn.recv(2), conn.recv())
+conn.send("hi".to_bytes())
+print(client.recv(), client.recv_exactly(0))
+client.send_text("abc")
+client.shutdown()
+print(try { conn.recv_exactly(5) } catch { e: socket.SocketError => { e.kind + " " + e.message().replace_all(":" + conn.peer_port, ":PORT") } })
+print(conn.recv(), conn.recv().len(), conn.read_line())
+print(conn.recv(timeout: 30))
+conn.send_text("late")
+print(client.recv(timeout: 1000), try { client.read_line(timeout: 0) } catch { e: socket.SocketError => { e.kind } })
+print(try { server.accept(timeout: 30) } catch { e: socket.SocketError => { e.kind + " " + e.description } })
+print(client.to_string().starts_with("Socket(127.0.0.1:"), server.to_string().starts_with("Listener(127.0.0.1:"), server.host)
+let waiting = detach conn.recv()
+sleep_async(100)
+conn.close()
+conn.close()
+print(try { waiting.await } catch { e: socket.SocketError => { e.kind + " " + e.op + " " + e.description } })
+print(try { conn.send_text("x") } catch { e: socket.SocketError => { e.kind } })
+let accepting = detach server.accept()
+sleep_async(100)
+server.close()
+print(try { accepting.await } catch { e: socket.SocketError => { e.kind + " " + e.op } })
+client.close()
+let port = server.port
+print(try { socket.connect("127.0.0.1", port) } catch { e: socket.SocketError => { e.kind + ": " + e.message().replace_all(":" + port, ":PORT") } })
+let first = socket.listen(0)
+print(try { socket.listen(first.port) } catch { e: socket.SocketError => { e.kind + ": " + e.description } })
+first.close()
+print(try { socket.connect("no-such-host.invalid", 80) } catch { e: socket.SocketError => { e.kind + ": " + e.description } })
+let u: Unknown = "x"
+let n: Unknown = 1.5
+let probes = [
+    fn() { socket.connect(1, 80) },
+    fn() { socket.connect("127.0.0.1", u) },
+    fn() { socket.connect("127.0.0.1", 0) },
+    fn() { socket.connect("127.0.0.1", 70000) },
+    fn() { socket.connect("127.0.0.1", 80, u) },
+    fn() { socket.connect("127.0.0.1", 80, n) },
+    fn() { socket.connect("127.0.0.1", 80, -1) },
+    fn() { socket.listen(n) },
+    fn() { socket.listen(-1) },
+    fn() { socket.listen(0, n) },
+    fn() { socket.listen(0, "127.0.0.1", 0) },
+    fn() { socket.listen(0, "127.0.0.1", u) },
+    fn() { socket.Listener { id: u, host: "h", port: 1 }.accept() },
+    fn() { socket.Listener { id: 1, host: "h", port: 1 }.accept(u) },
+    fn() { socket.Socket { id: 1, peer_host: "h", peer_port: 1, local_port: 1, buffer: "".to_bytes() }.recv(0) },
+    fn() { socket.Socket { id: 1, peer_host: "h", peer_port: 1, local_port: 1, buffer: "".to_bytes() }.recv(u) },
+    fn() { socket.Socket { id: 1, peer_host: "h", peer_port: 1, local_port: 1, buffer: "".to_bytes() }.send(u) },
+]
+for let p in probes {
+    print(try { p() } catch { e: RuntimeError => { e.message() } })
+}
+""", b""),
     ("std_csv", """
 import csv from "std:csv"
 print(csv.parse("a,\\"b,c\\"\\r\\n\\n\\"q\\"\\"x\\",\\n"), csv.parse_records("n,v\\nx,1\\n"))

@@ -801,7 +801,7 @@ own type with such a name.
 Standard library modules are imported as `"std:<name>"`, the same two ways
 as a file: `std:math`, `std:path`, `std:json`, `std:csv`, `std:random`,
 `std:collections`, `std:regex`, `std:time`, `std:async`, `std:bytes`, `std:fs`,
-`std:process`, `std:reflect` (and `std:test`, below).
+`std:process`, `std:socket`, `std:reflect` (and `std:test`, below).
 
 ```mah
 import math from "std:math"
@@ -1070,6 +1070,46 @@ try {
     process.run("no-such-program")
 } catch {
     e: process.ProcessError => { print(e.kind) }         # not_found
+}
+```
+
+`std:socket`: TCP. `connect(host, port, timeout = none)` gives a `socket.Socket`;
+`listen(port, host = "127.0.0.1", backlog = 128)` gives a `socket.Listener`
+(port 0 picks a free one; `.port` is the real one) whose `accept(timeout =
+none)` gives Sockets and `close()` stops it. A Socket has `send(data)` (Bytes,
+all of it), `send_text(text)`, `recv(max = 65536, timeout = none)` (Bytes, up to
+`max`; **empty once the peer has closed its side**), `recv_exactly(n, timeout =
+none)`, `read_line(timeout = none)` (a String without its `\n` or `\r\n`, or
+`none` at the end; extra bytes wait in `buffer`, which `recv` returns first),
+`shutdown()` (stop sending; the peer's `recv` then ends) and `close()` (twice is
+fine), plus `peer_host`, `peer_port` and `local_port`. Timeouts are in
+milliseconds (`none` waits forever, 0 only what is there). Everything throws
+`socket.SocketError { kind, op, address, description }`; `kind` is
+`"connection_refused"`, `"connection_reset"`, `"timed_out"`, `"address_in_use"`,
+`"address_not_available"`, `"host_not_found"`, `"permission_denied"`,
+`"closed"`, `"closed_early"` (`recv_exactly` hit the end), `"invalid_utf8"` (in
+`read_line`) or `"other"`. Calls wait like any async call, and `detach` runs one
+in the background; a waiting `accept` or `recv` keeps the program running, and
+closing its socket or listener makes it fail with `"closed"`. A program
+importing `std:socket` needs a 1.18 VM.
+
+```mah
+import socket from "std:socket"
+let server = socket.listen(0)                  # a free port on 127.0.0.1
+let incoming = detach server.accept()
+let client = socket.connect("127.0.0.1", server.port)
+let conn = incoming.await
+client.send_text("hello\n")
+print(conn.read_line())                        # hello
+conn.send("hi".to_bytes())
+print(client.recv())                           # Bytes[68 69]
+client.close()
+conn.close()
+server.close()
+try {
+    socket.connect("127.0.0.1", server.port, 500)
+} catch {
+    e: socket.SocketError => { print(e.kind) } # connection_refused
 }
 ```
 
@@ -1395,8 +1435,8 @@ test "not ready yet" {
 - Hooks for enums or variants, field *get* hooks, and `impl` for a nested
   `fn` or closure (only top-level `fn`s and types are impl targets).
 - Decorators on `let`s, traits, `impl` blocks, nested functions or closures.
-- Network access, spawning a process to stream from, and every other planned
+- UDP and TLS, an HTTP client or server, spawning a process to stream from, and every other planned
   `std:` module besides `std:math`, `std:path`, `std:json`, `std:csv`,
   `std:random`, `std:collections`, `std:regex`, `std:time`, `std:async`,
-  `std:bytes`, `std:fs`, `std:process`, `std:reflect` and `std:test`. A Bytes literal. Time zones (`std:time` is UTC only).
+  `std:bytes`, `std:fs`, `std:process`, `std:socket`, `std:reflect` and `std:test`. A Bytes literal. Time zones (`std:time` is UTC only).
 - `null`/`nil`/`undefined`: use `none`.

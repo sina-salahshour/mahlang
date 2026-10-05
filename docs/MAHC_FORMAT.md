@@ -1,4 +1,4 @@
-# The `.mahc` bytecode format (version 1.17)
+# The `.mahc` bytecode format (version 1.18)
 
 `mah build prog.mh` compiles a program (its entry file plus everything it
 imports) into a single `.mahc` file; `mah runc prog.mahc` runs one. This
@@ -64,7 +64,7 @@ sections   (id u8, length varuint, payload bytes(length))*   until end of file
   version whose features it uses. *(1.5)* The reference encoder writes 4
   (every file it produces has 1.4's TYPES layout and HANDLERS section),
   or the highest `(1.x)` marker among the natives the file lists (5 for
-  the `std:math` natives, 7 for the ones behind `std:json`/`std:csv`, 8 for `std:random`'s, 9 for `std:regex`'s, 10 for `io.read_line`, 11 for `std:time`/`std:async`'s, 12 for `std:fs`'s, 13 for `std:process`'s, 14 for `std:reflect`'s, 17 for the `bytes.*` natives and the binary `fs.*` ones), so a program that doesn't call newer natives
+  the `std:math` natives, 7 for the ones behind `std:json`/`std:csv`, 8 for `std:random`'s, 9 for `std:regex`'s, 10 for `io.read_line`, 11 for `std:time`/`std:async`'s, 12 for `std:fs`'s, 13 for `std:process`'s, 14 for `std:reflect`'s, 17 for the `bytes.*` natives and the binary `fs.*` ones, 18 for `std:socket`'s), so a program that doesn't call newer natives
   still runs on an older VM. *(1.6)* Native methods (§6.7) are called by
   name, so it also writes the minor that added any native method whose
   *name* a `callmethod`/`callmethodkw`/`detachmethod`/`detachmethodkw` in
@@ -92,6 +92,10 @@ sections   (id u8, length varuint, payload bytes(length))*   until end of file
   minor. A `Bytes` annotation in META (§4.10) is written as primitive code 8
   only in a 1.17 file; in a lower-minor file it is written as `unknown`
   (tag 0), so that 1.14–1.16 VMs, which refuse code 8, still load it.
+  *(1.18)* It writes 18 when the file lists a 1.18 native (§4.4), the seven
+  `socket.*` ones; no opcode or method needs it. Only a program that imports
+  `std:socket` lists them, so every other program keeps its lower minor
+  (`std:fs` and `std:bytes` programs stay 17).
 - **Required sections**, each present exactly once and in increasing id
   order: STRINGS (`0x01`), CONSTANTS (`0x02`), TYPES (`0x03`), NATIVES
   (`0x04`), FUNCTIONS (`0x05`), CODE (`0x06`), — in files with minor ≥ 1 —
@@ -270,6 +274,13 @@ Version 1.0 defines:
 | `fs.write_bytes` / `fs.append_bytes` | 2 | *(1.17)* `path, data` (Bytes, else `TypeMismatch`, `NAME: data must be Bytes, got TYPE`, with `NAME` `write_bytes` / `append_bytes`) → `none`; write replaces (creating), append adds (creating). The bytes are copied when the native is called, so later changes to `data` don't affect the write |
 | `fs.file_read_bytes` | 2 | *(1.17)* `id, max` → a new Bytes of up to `max` bytes from the open file's current position, or all the rest when `max` is `none`; fewer than `max` only at the end of the file, and empty Bytes once it is reached. `max` neither a Number nor `none`: `TypeMismatch`, `file_read_bytes: max must be a Number or none, got TYPE`; not a whole Number ≥ 0: `ArgumentError`, `file_read_bytes: max must be a whole number of at least 0, got N`. A file opened for writing: failure kind `other`, `the file isn't open for reading` |
 | `fs.file_write_bytes` | 2 | *(1.17)* `id, data` → `none`, writing the bytes as `fs.write` writes text (unbuffered); `data` not Bytes: `TypeMismatch`, `file_write_bytes: data must be Bytes, got TYPE`. A file opened for reading: failure kind `other`, `the file isn't open for writing` |
+| `socket.connect` | 3 | *(1.18)* `host, port, timeout` → `[id, peer_host, peer_port, local_port]`: resolves `host` (DNS; IPv4 or IPv6), tries each address in order until one connects, the timeout covering the whole attempt; `peer_host` is the numeric address it connected to (`127.0.0.1`) and `local_port` its local port. `port` 0 is refused (`connect: port must be a whole number from 1 to 65535, got 0`) |
+| `socket.listen` | 3 | *(1.18)* `host, port, backlog` → `[id, port]`, `port` the bound port (the real one when 0 was asked): binds `host:port` with `SO_REUSEADDR` on Unix, then listens with `backlog` |
+| `socket.accept` | 2 | *(1.18)* `id, timeout` → `[id, peer_host, peer_port, local_port]` of the new socket, once a connection arrives; `id` must be a listener |
+| `socket.send` | 2 | *(1.18)* `id, data` (Bytes, else `TypeMismatch`, `send: data must be Bytes, got TYPE`) → `none` once every byte is written. The bytes are copied when the native is called |
+| `socket.recv` | 3 | *(1.18)* `id, max, timeout` → a new Bytes of 1 to `max` bytes (whatever is available, at most `max`), or empty Bytes once the peer has closed its side |
+| `socket.shutdown` | 1 | *(1.18)* `id` → `none`, shutting down the write side (the peer's `recv` then reaches the end); reading still works |
+| `socket.close` | 1 | *(1.18)* `id` → `none`; an unknown or already closed id is fine (`[true, none]`) |
 | `math.sin` | 1 | sine of a Number (radians); the result is computed in IEEE-754 double precision and converted to Number via its shortest round-trip decimal text |
 | `math.cos` | 1 | cosine, same rules |
 | `time.sleep_async` | 1 | returns a new pending Promise that the scheduler settles with `none` after the argument's number of milliseconds (§6.4) |
@@ -411,6 +422,56 @@ position, shared by all reads, so text reads (`fs.read_line`,
 `fs.read_all`) and `fs.file_read_bytes` may be mixed on one open file, each
 continuing where the last stopped. The Bytes a native returns is new, and
 one it is given isn't kept.
+
+The `(1.18)` natives are `std:socket`'s (TCP only). Each returns a pending
+Promise at once and does its work off the VM's thread of execution, as an I/O
+operation (§6.4), settling it with a **result** exactly like the `(1.12)`
+natives: `[true, value]` (the value the table lists) or `[false, kind,
+description]`, which std:socket turns into a `SocketError`. **Sockets and
+listeners** are positive whole-Number ids in a per-VM **socket table**,
+numbered from 1 and separate from the file table; the VM closes every open
+one when it finishes. Sends and receives on one socket may run at the same
+time from different tasks. The VM's thread checks the arguments **before**
+anything else and raises these as RuntimeErrors at once
+(`NAME` is the part after `socket.`; numbers are formatted as `print` shows
+them):
+
+- `host` not a String: `TypeMismatch`, `NAME: host must be a String, got TYPE`.
+- `port` not a Number: `TypeMismatch`, `NAME: port must be a Number, got
+  TYPE`; not a whole Number from 0 to 65535: `ArgumentError`, `NAME: port must
+  be a whole number from 0 to 65535, got N`. `connect` refuses 0 the same way,
+  with `from 1 to 65535`.
+- `timeout` neither `none` nor a Number: `TypeMismatch`, `NAME: timeout must
+  be a Number or none, got TYPE`; not a whole Number ≥ 0: `ArgumentError`,
+  `NAME: timeout must be a whole number of at least 0, got N`. A timeout is in
+  milliseconds; `none` waits forever and 0 means only what is already there.
+- `backlog` not a Number: `TypeMismatch`, `listen: backlog must be a Number,
+  got TYPE`; not a whole Number ≥ 1: `ArgumentError`, `listen: backlog must be
+  a whole number of at least 1, got N`.
+- `id` not a Number: `TypeMismatch`, `NAME: expected a socket id, got TYPE`.
+- `data` not Bytes: `TypeMismatch`, `send: data must be Bytes, got TYPE`.
+- `max` not a Number: `TypeMismatch`, `recv: max must be a Number, got TYPE`;
+  not a whole Number ≥ 1: `ArgumentError`, `recv: max must be a whole number
+  of at least 1, got N`.
+
+An id that isn't open (closed, never opened, or of the wrong kind: a
+listener id given to `recv`, a socket id given to `accept`) settles at once
+with `[false, "closed", "the socket is closed"]`. The failure kinds, each with
+a fixed description: `connection_refused` (`connection refused`),
+`connection_reset` (`connection reset by peer`; also a broken pipe or an
+aborted connection), `timed_out` (`timed out`), `address_in_use` (`address
+already in use`), `address_not_available` (`address not available`),
+`host_not_found` (`host not found`: the name didn't resolve),
+`permission_denied` (`permission denied`), `closed` (`the socket is closed`),
+or `other`, whose description is the OS's own error text without a trailing
+` (os error N)`. **Waiting and closing**: a worker waiting in `accept`, `recv`
+or `connect` polls in slices of at most 50 ms, and between slices checks its
+deadline (`timed_out`) and whether its id was closed. `socket.close` removes
+the id from the table at once, on the VM's thread, and then closes the OS
+socket off it, so a call already waiting on that id fails with `closed` within
+about 50 ms; a `send` in progress may fail with `closed` or `connection_reset`.
+A pending `accept` or `recv` is an I/O operation, so it keeps the program
+running (§6.4) until it settles.
 
 The `(1.11)` natives are `std:time`'s clocks and the building blocks of
 `std:async`. A non-Promise argument to `time.cancel`, `promise.resolve`
@@ -1000,7 +1061,9 @@ Single-threaded cooperative scheduling:
   operation does, whichever comes first, and settle it -- a timer's promise
   resolves with `none`. So the program ends only once the main code has
   finished *and* no scheduled work remains: *(1.10)* a detached `input`
-  nobody awaits still keeps the program running until its line arrives. *(1.4)* Once it does, if any
+  nobody awaits still keeps the program running until its line arrives. *(1.18)* So does
+  a pending `socket.accept`, `socket.recv` or `socket.connect`, until it settles
+  (data, a connection, an error, its timeout, or its socket being closed). *(1.4)* Once it does, if any
   detached task's Promise failed and was never observed, the program
   still stops with the uncaught-error report (§6.8) for the **first**
   such Promise, in fail order.
@@ -1496,6 +1559,11 @@ message
   `Bytes` has the META `typeref` written as `unknown` (tag 0), not as code 8;
   a decoder accepts code 8 (in `loadtype` and META) only from minor 17, and
   otherwise reports `'loadtype' at instruction I: primitive type code 8 out of range` / `META: primitive type code 8 out of range`.
+- **1.18** added `std:socket` (docs/STDLIB.md, M38): seven `socket.*`
+  natives (§4.4) with a per-VM socket table, and nothing else (no opcode, type
+  or method). The encoder writes 18 for a file that lists one of them, which
+  only a program importing `std:socket` does. A 1.17 or older VM names them
+  in its unsupported-minor error (§3).
 - Planned growth, for orientation: error-set checking (the static
   checker's `throws` inference and "unhandled error" diagnostics -- M26),
   string utilities, filesystem, networking, and process natives.

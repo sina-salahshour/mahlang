@@ -1,0 +1,365 @@
+# Tests for std:socket, run by tests/test_stdlib.py (or
+# `mah test --file mah/std/socket.test.mh`) on both VMs. They use real TCP
+# connections on 127.0.0.1 (ports picked by the system).
+import "std:test"
+import socket from "./socket"
+
+struct Pair { client: socket.Socket, conn: socket.Socket, server: socket.Listener }
+
+fn pair() -> Pair {
+    let server = socket.listen(0)
+    let incoming = detach server.accept()
+    let client = socket.connect("127.0.0.1", server.port)
+    let conn = incoming.await
+    Pair { client: client, conn: conn, server: server }
+}
+
+fn finish(p: Pair) {
+    p.client.close()
+    p.conn.close()
+    p.server.close()
+}
+
+fn error_of(f: fn() -> Unknown) -> String {
+    let e = assert_throws(f)
+    match e {
+        socket.SocketError { kind, op, address, description } => {
+            kind + " " + op + ": " + description
+        }
+        _ => { "not a SocketError: " + e.message() }
+    }
+}
+
+test "echo" {
+    let p = pair()
+    p.client.send_text("hello")
+    assert_eq(p.conn.recv(), "hello".to_bytes())
+    p.conn.send("hi there".to_bytes())
+    assert_eq(p.client.recv(), "hi there".to_bytes())
+    assert_eq(p.client.peer_port, p.server.port)
+    assert_eq(p.client.peer_host, "127.0.0.1")
+    assert_eq(p.conn.local_port, p.server.port)
+    assert_eq(p.conn.peer_port, p.client.local_port)
+    finish(p)
+}
+
+test "an echo server in the background" {
+    let server = socket.listen(0)
+    defer server.close()
+    fn serve() {
+        let conn = server.accept()
+        defer conn.close()
+        for let _ in 0..2 {
+            let line = conn.read_line()
+            conn.send_text("echo " + line + "\n")
+        }
+    }
+    let done = detach serve()
+    let client = socket.connect("127.0.0.1", server.port)
+    defer client.close()
+    client.send_text("one\ntwo\n")
+    assert_eq(client.read_line(), "echo one")
+    assert_eq(client.read_line(), "echo two")
+    done.await
+}
+
+test "read_line handles \\r\\n, a last unterminated line and the end" {
+    let p = pair()
+    p.client.send_text("one\r\ntwo\n\nthree\rx\nlast")
+    p.client.shutdown()
+    assert_eq(p.conn.read_line(), "one")
+    assert_eq(p.conn.read_line(), "two")
+    assert_eq(p.conn.read_line(), "")
+    assert_eq(p.conn.read_line(), "three\rx")
+    assert_eq(p.conn.read_line(), "last")
+    assert(p.conn.read_line() == none)
+    assert(p.conn.read_line() == none)
+    finish(p)
+}
+
+test "a line arriving in pieces" {
+    let p = pair()
+    let line = detach p.conn.read_line()
+    p.client.send_text("par")
+    sleep_async(30)
+    p.client.send_text("tial\nrest")
+    assert_eq(line.await, "partial")
+    assert_eq(p.conn.buffer, "rest".to_bytes())
+    finish(p)
+}
+
+test "recv returns buffered bytes first" {
+    let p = pair()
+    p.client.send_text("abc\ndefgh")
+    assert_eq(p.conn.read_line(), "abc")
+    assert_eq(p.conn.buffer, "defgh".to_bytes())
+    assert_eq(p.conn.recv(2), "de".to_bytes())
+    assert_eq(p.conn.recv(), "fgh".to_bytes())
+    assert_eq(p.conn.buffer.len(), 0)
+    p.client.send_text("next")
+    assert_eq(p.conn.recv(), "next".to_bytes())
+    finish(p)
+}
+
+test "recv_exactly" {
+    let p = pair()
+    let got = detach p.conn.recv_exactly(6)
+    p.client.send_text("ab")
+    sleep_async(30)
+    p.client.send_text("cdefgh")
+    assert_eq(got.await, "abcdef".to_bytes())
+    assert_eq(p.conn.recv_exactly(2), "gh".to_bytes())
+    assert_eq(p.conn.recv_exactly(0), "".to_bytes())
+    finish(p)
+}
+
+test "recv_exactly closed_early" {
+    let p = pair()
+    p.client.send_text("abc")
+    p.client.close()
+    let e = assert_throws(fn() { p.conn.recv_exactly(5) })
+    match e {
+        socket.SocketError { kind, op, address, description } => {
+            assert_eq(kind, "closed_early")
+            assert_eq(op, "recv_exactly")
+            assert_eq(description, "the connection closed before 5 bytes arrived")
+        }
+        _ => { fail("not a SocketError") }
+    }
+    assert_eq(p.conn.buffer, "abc".to_bytes())
+    p.conn.close()
+    p.server.close()
+}
+
+test "a closed peer ends recv" {
+    let p = pair()
+    p.client.send_text("bye")
+    p.client.close()
+    assert_eq(p.conn.recv(), "bye".to_bytes())
+    assert_eq(p.conn.recv().len(), 0)
+    assert_eq(p.conn.recv().len(), 0)
+    p.conn.close()
+    p.server.close()
+}
+
+test "shutdown ends the peer's recv but not this side's" {
+    let p = pair()
+    p.client.send_text("last words")
+    p.client.shutdown()
+    assert_eq(p.conn.recv(), "last words".to_bytes())
+    assert_eq(p.conn.recv().len(), 0)
+    p.conn.send_text("still here")
+    assert_eq(p.client.recv(), "still here".to_bytes())
+    finish(p)
+}
+
+test "binary data" {
+    let p = pair()
+    let data = "".to_bytes()
+    for let i in 0..256 {
+        data.push(i)
+    }
+    p.client.send(data)
+    assert_eq(p.conn.recv_exactly(256), data)
+    finish(p)
+}
+
+test "a large send" {
+    let p = pair()
+    let chunk = "0123456789abcdef".to_bytes()
+    let data = "".to_bytes()
+    for let _ in 0..4096 {
+        data.extend(chunk)
+    }
+    let sending = detach p.client.send(data)
+    let got = p.conn.recv_exactly(data.len())
+    sending.await
+    assert(got == data)
+    finish(p)
+}
+
+test "timed_out on recv, accept and read_line" {
+    let p = pair()
+    assert_eq(error_of(fn() { p.conn.recv(timeout: 50) }), "timed_out recv: timed out")
+    assert_eq(error_of(fn() { p.conn.read_line(timeout: 50) }), "timed_out read_line: timed out")
+    assert_eq(
+        error_of(fn() { p.conn.recv_exactly(1, timeout: 50) }),
+        "timed_out recv_exactly: timed out"
+    )
+    assert_eq(error_of(fn() { p.server.accept(timeout: 50) }), "timed_out accept: timed out")
+    assert_eq(error_of(fn() { p.server.accept(0) }), "timed_out accept: timed out")
+    p.client.send_text("x")
+    sleep_async(50)
+    assert_eq(p.conn.recv(timeout: 0), "x".to_bytes())
+    finish(p)
+}
+
+test "connection refused" {
+    let server = socket.listen(0)
+    let port = server.port
+    server.close()
+    let e = assert_throws(fn() { socket.connect("127.0.0.1", port) })
+    match e {
+        socket.SocketError { kind, op, address, description } => {
+            assert_eq(kind, "connection_refused")
+            assert_eq(op, "connect")
+            assert_eq(address, "127.0.0.1:" + port)
+            assert_eq(description, "connection refused")
+            assert_eq(e.message(), "connect: connection refused: 127.0.0.1:" + port)
+        }
+        _ => { fail("not a SocketError") }
+    }
+}
+
+test "a name that doesn't resolve" {
+    let e = assert_throws(fn() { socket.connect("no-such-host.invalid", 80) })
+    match e {
+        socket.SocketError { kind, op, address, description } => {
+            assert_eq(kind, "host_not_found")
+            assert_eq(address, "no-such-host.invalid:80")
+        }
+        _ => { fail("not a SocketError") }
+    }
+}
+
+test "the address is in use" {
+    let first = socket.listen(0)
+    defer first.close()
+    assert_eq(
+        error_of(fn() { socket.listen(first.port) }),
+        "address_in_use listen: address already in use"
+    )
+}
+
+test "closing a listener ends a detached accept" {
+    let server = socket.listen(0)
+    let waiting = detach server.accept()
+    sleep_async(100)
+    server.close()
+    let e = assert_throws(fn() { waiting.await })
+    match e {
+        socket.SocketError { kind, op, address, description } => {
+            assert_eq(kind, "closed")
+            assert_eq(op, "accept")
+            assert_eq(description, "the socket is closed")
+        }
+        _ => { fail("not a SocketError") }
+    }
+}
+
+test "closing a socket ends a detached recv" {
+    let p = pair()
+    let waiting = detach p.conn.recv()
+    sleep_async(100)
+    p.conn.close()
+    let e = assert_throws(fn() { waiting.await })
+    match e {
+        socket.SocketError { kind, op, address, description } => {
+            assert_eq(kind, "closed")
+            assert_eq(op, "recv")
+        }
+        _ => { fail("not a SocketError") }
+    }
+    p.client.close()
+    p.server.close()
+}
+
+test "closed sockets and listeners" {
+    let p = pair()
+    p.client.close()
+    p.client.close()
+    assert_eq(error_of(fn() { p.client.recv() }), "closed recv: the socket is closed")
+    assert_eq(error_of(fn() { p.client.send_text("x") }), "closed send: the socket is closed")
+    assert_eq(error_of(fn() { p.client.read_line() }), "closed read_line: the socket is closed")
+    assert_eq(
+        error_of(fn() { p.client.recv_exactly(1) }),
+        "closed recv_exactly: the socket is closed"
+    )
+    assert_eq(error_of(fn() { p.client.shutdown() }), "closed shutdown: the socket is closed")
+    p.conn.close()
+    p.server.close()
+    p.server.close()
+    assert_eq(error_of(fn() { p.server.accept() }), "closed accept: the socket is closed")
+}
+
+test "a socket id and a listener id are not interchangeable" {
+    let p = pair()
+    let as_socket = socket.Socket {
+        id: p.server.id,
+        peer_host: "127.0.0.1",
+        peer_port: 1,
+        local_port: 1,
+        buffer: "".to_bytes()
+    }
+    assert_eq(error_of(fn() { as_socket.recv() }), "closed recv: the socket is closed")
+    let as_listener = socket.Listener { id: p.client.id, host: "127.0.0.1", port: 1 }
+    assert_eq(error_of(fn() { as_listener.accept() }), "closed accept: the socket is closed")
+    finish(p)
+}
+
+test "errors name the peer or the listen address" {
+    let p = pair()
+    let a = p.conn.peer_host + ":" + p.conn.peer_port
+    p.conn.close()
+    let e = assert_throws(fn() { p.conn.send_text("x") })
+    assert_eq(e.message(), "send: the socket is closed: " + a)
+    let l = "127.0.0.1:" + p.server.port
+    p.server.close()
+    let e2 = assert_throws(fn() { p.server.accept() })
+    assert_eq(e2.message(), "accept: the socket is closed: " + l)
+    p.client.close()
+}
+
+test "read_line with text that isn't UTF-8" {
+    let p = pair()
+    let bad = "a".to_bytes()
+    bad.push(255)
+    bad.push(10)
+    p.client.send(bad)
+    p.client.send_text("ok\n")
+    assert_eq(error_of(fn() { p.conn.read_line() }), "invalid_utf8 read_line: not valid UTF-8 text")
+    assert_eq(p.conn.read_line(), "ok")
+    finish(p)
+}
+
+test "several connections at once" {
+    let server = socket.listen(0)
+    defer server.close()
+    fn serve_one() {
+        let conn = server.accept()
+        defer conn.close()
+        let name = conn.read_line()
+        conn.send_text("hello " + name + "\n")
+    }
+    let servers = [detach serve_one(), detach serve_one(), detach serve_one()]
+    let clients = []
+    for let name in ["a", "b", "c"] {
+        let c = socket.connect("127.0.0.1", server.port)
+        c.send_text(name + "\n")
+        clients.push(c)
+    }
+    let replies = []
+    for let c in clients {
+        replies.push(c.read_line())
+        c.close()
+    }
+    for let s in servers {
+        s.await
+    }
+    assert_eq(replies.join(","), "hello a,hello b,hello c")
+}
+
+test "listen on a given host" {
+    let server = socket.listen(0, "127.0.0.1", 4)
+    assert_eq(server.host, "127.0.0.1")
+    assert(server.port > 0)
+    server.close()
+}
+
+test "Printable" {
+    let p = pair()
+    assert_eq("" + p.server, "Listener(127.0.0.1:" + p.server.port + ")")
+    assert_eq("" + p.client, "Socket(127.0.0.1:" + p.server.port + ")")
+    assert_eq("" + p.conn, "Socket(127.0.0.1:" + p.client.local_port + ")")
+    finish(p)
+}

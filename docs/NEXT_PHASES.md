@@ -232,8 +232,9 @@ cancellable timers), and **M35 `std:fs`** (with handles), and **M36
 **M41a type values, `##` docs, spread calls, `std:reflect` and
 `json.decode`**, and **M41b decorators as metadata**, and **M41c hooks,
 function-item impls and rest parameters** ([`REFLECTION.md`](REFLECTION.md)),
-and **M37 the `Bytes` type** (with `std:bytes` and binary `std:fs`).
-Next: sockets, the URL/HTTP client, the HTTP
+and **M37 the `Bytes` type** (with `std:bytes` and binary `std:fs`), and
+**M38 `std:socket`** (TCP).
+Next: the URL/HTTP client, the HTTP
 server and package dependencies (the network modules per `STDLIB.md`), each
 with Mah-level tests.
 `std:test` and the `mah test` runner ([`MAH_TEST.md`](MAH_TEST.md)) come

@@ -76,6 +76,10 @@ its native methods and `String.to_bytes` (#6.7), the `bytes.*` natives
 behind std:bytes and the binary `fs.*` ones (#4.4), and the primitive type
 code 8 (`loadtype 1, 8`, the Type `Bytes`). Bytes values only come from
 1.17 natives and methods, so a file uses 1.17 only when it calls one.
+
+M38 bumps MINOR to 18: new natives only (`socket.*`, behind std:socket;
+sockets and listeners are ids in the VM's socket table) --
+docs/MAHC_FORMAT.md #4.4.
 """
 
 from __future__ import annotations
@@ -88,7 +92,7 @@ MAGIC = b"MAHC"
 # `.mahc` extension).
 SHEBANG = b"#!/usr/bin/env -S mah runc\n"
 MAJOR = 1
-MINOR = 17
+MINOR = 18
 
 # -- section ids (docs/MAHC_FORMAT.md #3) -----------------------------------
 SEC_STRINGS = 0x01
@@ -265,6 +269,14 @@ NATIVE_ARITIES = {
     "fs.append_bytes": 2,
     "fs.file_read_bytes": 2,
     "fs.file_write_bytes": 2,
+    # M38 (1.18): std:socket.
+    "socket.connect": 3,
+    "socket.listen": 3,
+    "socket.accept": 2,
+    "socket.send": 2,
+    "socket.recv": 3,
+    "socket.shutdown": 1,
+    "socket.close": 1,
 }
 
 # M16: which minor version introduced each 1.1+ native -- a 1.0 file
@@ -350,6 +362,13 @@ NATIVE_SINCE_MINOR = {
     "fs.append_bytes": 17,
     "fs.file_read_bytes": 17,
     "fs.file_write_bytes": 17,
+    "socket.connect": 18,
+    "socket.listen": 18,
+    "socket.accept": 18,
+    "socket.send": 18,
+    "socket.recv": 18,
+    "socket.shutdown": 18,
+    "socket.close": 18,
 }
 
 # M29: native inherent methods added after 1.0, by the minor that added

@@ -3539,6 +3539,44 @@ node that resolved to it. Then:
       bytecode minors, the META downgrade, the decoder refusing code 8 below
       1.17, reflection), `vm_diff.py` cases `bytes` and `std_fs_bytes`.
 
+43. **M38 — `std:socket`. ✅ Landed.** `docs/STDLIB.md` Phase 4's first
+    module (TCP only); bytecode 1.18 (natives only) in `docs/MAHC_FORMAT.md`
+    §3/§4.4/§6.4/§7. Decisions in `STDLIB.md`; the milestone was split across
+    parallel agents from a written contract (`docs/contracts/M38_socket.md`).
+
+    - **Natives, both VMs**: seven `socket.*` (`connect`, `listen`, `accept`,
+      `send`, `recv`, `shutdown`, `close`: `mah/socket_natives.py`,
+      `runtime/src/vm/socket.rs`). Sockets and listeners are ids in a per-VM
+      socket table (on `_IoHub` in Python and on `Vm` in Rust), separate from
+      the file table. Each native returns a pending Promise settled by a
+      worker thread with a result (`[true, value]` or `[false, kind,
+      description]`), like std:fs's. Argument types are checked on the VM's
+      thread first, with the same text on both VMs.
+    - **Waiting and closing**: a worker waiting in `accept`/`recv`/`connect`
+      polls in slices of at most 50 ms, checking its deadline and whether its
+      id is still in the table; `socket.close` removes the id at once and
+      closes the OS socket on a worker, so a waiting call fails with `closed`
+      within about 50 ms. Rust shares a stream as `Arc<TcpStream>` so a send
+      and a recv on one socket can run at the same time, never holding a lock
+      while waiting. A pending `accept`/`recv` keeps the program running
+      (the scheduler's pending-I/O rule). Every open socket is closed when
+      the VM finishes.
+    - **`mah/std/socket.mh`**: `connect`, `listen`, `Listener` (`accept`,
+      `close`), `Socket` (`send`, `send_text`, `recv`, `recv_exactly`,
+      `read_line` over a `buffer` Bytes field, `shutdown`, `close`),
+      `Printable` for both, and `SocketError` with kinds the natives report
+      plus `closed_early` and `invalid_utf8`, which the module raises itself.
+      Timeouts are milliseconds (`none` waits forever).
+    - **Versioning**: MINOR 18; the seven natives are 1.18
+      (`NATIVE_SINCE_MINOR` / `native_since_minor`). Only programs importing
+      `std:socket` are 1.18, so `std:fs` programs stay 17.
+    - **Test changes**: the MINOR pins went from 17 to 18; the
+      unsupported-minor tests now use 19. Tests added:
+      `mah/std/socket.test.mh` (both VMs), `tests/test_socket.py` (argument
+      errors, checker types, bytecode minor, a pending accept keeping the
+      program alive until a timer closes the listener), the `vm_diff.py`
+      case `std_socket`, `examples/sockets.mh`.
+
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
 it** (`make test` must stay green) — see `docs/TESTING.md` for where
@@ -3550,15 +3588,15 @@ M1 was built and documented that way.
 
 ## Status
 
-M0 through M41c, M37 and M41s (and M21b, `mah format`) have all landed; each milestone's
+M0 through M41c, M37, M38 and M41s (and M21b, `mah format`) have all landed; each milestone's
 entry above says what changed and where it deliberately deviates from the
 design. The language has traits, generics, typed and checked errors, a
 static type checker, projects and `mah test`, async I/O with timers, and a
-`.mahc` bytecode format (currently 1.17) run by the reference Python VM
+`.mahc` bytecode format (currently 1.18) run by the reference Python VM
 and the native Rust VM in `runtime/`; the standard library (`std:math`,
 `std:json`, `std:csv`, `std:path`, `std:random`, `std:collections`,
 `std:regex`, `std:time`, `std:async`, `std:fs`, `std:process`, `std:reflect`,
-`std:bytes`) and the built-in `Bytes` type (M37)
+`std:bytes`, `std:socket`) and the built-in `Bytes` type (M37)
 are described in `docs/STDLIB.md`. Type values, `##` docs, spread calls and
 reflection landed with M41a, decorators as metadata with M41b, and hooks,
 function-item impls and rest parameters with M41c (`docs/REFLECTION.md`). M41s made
