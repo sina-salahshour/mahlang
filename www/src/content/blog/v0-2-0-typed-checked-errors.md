@@ -345,3 +345,20 @@ modules.
 --self-contained` refuses to bundle a program with a `mah-vm` that's too
 old to run it, and says to rebuild it (`make vm`). Previously you got an
 executable that failed with "unsupported minor version" when you ran it.
+
+## Networking: sockets, TLS, URLs and HTTP
+
+Since this post first went up, `std:socket` (M38) added TCP clients and
+servers, and M39 added TLS, `std:url` and an HTTP client, `std:http`,
+written in Mah over sockets so both runtimes run the same code. Programs
+that use them need bytecode 1.19.
+
+```mah
+import http from "std:http"
+import url from "std:url"
+fn show() throws http.HttpError {
+    let r = http.get("https://example.com/?" + url.encode_query(["q": "mah"]))
+    print(r.status, r.header("content-type"))
+}
+```
+

@@ -20,7 +20,8 @@ for Neovim and VS Code.
   self-contained executable.
 - **Standard library:** `std:math`, `json`, `csv`, `path`, `regex`,
   `random`, `collections`, `time`, `async`, `fs`, `process`, `reflect`,
-  `bytes` (with the built-in `Bytes` type), and `test`, mostly written in Mah
+  `bytes` (with the built-in `Bytes` type), `socket` (TCP and TLS), `url`,
+  `http` (an HTTP/HTTPS client), and `test`, mostly written in Mah
   itself.
 - **Tooling:** `mah run`/`build`/`check`/`test`/`format`/`init`, project
   manifests, and `mah lsp` (diagnostics, typed hover, completion, go to
@@ -43,7 +44,7 @@ actually work, so a few choices run through the whole project on purpose:
   server use only the Python standard library: no parser library, no LSP
   framework, no CLI library. Clone the repo and `python -m mah` works with
   nothing to `pip install`. The Rust runtime uses the Rust standard library
-  plus the `regex` crate. The only Node code is the optional VS Code
+  plus the `regex` crate and `rustls` (TLS). The only Node code is the optional VS Code
   extension client and the website.
 - **The bytecode is the contract.** Both VMs run only `.mahc`, and its
   format is written down in enough detail to implement a third VM in any
@@ -222,7 +223,7 @@ python -m mah check ./examples/structs.mh            # run the static type check
 (`--check` lists files that would change instead; see `docs/FORMAT.md`).
 
 There's also a native runtime written in Rust (standard library only, plus
-the `regex` crate for `std:regex`), with the same behavior as the Python VM:
+the `regex` crate for `std:regex` and `rustls` for TLS), with the same behavior as the Python VM:
 
 ```sh
 make vm                                              # build it (needs cargo)
@@ -389,17 +390,21 @@ source --> preprocessor --> lexer --> parser --> resolver --> type checker
 - `mah/format/` is `mah format`, and `mah/lsp/` is the language server.
 
 `docs/V2_DESIGN.md` and the per-feature design docs record every milestone
-(M0 through M41c, including M37 and M38, so far) with its reasoning, deviations, and test coverage.
+(M0 through M41c, including M37 to M39, so far) with its reasoning, deviations, and test coverage.
 
 ## Where this is going
 
-Next, mostly in service of a NestJS/FastAPI-style web framework written in
-Mah (routes from decorators, request binding and OpenAPI from types):
+Next, mostly in service of a NestJS/Hono-style web framework written in
+Mah (`std:url`, the HTTP client and TLS landed in M39, over M38's
+`std:socket`):
 
-- **`std:url`** and an **HTTP client** (`Bytes` landed in M37 and `std:socket`, TCP, in M38)
 - **An HTTP server** (with form and multipart bodies)
-- **Third-party packages** (`[dependencies]` in the manifest is already
-  reserved for them)
+- **The web framework**: routes and parameters from decorators, with
+  validation, pipes and transforms, request binding and OpenAPI from types
+- **Packages from GitHub repositories**: each `[dependencies]` entry a repo
+  with an optional branch, tag or commit and an optional subdirectory as the
+  library's root, pinned by a lock file
+- **Optional multithreading** for `detach`ed expressions
 
 Further out (`docs/NEXT_PHASES.md`, `docs/TYPES.md`): the rest of the
 checker's trait and completion work, pattern matching on Vectors and

@@ -1,4 +1,4 @@
-# The `.mahc` bytecode format (version 1.18)
+# The `.mahc` bytecode format (version 1.19)
 
 `mah build prog.mh` compiles a program (its entry file plus everything it
 imports) into a single `.mahc` file; `mah runc prog.mahc` runs one. This
@@ -64,7 +64,7 @@ sections   (id u8, length varuint, payload bytes(length))*   until end of file
   version whose features it uses. *(1.5)* The reference encoder writes 4
   (every file it produces has 1.4's TYPES layout and HANDLERS section),
   or the highest `(1.x)` marker among the natives the file lists (5 for
-  the `std:math` natives, 7 for the ones behind `std:json`/`std:csv`, 8 for `std:random`'s, 9 for `std:regex`'s, 10 for `io.read_line`, 11 for `std:time`/`std:async`'s, 12 for `std:fs`'s, 13 for `std:process`'s, 14 for `std:reflect`'s, 17 for the `bytes.*` natives and the binary `fs.*` ones, 18 for `std:socket`'s), so a program that doesn't call newer natives
+  the `std:math` natives, 7 for the ones behind `std:json`/`std:csv`, 8 for `std:random`'s, 9 for `std:regex`'s, 10 for `io.read_line`, 11 for `std:time`/`std:async`'s, 12 for `std:fs`'s, 13 for `std:process`'s, 14 for `std:reflect`'s, 17 for the `bytes.*` natives and the binary `fs.*` ones, 18 for `std:socket`'s, 19 for `socket.start_tls`), so a program that doesn't call newer natives
   still runs on an older VM. *(1.6)* Native methods (§6.7) are called by
   name, so it also writes the minor that added any native method whose
   *name* a `callmethod`/`callmethodkw`/`detachmethod`/`detachmethodkw` in
@@ -96,6 +96,9 @@ sections   (id u8, length varuint, payload bytes(length))*   until end of file
   `socket.*` ones; no opcode or method needs it. Only a program that imports
   `std:socket` lists them, so every other program keeps its lower minor
   (`std:fs` and `std:bytes` programs stay 17).
+  *(1.19)* It writes 19 when the file lists `socket.start_tls`. std:socket
+  declares it, so every program importing `std:socket` (or `std:http`, which
+  imports it) is 1.19; `std:url` alone needs no newer VM.
 - **Required sections**, each present exactly once and in increasing id
   order: STRINGS (`0x01`), CONSTANTS (`0x02`), TYPES (`0x03`), NATIVES
   (`0x04`), FUNCTIONS (`0x05`), CODE (`0x06`), — in files with minor ≥ 1 —
@@ -281,6 +284,7 @@ Version 1.0 defines:
 | `socket.recv` | 3 | *(1.18)* `id, max, timeout` → a new Bytes of 1 to `max` bytes (whatever is available, at most `max`), or empty Bytes once the peer has closed its side |
 | `socket.shutdown` | 1 | *(1.18)* `id` → `none`, shutting down the write side (the peer's `recv` then reaches the end); reading still works |
 | `socket.close` | 1 | *(1.18)* `id` → `none`; an unknown or already closed id is fine (`[true, none]`) |
+| `socket.start_tls` | 3 | *(1.19)* `id, server_name, timeout` → `none` once a TLS client handshake on the open socket has finished; from then on `send`/`recv` on that id carry plaintext through TLS. See below |
 | `math.sin` | 1 | sine of a Number (radians); the result is computed in IEEE-754 double precision and converted to Number via its shortest round-trip decimal text |
 | `math.cos` | 1 | cosine, same rules |
 | `time.sleep_async` | 1 | returns a new pending Promise that the scheduler settles with `none` after the argument's number of milliseconds (§6.4) |
@@ -472,6 +476,30 @@ socket off it, so a call already waiting on that id fails with `closed` within
 about 50 ms; a `send` in progress may fail with `closed` or `connection_reset`.
 A pending `accept` or `recv` is an I/O operation, so it keeps the program
 running (§6.4) until it settles.
+
+The `(1.19)` native `socket.start_tls` makes an open socket a **TLS client**
+(TLS 1.2 or 1.3, no client certificate, no ALPN). The server's certificate
+must be valid now, name `server_name` (a DNS name or an IP address), and chain
+to a trusted root: the roots in the PEM file named by the `SSL_CERT_FILE`
+environment variable when it is set (read at each call), else the VM's
+built-in set (the Python VM uses the platform's, the Rust VM Mozilla's). A
+self-signed CA certificate used as the server's own isn't accepted
+everywhere; a server certificate signed by a trusted CA is. Arguments are
+checked like the other socket natives' (`server_name` not a String:
+`TypeMismatch`, `start_tls: server name must be a String, got TYPE`; the
+`timeout` rules above, covering the whole handshake). An id that isn't an
+open socket settles with `closed`. Two more failure kinds:
+`tls_certificate` (`the server's certificate isn't trusted`: verification
+failed, including a name that doesn't match) and `tls` (`the TLS handshake or
+connection failed`: anything else, including a peer that doesn't speak TLS
+and calling `start_tls` again on a TLS socket). The peer closing during the
+handshake is `connection_reset`. After the handshake, `recv` returns
+decrypted bytes, and a peer that closes **without** TLS's close notice is a
+normal end (empty Bytes), as is one that sends it; `shutdown` ends the
+sending side of the TCP connection without sending a close notice, and
+`close` closes it. A send and a recv on one TLS socket may still run at the
+same time (they take turns at the TLS state, holding it at most one 50 ms
+slice).
 
 The `(1.11)` natives are `std:time`'s clocks and the building blocks of
 `std:async`. A non-Promise argument to `time.cancel`, `promise.resolve`
@@ -1564,6 +1592,10 @@ message
   or method). The encoder writes 18 for a file that lists one of them, which
   only a program importing `std:socket` does. A 1.17 or older VM names them
   in its unsupported-minor error (§3).
+- **1.19** added `socket.start_tls` (§4.4, M39), TLS on an open socket, behind
+  std:socket's `start_tls`/`connect_tls` and `std:http`; and nothing else.
+  The encoder writes 19 for a file that lists it, which every program
+  importing `std:socket` does.
 - Planned growth, for orientation: error-set checking (the static
   checker's `throws` inference and "unhandled error" diagnostics -- M26),
   string utilities, filesystem, networking, and process natives.

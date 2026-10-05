@@ -801,7 +801,7 @@ own type with such a name.
 Standard library modules are imported as `"std:<name>"`, the same two ways
 as a file: `std:math`, `std:path`, `std:json`, `std:csv`, `std:random`,
 `std:collections`, `std:regex`, `std:time`, `std:async`, `std:bytes`, `std:fs`,
-`std:process`, `std:socket`, `std:reflect` (and `std:test`, below).
+`std:process`, `std:socket`, `std:url`, `std:http`, `std:reflect` (and `std:test`, below).
 
 ```mah
 import math from "std:math"
@@ -1090,8 +1090,13 @@ milliseconds (`none` waits forever, 0 only what is there). Everything throws
 `"closed"`, `"closed_early"` (`recv_exactly` hit the end), `"invalid_utf8"` (in
 `read_line`) or `"other"`. Calls wait like any async call, and `detach` runs one
 in the background; a waiting `accept` or `recv` keeps the program running, and
-closing its socket or listener makes it fail with `"closed"`. A program
-importing `std:socket` needs a 1.18 VM.
+closing its socket or listener makes it fail with `"closed"`. **TLS**:
+`socket.connect_tls(host, port, timeout = none)` opens an encrypted connection,
+and `s.start_tls(server_name, timeout = none)` upgrades a connected Socket (its
+`buffer` must be empty); the server's certificate must be valid for the name
+and trusted (the PEM file in the `SSL_CERT_FILE` environment variable, else
+the system's roots). TLS failures are kinds `"tls_certificate"` and `"tls"`. A
+program importing `std:socket` needs a 1.19 VM.
 
 ```mah
 import socket from "std:socket"
@@ -1110,6 +1115,53 @@ try {
     socket.connect("127.0.0.1", server.port, 500)
 } catch {
     e: socket.SocketError => { print(e.kind) } # connection_refused
+}
+```
+
+`std:url`: `url.parse(text)` gives a `url.Url { scheme, username, password,
+host, port, path, query, fragment }` (scheme and host lowercased; `port`,
+`query`, `fragment` are `none` when absent; `path`/`query` stay
+percent-encoded) or throws `url.UrlError { kind, text, description }`.
+`u.effective_port()` (the scheme's default when `port` is none),
+`u.origin()`, `u.request_target()`, `u.query_pairs()`, `u.resolve(relative)`
+(RFC 3986) and `u.with_query(params)`; it prints as the URL. `url.encode(text,
+safe = "")` / `url.decode(text)` percent-encode, `url.encode_query(params)`
+takes a Map or `[key, value]` pairs (form style, space as `+`) and
+`url.parse_query(q)` returns `[key, value]` pairs. `url.is_valid(text)`.
+
+```mah
+import url from "std:url"
+let u = url.parse("https://example.com:8443/docs/a?x=1#top")
+print(u.host, u.port, u.path, u.query, u.fragment)   # example.com 8443 /docs/a x=1 top
+print(u.resolve("../b?y=2"))                         # https://example.com:8443/b?y=2
+print(url.encode("a b/c"), url.encode_query(["q": "mah lang", "n": 2]))   # a%20b%2Fc q=mah+lang&n=2
+```
+
+`std:http`: an HTTP/1.1 client (http and https). `http.get(url, headers = [:],
+timeout = 30000, max_redirects = 10)`, `http.post(url, body = none, json = none,
+form = none, headers = [:], ...)`, likewise `put`, `patch`, `delete`, `head`,
+and `http.request(method, url, ...)`. `body` is a String or Bytes; `json:`
+sends a value as JSON, `form:` a Map as a form; `headers` is a Map or `[name,
+value]` pairs. The result is an `http.Response { status, reason, headers, body,
+url, method }` with `r.text()`, `r.json()`, `r.header(name)` (any case, `none` if
+missing), `r.header_all(name)`, `r.is_success()` and `r.check_status()`. **A 404
+or 500 is still a Response**; `http.HttpError { kind, method, url, description }`
+is for requests that couldn't complete (`kind` is a SocketError kind like
+`"connection_refused"`, `"timed_out"`, `"tls_certificate"`, or
+`"invalid_url"`, `"unsupported_scheme"`, `"invalid_response"`,
+`"too_many_redirects"`, `"proxy"`, `"status"` from `check_status`). Redirects
+are followed; `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` are honored; each request
+uses one connection, and `timeout` (ms) applies to each wait.
+
+```mah
+import http from "std:http"
+fn fetch_title() -> String throws http.HttpError {
+    let r = http.get("https://example.com/", headers: ["Accept": "text/html"])
+    if !r.is_success() { return "status " + r.status }
+    r.text().split("<title>")[1].split("</title>")[0]
+}
+let created = try { http.post("https://api.example.com/items", json: ["name": "mah"]) } catch {
+    e: http.HttpError => { print(e.kind, e.message()); none }
 }
 ```
 

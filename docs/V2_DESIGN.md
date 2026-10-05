@@ -3577,6 +3577,54 @@ node that resolved to it. Then:
       program alive until a timer closes the listener), the `vm_diff.py`
       case `std_socket`, `examples/sockets.mh`.
 
+44. **M39 — TLS, `std:url` and the `std:http` client. ✅ Landed.**
+    `docs/STDLIB.md` Phase 4's second step; bytecode 1.19 (one native) in
+    `docs/MAHC_FORMAT.md` §3/§4.4/§7; contract in
+    `docs/contracts/M39_http.md`.
+
+    - **Design change**: STDLIB.md planned `ureq` (Rust) and `urllib`
+      (Python) behind native `http.*` calls. Instead **HTTP is written in Mah**
+      (`mah/std/http.mh`) over `std:socket`, so both VMs run the same request
+      code and only TLS is native. That keeps parity by construction and
+      gives the coming HTTP server the same building blocks.
+    - **`socket.start_tls`** (`id, server_name, timeout`), both VMs: Python
+      wraps the socket with `ssl.create_default_context()`
+      (`do_handshake_on_connect=False`, driven by the same 50 ms `select`
+      slices; `SSLWant*` joins the retry set, and `pending()` bytes count as
+      readable); Rust keeps a `Mutex<Option<rustls::ClientConnection>>` next
+      to the `TcpStream` (`Entry::Stream(Arc<Conn>)`), driving
+      `read_tls`/`write_tls`/`process_new_packets` in slices and holding the
+      lock at most one slice so a send and a recv still interleave. Roots:
+      `SSL_CERT_FILE`'s PEM file when set, else the platform's (Python) or
+      `webpki-roots` (Rust). Kinds `tls_certificate` and `tls`; a ragged EOF
+      is a normal end (Python's `suppress_ragged_eofs`); `shutdown` on a TLS
+      socket bypasses `SSLSocket.shutdown` (which would drop TLS for reading)
+      and sends no close notice on either VM. New Rust crates: `rustls`
+      (ring provider only) and `webpki-roots`.
+    - **`mah/std/socket.mh`**: `Socket.start_tls(server_name, timeout)`
+      (an `ArgumentError` when `buffer` holds unread bytes) and
+      `connect_tls(host, port, timeout)`.
+    - **`mah/std/url.mh`** (pure Mah): `parse`, `is_valid`, `Url` with
+      `effective_port`/`authority`/`origin`/`request_target`/`query_pairs`/
+      `resolve` (RFC 3986 §5.2)/`with_query`, `default_port`, `encode`/
+      `decode`, `encode_query`/`parse_query`, `UrlError`.
+    - **`mah/std/http.mh`**: `request` and `get`/`post`/`put`/`patch`/
+      `delete`/`head`, `Response` (`header`, `header_all`, `text`, `json`,
+      `is_success`, `check_status`), `HttpError`; chunked/length/close
+      bodies, redirects, `HTTP(S)_PROXY`/`NO_PROXY` with CONNECT tunnels.
+    - **Versioning**: MINOR 19; `socket.start_tls` is 1.19. std:socket
+      declares it, so every std:socket (and std:http) program is now 1.19,
+      the same trade M37 made for std:fs's binary natives.
+    - **Test changes**: MINOR pins 18 → 19, unsupported-minor tests use 20,
+      `sockets.mh`'s expected minor is 19. Tests added:
+      `mah/std/url.test.mh` and `mah/std/http.test.mh` (both VMs; a scripted
+      server on 127.0.0.1 covers bodies, redirects, proxies, errors),
+      `tests/test_http.py` (HTTPS against a Python TLS server with a
+      throwaway CA made by `openssl`, untrusted and wrong-name certificates,
+      a non-TLS peer, argument errors, minors, checker types, on both VMs),
+      the `vm_diff.py` case `std_tls_url_http`, and `examples/http_client.mh`
+      with a golden test.
+
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
 it** (`make test` must stay green) — see `docs/TESTING.md` for where
@@ -3588,19 +3636,20 @@ M1 was built and documented that way.
 
 ## Status
 
-M0 through M41c, M37, M38 and M41s (and M21b, `mah format`) have all landed; each milestone's
+M0 through M41c, M37 to M39 and M41s (and M21b, `mah format`) have all landed; each milestone's
 entry above says what changed and where it deliberately deviates from the
 design. The language has traits, generics, typed and checked errors, a
 static type checker, projects and `mah test`, async I/O with timers, and a
-`.mahc` bytecode format (currently 1.18) run by the reference Python VM
+`.mahc` bytecode format (currently 1.19) run by the reference Python VM
 and the native Rust VM in `runtime/`; the standard library (`std:math`,
 `std:json`, `std:csv`, `std:path`, `std:random`, `std:collections`,
 `std:regex`, `std:time`, `std:async`, `std:fs`, `std:process`, `std:reflect`,
-`std:bytes`, `std:socket`) and the built-in `Bytes` type (M37)
+`std:bytes`, `std:socket`, `std:url`, `std:http`) and the built-in `Bytes` type (M37)
 are described in `docs/STDLIB.md`. Type values, `##` docs, spread calls and
 reflection landed with M41a, decorators as metadata with M41b, and hooks,
 function-item impls and rest parameters with M41c (`docs/REFLECTION.md`). M41s made
 struct/enum/trait names module-scoped (a breaking change: export the types a
 module shares, write `lib.Point` to use one). What else is
-deferred and what comes next (the network modules, and the rest) is in
+deferred and what comes next (the HTTP server, a web framework, packages
+from GitHub, multithreaded `detach`, and the rest) is in
 `docs/NEXT_PHASES.md`.

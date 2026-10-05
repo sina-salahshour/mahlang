@@ -2,8 +2,9 @@
 
 `runtime/` is a second implementation of the `.mahc` machine
 ([MAHC_FORMAT.md](MAHC_FORMAT.md)), written in Rust with **the standard
-library plus one crate**: `regex` (M32, for `std:regex`, with no default
-features), per `docs/STDLIB.md`'s rule that each dependency is small,
+library plus three crates**: `regex` (M32, for `std:regex`, with no default
+features), and `rustls` (with only its `ring` provider) plus `webpki-roots`
+(M39, for `socket.start_tls`'s TLS and its fallback trusted roots), per `docs/STDLIB.md`'s rule that each dependency is small,
 vetted, and named with its reason in `runtime/Cargo.toml`. The Python VM (`mah/code_interpreter.py`)
 stays the reference: the Rust one must print the same output, fail with the
 same messages and exit codes, and reject the same malformed files.

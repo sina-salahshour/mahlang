@@ -30,10 +30,10 @@ written bare (`Set`). They are module-scoped, so your own `struct Field` or
 
 So far there are `std:math`, `std:path`, `std:json`, `std:csv`,
 `std:random`, `std:collections`, `std:regex`, `std:time`, `std:async`,
-`std:fs`, `std:process` and `std:reflect` (and `std:test`, see
-[Testing](/docs/testing)).
-The rest of the plan (sockets, http) is in `docs/STDLIB.md` in the
-repository.
+`std:fs`, `std:process`, `std:bytes`, `std:socket`, `std:url`, `std:http`
+and `std:reflect` (and `std:test`, see [Testing](/docs/testing)).
+The rest of the plan (an HTTP server, then a web framework) is in
+`docs/STDLIB.md` and `docs/NEXT_PHASES.md` in the repository.
 
 ## `std:math`
 
@@ -506,6 +506,66 @@ starts get the copy (plus the call's `env` entries). Names must be
 non-empty and contain no `=`; names and values can't contain a NUL
 character.
 
+## `std:socket`
+
+TCP connections, plain or TLS. Every call waits like any async call;
+`detach` runs one in the background. Timeouts are in milliseconds.
+
+```mah
+import socket from "std:socket"
+let server = socket.listen(0)                  # a free port on 127.0.0.1
+let incoming = detach server.accept()
+let client = socket.connect("127.0.0.1", server.port)
+let conn = incoming.await
+client.send_text("hello\n")
+print(conn.read_line())                        # hello
+client.close()
+conn.close()
+server.close()
+```
+
+`socket.connect_tls(host, port)` (or `sock.start_tls(name)` on a connected
+socket) encrypts the connection, verifying the server's certificate against
+the system's roots, or the PEM file the `SSL_CERT_FILE` environment variable
+names. Failures throw `socket.SocketError { kind, op, address, description }`.
+
+## `std:url`
+
+Parse, build and resolve URLs, and percent-encode text and query strings.
+
+```mah
+import url from "std:url"
+let u = url.parse("https://example.com:8443/docs/a?x=1#top")
+print(u.host, u.port, u.path, u.query, u.fragment)   # example.com 8443 /docs/a x=1 top
+print(u.resolve("../b?y=2"))                         # https://example.com:8443/b?y=2
+print(url.encode("a b/c"), url.encode_query(["q": "mah lang", "n": 2]))   # a%20b%2Fc q=mah+lang&n=2
+print(url.parse_query("a=1&b=x+y"))                  # [[a, 1], [b, x y]]
+```
+
+## `std:http`
+
+An HTTP/1.1 client for `http://` and `https://`, written in Mah over
+`std:socket`. `get`, `post`, `put`, `patch`, `delete`, `head` and
+`request(method, url, ...)` take `headers` (a Map), `timeout` and
+`max_redirects`; the body-sending ones take `body` (String or Bytes),
+`json` or `form`.
+
+```mah
+import http from "std:http"
+fn latest() throws http.HttpError {
+    let r = http.get("https://example.com/", headers: ["Accept": "text/html"])
+    print(r.status, r.header("content-type"), r.text().len())
+    let created = http.post("https://api.example.com/items", json: ["name": "mah"])
+    print(created.check_status().json())
+}
+```
+
+A 404 or 500 is still a `Response` (`r.is_success()`, `r.check_status()`);
+`http.HttpError` is for requests that couldn't complete: refused or timed
+out connections, untrusted certificates, bad URLs, too many redirects.
+Redirects are followed, and the `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`
+environment variables are honored.
+
 ## `std:reflect`
 
 What a program can find out about its own functions, types and values while
@@ -591,7 +651,8 @@ type and fields and a String's characters. `std:random`'s generator is a
 small native, specified bit for bit so every runtime computes the same
 numbers. `std:fs` and `std:process`'s `run` hand their work to a thread and settle
 a Promise when it's done; an open file is an id in a table, wrapped in a `fs.File`
-struct. `std:regex` parses each pattern in Mah and hands the runtime a
+struct. `std:http` is Mah over `std:socket`; only TLS is native (Python's `ssl`,
+Rust's `rustls`). `std:regex` parses each pattern in Mah and hands the runtime a
 form that Python's `re` and Rust's `regex` crate read the same way.
 
 Only standard library modules may use `extern fn`. New natives come with

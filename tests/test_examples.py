@@ -305,8 +305,8 @@ class ExampleTests(unittest.TestCase):
             "example.com 443 /docs/guide lang=en install\n"
             "https://example.com/api/v2?q=1\n"
             "q=mah+lang&page=2 café\n"
-            "200 application/json GET /hello?name=mah HTTP/1.1\n"
-            "true POST /items HTTP/1.1\n"
+            '200 application/json {"you_sent": "GET /hello?name=mah HTTP/1.1"}\n'
+            'true {"you_sent": "POST /items HTTP/1.1"}\n'
             "unsupported_scheme\n",
         )
 

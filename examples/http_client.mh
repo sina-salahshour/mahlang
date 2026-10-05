@@ -6,10 +6,12 @@ import url from "std:url"
 import http from "std:http"
 import socket from "std:socket"
 
-let u = url.parse("https://example.com/docs/guide?lang=en#install")
-print(u.host, u.effective_port(), u.path, u.query, u.fragment)
-print(u.resolve("../api/v2?q=1"))
-print(url.encode_query(["q": "mah lang", "page": 2]), url.decode("caf%C3%A9"))
+fn urls() throws url.UrlError {
+    let u = url.parse("https://example.com/docs/guide?lang=en#install")
+    print(u.host, u.effective_port(), u.path, u.query, u.fragment)
+    print(u.resolve("../api/v2?q=1"))
+    print(url.encode_query(["q": "mah lang", "page": "2"]), url.decode("caf%C3%A9"))
+}
 
 # Answers each request with its request line, as JSON, until `count` are done.
 fn serve(server: socket.Listener, count: Number) throws socket.SocketError {
@@ -32,12 +34,15 @@ fn demo() throws socket.SocketError | http.HttpError {
     let serving = detach serve(server, 2)
     let base = "http://127.0.0.1:" + server.port
     let r = http.get(base + "/hello?name=mah")
-    print(r.status, r.header("content-type"), r.json()["you_sent"])
+    print(r.status, r.header("content-type"), r.text())
     let posted = http.post(base + "/items", json: ["name": "mah"])
-    print(posted.is_success(), posted.json()["you_sent"])
+    print(posted.is_success(), posted.text())
     serving.await
 }
 
+try { urls() } catch {
+    e: url.UrlError => { print("url error:", e.message()) }
+};
 try { demo() } catch {
     e: http.HttpError => { print("http error:", e.message()) }
     e: socket.SocketError => { print("socket error:", e.message()) }
