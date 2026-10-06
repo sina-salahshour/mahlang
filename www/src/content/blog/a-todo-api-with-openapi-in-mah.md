@@ -94,7 +94,7 @@ So there's no list of routes to keep in sync either. Writing the function
 is enough, and the app mounts them like this:
 
 ```mah
-let api = Api.new("p05 todo api", version)
+let api = Api.new("Mah Todo API", version)
 mount(api, registered(), [db])
 ```
 
