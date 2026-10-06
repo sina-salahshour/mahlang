@@ -684,12 +684,15 @@ class _Builder:
                 return [*opener, Indent(closer_comments), HARDLINE, *closer, *after]
             return [*opener, " " if node.kind == "brace" else "", *closer, *after]
         item_docs = []
+        last_has_comments = False
         for item in items:
             first = _first_tok(item[0]).index
+            last_has_comments = bool(self.trivia[first].leading)
             item_docs.append([*self._leading_comment_lines(first), *self.sequence(item)])
         if (
             node.kind == "paren"
             and not closer_comments
+            and not last_has_comments  # its own-line comments need the list broken
             and contains_hard_break(item_docs[-1])
             and not any(contains_hard_break(d) for d in item_docs[:-1])
         ):

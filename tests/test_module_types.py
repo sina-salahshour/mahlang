@@ -230,6 +230,28 @@ class ExportedTypeTests(unittest.TestCase):
         )
         self.assertEqual(run_main({"lib.mh": LIB_POINT, "main.mh": main}), "Point { x: 7 }\ntrue\n")
 
+    def test_flat_imported_type_inside_a_function_type(self):
+        # `fn(Point)` in an annotation is a type, not a closure with a
+        # parameter named Point: the name must still be renamed, there and
+        # in the body after it.
+        main = (
+            'import "./lib"\n'
+            "fn each(f: fn(Point) -> Vector<Point>, n: Number) { print(f(Point { x: n })) }\n"
+            "each(fn(p) { [p] }, 3)\n"
+            "fn maker() -> fn(Number) -> Point { fn(n) { Point { x: n } } }\n"
+            "print(maker()(4))\n"
+            "let pick: Vector<fn(Point)> = [fn(p) { print(p.x) }]\n"
+            "pick[0](Point { x: 5 })\n"
+        )
+        self.assertEqual(
+            run_main({"lib.mh": LIB_POINT, "main.mh": main}),
+            "[Point { x: 3 }]\nPoint { x: 4 }\n5\n",
+        )
+
+    def test_parameter_named_like_a_flat_imported_type_still_shadows_it(self):
+        main = 'import "./lib"\nfn f(Point: Number) -> Number { Point + 1 }\nprint(f(Point: 1), (fn(Point) { Point })(2))\n'
+        self.assertEqual(run_main({"lib.mh": LIB_POINT, "main.mh": main}), "2 2\n")
+
 
 class NotExportedTests(unittest.TestCase):
     def test_struct_literal(self):

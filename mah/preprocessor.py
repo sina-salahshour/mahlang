@@ -540,6 +540,8 @@ def _shadowed_params(tokens: list, names) -> set:
     for i, tok in enumerate(tokens):
         if not (tok.kind == "id" and tok.value == "fn"):
             continue
+        if i >= 2 and punct(i - 1, ">") and punct(i - 2, "-"):
+            continue  # `-> fn(T)`: a function *type* (a return type), never a closure
         j = i + 1
         if j < count and tokens[j].kind == "id":
             j += 1
@@ -579,15 +581,27 @@ def _shadowed_params(tokens: list, names) -> set:
             k += 1
         if not params or k >= count:
             continue
-        # the body: the first `{` after the signature, unless a declaration starts first
+        # the body: the first `{` after the signature, unless a declaration starts
+        # first -- or the `fn(...)` turns out to be a function *type* (`b: fn(S)`
+        # in a parameter list, `Vector<fn(S)>`): then a `)`, `]`, `>` or `,`
+        # closes something around it before any `{`.
         m = k + 1
         body = None
+        nest = 0
         while m < count:
             t = tokens[m]
             if punct(m, "{"):
                 body = m
                 break
             if punct(m, "=") or punct(m, ";") or punct(m, "}"):
+                break
+            if punct(m, "(") or punct(m, "[") or punct(m, "<"):
+                nest += 1
+            elif punct(m, ")") or punct(m, "]") or (punct(m, ">") and not punct(m - 1, "-")):
+                if nest == 0:
+                    break
+                nest -= 1
+            elif punct(m, ",") and nest == 0:
                 break
             if t.kind == "id" and (
                 t.value in _DECLARATION_WORDS

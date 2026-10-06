@@ -72,6 +72,18 @@ class GoldenTests(unittest.TestCase):
             "let b = 2  # bee\nlet cc = 3 # cee\n\nfn g() {\n    # inside\n    b\n    # before close\n}\n",
         )
 
+    def test_doc_comment_on_the_last_parameter_keeps_the_list_broken(self):
+        # The "hug the last argument" layout (`f(a, fn(x) {`) must not pull an
+        # own-line `##` doc up onto the `(` line, where it stops being a doc.
+        self.check(
+            "fn a(\n    ## The id.\n    id: Number\n) -> Number { id }\n",
+            "fn a(\n    ## The id.\n    id: Number\n) -> Number { id }\n",
+        )
+        self.check(
+            "fn a(x: Number,\n    # why\n    id: Number) { id }\n",
+            "fn a(\n    x: Number,\n    # why\n    id: Number\n) { id }\n",
+        )
+
     def test_comment_after_a_closing_bracket_does_not_break_the_group(self):
         self.check("let x=add( 2 )   # trailing\n", "let x = add(2) # trailing\n")
 
