@@ -32,6 +32,19 @@
 	// is also what gives us focus trap, Escape-to-close, and
 	// outside-click-to-close for free.
 	const mobile = new Dialog();
+
+	// melt's outside-tap close listens on `document`, which iOS Safari
+	// doesn't reliably fire for taps on non-interactive areas. A tap on the
+	// ::backdrop is delivered to the <dialog> itself, so handle it here too:
+	// anything outside the sheet's box is the backdrop.
+	function onSheetClick(e: MouseEvent) {
+		const sheet = e.currentTarget as HTMLDialogElement;
+		if (e.target !== sheet) return;
+		const r = sheet.getBoundingClientRect();
+		const inside =
+			e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+		if (!inside) mobile.open = false;
+	}
 </script>
 
 <header class="site-header">
@@ -102,10 +115,30 @@
 		</div>
 	</div>
 
-	<dialog {...mobile.content} class="mobile-sheet">
+	<dialog {...mobile.content} class="mobile-sheet" aria-label="Menu" onclick={onSheetClick}>
+		<div class="sheet-head">
+			<span class="sheet-title">Menu</span>
+			<!-- The header's hamburger sits under the modal sheet, so the sheet
+			     needs its own close button. -->
+			<button class="sheet-close" type="button" aria-label="Close menu" onclick={() => (mobile.open = false)}>
+				<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+					<path
+						d="M6 6l12 12M18 6L6 18"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linecap="round"
+					/>
+				</svg>
+			</button>
+		</div>
 		<nav aria-label="Mobile">
 			{#each nav as item (item.href)}
-				<a href={item.href} onclick={() => (mobile.open = false)}>{item.label}</a>
+				<a
+					href={item.href}
+					class:active={isActive(item.href)}
+					aria-current={isActive(item.href) ? 'page' : undefined}
+					onclick={() => (mobile.open = false)}>{item.label}</a
+				>
 			{/each}
 			<!-- .gh-link is hidden on small screens, so GitHub lives here instead. -->
 			<a href="https://github.com/sina-salahshour/mahlang" target="_blank" rel="noreferrer">GitHub</a>
@@ -275,7 +308,7 @@
 		border-left: 1px solid var(--color-border);
 		background: var(--color-bg);
 		color: var(--color-text);
-		padding: 1.5rem;
+		padding: 0 1rem 1.5rem;
 		box-shadow: -12px 0 32px -16px rgb(0 0 0 / 35%);
 		transform: translateX(100%);
 		opacity: 0;
@@ -290,7 +323,7 @@
 	}
 
 	.mobile-sheet::backdrop {
-		background: rgb(0 0 0 / 40%);
+		background: var(--sheet-backdrop, rgb(0 0 0 / 40%));
 		opacity: 0;
 		transition: opacity 0.25s ease;
 	}
@@ -299,16 +332,73 @@
 		opacity: 1;
 	}
 
+	.mobile-sheet::backdrop {
+		cursor: pointer;
+	}
+
+	/* Same height as the site header, so the X lands where the hamburger
+	   was. */
+	.sheet-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		height: 3.75rem;
+		margin-bottom: 0.75rem;
+		padding-left: 0.5rem;
+		border-bottom: 1px solid var(--color-border);
+	}
+
+	.sheet-title {
+		font-size: 0.78rem;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		color: var(--color-text-muted);
+	}
+
+	.sheet-close {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 2.5rem;
+		height: 2.5rem;
+		border-radius: 8px;
+		border: 1px solid var(--color-border);
+		background: var(--color-bg-raised);
+		color: var(--color-text);
+		cursor: pointer;
+	}
+
+	.sheet-close:hover {
+		border-color: var(--color-accent);
+		color: var(--color-accent);
+	}
+
 	.mobile-sheet nav {
 		display: flex;
 		flex-direction: column;
-		gap: 1rem;
+		gap: 0.25rem;
 	}
 
+	/* Full-width rows with comfortable tap targets (>= 44px). */
 	.mobile-sheet nav a {
+		display: block;
+		padding: 0.7rem 0.5rem;
+		border-radius: 8px;
 		font-size: 1.05rem;
 		color: var(--color-text);
 		font-weight: 500;
+	}
+
+	.mobile-sheet nav a:hover {
+		background: var(--color-bg-raised);
+		text-decoration: none;
+	}
+
+	.mobile-sheet nav a.active {
+		background: var(--color-bg-inset);
+		color: var(--color-accent);
+		font-weight: 600;
 	}
 
 	@media (max-width: 400px) {
