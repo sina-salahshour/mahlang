@@ -2,7 +2,7 @@ import { posts } from '$lib/content';
 
 export const prerender = true;
 
-const SITE_URL = 'https://mah-lang.example.com';
+const SITE_URL = 'https://mahlang.dev';
 
 function escapeXml(s: string): string {
 	return s

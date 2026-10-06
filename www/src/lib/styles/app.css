@@ -275,6 +275,10 @@ pre.mah-code code {
 .tok-punct {
 	color: var(--tok-punct);
 }
+.tok-decorator {
+	color: var(--tok-type);
+	font-weight: 600;
+}
 
 blockquote {
 	margin: 1em 0;

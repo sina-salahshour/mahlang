@@ -13,7 +13,8 @@ fn fetch(n) { sleep_async(100); n * 2 }   # a bare sleep_async just waits
 let p = detach fetch(21)        # starts it; you get a Promise back
 print("meanwhile")
 print(p.await)                  # waits for the result: 42
-let q = detach obj.method(1)    # methods can be detached too
+let q = detach "mah".to_upper()  # methods can be detached too
+print(q.await)                  # MAH
 let r = detach {                # so can any expression: a block, a loop,
     sleep_async(10);            # an `if`, a `match`, `(a + b)`, ...
     2 + 3

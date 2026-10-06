@@ -58,6 +58,8 @@ const BUILTIN_TYPES = new Set([
 	'Number',
 	'String',
 	'Bool',
+	'Bytes',
+	'Type',
 	'Vector',
 	'Map',
 	'Option',
@@ -94,7 +96,7 @@ function escapeHtml(s: string): string {
 // matched before the generic identifier rule so keywords inside strings
 // don't get relexed.
 const TOKEN_RE =
-	/(#[^\n]*)|("(?:\\.|[^"\\])*")|(\b\d+(?:\.\d+)?\b)|([A-Za-z_][A-Za-z0-9_]*)|(\.\.=|\.\.|\*\*|==|!=|<=|>=|=>|->|[-+*/%<>=!&|.,:;(){}\[\]])/g;
+	/(#[^\n]*)|("(?:\\.|[^"\\])*")|(\b\d+(?:\.\d+)?\b)|(@[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)|([A-Za-z_][A-Za-z0-9_]*)|(\.\.=|\.\.|\*\*|==|!=|<=|>=|=>|->|[-+*/%<>=!&|.,:;(){}\[\]])/g;
 
 function highlightMah(code: string): string {
 	let out = '';
@@ -103,13 +105,16 @@ function highlightMah(code: string): string {
 	let m: RegExpExecArray | null;
 	while ((m = TOKEN_RE.exec(code))) {
 		if (m.index > last) out += escapeHtml(code.slice(last, m.index));
-		const [full, comment, string, number, word, punct] = m;
+		const [full, comment, string, number, decorator, word, punct] = m;
 		if (comment) {
 			out += `<span class="tok-comment">${escapeHtml(comment)}</span>`;
 		} else if (string) {
 			out += `<span class="tok-string">${escapeHtml(string)}</span>`;
 		} else if (number) {
 			out += `<span class="tok-number">${escapeHtml(number)}</span>`;
+		} else if (decorator) {
+			// `@name` / `@lib.name` (decorators, see /docs/decorators)
+			out += `<span class="tok-decorator">${escapeHtml(decorator)}</span>`;
 		} else if (word) {
 			if (KEYWORDS.has(word)) {
 				out += `<span class="tok-keyword">${word}</span>`;

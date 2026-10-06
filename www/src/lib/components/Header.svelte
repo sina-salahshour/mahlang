@@ -252,9 +252,17 @@
 	/* The off-canvas nav is a real <dialog> (see the script for why: melt's
 	   Dialog builder drives native showModal()/close() only when the
 	   content ref is an HTMLDialogElement), positioned as a right-side
-	   sheet instead of the browser's default centered dialog, animated with
-	   a plain CSS transition -- melt itself waits for `transitionend`
-	   before actually closing it, so this "just works" with the builder. */
+	   sheet instead of the browser's default centered dialog.
+
+	   The open/closed look must hang off melt's `data-open`, NOT the native
+	   `[open]` attribute: to close, melt clears `data-open` and waits for
+	   `transitionend` before calling close(), so `[open]` stays set the
+	   whole time. Styling on `[open]` meant nothing changed, no transition
+	   ran, close() never came, and the sheet stuck open (invisibly
+	   blocking the page) after Escape, an outside click or a link tap.
+	   Opening works the same way in reverse: showModal() first (closed
+	   look), then `data-open` on the next tick, so the slide-in transitions
+	   without needing @starting-style. */
 	.mobile-sheet {
 		position: fixed;
 		inset: 0 0 0 auto;
@@ -273,40 +281,22 @@
 		opacity: 0;
 		transition:
 			transform 0.25s cubic-bezier(0.4, 0, 0.2, 1),
-			opacity 0.2s ease,
-			overlay 0.25s allow-discrete,
-			display 0.25s allow-discrete;
+			opacity 0.2s ease;
 	}
 
-	.mobile-sheet[open] {
+	.mobile-sheet[data-open] {
 		transform: translateX(0);
 		opacity: 1;
-	}
-
-	@starting-style {
-		.mobile-sheet[open] {
-			transform: translateX(100%);
-			opacity: 0;
-		}
 	}
 
 	.mobile-sheet::backdrop {
 		background: rgb(0 0 0 / 40%);
 		opacity: 0;
-		transition:
-			opacity 0.25s ease,
-			overlay 0.25s allow-discrete,
-			display 0.25s allow-discrete;
+		transition: opacity 0.25s ease;
 	}
 
-	.mobile-sheet[open]::backdrop {
+	.mobile-sheet[data-open]::backdrop {
 		opacity: 1;
-	}
-
-	@starting-style {
-		.mobile-sheet[open]::backdrop {
-			opacity: 0;
-		}
 	}
 
 	.mobile-sheet nav {

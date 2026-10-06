@@ -261,7 +261,7 @@ same methods, which is handy when one part of a program needs repeatable
 numbers and the rest doesn't:
 
 ```mah
-import "std:random"
+import random from "std:random"
 
 let a = random.Rng.new(7)
 let b = random.Rng.new(7)

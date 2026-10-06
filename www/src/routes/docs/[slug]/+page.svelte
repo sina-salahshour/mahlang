@@ -9,5 +9,8 @@
 </svelte:head>
 
 <article>
+	<!-- The Markdown files carry their title in frontmatter only; render it
+	     here so every page starts with a heading. -->
+	<h1>{data.doc.meta.title}</h1>
 	<Doc />
 </article>
