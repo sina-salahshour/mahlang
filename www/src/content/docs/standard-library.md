@@ -414,6 +414,41 @@ async.set_timeout(fn() { async.clear_interval(ticker) }, 55)
   running; a cleared timer doesn't. Callbacks can't throw (their type is
   `fn() throws never`): handle errors inside them.
 
+## `std:bytes`
+
+Making and decoding [Bytes](/docs/collections#bytes), Mah's binary data
+type. The methods on a Bytes value (`to_hex()`, `to_base64()`,
+`to_text()`, `index_of`, ...) need no import; these are the constructors.
+
+```mah
+import bytes from "std:bytes"
+fn decode(s: String) -> Bytes {
+    try {
+        return bytes.from_base64(s)
+    } catch {
+        e: bytes.BytesError => {
+            print(e.kind)                     # invalid_base64
+            return bytes.new()
+        }
+    }
+}
+print(decode("SGkh").to_text_lossy())         # Hi!
+print(decode("not base64!").len())            # 0
+print(bytes.new(3, 255), bytes.from_hex("CAFE"))   # Bytes[ff ff ff] Bytes[ca fe]
+```
+
+| Function | |
+|---|---|
+| `new(size = 0, fill = 0)` | `size` bytes, each `fill` |
+| `from_vector(items)` | from a Vector of Numbers 0 to 255 |
+| `concat(parts)` | a Vector of Bytes joined into one new Bytes |
+| `from_hex(text)` | an even number of hex digits, either case |
+| `from_base64(text)` | standard alphabet, `=` padded, no whitespace |
+
+`from_hex` and `from_base64` throw `bytes.BytesError { kind, description }`
+(`kind` is `"invalid_hex"` or `"invalid_base64"`). A bad byte or size given
+to `new` or `from_vector` is a runtime error, like `b[i] = 300`.
+
 ## `std:fs`
 
 Files and directories. Every function waits like any call, but the work
@@ -458,7 +493,33 @@ Errors are an `fs.FsError` whose `kind` is `"not_found"`,
 `"not_a_directory"`, `"directory_not_empty"`, `"invalid_utf8"`,
 `"closed"` (using a closed File) or `"other"`, plus the `op`, `path`, and
 a `description`. Text is UTF-8, read and written exactly: no newline
-conversion. Binary data waits for a future `Bytes` type.
+conversion.
+
+Binary files use [Bytes](/docs/collections#bytes) instead of Strings:
+`read_bytes(path)`, `write_bytes(path, data)`, `append_bytes(path, data)`,
+and a File's `read_bytes(max = none)` (up to `max` bytes, the rest of the
+file without it; empty Bytes at the end) and `write_bytes(data)`. Text and
+binary reads can be mixed on one open file.
+
+```mah
+import bytes from "std:bytes"
+import fs from "std:fs"
+try {
+    let dir = fs.temp_dir()
+    defer fs.remove(dir, recursive: true)
+    let p = dir + "/data.bin"
+    fs.write_bytes(p, bytes.from_hex("89504e47"))
+    fs.append_bytes(p, bytes.new(4, 0))
+    let f = fs.open(p)
+    defer f.close()
+    print(f.read_bytes(max: 4).to_hex(), f.read_bytes().len())   # 89504e47 4
+    print(fs.read_bytes(p))           # Bytes[89 50 4e 47 00 00 00 00]
+} catch {
+    e: fs.FsError => { print(e.kind) }
+}
+```
+
+A program importing `std:fs` needs bytecode 1.17.
 
 ## `std:process`
 

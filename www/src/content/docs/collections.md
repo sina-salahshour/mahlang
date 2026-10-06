@@ -87,9 +87,50 @@ print(s[1], s[-1], s[9], s[1..3], s[..=1], s[2..])   # é o none él hé llo
 Indices count characters (Unicode code points), like `len()` and
 `char_at`. See [Strings](/docs/strings).
 
-Both Vectors and Maps (and Strings and ranges) are **Iterable** — `for`,
+Both Vectors and Maps (and Strings, Bytes and ranges) are **Iterable** — `for`,
 `map`, `filter`, `skip`, `take`, and `reduce` all work on them; see
 [Iterators & ranges](/docs/iterators-ranges).
+
+## Bytes
+
+`Bytes` is a growable sequence of bytes (whole Numbers 0 to 255) for
+binary data: file contents, network packets, hashes. It's mutable and
+passed by reference like a Vector. There's no literal; make one with
+`"text".to_bytes()` (a String's UTF-8 encoding) or the
+[`std:bytes`](/docs/standard-library#stdbytes) functions.
+
+```mah
+import bytes from "std:bytes"
+let b = "hi".to_bytes()
+print(b, b.len(), b[0], b[-1], b[9])       # Bytes[68 69] 2 104 105 none
+b.push(33)
+b[0] = 72
+print(b.to_text(), b.to_hex(), b.to_base64())   # some(Hi!) 486921 SGkh
+print(b[1..], b == bytes.from_hex("486921"))    # Bytes[69 21] true
+print(b + bytes.new(2, 0), b.index_of(bytes.from_vector([105])))   # Bytes[48 69 21 00 00] some(1)
+for let x in b { print(x) }                # 72, 105, 33
+print(bytes.concat([b, b]).len())          # 6
+```
+
+- **Indexing** works like a Vector's: `b[i]` is the byte as a Number
+  (`none` past the end, negative counts from the end), `b[a..b]` is a
+  **new** Bytes, and `b[i] = n` sets an existing byte. Writing anything
+  other than a whole Number from 0 to 255 is a runtime error.
+- `==` compares **contents** (unlike Vectors), so
+  `"hi".to_bytes() == "hi".to_bytes()` is `true`; a Bytes never equals a
+  Vector. `a + b` is a new, concatenated Bytes. A Bytes prints as
+  `Bytes[68 69]`, two hex digits per byte.
+- **Methods**: `len()`, `push(n)`, `pop()` (`none` when empty),
+  `extend(other)`, `copy()`, `to_vector()`, `to_text()` (`some(String)` if
+  the bytes are valid UTF-8, else `none`), `to_text_lossy()` (invalid
+  sequences become U+FFFD), `to_hex()`, `to_base64()`, and
+  `index_of(needle)` (`some(i)` of the first occurrence of another Bytes).
+- `Bytes` is a type annotation and a Type value
+  (`reflect.type_of(b) == Bytes`).
+
+Binary files ([`std:fs`](/docs/standard-library#stdfs)'s `read_bytes`/
+`write_bytes`) and sockets (`std:socket`'s `send`/`recv`) read and write
+Bytes.
 
 ## Indexing your own types
 
