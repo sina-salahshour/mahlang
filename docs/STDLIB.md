@@ -40,7 +40,9 @@ import "std:math"            # flat import works too
   runs it in the background. Pure modules (json, csv, regex, math, path,
   random, collections) are synchronous.
 - **The Rust runtime may take a small, vetted set of dependencies**:
-  `ureq` with `rustls` for HTTP/HTTPS, and `regex`. Anything small (glob
+  `regex`, and `rustls` (ring provider) with `webpki-roots` for TLS. (The
+  original plan named `ureq` for HTTP; M39 wrote HTTP in Mah over
+  `std:socket` instead, so only TLS is native.) Anything small (glob
   matching, the PRNG, base encodings) stays hand-written. Each dependency
   gets a one-line reason in `runtime/Cargo.toml`, replacing the
   "standard library only" note.
@@ -705,7 +707,8 @@ section) and §5 (the `Type` value). In short:
   `recv` sees the end) and `close()` (closing twice does nothing). Both
   print as `Socket(127.0.0.1:5000)` / `Listener(127.0.0.1:5000)` (the peer's
   address, the listen address).
-- **TCP only.** UDP and TLS come later (TLS with the HTTP client).
+- **TCP only**, plus TLS clients since M39 (`start_tls`, `connect_tls`;
+  below). UDP and TLS servers come later.
 - **Timeouts are in milliseconds**, like `std:async`'s; `none` waits
   forever, 0 means "only what is already there", and running out throws kind
   `timed_out`.
@@ -738,15 +741,88 @@ section) and §5 (the `Type` value). In short:
   once; `connect` tries every address the name resolves to (IPv4 or IPv6).
   When the VM finishes, every open socket and listener is closed.
 - Bytecode 1.18 (docs/MAHC_FORMAT.md §4.4): only programs importing
-  `std:socket` are 1.18.
+  `std:socket` are 1.18 (1.19 since M39, which added `socket.start_tls`).
+- **TLS (M39)**: `sock.start_tls(server_name, timeout = none)` turns a
+  connected Socket into a TLS client (its `buffer` must be empty, else
+  `RuntimeError.ArgumentError`), and `connect_tls(host, port, timeout =
+  none)` is `connect` plus `start_tls(host)`, closing the socket if the
+  handshake fails. The certificate must chain to a trusted root: the PEM
+  file in `SSL_CERT_FILE` when set, else the platform's (Python) or
+  Mozilla's (Rust) set. Two more kinds: `tls_certificate` (verification
+  failed, including the wrong name) and `tls` (any other TLS failure). A
+  peer closing without TLS's close notice is a normal end; `shutdown` on a
+  TLS socket sends no close notice. Python uses `ssl`, Rust `rustls`.
+
+### `std:url`
+
+✅ **Landed (M39)**, in `mah/std/url.mh`, pure Mah (no natives):
+
+- `parse(text)` gives `Url { scheme, username, password, host, port, path,
+  query, fragment }`. The scheme and host are lowercased; `path`, `query`
+  and `fragment` stay as written (percent-encoded); `port`, `query` and
+  `fragment` are `none` when absent (`?` with nothing after it is `""`).
+  Throws `UrlError { kind: "invalid_url", text, description }` for no
+  scheme, spaces or control characters, a port that isn't a number up to
+  65535, an unclosed `[` IPv6 host, or an http/https URL without a host.
+  `is_valid(text)` is the Bool form.
+- Methods: `effective_port()` (the port or `default_port(scheme)`: 80
+  http/ws, 443 https/wss, 21 ftp), `authority()`, `origin()`,
+  `request_target()` (path, "/" when empty, plus the query), `query_pairs()`,
+  `resolve(reference)` (RFC 3986 §5.2, every §5.4 example tested) and
+  `with_query(params)`. It prints as the URL.
+- `encode(text, safe = "")` escapes everything but letters, digits, `-._~`
+  and `safe` as `%XX` of the UTF-8 bytes (uppercase hex); `decode(text)`
+  reverses it, throwing kind `invalid_encoding` for a bad escape or
+  non-UTF-8 bytes (`+` stays `+`).
+- `encode_query(params)` takes a Map (a Vector value repeats the key) or a
+  Vector of `[key, value]` pairs, form style (space as `+`);
+  `parse_query(q)` gives decoded `[key, value]` pairs in order.
 
 ### `std:http`
 
-`get(url, headers =)`, `post(url, body =, json =, headers =)` and
-`request(method, url, ...)`. They return a
-`Response { status, headers, text(), json() }`. Throws `HttpError` for
-transport failures; a 4xx/5xx status is a normal Response. Rust uses
-`ureq` + `rustls`; Python uses `urllib`.
+✅ **Landed (M39)**, in `mah/std/http.mh`: an HTTP/1.1 client written in
+Mah over `std:socket` (so both VMs share it), TLS through
+`socket.start_tls`. Decisions:
+
+- **Surface**: `request(method, url, body = none, json = none, form = none,
+  headers = [:], timeout = 30000, max_redirects = 10)`, and `get`, `post`,
+  `put`, `patch`, `delete`, `head` wrappers. `body` is a String or Bytes;
+  `json` sends `json.stringify(value)` as `application/json`; `form` sends
+  `url.encode_query(form)` as `application/x-www-form-urlencoded`.
+  `headers` is a Map or `[name, value]` pairs and replaces any default of
+  the same name (Host, User-Agent `mah`, Accept `*/*`, Connection `close`,
+  Content-Length, Content-Type). A header with CR/LF or `:` in its name,
+  a bad `body`/`headers` type, or an unwritable `json` value is a
+  `RuntimeError.ArgumentError`.
+- **Response** `{ status, reason, headers, body, url, method }`: `headers`
+  are the `[name, value]` pairs as received, `body` Bytes, `url` the final
+  URL. `header(name)` (first value, any case, or `none`),
+  `header_all(name)`, `text()` (lossy UTF-8), `json()`, `is_success()`
+  (2xx) and `check_status()` (throws kind `status` for 4xx/5xx). **A 4xx or
+  5xx is a normal Response.**
+- **HttpError { kind, method, url, description }** with `message()` =
+  `METHOD URL: description`: a `SocketError` kind for network failures
+  (`connection_refused`, `host_not_found`, `timed_out`, `tls_certificate`,
+  `tls`, `closed_early`, ...), or `invalid_url`, `unsupported_scheme`,
+  `invalid_response`, `too_many_redirects`, `proxy`, `status`.
+- **One connection per request** (`Connection: close`); no keep-alive,
+  no compression (no `Accept-Encoding` is sent), no HTTP/2. Bodies framed
+  by chunked encoding (extensions and trailers ignored), Content-Length,
+  or the connection closing; HEAD, 204 and 304 have none; 1xx responses
+  are skipped.
+- **Timeouts**: `timeout` (ms, or `none`) applies to each wait: connecting,
+  the TLS handshake, and each read, not the request as a whole.
+- **Redirects** 301/302/303/307/308 with a Location are followed up to
+  `max_redirects` (0 returns the redirect): 303, and 301/302 after a POST,
+  continue as a bodiless GET (HEAD stays HEAD); 307/308 keep the method
+  and body. Authorization and Cookie are dropped when the origin changes.
+- **Proxies** from the environment: `HTTP_PROXY`/`HTTPS_PROXY` (lowercase
+  first, empty means unset; an `http://` proxy, with optional
+  `user:password@` sent as Basic `Proxy-Authorization`), `NO_PROXY`
+  (comma-separated; `*`, exact hosts and domain suffixes, a leading `.` or
+  `*.` ignored, ports dropped; no CIDR ranges). Plain http goes to the
+  proxy with the absolute URL; https uses `CONNECT host:port`, then TLS to
+  the real host through the tunnel.
 
 ## `std:test` and `mah test`
 

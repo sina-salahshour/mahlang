@@ -822,6 +822,55 @@ for let p in probes {
     print(try { p() } catch { e: RuntimeError => { e.message() } })
 }
 """, b""),
+    # M39: socket.start_tls's errors, std:url and an std:http round trip on 127.0.0.1.
+    ("std_tls_url_http", """
+import socket from "std:socket"
+import url from "std:url"
+import http from "std:http"
+let u: Unknown = "x"
+let probes = [
+    fn() { socket.Socket { id: 1, peer_host: "h", peer_port: 1, local_port: 1, buffer: "".to_bytes() }.start_tls(5) },
+    fn() { socket.Socket { id: 1, peer_host: "h", peer_port: 1, local_port: 1, buffer: "".to_bytes() }.start_tls("h", u) },
+    fn() { socket.Socket { id: 1, peer_host: "h", peer_port: 1, local_port: 1, buffer: "".to_bytes() }.start_tls("h", -1) },
+    fn() { socket.Socket { id: 1, peer_host: "h", peer_port: 1, local_port: 1, buffer: "x".to_bytes() }.start_tls("h") },
+]
+for let p in probes {
+    print(try { p() } catch { e: RuntimeError => { e.message() } })
+}
+print(try { socket.Socket { id: 77, peer_host: "h", peer_port: 1, local_port: 1, buffer: "".to_bytes() }.start_tls("h") } catch { e: socket.SocketError => { e.message() } })
+let server = socket.listen(0)
+fn plain() {
+    let conn = server.accept()
+    conn.send_text("HTTP/1.1 400 Bad Request\\r\\n\\r\\n")
+    conn.recv(65536, 2000)
+    conn.close()
+}
+let done = detach plain()
+let c = socket.connect("127.0.0.1", server.port)
+print(try { c.start_tls("localhost", 5000) } catch { e: socket.SocketError => { e.kind + " " + e.description } })
+c.close()
+done.await
+let b = url.parse("HTTP://u@Example.com:8080/a/b/c?x=1#f")
+print(b, b.host, b.port, b.query, b.fragment, b.origin(), b.request_target())
+print(b.resolve("../d?y=2"), b.resolve("//other/p"), b.resolve("/x/./y/../z"))
+print(url.encode("a b&ü"), url.decode("a%20b%26%C3%BC"), url.encode_query(["q": "a b", "n": [1, 2]]))
+print(url.parse_query("a=1&b=x+y&c"), try { url.decode("%e9") } catch { e: url.UrlError => { e.message() } })
+fn serve() {
+    let conn = server.accept()
+    let line = conn.read_line()
+    let h = conn.read_line()
+    while h != "" { h = conn.read_line() }
+    conn.send_text("HTTP/1.1 200 OK\\r\\nTransfer-Encoding: chunked\\r\\nX-A: 1\\r\\n\\r\\n3\\r\\nabc\\r\\n0\\r\\n\\r\\n")
+    conn.close()
+    print(line)
+}
+let served = detach serve()
+let r = http.get("http://127.0.0.1:" + server.port + "/p?q=1")
+served.await
+print(r.status, r.reason, r.text(), r.header("x-a"), r.headers.len())
+server.close()
+print(try { http.get("gopher://h/") } catch { e: http.HttpError => { e.kind + ": " + e.message() } })
+""", b""),
     ("std_csv", """
 import csv from "std:csv"
 print(csv.parse("a,\\"b,c\\"\\r\\n\\n\\"q\\"\\"x\\",\\n"), csv.parse_records("n,v\\nx,1\\n"))

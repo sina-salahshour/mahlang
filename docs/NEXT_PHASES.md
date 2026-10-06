@@ -233,9 +233,44 @@ cancellable timers), and **M35 `std:fs`** (with handles), and **M36
 `json.decode`**, and **M41b decorators as metadata**, and **M41c hooks,
 function-item impls and rest parameters** ([`REFLECTION.md`](REFLECTION.md)),
 and **M37 the `Bytes` type** (with `std:bytes` and binary `std:fs`), and
-**M38 `std:socket`** (TCP).
-Next: the URL/HTTP client, the HTTP
-server and package dependencies (the network modules per `STDLIB.md`), each
-with Mah-level tests.
+**M38 `std:socket`** (TCP), and **M39 TLS, `std:url` and the `std:http`
+client**. The roadmap after it, in order (recorded at the user's request),
+is the next four sections.
 `std:test` and the `mah test` runner ([`MAH_TEST.md`](MAH_TEST.md)) come
 right after errors and `std:` resolution.
+
+## The HTTP server
+
+Next after M39: `std:http`'s server side over `std:socket`'s `listen`/
+`accept`, sharing the client's request/response parsing (chunked bodies,
+headers as pairs), with keep-alive, form and multipart bodies, and graceful
+shutdown. TLS on the server side would need a `start_tls` for accepted
+sockets (a certificate and key), which is a separate native.
+
+## A NestJS/Hono-style web framework
+
+Built on the HTTP server and M41b/M41c's decorators and hooks: controllers
+and routes declared with decorators, **parameter decorators** binding path,
+query, header and body values to typed parameters, **validation** from the
+declared types and validator decorators, **pipes** and **transforms** that
+convert and check values before the handler runs (and interceptors/guards
+around it), middleware in a Hono-like style, and OpenAPI generated from the
+same metadata through `std:reflect`. Likely gaps to close first: decorators
+on parameters reaching hooks with enough information, and async hooks.
+
+## Packages from GitHub repositories
+
+`[dependencies]` in `mah-project.toml` (reserved since projects landed)
+becomes real: each entry names a GitHub repository, with an optional
+branch, tag or commit hash to install, and an optional subdirectory of the
+repository to use as the installed library's root. `mah install` fetches
+them, and a **lock file** records the exact commit (and a content hash) of
+each, so installs are reproducible; imports then resolve a package name to
+its installed root.
+
+## Optional multithreading for `detach`ed expressions
+
+Last on the current roadmap: let a `detach`ed expression run on another OS
+thread when asked (opt-in, since today's scheduler is single-threaded and
+values are shared by reference), which needs a decision on what may cross
+threads (copying, or freezing values) and how the Python VM approximates it.

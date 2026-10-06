@@ -23,6 +23,7 @@ from __future__ import annotations
 import errno
 import select
 import socket
+import ssl
 import time
 from decimal import Decimal
 
@@ -37,7 +38,13 @@ DESCRIPTIONS = {
     "host_not_found": "host not found",
     "permission_denied": "permission denied",
     "closed": "the socket is closed",
+    # M39: start_tls
+    "tls_certificate": "the server's certificate isn't trusted",
+    "tls": "the TLS handshake or connection failed",
 }
+
+# M39: the TLS layer asks to wait for the socket before retrying.
+_WANT = (BlockingIOError, InterruptedError, ssl.SSLWantReadError, ssl.SSLWantWriteError)
 KINDS = frozenset(DESCRIPTIONS) | {"other"}
 
 SLICE = 0.05  # seconds: the longest a waiting worker sleeps between checks
@@ -74,6 +81,12 @@ def _classify(exc: BaseException) -> VectorValue:
         return _failure("closed")
     if isinstance(exc, (_TimedOut, TimeoutError, socket.timeout)):
         return _failure("timed_out")
+    if isinstance(exc, ssl.SSLCertVerificationError):
+        return _failure("tls_certificate")
+    if isinstance(exc, ssl.SSLEOFError):
+        return _failure("connection_reset")
+    if isinstance(exc, ssl.SSLError):
+        return _failure("tls")
     if isinstance(exc, socket.gaierror):
         return _failure("host_not_found")
     code = getattr(exc, "errno", None)
@@ -185,6 +198,9 @@ def _wait(ctx, sock_id, entry, deadline, want_write=False) -> None:
     while True:
         if ctx.io.sockets.get(sock_id) is not entry:
             raise _Closed()
+        # M39: bytes TLS already decrypted are ready, though select can't see them
+        if not want_write and isinstance(entry.sock, ssl.SSLSocket) and entry.sock.pending():
+            return
         wait = SLICE
         if deadline is not None:
             wait = min(wait, max(0.0, deadline - time.monotonic()))
@@ -317,7 +333,7 @@ def _accept(ctx, args):
             _wait(ctx, sock_id, entry, deadline)
             try:
                 conn, _ = entry.sock.accept()
-            except (BlockingIOError, InterruptedError):
+            except _WANT:
                 continue
             except OSError:
                 if ctx.io.sockets.get(sock_id) is not entry:
@@ -347,7 +363,7 @@ def _send(ctx, args):
             _wait(ctx, sock_id, entry, None, want_write=True)
             try:
                 sent = entry.sock.send(view)
-            except (BlockingIOError, InterruptedError):
+            except _WANT:
                 continue
             except OSError:
                 if ctx.io.sockets.get(sock_id) is not entry:
@@ -380,13 +396,50 @@ def _recv(ctx, args):
             _wait(ctx, sock_id, entry, deadline)
             try:
                 chunk = entry.sock.recv(min(limit, 1 << 20))
-            except (BlockingIOError, InterruptedError):
+            except _WANT:
                 continue
             except OSError:
                 if ctx.io.sockets.get(sock_id) is not entry:
                     raise _Closed()
                 raise
             return BytesValue(chunk)
+
+    return _async(ctx, job)
+
+
+def _start_tls(ctx, args):
+    """M39: TLS on an open socket, as a client of `server_name` (which its
+    certificate must name), verified against the system's trusted roots --
+    or the PEM file in the SSL_CERT_FILE environment variable. The socket
+    keeps its id; everything sent and received from then on is encrypted.
+    A peer closing without TLS's close notice is a normal end, like a
+    plain close."""
+    sock_id = _id("start_tls", args[0])
+    if not isinstance(args[1], str):
+        raise MahRuntimeError(
+            f"start_tls: server name must be a String, got {type_name_of(args[1])}", kind="TypeMismatch"
+        )
+    server_name = args[1]
+    timeout = _timeout("start_tls", args[2])
+    entry = _lookup(ctx, sock_id, "socket")
+    if entry is None:
+        return _closed_now()
+
+    def job():
+        if isinstance(entry.sock, ssl.SSLSocket):
+            raise ssl.SSLError("the socket already uses TLS")
+        deadline = _deadline(timeout)
+        context = ssl.create_default_context()
+        tls = context.wrap_socket(entry.sock, server_hostname=server_name, do_handshake_on_connect=False)
+        entry.sock = tls
+        while True:
+            try:
+                tls.do_handshake()
+                return NONE_VALUE
+            except ssl.SSLWantReadError:
+                _wait(ctx, sock_id, entry, deadline)
+            except ssl.SSLWantWriteError:
+                _wait(ctx, sock_id, entry, deadline, want_write=True)
 
     return _async(ctx, job)
 
@@ -398,7 +451,9 @@ def _shutdown(ctx, args):
         return _closed_now()
 
     def job():
-        entry.sock.shutdown(socket.SHUT_WR)
+        # M39: on a TLS socket this ends the sending side without TLS's
+        # close notice (SSLSocket.shutdown would drop TLS for reading too).
+        socket.socket.shutdown(entry.sock, socket.SHUT_WR)
         return NONE_VALUE
 
     return _async(ctx, job)
@@ -427,4 +482,5 @@ NATIVES = {
     "socket.recv": (3, _recv),
     "socket.shutdown": (1, _shutdown),
     "socket.close": (1, _close),
+    "socket.start_tls": (3, _start_tls),
 }

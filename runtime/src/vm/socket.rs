@@ -6,6 +6,9 @@
 //! description]`. Sockets and listeners are ids in a per-VM table, separate
 //! from the file table. Waiting calls poll in slices of at most 50 ms,
 //! checking their deadline and whether their id was closed in between.
+//!
+//! M39 (1.19): `start_tls` turns an open stream into a TLS client
+//! (rustls); from then on `send`/`recv` go through the TLS layer.
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
@@ -13,6 +16,10 @@ use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, ServerName};
+use rustls::{ClientConfig, ClientConnection, RootCertStore};
 
 use crate::decimal::Decimal;
 
@@ -25,8 +32,22 @@ const SLICE: Duration = Duration::from_millis(50);
 
 #[derive(Clone)]
 enum Entry {
-    Stream(Arc<TcpStream>),
+    Stream(Arc<Conn>),
     Listener(Arc<TcpListener>),
+}
+
+/// A connected stream, and its TLS layer once `start_tls` has run. A worker
+/// holds the lock for at most one slice of waiting, so a send and a recv on
+/// the same TLS socket take turns.
+struct Conn {
+    tcp: TcpStream,
+    tls: Mutex<Option<ClientConnection>>,
+}
+
+impl Conn {
+    fn uses_tls(&self) -> bool {
+        self.tls.lock().expect("tls").is_some()
+    }
 }
 
 /// The VM's socket table (ids start at 1), shared with the workers.
@@ -82,6 +103,8 @@ fn description_of(kind: &str) -> &'static str {
         "host_not_found" => "host not found",
         "permission_denied" => "permission denied",
         "closed" => "the socket is closed",
+        "tls_certificate" => "the server's certificate isn't trusted",
+        "tls" => "the TLS handshake or connection failed",
         _ => "",
     }
 }
@@ -208,7 +231,7 @@ fn closed() -> Value {
     Value::Promise(promise)
 }
 
-fn stream_of(vm: &Vm, id: Option<u64>) -> Option<(u64, Arc<TcpStream>)> {
+fn stream_of(vm: &Vm, id: Option<u64>) -> Option<(u64, Arc<Conn>)> {
     let id = id?;
     match vm.sockets().get(id) {
         Some(Entry::Stream(s)) => Some((id, s)),
@@ -233,7 +256,7 @@ fn register(table: &SocketTable, stream: TcpStream) -> IoValue {
         Ok(v) => v,
         Err(e) => return classify(&e),
     };
-    let id = table.add(Entry::Stream(Arc::new(stream)));
+    let id = table.add(Entry::Stream(Arc::new(Conn { tcp: stream, tls: Mutex::new(None) })));
     if let IoValue::List(items) = &mut info {
         items[0] = IoValue::Num(id);
     }
@@ -374,9 +397,13 @@ pub fn send(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
         Value::Bytes(b) => b.borrow().clone(),
         other => return Err(type_err(vm, "send", "data", "Bytes", other)),
     };
-    let Some((id, stream)) = stream_of(vm, id) else { return Ok(closed()) };
+    let Some((id, conn)) = stream_of(vm, id) else { return Ok(closed()) };
     let table = vm.sockets().clone();
     Ok(spawn(vm, move || {
+        if conn.uses_tls() {
+            return tls_send(&table, id, &conn, &data);
+        }
+        let stream = &conn.tcp;
         let _ = stream.set_write_timeout(Some(SLICE));
         let mut rest: &[u8] = &data;
         while !rest.is_empty() {
@@ -402,11 +429,15 @@ pub fn recv(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
         other => return Err(type_err(vm, "recv", "max", "a Number", other)),
     };
     let timeout = timeout_arg(vm, "recv", &args[2])?;
-    let Some((id, stream)) = stream_of(vm, id) else { return Ok(closed()) };
+    let Some((id, conn)) = stream_of(vm, id) else { return Ok(closed()) };
     let table = vm.sockets().clone();
     Ok(spawn(vm, move || {
         let deadline = timeout.map(|t| Instant::now() + t);
         let mut buf = vec![0u8; max.min(1 << 20)];
+        if conn.uses_tls() {
+            return tls_recv(&table, id, &conn, buf, deadline);
+        }
+        let stream = &conn.tcp;
         loop {
             if !table.is_open(id) {
                 return fixed("closed");
@@ -437,10 +468,67 @@ pub fn recv(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
 
 pub fn shutdown(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
     let id = id_arg(vm, "shutdown", &args[0])?;
-    let Some((_, stream)) = stream_of(vm, id) else { return Ok(closed()) };
-    Ok(spawn(vm, move || match stream.shutdown(Shutdown::Write) {
+    let Some((_, conn)) = stream_of(vm, id) else { return Ok(closed()) };
+    // On a TLS socket this ends the sending side without TLS's close notice.
+    Ok(spawn(vm, move || match conn.tcp.shutdown(Shutdown::Write) {
         Ok(()) => ok(IoValue::None),
         Err(e) => classify(&e),
+    }))
+}
+
+/// `socket.start_tls(id, server_name, timeout)`: a TLS client handshake on
+/// an open stream, verifying the server's certificate names `server_name`.
+pub fn start_tls(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
+    let id = id_arg(vm, "start_tls", &args[0])?;
+    let server_name = match &args[1] {
+        Value::Str(s) => s.to_string(),
+        other => return Err(type_err(vm, "start_tls", "server name", "a String", other)),
+    };
+    let timeout = timeout_arg(vm, "start_tls", &args[2])?;
+    let Some((id, conn)) = stream_of(vm, id) else { return Ok(closed()) };
+    let table = vm.sockets().clone();
+    Ok(spawn(vm, move || {
+        let deadline = timeout.map(|t| Instant::now() + t);
+        let mut guard = conn.tls.lock().expect("tls");
+        if guard.is_some() {
+            return fixed("tls");
+        }
+        let Ok(name) = ServerName::try_from(server_name) else { return fixed("tls_certificate") };
+        let mut tls = match ClientConnection::new(client_config(), name) {
+            Ok(c) => c,
+            Err(_) => return fixed("tls"),
+        };
+        while tls.is_handshaking() {
+            if !table.is_open(id) {
+                return fixed("closed");
+            }
+            let Some(slice) = slice_of(deadline) else { return fixed("timed_out") };
+            if tls.wants_write() {
+                let _ = conn.tcp.set_write_timeout(Some(slice));
+                match tls.write_tls(&mut &conn.tcp) {
+                    Ok(_) => {}
+                    Err(e) if waiting(&e) => {}
+                    Err(e) => return classify(&e),
+                }
+                continue;
+            }
+            let _ = conn.tcp.set_read_timeout(Some(slice));
+            match tls.read_tls(&mut &conn.tcp) {
+                Ok(0) => return fixed("connection_reset"),
+                Ok(_) => {
+                    if let Err(e) = tls.process_new_packets() {
+                        // Tell the server why, best effort.
+                        let _ = conn.tcp.set_write_timeout(Some(SLICE));
+                        let _ = tls.write_tls(&mut &conn.tcp);
+                        return tls_failure(&e);
+                    }
+                }
+                Err(e) if waiting(&e) => {}
+                Err(e) => return classify(&e),
+            }
+        }
+        *guard = Some(tls);
+        ok(IoValue::None)
     }))
 }
 
@@ -452,6 +540,116 @@ pub fn close(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
         }
         ok(IoValue::None)
     }))
+}
+
+// -- TLS ---------------------------------------------------------------------------
+
+/// The roots in the PEM file `SSL_CERT_FILE` names when it's set (like
+/// OpenSSL, which the Python VM uses), else the built-in Mozilla set.
+fn client_config() -> Arc<ClientConfig> {
+    let mut roots = RootCertStore::empty();
+    match std::env::var_os("SSL_CERT_FILE") {
+        Some(path) => {
+            if let Ok(certs) = CertificateDer::pem_file_iter(&path) {
+                for cert in certs.flatten() {
+                    let _ = roots.add(cert);
+                }
+            }
+        }
+        None => roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned()),
+    }
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("ring supports the default TLS versions")
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Arc::new(config)
+}
+
+fn waiting(e: &io::Error) -> bool {
+    matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted)
+}
+
+fn tls_failure(e: &rustls::Error) -> IoValue {
+    match e {
+        rustls::Error::InvalidCertificate(_) => fixed("tls_certificate"),
+        _ => fixed("tls"),
+    }
+}
+
+fn tls_send(table: &SocketTable, id: u64, conn: &Conn, data: &[u8]) -> IoValue {
+    let mut rest = data;
+    loop {
+        if !table.is_open(id) {
+            return fixed("closed");
+        }
+        let mut guard = conn.tls.lock().expect("tls");
+        let Some(tls) = guard.as_mut() else { return fixed("tls") };
+        if !rest.is_empty() {
+            match tls.writer().write(rest) {
+                Ok(n) => rest = &rest[n..],
+                Err(e) => return classify(&e),
+            }
+        }
+        if !tls.wants_write() {
+            if rest.is_empty() {
+                return ok(IoValue::None);
+            }
+            continue;
+        }
+        let _ = conn.tcp.set_write_timeout(Some(SLICE));
+        match tls.write_tls(&mut &conn.tcp) {
+            Ok(_) => {}
+            Err(e) if waiting(&e) => {}
+            Err(e) => return classify(&e),
+        }
+    }
+}
+
+/// A peer closing without TLS's close notice is a normal end (an empty
+/// read), as with Python's `suppress_ragged_eofs`.
+fn tls_recv(table: &SocketTable, id: u64, conn: &Conn, mut buf: Vec<u8>, deadline: Option<Instant>) -> IoValue {
+    loop {
+        if !table.is_open(id) {
+            return fixed("closed");
+        }
+        let mut guard = conn.tls.lock().expect("tls");
+        let Some(tls) = guard.as_mut() else { return fixed("tls") };
+        match tls.reader().read(&mut buf) {
+            Ok(n) => {
+                buf.truncate(n);
+                return ok(IoValue::Bytes(buf));
+            }
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                buf.truncate(0);
+                return ok(IoValue::Bytes(buf));
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+            Err(e) => return classify(&e),
+        }
+        let slice = slice_of(deadline).unwrap_or(Duration::from_millis(1)).max(Duration::from_millis(1));
+        let _ = conn.tcp.set_read_timeout(Some(slice));
+        let got = tls.read_tls(&mut &conn.tcp);
+        match got {
+            Ok(_) => {
+                if let Err(e) = tls.process_new_packets() {
+                    return tls_failure(&e);
+                }
+                if tls.wants_write() {
+                    let _ = conn.tcp.set_write_timeout(Some(SLICE));
+                    let _ = tls.write_tls(&mut &conn.tcp);
+                }
+            }
+            Err(e) if waiting(&e) => {
+                drop(guard);
+                if slice_of(deadline).is_none() {
+                    return fixed("timed_out");
+                }
+            }
+            Err(e) => return classify(&e),
+        }
+    }
 }
 
 #[cfg(test)]
