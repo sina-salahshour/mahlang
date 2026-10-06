@@ -11,6 +11,8 @@ export interface DocMeta {
 	title: string;
 	order: number;
 	section: string;
+	/** Standard library pages only: one line for the /std index cards. */
+	summary?: string;
 }
 
 export interface DocEntry {
@@ -69,11 +71,11 @@ export interface DocSection {
 	docs: DocEntry[];
 }
 
-/** Docs grouped by `section`, in first-appearance order (which follows `order`). */
-export function docSections(): DocSection[] {
+/** Pages grouped by `section`, in first-appearance order (which follows `order`). */
+function groupBySection(entries: DocEntry[]): DocSection[] {
 	const sections: DocSection[] = [];
 	const bySectionName = new Map<string, DocSection>();
-	for (const doc of docs) {
+	for (const doc of entries) {
 		let section = bySectionName.get(doc.meta.section);
 		if (!section) {
 			section = { name: doc.meta.section, docs: [] };
@@ -83,6 +85,30 @@ export function docSections(): DocSection[] {
 		section.docs.push(doc);
 	}
 	return sections;
+}
+
+export function docSections(): DocSection[] {
+	return groupBySection(docs);
+}
+
+// The standard library reference (/std): one page per module, same
+// frontmatter as a docs page plus a `summary` for the index.
+const stdModules = import.meta.glob<MdModule>('/src/content/std/*.md', { eager: true });
+
+export const stdDocs: DocEntry[] = Object.entries(stdModules)
+	.map(([path, mod]) => ({
+		slug: slugFromPath(path),
+		meta: mod.metadata as unknown as DocMeta,
+		component: mod.default
+	}))
+	.sort((a, b) => a.meta.order - b.meta.order);
+
+export function getStdDoc(slug: string): DocEntry | undefined {
+	return stdDocs.find((d) => d.slug === slug);
+}
+
+export function stdSections(): DocSection[] {
+	return groupBySection(stdDocs);
 }
 
 const postModules = import.meta.glob<MdModule>('/src/content/blog/*.md', { eager: true });

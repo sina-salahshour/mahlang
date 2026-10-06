@@ -4,8 +4,12 @@ order: 18
 section: Language
 ---
 
-The standard library is a set of modules that ship with Mah. You import
-them like any other file, with a `std:` path, either namespaced or flat:
+The standard library is a set of modules that ship with Mah. This page is
+a quick tour; the [standard library reference](/std) has a page per module
+with a full guide, more examples, and every function.
+
+You import them like any other file, with a `std:` path, either
+namespaced or flat:
 
 ```mah
 import math from "std:math"      # math.sqrt(2), math.pi
@@ -32,10 +36,13 @@ So far there are `std:math`, `std:path`, `std:json`, `std:csv`,
 `std:random`, `std:collections`, `std:regex`, `std:time`, `std:async`,
 `std:fs`, `std:process`, `std:bytes`, `std:socket`, `std:url`, `std:http`
 and `std:reflect` (and `std:test`, see [Testing](/docs/testing)).
-The rest of the plan (an HTTP server, then a web framework) is in
+See [the reference](/std) for each one. The rest of the plan (an HTTP
+server, then a web framework) is in
 `docs/STDLIB.md` and `docs/NEXT_PHASES.md` in the repository.
 
 ## `std:math`
+
+*Full guide: [std:math](/std/math).*
 
 ```mah
 import math from "std:math"
@@ -75,6 +82,8 @@ a flat `import "std:math"`, takes over.
 
 ## `std:path`
 
+*Full guide: [std:path](/std/path).*
+
 Paths as Strings: nothing here touches the file system. Input may use `/`
 or `\` and start with a drive (`C:`); `normalize` and `relative` always
 answer with `/`.
@@ -99,6 +108,8 @@ print(path.relative("/a/b", "/a/c/d"), path.is_absolute("C:\\x"))   # ../c/d tru
 | `relative(from, to)` | the path from directory `from` to `to` |
 
 ## `std:json`
+
+*Full guide: [std:json](/std/json).*
 
 ```mah
 import json from "std:json"
@@ -186,6 +197,8 @@ items through untouched.
 
 ## `std:csv`
 
+*Full guide: [std:csv](/std/csv).*
+
 Comma-separated values, following RFC 4180: a field in double quotes can
 hold the delimiter, line breaks, and `""` for a quote.
 
@@ -216,6 +229,8 @@ the wrong number of fields. `csv.FromCsvRow` works like `json.FromJson`, with
 `from_csv_row(row)` taking a record from `parse_records`.
 
 ## `std:random`
+
+*Full guide: [std:random](/std/random).*
 
 ```mah
 import random from "std:random"
@@ -258,6 +273,8 @@ Bad arguments, like `choice([])` or `randint(5, 1)`, throw a
 
 ## `std:collections`
 
+*Full guide: [std:collections](/std/collections).*
+
 `Set`, `Deque` and `PriorityQueue`, usually imported flat. Each works
 with `for` and `map`/`filter`/`reduce`, and prints with its name.
 
@@ -292,6 +309,8 @@ print(tasks.pop(), tasks.pop(), tasks.pop())          # fix test it write docs
   For largest first, use a key that negates: `fn(x) { 0 - x }`.
 
 ## `std:regex`
+
+*Full guide: [std:regex](/std/regex).*
 
 ```mah
 import regex from "std:regex"
@@ -347,6 +366,8 @@ print(try { regex.compile(pattern) } catch { e: regex.RegexError => { e.message(
 
 ## `std:time`
 
+*Full guide: [std:time](/std/time).*
+
 ```mah
 import time from "std:time"
 
@@ -383,6 +404,8 @@ aren't supported yet.
 
 ## `std:async`
 
+*Full guide: [std:async](/std/async).*
+
 A Promise comes from `detach`. `std:async` combines them, and runs
 timers:
 
@@ -415,6 +438,8 @@ async.set_timeout(fn() { async.clear_interval(ticker) }, 55)
   `fn() throws never`): handle errors inside them.
 
 ## `std:bytes`
+
+*Full guide: [std:bytes](/std/bytes).*
 
 Making and decoding [Bytes](/docs/collections#bytes), Mah's binary data
 type. The methods on a Bytes value (`to_hex()`, `to_base64()`,
@@ -450,6 +475,8 @@ print(bytes.new(3, 255), bytes.from_hex("CAFE"))   # Bytes[ff ff ff] Bytes[ca fe
 to `new` or `from_vector` is a runtime error, like `b[i] = 300`.
 
 ## `std:fs`
+
+*Full guide: [std:fs](/std/fs).*
 
 Files and directories. Every function waits like any call, but the work
 happens off your program's thread, so `detach fs.read_text(path)` lets
@@ -523,6 +550,8 @@ A program importing `std:fs` needs bytecode 1.17.
 
 ## `std:process`
 
+*Full guide: [std:process](/std/process).*
+
 The program's arguments and environment, and running other programs.
 `run` waits for the program like any call, but the work happens off your
 program's thread, so `detach process.run(...)` lets other tasks and timers
@@ -569,6 +598,8 @@ character.
 
 ## `std:socket`
 
+*Full guide: [std:socket](/std/socket).*
+
 TCP connections, plain or TLS. Every call waits like any async call;
 `detach` runs one in the background. Timeouts are in milliseconds.
 
@@ -592,6 +623,8 @@ names. Failures throw `socket.SocketError { kind, op, address, description }`.
 
 ## `std:url`
 
+*Full guide: [std:url](/std/url).*
+
 Parse, build and resolve URLs, and percent-encode text and query strings.
 
 ```mah
@@ -604,6 +637,8 @@ print(url.parse_query("a=1&b=x+y"))                  # [[a, 1], [b, x y]]
 ```
 
 ## `std:http`
+
+*Full guide: [std:http](/std/http).*
 
 An HTTP/1.1 client for `http://` and `https://`, written in Mah over
 `std:socket`. `get`, `post`, `put`, `patch`, `delete`, `head` and
@@ -628,6 +663,8 @@ Redirects are followed, and the `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`
 environment variables are honored.
 
 ## `std:reflect`
+
+*Full guide: [std:reflect](/std/reflect).*
 
 What a program can find out about its own functions, types and values while
 it runs. A bare type name is a value: `Number`, `String`, `User`, `Vector`

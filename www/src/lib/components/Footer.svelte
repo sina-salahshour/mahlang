@@ -10,6 +10,7 @@
 		</p>
 		<nav aria-label="Footer">
 			<a href="/docs">Docs</a>
+			<a href="/std">Stdlib</a>
 			<a href="/blog">Blog</a>
 			<a href="/changelog">Changelog</a>
 			<a href="/blog/rss.xml">RSS</a>

@@ -35,6 +35,7 @@ needs no code change**, as long as its frontmatter is right.
 
 ```
 src/content/docs/*.md     one page per file, rendered at /docs/<filename-without-.md>
+src/content/std/*.md      one page per standard library module, at /std/<module>
 src/content/blog/*.md     one post per file, rendered at /blog/<filename-without-.md>
 ```
 
@@ -53,6 +54,26 @@ section: Language        # sidebar group: "Start", "Language", or "Tooling" toda
 The sidebar (`src/lib/components/DocsSidebar.svelte`) groups pages by
 `section` and sorts within a section by `order` — there's no separate
 navigation config to keep in sync.
+
+### Standard library reference (`src/content/std/*.md`)
+
+One page per `std:` module (`json.md` → `/std/json`), with a guide,
+runnable examples, and the module's full API. Same frontmatter as a docs
+page plus a one-line `summary`, which the `/std` index shows on the
+module's card:
+
+```yaml
+---
+title: std:json
+order: 6                  # position in the sidebar and index (and prev/next)
+section: Text & data       # sidebar/index group
+summary: "Parse and write JSON, and decode it into your own types."
+---
+```
+
+The `/docs/standard-library` page stays as a short tour and links each
+module to its `/std` page. When a module gains or changes a function,
+update its `/std` page (and the tour, if the change is notable).
 
 ### Blog (`src/content/blog/*.md`)
 
@@ -110,13 +131,17 @@ src/routes/
     +page.ts                 redirects /docs -> the first doc (by `order`)
     [slug]/+page.{ts,svelte} renders one docs page; +page.ts declares
                               prerender entries from src/lib/content.ts
+  std/
+    +layout.svelte           SidebarLayout over the std modules
+    +page.svelte             the index: importing, then a card per module
+    [slug]/+page.{ts,svelte} one module's page, with prev/next links
   blog/
     +page.svelte              post index
     [slug]/+page.{ts,svelte} renders one post
     rss.xml/+server.ts        RSS feed
   changelog/+page.svelte      changelog-tagged posts only
 src/lib/
-  content.ts                  loads docs/ and blog/ via import.meta.glob
+  content.ts                  loads docs/, std/ and blog/ via import.meta.glob
   markdown/highlight-mah.ts   the Mah syntax highlighter
   markdown/heading-ids.ts     rehype plugin: ids on h2-h4 for #anchors
   components/                 Header, Footer, ThemeToggle, DocsSidebar,

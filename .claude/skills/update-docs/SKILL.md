@@ -18,6 +18,7 @@ structural writeup this skill summarizes.
 
 ```
 www/src/content/docs/*.md    one page per file -> /docs/<filename>
+www/src/content/std/*.md     one page per std module -> /std/<module>
 www/src/content/blog/*.md    one post per file -> /blog/<filename>, and
                               also /changelog if tagged `changelog`
 ```
@@ -72,6 +73,24 @@ is no separate nav config to edit.
    ```sh
    cd www && pnpm run build && pnpm run check
    ```
+
+## Updating the standard library reference
+
+Each `std:` module has a page in `www/src/content/std/<module>.md`
+(frontmatter: `title: std:<module>`, `order`, `section`, and a one-line
+`summary` for the `/std` index). A page is a guide (what the module is for,
+then common tasks with examples), then a **Reference** section listing
+every exported function and type. When a module gains, loses or changes
+an export (check `mah/std/<module>.mh`'s `export`s), update its Reference
+tables and add an example if the change is notable. A brand-new module
+gets a new page; `docs/standard-library.md` (the short tour) gets a
+section linking to it.
+
+Verify the examples on **both** runtimes: `python3 -m mah run x.mh`, and
+`python3 -m mah build x.mh -o x.mahc && runtime/target/release/mah-vm run x.mahc`
+(`make vm` first). Examples that need the internet go inside a `fn` that
+isn't called, so they still compile-check. `std:test` examples are test
+files: check them with `mah test` in a scratch project.
 
 ## Adding a blog post
 

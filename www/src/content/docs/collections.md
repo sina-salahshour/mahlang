@@ -97,7 +97,7 @@ Both Vectors and Maps (and Strings, Bytes and ranges) are **Iterable** — `for`
 binary data: file contents, network packets, hashes. It's mutable and
 passed by reference like a Vector. There's no literal; make one with
 `"text".to_bytes()` (a String's UTF-8 encoding) or the
-[`std:bytes`](/docs/standard-library#stdbytes) functions.
+[`std:bytes`](/std/bytes) functions.
 
 ```mah
 import bytes from "std:bytes"
@@ -128,7 +128,7 @@ print(bytes.concat([b, b]).len())          # 6
 - `Bytes` is a type annotation and a Type value
   (`reflect.type_of(b) == Bytes`).
 
-Binary files ([`std:fs`](/docs/standard-library#stdfs)'s `read_bytes`/
+Binary files ([`std:fs`](/std/fs)'s `read_bytes`/
 `write_bytes`) and sockets (`std:socket`'s `send`/`recv`) read and write
 Bytes.
 

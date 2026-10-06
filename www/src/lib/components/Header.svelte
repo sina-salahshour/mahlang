@@ -5,6 +5,7 @@
 
 	const nav = [
 		{ href: '/docs', label: 'Docs' },
+		{ href: '/std', label: 'Stdlib' },
 		{ href: '/blog', label: 'Blog' },
 		{ href: '/changelog', label: 'Changelog' }
 	];
