@@ -86,6 +86,11 @@ tokenizer (no Shiki/highlight.js) used as mdsvex's `highlight` hook for
 `mah/compiler/lexer.py`'s `KEYWORDS`. Every other fenced language (`sh`,
 `toml`, ...) just gets escaped and wrapped, no tokenizing.
 
+`src/lib/markdown/heading-ids.ts` is a tiny rehype plugin (also
+dependency-free) that gives every `h2`–`h4` in docs and posts a
+GitHub-style `id` (`` ## `std:fs` `` → `#stdfs`, `## Hooks` → `#hooks`), so
+`/docs/standard-library#stdfs` links work.
+
 If you add a new Mah keyword, update `KEYWORDS`/`CONSTANTS`/`BUILTIN_TYPES`
 in that file to match `mah/compiler/lexer.py`.
 
@@ -101,7 +106,7 @@ expression and fail the build. Keep that escaping if you touch the file.
 src/routes/
   +page.svelte              landing page
   docs/
-    +layout.svelte           sidebar + prose layout
+    +layout.svelte           wraps SidebarLayout (sidebar + prose)
     +page.ts                 redirects /docs -> the first doc (by `order`)
     [slug]/+page.{ts,svelte} renders one docs page; +page.ts declares
                               prerender entries from src/lib/content.ts
@@ -113,7 +118,11 @@ src/routes/
 src/lib/
   content.ts                  loads docs/ and blog/ via import.meta.glob
   markdown/highlight-mah.ts   the Mah syntax highlighter
+  markdown/heading-ids.ts     rehype plugin: ids on h2-h4 for #anchors
   components/                 Header, Footer, ThemeToggle, DocsSidebar,
+                               SidebarLayout (sticky sidebar on desktop,
+                               a collapsible bar under the header at
+                               <=860px),
                                QuickstartTabs (melt-ui builders: Dialog,
                                Toggle, Accordion, Tabs) — theme persistence
                                and small reactive bits use `runed`
@@ -124,6 +133,14 @@ Everything is prerendered (`export const prerender = true` in the root
 `+layout.ts`); dynamic routes (`docs/[slug]`, `blog/[slug]`) declare
 `entries()` from the same content list so `adapter-static` knows every
 page to emit.
+
+## Responsive layout
+
+The site must work from 320px wide up, with no sideways page scroll:
+wide code blocks and Markdown tables scroll inside themselves, grids use
+`minmax(0, 1fr)` / `minmax(min(Xrem, 100%), 1fr)` tracks so a code block
+can't widen its column, and the gutter drops to 1rem at <=600px. Check a
+change at phone width (e.g. Chrome devtools at 375px) before shipping.
 
 ## Keeping the language reference in sync
 

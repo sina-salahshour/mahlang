@@ -285,7 +285,7 @@ print(a.await, b.await)   # 42 from a block`;
 
 	.feature-grid {
 		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(15.5rem, 1fr));
+		grid-template-columns: repeat(auto-fit, minmax(min(15.5rem, 100%), 1fr));
 		gap: 1.25rem;
 		margin-top: 1.5rem;
 	}
@@ -322,7 +322,7 @@ print(a.await, b.await)   # 42 from a block`;
 
 	.snippet-grid {
 		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
+		grid-template-columns: repeat(auto-fit, minmax(min(18rem, 100%), 1fr));
 		gap: 2rem;
 	}
 
@@ -339,9 +339,33 @@ print(a.await, b.await)   # 42 from a block`;
 		max-width: 42rem;
 	}
 
+	.snippet-grid > :global(*),
+	.hero-grid > :global(*) {
+		min-width: 0;
+	}
+
 	@media (max-width: 860px) {
 		.hero-grid {
-			grid-template-columns: 1fr;
+			/* minmax(0, ...) rather than plain 1fr: a 1fr track's minimum
+			   is its content's min-content width, so the hero's code block
+			   used to widen the whole page past the viewport on phones. */
+			grid-template-columns: minmax(0, 1fr);
+			gap: 2rem;
+		}
+	}
+
+	@media (max-width: 600px) {
+		section {
+			padding: 2.5rem 0;
+		}
+
+		.hero {
+			padding-top: 2.5rem;
+		}
+
+		.cta-row .btn {
+			flex: 1 1 auto;
+			text-align: center;
 		}
 	}
 </style>

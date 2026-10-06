@@ -1,12 +1,25 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import { Accordion } from 'melt/builders';
-	import { docSections } from '$lib/content';
+	import { docSections, type DocSection } from '$lib/content';
 
-	const sections = docSections();
+	// Defaults are the /docs sidebar; the standard library reference
+	// (/std) passes its own sections and base path.
+	let {
+		sections = docSections(),
+		base = '/docs',
+		label = 'Docs',
+		onnavigate
+	}: {
+		sections?: DocSection[];
+		base?: string;
+		label?: string;
+		onnavigate?: () => void;
+	} = $props();
 
 	const accordion = new Accordion({
 		multiple: true,
+		// svelte-ignore state_referenced_locally
 		value: sections.map((s) => s.name)
 	});
 
@@ -19,15 +32,27 @@
 	// active class just jumping, and instead of the whole sidebar
 	// re-rendering/fading when you go from one doc page to another.
 	let docRefs: Record<string, HTMLAnchorElement> = $state({});
+	// Bumped whenever the nav changes size -- e.g. the mobile sidebar going
+	// from display:none (every offset 0) to shown, or a section expanding --
+	// so the indicator re-measures instead of keeping stale offsets.
+	let navEl: HTMLElement | undefined = $state();
+	let layoutTick = $state(0);
+	$effect(() => {
+		if (!navEl) return;
+		const ro = new ResizeObserver(() => layoutTick++);
+		ro.observe(navEl);
+		return () => ro.disconnect();
+	});
 	let indicatorStyle = $derived.by(() => {
+		void layoutTick;
 		const slug = page.params.slug;
 		const el = slug ? docRefs[slug] : undefined;
-		if (!el) return 'opacity: 0';
+		if (!el || !el.offsetWidth) return 'opacity: 0';
 		return `top: ${el.offsetTop}px; left: ${el.offsetLeft}px; width: ${el.offsetWidth}px; height: ${el.offsetHeight}px; opacity: 1;`;
 	});
 </script>
 
-<nav class="docs-sidebar" aria-label="Docs">
+<nav class="docs-sidebar" bind:this={navEl} aria-label={label}>
 	<span class="side-indicator" style={indicatorStyle}></span>
 	{#each sections as section (section.name)}
 		{@const item = accordion.getItem({ id: section.name })}
@@ -59,7 +84,8 @@
 					{#each section.docs as doc (doc.slug)}
 						<li>
 							<a
-								href="/docs/{doc.slug}"
+								href="{base}/{doc.slug}"
+								onclick={() => onnavigate?.()}
 								bind:this={docRefs[doc.slug]}
 								class:active={isActive(doc.slug)}>{doc.meta.title}</a
 							>

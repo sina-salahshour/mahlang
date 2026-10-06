@@ -106,6 +106,8 @@
 			{#each nav as item (item.href)}
 				<a href={item.href} onclick={() => (mobile.open = false)}>{item.label}</a>
 			{/each}
+			<!-- .gh-link is hidden on small screens, so GitHub lives here instead. -->
+			<a href="https://github.com/sina-salahshour/mahlang" target="_blank" rel="noreferrer">GitHub</a>
 		</nav>
 	</dialog>
 </header>
@@ -316,6 +318,17 @@
 		font-size: 1.05rem;
 		color: var(--color-text);
 		font-weight: 500;
+	}
+
+	@media (max-width: 400px) {
+		.bar {
+			gap: 0.75rem;
+		}
+
+		.brand-icon {
+			width: 2.1rem;
+			height: 2.1rem;
+		}
 	}
 
 	@media (max-width: 720px) {

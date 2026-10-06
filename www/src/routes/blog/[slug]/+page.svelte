@@ -59,4 +59,10 @@
 	header h1 {
 		margin-top: 0.1em;
 	}
+
+	@media (max-width: 600px) {
+		.post {
+			padding: 1.75rem 1rem 3rem;
+		}
+	}
 </style>

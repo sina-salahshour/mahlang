@@ -3,6 +3,7 @@ import adapter from '@sveltejs/adapter-vercel';
 import { sveltekit } from '@sveltejs/kit/vite';
 import { defineConfig } from 'vite';
 import { highlighter } from './src/lib/markdown/highlight-mah.ts';
+import { headingIds } from './src/lib/markdown/heading-ids.ts';
 
 export default defineConfig({
 	plugins: [
@@ -17,7 +18,8 @@ export default defineConfig({
 			preprocess: [
 				mdsvex({
 					extensions: ['.svx', '.md'],
-					highlight: { highlighter }
+					highlight: { highlighter },
+					rehypePlugins: [headingIds]
 				})
 			],
 			extensions: ['.svelte', '.svx', '.md']

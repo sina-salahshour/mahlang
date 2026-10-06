@@ -39,6 +39,7 @@
 
 	.colophon {
 		display: flex;
+		flex: 1 1 18rem;
 		align-items: center;
 		gap: 0.5rem;
 		margin: 0;
@@ -46,7 +47,8 @@
 
 	nav {
 		display: flex;
-		gap: 1.1rem;
+		flex-wrap: wrap;
+		gap: 0.5rem 1.1rem;
 	}
 
 	nav a {

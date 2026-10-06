@@ -106,4 +106,10 @@
 		margin: 0;
 		color: var(--color-text-muted);
 	}
+
+	@media (max-width: 600px) {
+		.changelog {
+			padding: 1.75rem 1rem 3rem;
+		}
+	}
 </style>
