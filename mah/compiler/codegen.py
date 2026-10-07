@@ -258,6 +258,9 @@ from .ast_nodes import (
     Unary,
     WhileStmt,
     WildcardPat,
+    LockAcquire,
+    LockExpr,
+    LockRelease,
 )
 from ..preprocessor import demangle_message
 from ..runtime_values import NONE_VALUE
@@ -723,6 +726,10 @@ class Codegen:
             if id(stmt) in self._hoisted_fns:
                 return  # M41b: its closure was created up front
             src = self.gen_expr(stmt.value)
+            if stmt.shared:
+                # M44: `shared let x = e` -- an atomic assignment to the store.
+                self._gen_shared_store(stmt.shared_index, self._display(stmt.name), src)
+                return
             self.buf.emit(("=", src, None, (0, stmt.address)))
         elif isinstance(stmt, AssignStmt):
             src = self.gen_expr(stmt.value)
@@ -919,8 +926,48 @@ class Codegen:
         self.buf.emit(("ld", default_text, None, tmp))
         return tmp
 
+    def _gen_shared_store(self, index: int, name: str, src_addr) -> None:
+        """M44: `x = v` for a shared `x` this code doesn't hold lexically:
+        lock it (may wait), set, release -- an atomic assignment."""
+        promise = self._temp()
+        self.buf.emit(("sharedlock", index, name, promise))
+        self.buf.emit(("await", promise, None, self._temp()))
+        self.buf.emit(("sharedset", index, name, src_addr))
+        self.buf.emit(("sharedunlock", (index, 0), name, None))
+
+    def _gen_lock(self, expr: LockExpr, dest) -> None:
+        """M44 (docs/contracts/M44_threads.md #8.5): `gen_block` for the
+        desugared block, except that the user's body (the tail) gets its own
+        handler region, whose handler marks this lock's entries as being
+        left by a throw and re-throws (the enclosing handler drains the
+        release defers)."""
+        block = expr.block
+        self.buf.emit(("deferpush", None, None, None))
+        self._defer_depth += 1
+        for stmt in block.stmts:
+            self.gen_stmt(stmt)
+        err = self._temp()
+        region = self._open_region()
+        value = self.gen_expr(block.tail)
+        self.buf.emit(("=", value, None, dest))
+        segments = self._close_region(region)
+        skip = self.buf.emit((None, None, None, None))
+        handler = self.buf.code_pointer
+        self._emit_handler_entries(segments, handler, err[1])
+        for target in expr.targets:
+            self.buf.emit(("sharedunlock", (target.shared_index, 1), target.shared_name, None))
+        self.buf.emit(("throw", err, None, None))
+        self.buf.emit(("jmp", None, None, self.buf.code_pointer), address=skip)
+        self._emit_defer_unwind(1)
+        self._defer_depth -= 1
+
     def _gen_store(self, target, src_addr) -> None:
-        if isinstance(target, Ident):
+        if isinstance(target, Ident) and target.shared_index is not None:
+            if target.shared_locked:
+                self.buf.emit(("sharedset", target.shared_index, target.shared_name, src_addr))
+            else:
+                self._gen_shared_store(target.shared_index, target.shared_name, src_addr)
+        elif isinstance(target, Ident):
             self.buf.emit(("=", src_addr, None, target.address))
         elif isinstance(target, FieldAccess):
             obj_addr = self.gen_expr(target.obj)
@@ -1281,6 +1328,12 @@ class Codegen:
                 dest = self._temp()
                 self.buf.emit(("loadtype", expr.type_value, None, dest))
                 return dest
+            if expr.shared_index is not None:
+                # M44: a shared variable is read here, at its place in
+                # left-to-right evaluation (a copy, unless lexically locked).
+                dest = self._temp()
+                self.buf.emit(("sharedget", (expr.shared_index, 1 if expr.shared_locked else 0), expr.shared_name, dest))
+                return dest
             return expr.address
         if isinstance(expr, SpreadArg):
             raise AssertionError("a spread argument outside a call's argument list")
@@ -1321,6 +1374,31 @@ class Codegen:
             tmp = self._temp()
             self.buf.emit(("cos", src, None, tmp))
             return tmp
+        if isinstance(expr, DetachExpr) and expr.thread is not None:
+            # M44: `detach(t) expr` -- queue the synthesized closure as a job
+            # on `t` (std:thread's `thread.submit` native).
+            thread_addr = self.gen_expr(expr.thread)
+            callee_addr = self.gen_expr(expr.call.callee)
+            args = self._temp()
+            self.buf.emit(("vector", (), None, args))
+            dest = self._temp()
+            self.buf.emit(("native", "thread.submit", (thread_addr, callee_addr, args), dest))
+            return dest
+        if isinstance(expr, LockExpr):
+            dest = self._temp()
+            self._gen_lock(expr, dest)
+            return dest
+        if isinstance(expr, LockAcquire):
+            promise = self._temp()
+            self.buf.emit(("sharedlock", expr.shared_index, expr.shared_name, promise))
+            result = self._temp()
+            self.buf.emit(("await", promise, None, result))
+            return result
+        if isinstance(expr, LockRelease):
+            self.buf.emit(("sharedunlock", (expr.shared_index, 0), expr.shared_name, None))
+            result = self._temp()
+            self.buf.emit(("ld", NONE_VALUE, None, result))
+            return result
         if isinstance(expr, DetachExpr):
             if isinstance(expr.call, Call) and expr.call.builtin == "input":
                 # M33: `detach input(prompt)` -- the still-pending Promise

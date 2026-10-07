@@ -88,6 +88,10 @@ M42 bumps MINOR to 20: new natives only (`socket.tls_server_config`, a
 TLS server's certificate and key loaded into the socket table, and
 `socket.start_tls_server`, a TLS server handshake on an accepted socket;
 behind std:socket and std:http's `serve(tls:)`) -- docs/MAHC_FORMAT.md #4.4.
+
+M44 bumps MINOR to 21: the shared-variable opcodes `sharedget`/`sharedset`/
+`sharedlock`/`sharedunlock` and the `thread.*` natives behind std:thread
+(docs/MAHC_FORMAT.md #4.4/#4.6/#6.11).
 """
 
 from __future__ import annotations
@@ -100,7 +104,7 @@ MAGIC = b"MAHC"
 # `.mahc` extension).
 SHEBANG = b"#!/usr/bin/env -S mah runc\n"
 MAJOR = 1
-MINOR = 20
+MINOR = 21
 
 # -- section ids (docs/MAHC_FORMAT.md #3) -----------------------------------
 SEC_STRINGS = 0x01
@@ -290,6 +294,26 @@ NATIVE_ARITIES = {
     # M42 (1.20): TLS servers.
     "socket.tls_server_config": 2,
     "socket.start_tls_server": 3,
+    # M44 (1.21): std:thread.
+    "thread.spawn": 3,
+    "thread.submit": 3,
+    "thread.close": 2,
+    "thread.join": 1,
+    "thread.pending": 1,
+    "thread.current": 0,
+    "thread.cores": 0,
+    "thread.semaphore_new": 1,
+    "thread.semaphore_acquire": 1,
+    "thread.semaphore_try_acquire": 1,
+    "thread.semaphore_release": 1,
+    "thread.semaphore_available": 1,
+    "thread.channel_new": 1,
+    "thread.channel_send": 2,
+    "thread.channel_recv": 1,
+    "thread.channel_try_recv": 1,
+    "thread.channel_close": 1,
+    "thread.channel_len": 1,
+    "thread.channel_closed": 1,
 }
 
 # M16: which minor version introduced each 1.1+ native -- a 1.0 file
@@ -386,6 +410,26 @@ NATIVE_SINCE_MINOR = {
     # M42 (1.20)
     "socket.tls_server_config": 20,
     "socket.start_tls_server": 20,
+    # M44 (1.21): std:thread.
+    "thread.spawn": 21,
+    "thread.submit": 21,
+    "thread.close": 21,
+    "thread.join": 21,
+    "thread.pending": 21,
+    "thread.current": 21,
+    "thread.cores": 21,
+    "thread.semaphore_new": 21,
+    "thread.semaphore_acquire": 21,
+    "thread.semaphore_try_acquire": 21,
+    "thread.semaphore_release": 21,
+    "thread.semaphore_available": 21,
+    "thread.channel_new": 21,
+    "thread.channel_send": 21,
+    "thread.channel_recv": 21,
+    "thread.channel_try_recv": 21,
+    "thread.channel_close": 21,
+    "thread.channel_len": 21,
+    "thread.channel_closed": 21,
 }
 
 # M29: native inherent methods added after 1.0, by the minor that added
@@ -477,6 +521,11 @@ OPCODES: dict[str, tuple[int, tuple[str, ...]]] = {
     "deferabove": (0x46, ("A", "A")),  # M25 (1.4)
     "native": (0x50, ("X", "A*", "A?")),
     "throw": (0x60, ("A",)),  # M25 (1.4)
+    # M44 (1.21): shared variables -- index, name (for messages), [mode,] address.
+    "sharedget": (0x70, ("N", "S", "N", "A")),
+    "sharedset": (0x71, ("N", "S", "A")),
+    "sharedlock": (0x72, ("N", "S", "A")),
+    "sharedunlock": (0x73, ("N", "S", "N")),
 }
 
 OPCODES_BY_CODE: dict[int, tuple[str, tuple[str, ...]]] = {
@@ -508,4 +557,8 @@ OPCODE_SINCE_MINOR: dict[str, int] = {
     "spread": 14,
     "decorate": 15,
     "paramhooks": 16,
+    "sharedget": 21,
+    "sharedset": 21,
+    "sharedlock": 21,
+    "sharedunlock": 21,
 }

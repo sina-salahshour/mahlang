@@ -1,0 +1,207 @@
+# std:thread -- run code on other threads, share variables between them, and
+# pass messages (docs/STDLIB.md).
+#
+#   import thread from "std:thread"
+#   let t = thread.spawn(name: "worker")
+#   let p = detach(t) checksum(data)     # runs on t, on a copy of what it uses
+#   print(p.await)
+#   print(t.run(checksum, other).await)  # the same, for a function and arguments
+#   t.join()
+#
+# A job sees a copy of every global and of everything it captures, taken when
+# it is queued; changing them changes the copy. Its result (or error) comes
+# back as a copy too. Share state with `shared let` variables and `lock`, with
+# a Semaphore, or with channels. A thread runs its jobs one at a time, in the
+# order they were queued; `workers: n` makes a pool that runs n at a time.
+
+extern fn type_name(value: Unknown) -> String = "value.type_name"
+extern fn native_spawn(name: Unknown, workers: Number, capacity: Unknown) -> Vector<
+    Unknown
+> = "thread.spawn"
+extern fn native_submit(t: Unknown, f: Unknown, args: Vector<Unknown>) -> Promise<
+    Unknown
+> = "thread.submit"
+extern fn native_close(id: Number, cancel: Bool) = "thread.close"
+extern fn native_join(id: Number) -> Promise<Unknown> = "thread.join"
+extern fn native_pending(id: Number) -> Number = "thread.pending"
+extern fn native_current() -> Vector<Unknown> = "thread.current"
+extern fn native_cores() -> Number = "thread.cores"
+extern fn native_semaphore(permits: Number) -> Number = "thread.semaphore_new"
+extern fn native_sem_acquire(id: Number) -> Promise<Unknown> = "thread.semaphore_acquire"
+extern fn native_sem_try_acquire(id: Number) -> Bool = "thread.semaphore_try_acquire"
+extern fn native_sem_release(id: Number) = "thread.semaphore_release"
+extern fn native_sem_available(id: Number) -> Number = "thread.semaphore_available"
+extern fn native_channel(capacity: Unknown) -> Number = "thread.channel_new"
+extern fn native_send(id: Number, value: Unknown) -> Promise<Unknown> = "thread.channel_send"
+extern fn native_recv(id: Number) -> Promise<Unknown> = "thread.channel_recv"
+extern fn native_try_recv(id: Number) -> Option<Unknown> = "thread.channel_try_recv"
+extern fn native_channel_close(id: Number) = "thread.channel_close"
+extern fn native_channel_len(id: Number) -> Number = "thread.channel_len"
+extern fn native_channel_closed(id: Number) -> Bool = "thread.channel_closed"
+
+fn argument_error(message: String) -> Unknown {
+    throw RuntimeError.ArgumentError { message: message }
+}
+
+fn whole(n: Unknown, from: Number) -> Bool {
+    if type_name(n) != "Number" { return false }
+    n >= from & n % 1 == 0
+}
+
+# -- threads --------------------------------------------------------------------
+
+## A thread (or a pool of `workers` threads sharing one queue) that runs jobs:
+## `detach(t) expr` and `t.run(f, ...args)` queue one and give its Promise.
+## `capacity` is how many jobs may wait beyond the running ones (none: no limit).
+export struct Thread { id: Number, name: String, workers: Number, capacity: Unknown }
+
+## Starts a thread. `name` (default "thread-ID") shows in errors and in
+## `thread.name()`; `workers` threads share the queue; `capacity` limits how many
+## jobs may wait to start (none: no limit). A job queued beyond it throws
+## ThreadError "full".
+export fn spawn(name: Unknown = none, workers: Number = 1, capacity: Unknown = none) -> Thread {
+    if name != none {
+        if type_name(name) != "String" {
+            argument_error("thread.spawn: name must be a String or none")
+        }
+    }
+    if !whole(workers, 1) {
+        argument_error("thread.spawn: workers must be a whole number from 1 up")
+    }
+    if capacity != none {
+        if !whole(capacity, 0) {
+            argument_error("thread.spawn: capacity must be none or a whole number from 0 up")
+        }
+    }
+    let r = native_spawn(name, workers, capacity)
+    Thread { id: r[0], name: r[1], workers: workers, capacity: capacity }
+}
+
+impl Thread {
+    ## Queues `f(...args)` on this thread and gives its Promise. `f`, `args` and
+    ## every global are copied now; the arguments are bound to `f`'s parameters
+    ## now too.
+    fn run(self, f: Unknown, ...args: Vector<Unknown>) -> Promise<Unknown> throws ThreadError {
+        native_submit(self, f, args)
+    }
+
+    ## Stops taking jobs: queueing one throws ThreadError "closed". Queued jobs
+    ## still run, unless `cancel` is true: then the ones not started yet fail with
+    ## ThreadError "cancelled". A running job is never interrupted.
+    fn close(self, cancel: Bool = false) { native_close(self.id, cancel) }
+
+    ## Closes the thread and waits until every job it had has finished.
+    fn join(self) throws ThreadError { native_join(self.id).await }
+
+    ## How many jobs are queued or running right now.
+    fn pending(self) -> Number { native_pending(self.id) }
+}
+
+impl Printable for Thread {
+    fn to_string(self) { "Thread(" + self.name + ")" }
+}
+
+## The current thread's id: 0 on the main thread, else its Thread's id.
+export fn id() -> Number { native_current()[0] }
+
+## The current thread's name: "main" on the main thread, else its Thread's name.
+export fn name() -> String { native_current()[1] }
+
+## How many threads this machine can run at once (at least 1).
+export fn cores() -> Number { native_cores() }
+
+# -- semaphores -------------------------------------------------------------------
+
+## A counting semaphore shared by every thread: at most `permits` holders at once.
+export struct Semaphore { id: Number, permits: Number }
+
+## A semaphore with `permits` free permits.
+export fn semaphore(permits: Number) -> Semaphore {
+    if !whole(permits, 1) {
+        argument_error("thread.semaphore: permits must be a whole number from 1 up")
+    }
+    Semaphore { id: native_semaphore(permits), permits: permits }
+}
+
+impl Semaphore {
+    ## Waits (other tasks keep running) until a permit is free, and takes it.
+    ## Waiters get permits in the order they asked. Give it back with
+    ## `defer s.release()`: a permit is not owned by anyone, so one taken by a
+    ## task its job abandons is never given back.
+    fn acquire(self) { native_sem_acquire(self.id).await }
+
+    ## Takes a permit if one is free right now (and nobody is waiting).
+    fn try_acquire(self) -> Bool { native_sem_try_acquire(self.id) }
+
+    ## Gives a permit back. Throws ThreadError "over_release" if all are free.
+    fn release(self) throws ThreadError { native_sem_release(self.id) }
+
+    ## How many permits are free right now.
+    fn available(self) -> Number { native_sem_available(self.id) }
+}
+
+impl Printable for Semaphore {
+    fn to_string(self) { "Semaphore(" + self.available() + "/" + self.permits + ")" }
+}
+
+# -- channels (M44b) ----------------------------------------------------------------
+
+## A queue of messages shared by every thread. Each message is copied when it is
+## sent. `capacity` none: never full; 0: a send waits until a receiver takes it.
+export struct Channel { id: Number, capacity: Unknown }
+
+## A new channel.
+export fn channel(capacity: Unknown = none) -> Channel {
+    if capacity != none {
+        if !whole(capacity, 0) {
+            argument_error("thread.channel: capacity must be none or a whole number from 0 up")
+        }
+    }
+    Channel { id: native_channel(capacity), capacity: capacity }
+}
+
+impl Channel {
+    ## Sends a copy of `value`, waiting while the channel is full. Throws
+    ## ThreadError "closed" or "not_sendable" (a Promise inside `value`).
+    fn send(self, value: Unknown) throws ThreadError { native_send(self.id, value).await }
+
+    ## The next message, waiting for one. Throws ThreadError "closed" once the
+    ## channel is closed and empty.
+    fn recv(self) -> Unknown throws ThreadError { native_recv(self.id).await }
+
+    ## some(the next message) if one is there right now (or a sender is waiting
+    ## to hand one over), else none.
+    fn try_recv(self) -> Option<Unknown> { native_try_recv(self.id) }
+
+    ## No more sends; messages already sent can still be received. Waiting
+    ## receivers (of an empty channel) and waiting senders fail with "closed".
+    fn close(self) { native_channel_close(self.id) }
+
+    ## How many messages are waiting to be received.
+    fn len(self) -> Number { native_channel_len(self.id) }
+
+    ## Whether `close` was called.
+    fn closed(self) -> Bool { native_channel_closed(self.id) }
+}
+
+impl Printable for Channel {
+    fn to_string(self) { "Channel(" + self.id + ")" }
+}
+
+struct ChannelIter { channel: Channel }
+
+impl Iterator for ChannelIter {
+    fn next(self) {
+        try { some(self.channel.recv()) } catch {
+            e: ThreadError => {
+                if e.kind == "closed" { none } else { throw e }
+            }
+        }
+    }
+}
+
+## `for let message in channel { ... }` receives until the channel is closed and
+## empty.
+impl Iterable for Channel {
+    fn iter(self) { ChannelIter { channel: self } }
+}

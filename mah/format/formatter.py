@@ -284,6 +284,9 @@ class _Facts:
     # M41b: the `@` of each decorator written above a `fn`/`struct`/`enum`/
     # method -- each on its own line, with no blank line before what follows.
     decorator_starts: set = field(default_factory=set)
+    # M44: the `(` of each `detach(t) expr` (the thread form): no space
+    # before it, so the canonical spelling is `detach(t) f(x)`.
+    detach_thread_opens: set = field(default_factory=set)
 
 
 def _facts(program: list, toks: list, module_starts: set, prefixes: set = frozenset()) -> _Facts:
@@ -331,6 +334,10 @@ def _facts(program: list, toks: list, module_starts: set, prefixes: set = frozen
     facts.statement_starts |= module_starts
 
     for node in _walk(program):
+        if isinstance(node, ast.DetachExpr) and node.thread_position is not None:
+            idx = index_of(node.thread_position)
+            if idx is not None:
+                facts.detach_thread_opens.add(idx)
         if isinstance(node, ast.Block):
             idx = index_of(node.position)
             # Only a block written with braces has statements of its own:
@@ -540,6 +547,8 @@ class _Builder:
             if right.kind == "angle":
                 return False
             if right.kind == "paren":
+                if b.index in self.facts.detach_thread_opens:
+                    return False
                 after_generic = isinstance(left, _Node) and left.kind == "angle"
                 # Within one statement, `(` after a value is a call (a new
                 # statement would start on its own line anyway).

@@ -891,5 +891,60 @@ class WholeProgramTests(_Base):
         self.assertEqual(diagnostics, [])
 
 
+class ThreadTypeTests(_Base):
+    """M44 (docs/contracts/M44_threads.md #8.6)."""
+
+    THREAD = 'import thread from "std:thread"\n'
+    W1 = (
+        "'detach (...)' here is not the thread form, so nothing runs on the thread; put the operand on the "
+        "same line as 'detach(t)', or write 'detach(t) { ... }'"
+    )
+
+    def warnings(self, src: str) -> list:
+        diagnostics, _ = check(src)
+        return [(m, l) for k, m, l in diagnostics if k == "warning"]
+
+    def test_detach_on_a_thread_gives_a_promise(self):
+        self.assertTypes(self.THREAD + "let t = thread.spawn()\nlet p = detach(t) 1", p="Promise<Number>")
+
+    def test_detach_needs_a_thread(self):
+        self.assertMismatch("detach(5) 1", "detach(...) needs a thread.Thread, got Number", 1)
+        self.assertMismatch('detach("x") 1', "detach(...) needs a thread.Thread, got String", 1)
+        self.assertMismatch(
+            "struct Thread { id: Number }\nlet u = Thread { id: 1 }\ndetach(u) 1",
+            "detach(...) needs a thread.Thread, got Thread",
+            3,
+        )
+
+    def test_lock_has_its_body_type(self):
+        self.assertTypes("shared let n = 0\nlet v = lock n { n + 1 }", v="Number")
+
+    def test_w1(self):
+        src = self.THREAD + "let t = thread.spawn()\ndetach(t)\nprint(1)"
+        # (lines count in the combined text, which inlines std:thread)
+        self.assertIn(self.W1, [m for m, _line in self.warnings(src)])
+
+    def test_w2(self):
+        message = (
+            "shared variable 'xs' is passed as a copy: changes the callee makes to it are lost; to change it, "
+            "call inside 'lock xs { ... }'"
+        )
+        self.assertIn((message, 3), self.warnings("shared let xs = [1]\nfn f(v) { v.push(2) }\nf(xs)"))
+        self.assertEqual(self.warnings("shared let xs = [1]\nfn f(v) { v.push(2) }\nlock xs { f(xs) }"), [])
+
+    def test_w3(self):
+        message = (
+            "'s' is a copy of an element of shared variable 'ss': assigning into it changes nothing shared; "
+            "loop inside 'lock ss { ... }'"
+        )
+        src = "struct S { n: Number }\nshared let ss = [S { n: 1 }]\nfor let s in ss { s.n = 2 }"
+        self.assertIn((message, 3), self.warnings(src))
+        locked = "struct S { n: Number }\nshared let ss = [S { n: 1 }]\nlock ss {\n    for let s in ss { s.n = 2 }\n}"
+        self.assertEqual(self.warnings(locked), [])
+
+    def test_no_warning_for_plain_values(self):
+        self.assertEqual(self.warnings("shared let n = 0\nprint(n + 1)\nfn g(v) { v }\ng(n)"), [])
+
+
 if __name__ == "__main__":
     unittest.main()

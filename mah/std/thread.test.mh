@@ -1,0 +1,227 @@
+# Tests for std:thread, run by tests/test_stdlib.py (or
+# `mah test --file mah/std/thread.test.mh`). Each test runs in its own run,
+# so thread, semaphore and channel ids start at 1 in every test.
+import "std:test"
+import thread from "./thread"
+
+shared let counter = 0
+shared let items = []
+let base = [1, 2]
+
+struct Oops { why: String }
+
+impl Error for Oops {
+    fn message(self) { "oops: " + self.why }
+}
+
+fn square(n: Number) -> Number { n * n }
+
+fn bump(times: Number) {
+    for let i in 0..times {
+        lock counter { counter = counter + 1 }
+    }
+}
+
+fn add_twice(v: Unknown) {
+    lock items {
+        items.push(v)
+        lock items { items.push(v) }
+    }
+}
+
+test "spawn defaults and argument errors" {
+    let t = thread.spawn()
+    assert_eq(t.name, "thread-1")
+    assert_eq(t.workers, 1)
+    assert_eq(t.capacity, none)
+    let e = assert_throws(fn() { thread.spawn(name: 5) })
+    assert_eq(e.message(), "thread.spawn: name must be a String or none")
+    let e2 = assert_throws(fn() { thread.spawn(workers: 0) })
+    assert_eq(e2.message(), "thread.spawn: workers must be a whole number from 1 up")
+    let e3 = assert_throws(fn() { thread.spawn(capacity: 1.5) })
+    assert_eq(e3.message(), "thread.spawn: capacity must be none or a whole number from 0 up")
+    t.join()
+}
+
+test "run and detach give the job's result" {
+    let t = thread.spawn(name: "w")
+    assert_eq(t.run(square, 6).await, 36)
+    assert_eq(detach(t) square(5).await, 25)
+    let ids = detach(t) { [thread.id(), thread.name()] }.await
+    assert_eq(ids.join(","), "1,w")
+    assert_eq(thread.id(), 0)
+    assert_eq(thread.name(), "main")
+    t.join()
+}
+
+test "copies don't leak back" {
+    let t = thread.spawn()
+    let local = [1]
+    let got = detach(t) {
+        base.push(3)
+        local.push(2)
+        [base.len(), local.len()]
+    }.await
+    assert_eq(got.join(","), "3,2")
+    assert_eq(base.join(","), "1,2")
+    assert_eq(local.join(","), "1")
+    t.join()
+}
+
+test "identity is preserved in a copy" {
+    let t = thread.spawn()
+    let shared_part = [0]
+    let pair = [shared_part, shared_part]
+    let same = t.run(
+        fn(v: Unknown) {
+            v[0].push(1)
+            v[1].len()
+        },
+        pair
+    ).await
+    assert_eq(same, 2)
+    assert_eq(shared_part.join(","), "0")
+    t.join()
+}
+
+test "errors cross back" {
+    let t = thread.spawn()
+    let p = detach(t) { throw Oops { why: "no" } }
+    try {
+        p.await
+        fail("expected Oops")
+    } catch {
+        o: Oops => { assert_eq(o.why, "no") }
+    }
+    t.join()
+}
+
+test "a Promise argument is not sendable" {
+    let t = thread.spawn()
+    let pending = detach sleep_async(1)
+    let e = assert_throws(fn() { t.run(fn(x: Unknown) { x }, [pending]) })
+    assert_eq(e.kind, "not_sendable")
+    pending.await
+    t.join()
+}
+
+test "a pending Promise is foreign in a job" {
+    let t = thread.spawn()
+    let pending = detach sleep_async(1)
+    let kind = detach(t) {
+        try {
+            pending.await
+            "awaited"
+        } catch {
+            e: ThreadError => { e.kind }
+        }
+    }.await
+    assert_eq(kind, "foreign_promise")
+    pending.await
+    t.join()
+}
+
+test "a shared counter with 4 workers" {
+    let pool = thread.spawn(workers: 4)
+    let jobs = []
+    for let i in 0..4 { jobs.push(pool.run(bump, 50)) }
+    for let j in jobs { j.await }
+    assert_eq(counter, 200)
+    pool.join()
+}
+
+test "lock is re-entrant" {
+    add_twice("x")
+    let now = items
+    assert_eq(now.join(","), "x,x")
+}
+
+test "write-back on throw" {
+    try {
+        lock items {
+            items.push("kept")
+            throw Oops { why: "stop" }
+        }
+    } catch {
+        _ => { }
+    }
+    let now = items
+    assert_eq(now.join(","), "kept")
+}
+
+test "semaphores" {
+    let s = thread.semaphore(2)
+    assert(s.try_acquire())
+    s.acquire()
+    assert(!s.try_acquire())
+    assert_eq(s.available(), 0)
+    s.release()
+    s.release()
+    assert_eq(s.available(), 2)
+    let e = assert_throws(fn() { s.release() })
+    assert_eq(e.kind, "over_release")
+}
+
+test "channel order across threads" {
+    let t = thread.spawn()
+    let ch = thread.channel()
+    detach(t) {
+        for let n in [1, 2, 3] { ch.send(n) }
+    }
+    let got = [ch.recv(), ch.recv(), ch.recv()]
+    assert_eq(got.join(","), "1,2,3")
+    t.join()
+}
+
+test "a bounded channel" {
+    let ch = thread.channel(capacity: 2)
+    ch.send("a")
+    ch.send("b")
+    assert_eq(ch.len(), 2)
+    let waiting = detach ch.send("c")
+    assert_eq(ch.recv(), "a")
+    waiting.await
+    assert_eq(ch.len(), 2)
+}
+
+test "closed channels" {
+    let ch = thread.channel()
+    ch.send(1)
+    ch.close()
+    assert(ch.closed())
+    let e = assert_throws(fn() { ch.send(2) })
+    assert_eq(e.kind, "closed")
+    assert_eq(ch.recv(), 1)
+    let e2 = assert_throws(fn() { ch.recv() })
+    assert_eq(e2.kind, "closed")
+}
+
+test "iterating a channel until it is closed" {
+    let ch = thread.channel()
+    for let n in 1..=3 { ch.send(n) }
+    ch.close()
+    let sum = 0
+    for let n in ch { sum = sum + n }
+    assert_eq(sum, 6)
+}
+
+test "close with cancel, and join" {
+    let t = thread.spawn(name: "c")
+    let gate = thread.channel()
+    let started = thread.channel()
+    let first = detach(t) {
+        started.send(true)
+        gate.recv()
+    }
+    started.recv()
+    let second = detach(t) { "never" }
+    t.close(cancel: true)
+    let e = assert_throws(fn() { second.await })
+    assert_eq(e.kind, "cancelled")
+    let e2 = assert_throws(fn() { t.run(square, 1) })
+    assert_eq(e2.kind, "closed")
+    gate.send("go")
+    assert_eq(first.await, "go")
+    t.join()
+    assert_eq(t.pending(), 0)
+}

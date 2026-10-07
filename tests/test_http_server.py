@@ -21,7 +21,6 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from mah.bytecode.decode import decode  # noqa: E402
-from mah.bytecode.format import MINOR  # noqa: E402
 from tests.support import compile_bytes, run_source  # noqa: E402
 from tests.test_typecheck import check  # noqa: E402
 
@@ -287,7 +286,8 @@ class CheckerTests(unittest.TestCase):
 
 class BytecodeTests(unittest.TestCase):
     def test_minor(self):
-        self.assertEqual(decode(compile_bytes(text=HTTP + "print(http.serve)")).minor, MINOR)
+        # M44: std:http doesn't use 1.21 (threads), so it stays 1.20
+        self.assertEqual(decode(compile_bytes(text=HTTP + "print(http.serve)")).minor, 20)
 
 
 if __name__ == "__main__":

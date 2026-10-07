@@ -34,16 +34,30 @@ from .runtime_values import (
 
 
 class NativeContext:
-    __slots__ = ("_to_string", "_schedule_timer", "_read_line", "_cancel_timer", "_started", "io", "reflect")
+    __slots__ = ("_to_string", "_schedule_timer", "_read_line", "_cancel_timer", "_started", "io", "reflect", "thread")
 
-    def __init__(self, to_string, schedule_timer, read_line=None, cancel_timer=None, io=None, reflect=None):
+    def __init__(
+        self,
+        to_string,
+        schedule_timer,
+        read_line=None,
+        cancel_timer=None,
+        io=None,
+        reflect=None,
+        started=None,
+        thread=None,
+    ):
         import time
 
         self._to_string = to_string
         self._schedule_timer = schedule_timer
         self._read_line = read_line
         self._cancel_timer = cancel_timer
-        self._started = time.monotonic()
+        # M44: the run's start, shared by every VM of the run (monotonic_ms).
+        self._started = started if started is not None else time.monotonic()
+        # M44: this VM's `VmThreads` (mah/thread_runtime.py) -- its runtime
+        # and line buffer -- or None outside a VM run.
+        self.thread = thread
         # M35: code_interpreter's `_IoHub` -- `submit(promise, job)` and the
         # open-file table (mah/fs_natives.py).
         self.io = io
@@ -74,6 +88,10 @@ class NativeContext:
 
     @property
     def stdout(self):
+        # M44: a VM's line buffer, so a line printed by one thread never
+        # tears (docs/contracts/M44_threads.md #6.3).
+        if self.thread is not None:
+            return self.thread.out
         return sys.stdout
 
     @property
@@ -97,6 +115,7 @@ def _io_write(ctx: NativeContext, args) -> object:
 
 
 def _io_input(ctx: NativeContext, args) -> object:
+    ctx.stdout.flush()  # M44: a flush point
     raw = ""
     started = False
     while True:
@@ -566,3 +585,8 @@ NATIVES.update(_BYTES_NATIVES)
 from .socket_natives import NATIVES as _SOCKET_NATIVES  # noqa: E402
 
 NATIVES.update(_SOCKET_NATIVES)
+
+# M44 (1.21): std:thread (mah/thread_natives.py).
+from .thread_natives import NATIVES as _THREAD_NATIVES  # noqa: E402
+
+NATIVES.update(_THREAD_NATIVES)

@@ -184,7 +184,12 @@ from __future__ import annotations
 import os
 import re
 
+import dataclasses
+
 from .ast_nodes import (
+    LockAcquire,
+    LockExpr,
+    LockRelease,
     TestDecl,
     NativeCall,
     AssignStmt,
@@ -238,7 +243,7 @@ from .ast_nodes import (
 )
 from ..bytecode.format import NATIVE_ARITIES
 from ..preprocessor import STD_DIR, demangle_message
-from ..runtime_values import BUILTIN_TYPE_NAMES, SYSTEM_TRAIT_NATIVE_TYPES, SYSTEM_TRAITS
+from ..runtime_values import BUILTIN_TYPE_NAMES, SYSTEM_TRAIT_NATIVE_TYPES, SYSTEM_TRAITS, display_name
 
 # M21 (syntax only -- see docs/TYPES.md): known type names' arity (the
 # number of `<...>` type arguments they require -- exactly that many, no
@@ -288,10 +293,15 @@ class Symbol:
     own actual scoping rules -- see docs/V2_DESIGN.md's M7 milestone and its
     "LSP rename" design section."""
 
-    __slots__ = ("name", "decl_position", "kind", "references", "type_hint", "top_level_let")
+    __slots__ = ("name", "decl_position", "kind", "references", "type_hint", "top_level_let", "shared_index", "handle")
 
     def __init__(self, name: str, decl_position: int, kind: str):
         self.name = name
+        # M44: a `shared let` variable's index in the process-wide store
+        # (kind "shared"), and whether it holds a std:thread handle (a
+        # Thread/Semaphore/Channel struct: method calls on it need no lock).
+        self.shared_index = None
+        self.handle = False
         # M41b: a top-level `let` variable (not a `fn` declaration) -- what a
         # decorator of the same module may not use, see `_lookup`.
         self.top_level_let = False
@@ -649,6 +659,15 @@ class Resolver:
         # with the impl's/trait's own type params before resolving each
         # method body.
         self._fn_type_param_stack: list = []
+        # M44: `shared let` variables -- how many so far, their demangled
+        # names by index (for the LSP) and symbols by index, and the stack of
+        # the shared indices held lexically (by an enclosing `lock` in the
+        # same function; a nested `fn`/`detach` closure starts empty, a
+        # `defer` closure keeps the enclosing set).
+        self._shared_count = 0
+        self.shared_names: list = []
+        self._shared_symbols: list = []
+        self._held_locks: list = [frozenset()]
 
     # -- name table helpers ----------------------------------------------
 
@@ -669,6 +688,10 @@ class Resolver:
                 f"'self' is reserved (only valid as a method's first parameter) at position {position}"
             )
         scope = self.scopes[-1]
+        if name in scope and scope[name][2].shared_index is not None:
+            raise NameError(
+                f"'{name}' is a shared variable and can't be declared again in the same scope at position {position}"
+            )
         # M21: Rust-style same-scope `let` shadowing -- a `let` statement
         # redeclaring a name already in this exact scope replaces the
         # scope's binding (a fresh Symbol/slot, which the caller already
@@ -727,6 +750,140 @@ class Resolver:
             finally:
                 self._decorator_module = saved
 
+    def _bind_ident(self, ident: Ident):
+        """Look `ident` up (recording the reference; the usual NameError when
+        undefined). M44: a shared variable gets `shared_index`/`shared_name`/
+        `shared_locked` instead of an address. Returns its Symbol."""
+        frame_level, slot = self._lookup(ident.name, ident.position)
+        symbol = self.position_index[ident.position]
+        if symbol.shared_index is not None:
+            ident.address = None
+            ident.shared_index = symbol.shared_index
+            ident.shared_name = display_name(symbol.name)
+            ident.shared_locked = symbol.shared_index in self._held_locks[-1]
+            return symbol
+        ident.address = (self.frame_stack[-1].depth - frame_level.depth, slot)
+        return symbol
+
+    def _lookup_shared_quietly(self, name: str):
+        """M44: the Symbol `name` names, without recording a reference
+        (`lock`'s synthesized acquire/release)."""
+        for scope in reversed(self.scopes):
+            if name in scope:
+                return scope[name][2]
+        return None
+
+    @staticmethod
+    def _dotted_text(node) -> str:
+        if isinstance(node, FieldAccess):
+            return Resolver._dotted_text(node.obj) + "." + node.field
+        if isinstance(node, Ident):
+            return node.name
+        return "?"
+
+    @staticmethod
+    def _chain_root(node):
+        while isinstance(node, (FieldAccess, Index)):
+            node = node.obj
+        return node
+
+    def _shared_unheld(self, node) -> bool:
+        return (
+            isinstance(node, Ident)
+            and node.shared_index is not None
+            and node.shared_index not in self._held_locks[-1]
+        )
+
+    @staticmethod
+    def _mentions_shared(node, index: int) -> bool:
+        stack = [node]
+        while stack:
+            n = stack.pop()
+            if isinstance(n, (list, tuple)):
+                stack.extend(n)
+                continue
+            if isinstance(n, Ident) and n.shared_index == index:
+                return True
+            if dataclasses.is_dataclass(n) and not isinstance(n, type):
+                for f in dataclasses.fields(n):
+                    value = getattr(n, f.name)
+                    if isinstance(value, (list, tuple)) or dataclasses.is_dataclass(value):
+                        stack.append(value)
+        return False
+
+    def _check_shared_method_call(self, expr: MethodCall) -> None:
+        """M44 E1: a method call on a shared variable (or a chain rooted at
+        one) outside a lock on it -- unless it's a handle variable itself."""
+        root = self._chain_root(expr.obj)
+        if not self._shared_unheld(root):
+            return
+        symbol = self._shared_symbols[root.shared_index]
+        if symbol.handle and root is expr.obj:
+            return
+        name = root.shared_name
+        raise Exception(
+            f"Method call on shared variable '{name}' outside 'lock {name} {{ }}': it would act on a copy; "
+            f"write 'lock {name} {{ ... }}' at position {root.position}"
+        )
+
+    def _is_handle_let(self, stmt: LetStmt) -> bool:
+        prefix = self._pp.std_prefix("thread") if self._pp is not None and hasattr(self._pp, "std_prefix") else None
+        if prefix is None:
+            return False
+        if stmt.type_ann is not None:
+            return getattr(stmt.type_ann, "name", None) in (prefix + "Thread", prefix + "Semaphore", prefix + "Channel")
+        value = stmt.value
+        return (
+            isinstance(value, Call)
+            and isinstance(value.callee, Ident)
+            and value.callee.name in (prefix + "spawn", prefix + "semaphore", prefix + "channel")
+        )
+
+    def _resolve_shared_let(self, stmt: LetStmt, name_position: int) -> None:
+        if not self._at_top_level():
+            raise Exception(f"'shared let' is only allowed at the top level of a file at position {stmt.position}")
+        self.resolve_expr(stmt.value)
+        symbol = self._declare(stmt.name, None, name_position, kind="shared")
+        symbol.top_level_let = True
+        symbol.type_hint = self._type_hint(stmt.value)
+        symbol.shared_index = self._shared_count
+        symbol.handle = self._is_handle_let(stmt)
+        self._shared_count += 1
+        self.shared_names.append(display_name(stmt.name))
+        self._shared_symbols.append(symbol)
+        stmt.shared_index = symbol.shared_index
+
+    def _resolve_lock(self, expr: LockExpr) -> None:
+        indices = []
+        for target in expr.targets:
+            text = self._dotted_text(target)
+            if not isinstance(target, Ident):
+                raise Exception(f"'lock' takes shared variables, and '{text}' is not one at position {target.position}")
+            symbol = self._bind_ident(target)
+            if symbol.shared_index is None:
+                raise Exception(
+                    f"'lock' takes shared variables, and '{display_name(text)}' is not one at position {target.position}"
+                )
+            if symbol.shared_index in indices:
+                raise Exception(
+                    f"'{target.shared_name}' is locked twice in one 'lock' at position {target.position}"
+                )
+            indices.append(symbol.shared_index)
+        self._held_locks.append(self._held_locks[-1] | frozenset(indices))
+        try:
+            self.resolve_expr(expr.block)
+        finally:
+            self._held_locks.pop()
+
+    def _resolve_lock_step(self, expr) -> None:
+        symbol = self._lookup_shared_quietly(expr.name)
+        if symbol is None or symbol.shared_index is None:
+            raise Exception(
+                f"'lock' takes shared variables, and '{display_name(expr.name)}' is not one at position {expr.position}"
+            )
+        expr.shared_index = symbol.shared_index
+        expr.shared_name = display_name(symbol.name)
+
     def _resolve_ident_address(self, name: str, position: int) -> tuple:
         frame_level, slot = self._lookup(name, position)
         depth = self.frame_stack[-1].depth - frame_level.depth
@@ -744,7 +901,7 @@ class Resolver:
         docstring); otherwise a name that is a struct, an enum or a built-in
         type name evaluates to that type (M41a's `Type` value)."""
         try:
-            expr.address = self._resolve_ident_address(expr.name, expr.position)
+            self._bind_ident(expr)
             return
         except NameError:
             name = expr.name
@@ -1404,7 +1561,9 @@ class Resolver:
             name_position = stmt.name_position if stmt.name_position is not None else stmt.position
             if stmt.type_ann is not None:
                 self._record_type_expr(stmt.type_ann)
-            if isinstance(stmt.value, FnExpr):
+            if stmt.shared:
+                self._resolve_shared_let(stmt, name_position)
+            elif isinstance(stmt.value, FnExpr):
                 # Declare before resolving the body -- enables self-reference
                 # (recursion) for named function bindings. See module docstring.
                 slot = self.frame_stack[-1].alloc()
@@ -1439,6 +1598,25 @@ class Resolver:
                     f"{stmt.target.field}' at position {stmt.position}"
                 )
             self.resolve_expr(stmt.value)
+            # M44: assignments to / into shared variables (E2, E3).
+            target = stmt.target
+            if isinstance(target, Ident) and target.shared_index is not None:
+                if target.shared_index not in self._held_locks[-1] and self._mentions_shared(
+                    stmt.value, target.shared_index
+                ):
+                    name = target.shared_name
+                    raise Exception(
+                        f"'{name} = ...' reads shared variable '{name}' outside 'lock {name} {{ }}': another thread "
+                        f"can change it in between; write 'lock {name} {{ ... }}' at position {stmt.position}"
+                    )
+            elif isinstance(target, (FieldAccess, Index)):
+                root = self._chain_root(target)
+                if self._shared_unheld(root):
+                    name = root.shared_name
+                    raise Exception(
+                        f"Assignment into shared variable '{name}' outside 'lock {name} {{ }}': it would change a "
+                        f"copy; write 'lock {name} {{ ... }}' at position {stmt.position}"
+                    )
             if isinstance(stmt.target, Ident):
                 # M13: a variable reassigned to something of a different
                 # (or unknown) type loses its type hint -- conservative, see
@@ -1516,7 +1694,9 @@ class Resolver:
             # level and correct by-reference capture of enclosing
             # variables for free, with zero new resolve logic. See
             # docs/V2_DESIGN.md's M9 milestone.
-            self.resolve_expr(stmt.closure_expr)
+            # M44: a deferred block runs before an enclosing `lock` releases,
+            # so it keeps the locks held lexically around it.
+            self._resolve_fn_expr(stmt.closure_expr, keep_locks=True)
         elif isinstance(stmt, TestDecl):
             # M28 (docs/MAH_TEST.md): a hidden global slot for the test's
             # closure -- no name to declare, so nothing can refer to it.
@@ -1660,7 +1840,9 @@ class Resolver:
         for decorators in fn.param_decorators:
             self._resolve_decorators(decorators)
 
-    def _resolve_fn_expr(self, fn: FnExpr, allow_self: bool = False, defer_decorators: bool = False) -> None:
+    def _resolve_fn_expr(
+        self, fn: FnExpr, allow_self: bool = False, defer_decorators: bool = False, keep_locks: bool = False
+    ) -> None:
         if defer_decorators:
             self._pending_decorators.append(fn)
         else:
@@ -1682,9 +1864,11 @@ class Resolver:
         for texpr in fn.throws or []:
             self._pending_type_exprs.append((texpr, full_scope, inside))
         self._fn_type_param_stack.append(full_scope)
+        self._held_locks.append(self._held_locks[-1] if keep_locks else frozenset())
         try:
             self._resolve_fn_expr_body(fn, allow_self)
         finally:
+            self._held_locks.pop()
             self._fn_type_param_stack.pop()
 
     def _resolve_fn_expr_body(self, fn: FnExpr, allow_self: bool) -> None:
@@ -2173,10 +2357,18 @@ class Resolver:
                 any(isinstance(a, SpreadArg) for a in call.args) or any(n is None for n, _v, _p in call.kwargs)
             ):
                 raise SyntaxError(f"spread arguments can't be detached yet at position {expr.position}")
+            if expr.thread is not None:
+                self.resolve_expr(expr.thread)
             self.resolve_expr(expr.call)
             return
         if isinstance(expr, SleepAsyncExpr):
             self.resolve_expr(expr.arg)
+            return
+        if isinstance(expr, LockExpr):
+            self._resolve_lock(expr)
+            return
+        if isinstance(expr, (LockAcquire, LockRelease)):
+            self._resolve_lock_step(expr)
             return
         if isinstance(expr, FnExpr):
             self._resolve_fn_expr(expr)
@@ -2255,7 +2447,7 @@ class Resolver:
                 # check whether this is actually a bare enum unit-variant
                 # construction.
                 try:
-                    expr.obj.address = self._resolve_ident_address(expr.obj.name, expr.obj.position)
+                    self._bind_ident(expr.obj)
                     expr.enum_unit_type = None
                     return
                 except NameError:
@@ -2299,10 +2491,11 @@ class Resolver:
             if isinstance(expr.obj, Ident):
                 if expr.obj.name != "Self":
                     try:
-                        expr.obj.address = self._resolve_ident_address(expr.obj.name, expr.obj.position)
+                        self._bind_ident(expr.obj)
                     except NameError:
                         pass  # not a variable -- a type/trait path, below
                     else:
+                        self._check_shared_method_call(expr)
                         for arg in expr.args:
                             self.resolve_expr(arg)
                         self._resolve_kwargs(expr.kwargs)
@@ -2311,6 +2504,7 @@ class Resolver:
                 self._resolve_path_call(expr)
                 return
             self.resolve_expr(expr.obj)
+            self._check_shared_method_call(expr)
             for arg in expr.args:
                 self.resolve_expr(arg)
             self._resolve_kwargs(expr.kwargs)

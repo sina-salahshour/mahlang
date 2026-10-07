@@ -22,6 +22,7 @@ nothing from it, but the interpreter's `callmethod`/`to_str` do) and
 code_interpreter.py.
 """
 
+import itertools
 import re
 from decimal import Decimal
 
@@ -78,6 +79,23 @@ def display_name(name: str) -> str:
 def demangle_text(text: str) -> str:
     """`display_name` applied to every mangled name inside a message."""
     return _MANGLED.sub("", text) if "__mah_m" in text else text
+
+
+class _Absent:
+    """M16: the sentinel a defaulted-but-unbound parameter slot holds until
+    the callee's own `jmpset`-guarded default-computation code runs (see
+    docs/MAHC_FORMAT.md #6.1) -- never a real Mah value, never observed by
+    anything outside `_bind_params`/`jmpset` as long as an encoder emits
+    correct `jmpset` guards. M44: lives here (re-exported by
+    code_interpreter.py) so the thread runtime's copier can keep it as is."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "<absent>"
+
+
+ABSENT = _Absent()
 
 
 class TypeValue:
@@ -265,12 +283,16 @@ class PromiseInstance(EnumInstance):
     to this same heap object (Mah's usual reference semantics) sees the
     transition from Pending to Settled/Failed."""
 
-    __slots__ = ("callbacks", "observed")
+    __slots__ = ("callbacks", "observed", "producer")
 
     def __init__(self):
         super().__init__(type_name="Promise", variant="Pending", fields={})
         self.callbacks = []  # list[Callable[[bool, Any], None]], run synchronously on settle/fail
         self.observed = False
+        # M44 (docs/contracts/M44_threads.md #6.4): who settles this Promise,
+        # for deadlock detection -- ("task", task id), ("job", job id),
+        # ("join", thread id), or None.
+        self.producer = None
 
     def resolve(self, value):
         if self.variant in ("Settled", "Failed"):
@@ -293,6 +315,10 @@ class PromiseInstance(EnumInstance):
             callback(False, error)
 
 
+# M44: task ids are unique across every VM of the process.
+_TASK_IDS = itertools.count(1)
+
+
 class Task:
     """Async: one independent (pc, frame, return_stack, defer_stack)
     stepping context -- the main program is task 0, `detach` creates one
@@ -308,7 +334,9 @@ class Task:
     creates; `None` for the main program (task 0), which nothing is
     watching."""
 
-    __slots__ = ("pc", "current_frame", "return_stack", "defer_stack", "watching_promise")
+    __slots__ = (
+        "pc", "current_frame", "return_stack", "defer_stack", "watching_promise", "id", "held", "awaits_edge"
+    )
 
     def __init__(self, pc, current_frame, watching_promise=None):
         self.pc = pc
@@ -316,6 +344,13 @@ class Task:
         self.return_stack = []   # list[tuple[int, Frame]]
         self.defer_stack = []    # list[list[Closure]]
         self.watching_promise = watching_promise
+        # M44 (docs/contracts/M44_threads.md #6.1): a process-unique id, the
+        # shared variables this task holds (index -> [working value, depth,
+        # unwinding]; an implicit-call sub-task shares its caller's dict),
+        # and whether it recorded an await edge in the wait-for graph.
+        self.id = next(_TASK_IDS)
+        self.held = {}
+        self.awaits_edge = False
 
 
 # Mah's `none` -- a single shared singleton, not reallocated per use (see

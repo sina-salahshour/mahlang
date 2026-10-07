@@ -491,6 +491,17 @@ class _Lowerer:
             return Instr("native", (self.intern_native(a1), a2, a3))
         if op == "sleepasync":
             return Instr("native", (self.intern_native("time.sleep_async"), (a1,), a3))
+        # M44 (1.21): shared variables (docs/MAHC_FORMAT.md #4.6).
+        if op == "sharedget":
+            index, mode = a1
+            return Instr("sharedget", (index, self.intern_str(a2), mode, a3))
+        if op == "sharedset":
+            return Instr("sharedset", (a1, self.intern_str(a2), a3))
+        if op == "sharedlock":
+            return Instr("sharedlock", (a1, self.intern_str(a2), a3))
+        if op == "sharedunlock":
+            index, mode = a1
+            return Instr("sharedunlock", (index, self.intern_str(a2), mode))
         raise AssertionError(f"unhandled IR op {op!r}")
 
     # -- META (docs/MAHC_FORMAT.md #4.10) -------------------------------------

@@ -83,6 +83,14 @@ have `fn=None`/a body respectively, every `impl` method has a body),
 three-phase top-level resolution these introduce, and `compiler/codegen.py`
 for the `defmethod`/`callmethod` opcodes they compile to).
 
+M44 (docs/contracts/M44_threads.md): `detach(t) expr` -- `DetachExpr` gains
+`thread` (the thread expression; `None` for today's same-thread form),
+`thread_position` and `paren_head`; `shared let` is a `LetStmt` with
+`shared=True`; `lock a, b { body }` is a `LockExpr` whose `block` is the
+desugared block (`LockAcquire` per target, each followed by a `defer` of its
+`LockRelease`, with the user's body as the tail). Shared-variable `Ident`s
+carry the resolver's `shared_index`/`shared_name`/`shared_locked`.
+
 Every node carries `position` (a source offset into the *combined*,
 preprocessed text) so error messages can point mah.py at a `file:line:col`
 the same way v1's did.
@@ -174,6 +182,13 @@ class Ident:
     # built-in type -- `("struct" | "enum" | "prim", name)`. The expression
     # then evaluates to that type (a `Type` value); `address` stays None.
     type_value: Optional[tuple] = field(default=None, repr=False)
+    # M44: set by Resolver when this names a `shared let` variable -- its
+    # index in the process-wide store, its demangled source name, and
+    # whether it is written lexically inside a `lock` on it (`address`
+    # stays None).
+    shared_index: Optional[int] = field(default=None, repr=False)
+    shared_name: Optional[str] = field(default=None, repr=False)
+    shared_locked: bool = field(default=False, repr=False)
 
 
 @dataclass
@@ -338,6 +353,12 @@ class DetachExpr:
                    # call at all, so "detaching" it just means skipping the
                    # auto-await a bare sleep_async(ms) gets)
     position: int
+    # M44: `detach(t) expr` -- the thread expression (None: same-thread
+    # detach), the `(` token's position, and (today's form only) the
+    # parenthesized expression the operand started with, for the checker.
+    thread: Optional[object] = field(default=None)
+    thread_position: Optional[int] = field(default=None, repr=False)
+    paren_head: Optional[object] = field(default=None, repr=False)
 
 
 @dataclass
@@ -406,6 +427,10 @@ class LetStmt:
     # `let f = fn(...) { ... }`, which is a statement) -- decorators and the
     # decorator phase's "declaration vs statement" split (codegen.py) need it.
     is_decl: bool = field(default=False, repr=False)
+    # M44: `shared let NAME = value` (top level only); `position` is then the
+    # `shared` token's. `shared_index` is set by Resolver.
+    shared: bool = field(default=False)
+    shared_index: Optional[int] = field(default=None, repr=False)
 
 
 @dataclass
@@ -953,3 +978,34 @@ class TypePat:
     # set by Resolver: the slot number this binding's value is stored
     # into (None for `_`) -- exactly like `BindPat.address`.
     address: Optional[int] = field(default=None, repr=False)
+
+
+# -- M44: lock ------------------------------------------------------------
+
+
+@dataclass
+class LockExpr:
+    """`lock a, b { body }` -- `targets` are the parsed target nodes (an
+    `Ident`, or a `FieldAccess` chain before preprocessing); `block` is the
+    desugared block: per target a `LockAcquire` statement then a `defer` of
+    its `LockRelease`, with the user's body as the block's tail."""
+
+    targets: list
+    block: Block
+    position: int  # the `lock` token
+
+
+@dataclass
+class LockAcquire:
+    name: str  # the target as written (`a`, or `lib.hits` if dotted)
+    position: int
+    shared_index: Optional[int] = field(default=None, repr=False)
+    shared_name: Optional[str] = field(default=None, repr=False)
+
+
+@dataclass
+class LockRelease:
+    name: str
+    position: int
+    shared_index: Optional[int] = field(default=None, repr=False)
+    shared_name: Optional[str] = field(default=None, repr=False)

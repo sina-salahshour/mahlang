@@ -41,6 +41,9 @@ import dataclasses
 from dataclasses import dataclass
 
 from .ast_nodes import (
+    LockAcquire,
+    LockExpr,
+    LockRelease,
     TestDecl,
     NativeCall,
     AssignStmt,
@@ -1416,11 +1419,18 @@ class Checker:
         if isinstance(expr, Binary):
             return self._check_binary(expr)
         if isinstance(expr, Call):
-            return self._check_call(expr)
+            result = self._check_call(expr)
+            self._warn_shared_args(expr.args)
+            return result
         if isinstance(expr, SleepAsyncExpr):
             self._expect(self._check_expr(expr.arg), NUMBER, expr.arg.position)
             return NONE
         if isinstance(expr, DetachExpr):
+            if expr.thread is not None:
+                # M44: `detach(t) expr` needs std:thread's Thread.
+                thread = prune(self._check_expr(expr.thread))
+                if self._known(thread) and not self._is_std_thread_type(thread, "Thread"):
+                    self._error(expr.position, f"detach(...) needs a thread.Thread, got {show(thread)}")
             # M26: the task's errors fail its Promise instead of happening
             # here; `.await` re-throws them.
             node = ESet("acc", self.level, position=expr.position)
@@ -1430,7 +1440,19 @@ class Checker:
                 inner = self._check_expr(expr.call)
             finally:
                 accs.pop()
+            if expr.thread is None and isinstance(expr.paren_head, Ident):
+                head = prune(self._ident_type(expr.paren_head))
+                if self._is_std_thread_type(head, "Thread"):
+                    self._warn(
+                        expr.position,
+                        "'detach (...)' here is not the thread form, so nothing runs on the thread; put the "
+                        "operand on the same line as 'detach(t)', or write 'detach(t) { ... }'",
+                    )
             return TCon("Promise", [inner], node)
+        if isinstance(expr, LockExpr):
+            return self._check_block(expr.block, hint)
+        if isinstance(expr, (LockAcquire, LockRelease)):
+            return NONE
         if isinstance(expr, FnExpr):
             sig, _ = self._check_fn(expr, hint)
             return sig
@@ -1441,7 +1463,9 @@ class Checker:
         if isinstance(expr, FieldAccess):
             return self._check_field_access(expr)
         if isinstance(expr, MethodCall):
-            return self._check_method_call(expr)
+            result = self._check_method_call(expr)
+            self._warn_shared_args(expr.args)
+            return result
         if isinstance(expr, IfStmt):
             return self._check_if(expr, hint, used)
         if isinstance(expr, MatchStmt):
@@ -1904,7 +1928,87 @@ class Checker:
             self._note_none(loop.var)
         return prune(loop.var) if used else NONE
 
+    # -- M44: threads ---------------------------------------------------------
+
+    def _warn(self, position: int, message: str) -> None:
+        self.diagnostics.append(TypeDiagnostic("warning", message, position))
+
+    @staticmethod
+    def _known(t) -> bool:
+        """A type the checker knows (not Unknown, an unsolved variable or
+        the type of a bare `none`)."""
+        return not isinstance(t, (TUnknown, TVar)) and not is_con(t, "None")
+
+    def _is_std_thread_type(self, t, name: str) -> bool:
+        pp = getattr(self.r, "_pp", None)
+        prefix = pp.std_prefix("thread") if pp is not None and hasattr(pp, "std_prefix") else None
+        return prefix is not None and isinstance(t, TCon) and t.name == prefix + name
+
+    def _copied_shared_type(self, t) -> bool:
+        """W2/W3: a shared value whose changes would be lost on a copy."""
+        t = prune(t)
+        if not isinstance(t, TCon):
+            return False
+        if t.name in ("Vector", "Map", "Bytes"):
+            return True
+        if t.name in ("Option", "Promise", "RuntimeError"):
+            return False
+        if any(self._is_std_thread_type(t, n) for n in ("Thread", "Semaphore", "Channel")):
+            return False
+        return t.name in self.structs or t.name in self.enums
+
+    def _warn_shared_args(self, args: list) -> None:
+        """W2: a shared variable passed directly to a call outside its lock."""
+        for arg in args:
+            if isinstance(arg, Ident) and arg.shared_index is not None and not arg.shared_locked:
+                if self._copied_shared_type(self._ident_type(arg)):
+                    name = arg.shared_name
+                    self._warn(
+                        arg.position,
+                        f"shared variable '{name}' is passed as a copy: changes the callee makes to it are "
+                        f"lost; to change it, call inside 'lock {name} {{ ... }}'",
+                    )
+
+    def _warn_shared_loop(self, expr: ForStmt) -> None:
+        """W3: assigning into the loop variable of a loop over a shared
+        variable (outside its lock)."""
+        iterable = expr.iterable
+        if not (isinstance(iterable, Ident) and iterable.shared_index is not None and not iterable.shared_locked):
+            return
+        item = self._sym(expr.value_position)
+        if item is None:
+            return
+        found = None
+        stack = [expr.body]
+        while stack:
+            n = stack.pop()
+            if isinstance(n, (list, tuple)):
+                stack.extend(n)
+                continue
+            if isinstance(n, FnExpr):
+                continue
+            if isinstance(n, AssignStmt) and isinstance(n.target, (FieldAccess, Index)):
+                root = n.target
+                while isinstance(root, (FieldAccess, Index)):
+                    root = root.obj
+                if isinstance(root, Ident) and self._sym(root.position) is item:
+                    if found is None or n.position < found:
+                        found = n.position
+            if dataclasses.is_dataclass(n) and not isinstance(n, type):
+                for f in dataclasses.fields(n):
+                    value = getattr(n, f.name)
+                    if isinstance(value, (list, tuple)) or dataclasses.is_dataclass(value):
+                        stack.append(value)
+        if found is not None:
+            name = iterable.shared_name
+            self._warn(
+                found,
+                f"'{expr.value_name}' is a copy of an element of shared variable '{name}': assigning into it "
+                f"changes nothing shared; loop inside 'lock {name} {{ ... }}'",
+            )
+
     def _check_for(self, expr: ForStmt, used: bool):
+        self._warn_shared_loop(expr)
         iterable = prune(self._check_expr(expr.iterable))
         element = self._element_type(iterable, expr.iterable.position)
         value_symbol = self._sym(expr.value_position)

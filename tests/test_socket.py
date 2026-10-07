@@ -102,7 +102,7 @@ class ArgumentErrorTests(unittest.TestCase):
 
 class RuntimeBehaviorTests(unittest.TestCase):
     def test_bytecode_minor(self):
-        self.assertEqual(MINOR, 20)
+        self.assertEqual(MINOR, 21)
         # M39/M42: std:socket declares `socket.start_tls` (1.19) and the TLS
         # server natives (1.20) too
         self.assertEqual(minor_of(SOCKET + 'print(socket.listen(0))'), 20)

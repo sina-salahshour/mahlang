@@ -244,7 +244,7 @@ class StartTlsArgumentTests(unittest.TestCase):
 
 class BytecodeTests(unittest.TestCase):
     def test_minor(self):
-        self.assertEqual(MINOR, 20)
+        self.assertEqual(MINOR, 21)
         self.assertEqual(NATIVE_ARITIES["socket.start_tls"], 3)
         self.assertEqual(NATIVE_SINCE_MINOR["socket.start_tls"], 19)
         self.assertEqual(minor_of(HTTP + 'print(http.get)'), 20)

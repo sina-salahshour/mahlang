@@ -44,6 +44,9 @@ from .ast_nodes import (
     IfStmt,
     ImplDecl,
     LetStmt,
+    LockAcquire,
+    LockExpr,
+    LockRelease,
     MatchArm,
     MatchStmt,
     MethodCall,
@@ -146,6 +149,41 @@ _MULTIPLICATIVE_OPS = {
 # literal `;` after a value-less `return`): any of these also works,
 # which only *accepts* strictly more valid-v1-equivalent programs.
 _EXPR_STOPPERS = {TokenType.SEMICOLON, TokenType.BRACE_CLOSE, TokenType.EOF}
+
+# M44 (docs/contracts/M44_threads.md #3.1): after `detach (x)`, a token of one
+# of these types on the same line starts the operand of the thread form
+# `detach(t) expr` (BRACE_OPEN only where a struct literal is allowed).
+_DETACH_THREAD_OPERAND_START = {
+    TokenType.ID,
+    TokenType.NUMBER,
+    TokenType.STRING,
+    TokenType.TRUE,
+    TokenType.FALSE,
+    TokenType.NONE,
+    TokenType.SOME,
+    TokenType.FN,
+    TokenType.DETACH,
+    TokenType.SLEEP_ASYNC,
+    TokenType.IF,
+    TokenType.MATCH,
+    TokenType.FOR,
+    TokenType.WHILE,
+    TokenType.TRY,
+    TokenType.THROW,
+    TokenType.BANG,
+}
+# ...and these, on the same line, are a compile error (a statement can't be
+# the operand).
+_DETACH_THREAD_STATEMENTS = {
+    TokenType.PRINT,
+    TokenType.LET,
+    TokenType.RETURN,
+    TokenType.DEFER,
+    TokenType.BREAK,
+    TokenType.CONTINUE,
+}
+_DETACH_NEEDS_EXPR = "detach(t) needs an expression; write 'detach(t) { ... }'"
+_DETACH_SAME_LINE = "detach(t) and its operand must be on the same line; write 'detach(t) {' on one line"
 
 # M5: statement-leading tokens still handled by parse_stmt's own dedicated
 # logic, unchanged. IF/MATCH are deliberately NOT here any more -- they
@@ -298,6 +336,16 @@ class Parser:
                     stmts.append(self._parse_decorated_item(end_type))
                     continue
 
+                if self._at_shared_let():
+                    # M44: `shared let NAME = value` (top level only -- the
+                    # resolver's E5).
+                    shared_tok = self.advance()
+                    stmt = self.parse_stmt()
+                    stmt.shared = True
+                    stmt.position = shared_tok.position
+                    stmts.append(stmt)
+                    continue
+
                 if self.current.type in _STATEMENT_LEADING:
                     stmts.append(self.parse_stmt())
                     continue
@@ -356,6 +404,7 @@ class Parser:
                         SleepAsyncExpr,
                         FieldAccess,
                         MethodCall,
+                        LockExpr,
                     ),
                 ) or (
                     # M25: only the catch form (`try { } catch { }`) is
@@ -441,6 +490,65 @@ class Parser:
                     # would wrongly eat that legitimate resumption token.
                     self.advance()
         return stmts, tail
+
+    # -- M44: `shared let` / `lock` (contextual words) ----------------------
+
+    def _next_on_same_line(self, tok: Token, nxt: Token) -> bool:
+        start = tok.position + len(tok.literal)
+        return "\n" not in self.lexer.input_str[start : nxt.position]
+
+    def _at_shared_let(self) -> bool:
+        tok = self.current
+        if tok.type is not TokenType.ID or tok.literal != "shared":
+            return False
+        nxt = self.lexer.peek_token()
+        return nxt.type is TokenType.LET and self._next_on_same_line(tok, nxt)
+
+    def _at_lock(self, tok: Token) -> bool:
+        """`tok` is the current token: an ID `lock` followed by an ID on the
+        same line starts a `lock` expression."""
+        if tok.literal != "lock":
+            return False
+        nxt = self.lexer.peek_token()
+        return nxt.type is TokenType.ID and self._next_on_same_line(tok, nxt)
+
+    def _parse_lock(self, lock_tok: Token) -> LockExpr:
+        """M44: `lock a, b.c { body }` -- desugared into a block that, per
+        target in order, acquires it and defers its release; the user's
+        body is the block's tail (docs/contracts/M44_threads.md #8.3)."""
+        targets = []
+        while True:
+            name_tok = self.expect(TokenType.ID)
+            target = Ident(name=name_tok.literal, position=name_tok.position)
+            text = name_tok.literal
+            while self.current.type is TokenType.DOT:
+                self.advance()
+                field_tok = self.expect(TokenType.ID)
+                target = FieldAccess(obj=target, field=field_tok.literal, position=field_tok.position)
+                text += "." + field_tok.literal
+            targets.append((target, text, name_tok.position))
+            if self.current.type is not TokenType.COMMA:
+                break
+            self.advance()
+        body = self.parse_block()
+        stmts = []
+        for _target, text, position in targets:
+            stmts.append(ExprStmt(value=LockAcquire(name=text, position=position), position=position))
+            release = FnExpr(
+                name=None,
+                params=[],
+                body=Block(
+                    stmts=[ExprStmt(value=LockRelease(name=text, position=position), position=position)],
+                    position=position,
+                    tail=None,
+                ),
+                position=lock_tok.position,
+                name_position=None,
+                param_positions=[],
+            )
+            stmts.append(DeferStmt(closure_expr=release, position=lock_tok.position))
+        block = Block(stmts=stmts, tail=body, position=lock_tok.position)
+        return LockExpr(targets=[t for t, _text, _pos in targets], block=block, position=lock_tok.position)
 
     # -- M41b: decorators --------------------------------------------------
 
@@ -1881,6 +1989,9 @@ class Parser:
             return self._parse_postfix_from(self._parse_bracket_literal())
 
         if tok.type is TokenType.ID:
+            if self._at_lock(tok):
+                self.advance()
+                return self._parse_lock(tok)
             self.advance()
             if self.current.type is TokenType.PAREN_OPEN:
                 args, kwargs = self._parse_paren_args()
@@ -1967,13 +2078,49 @@ class Parser:
         runs as a new task. Any other operand is wrapped in a synthesized
         zero-param closure and that closure's call is detached, the same
         desugaring `defer` uses for its body, so the whole expression runs
-        in the new task and captures enclosing variables by reference."""
-        operand = self._parse_primary()
+        in the new task and captures enclosing variables by reference.
+
+        M44 (docs/contracts/M44_threads.md #3.1): `detach(t) expr` runs `expr`
+        on the thread `t` -- the thread form, recognized when the `)` is
+        followed, on the same line, by a token that starts an operand (see
+        `_DETACH_THREAD_OPERAND_START`). Its operand is always wrapped in a
+        closure (also a call), so everything in it is evaluated on the
+        thread. Any other `detach (x)...` keeps its old meaning."""
+        thread = None
+        thread_position = None
+        paren_head = None
+        if self.current.type is TokenType.PAREN_OPEN:
+            paren_tok = self.advance()
+            old = self._struct_literal_allowed
+            self._struct_literal_allowed = True
+            try:
+                inner = self.parse_expr()
+            finally:
+                self._struct_literal_allowed = old
+            self.expect(TokenType.PAREN_CLOSE)
+            nxt = self.current
+            same_line = self._on_same_line()
+            if same_line and (
+                nxt.type in _DETACH_THREAD_OPERAND_START
+                or (nxt.type is TokenType.BRACE_OPEN and self._struct_literal_allowed)
+            ):
+                thread = inner
+                thread_position = paren_tok.position
+                operand = self._parse_unary() if nxt.type is TokenType.BANG else self._parse_primary()
+            elif same_line and nxt.type in _DETACH_THREAD_STATEMENTS:
+                raise SyntaxError(f"{_DETACH_NEEDS_EXPR} at position '{nxt.position}'")
+            elif nxt.type is TokenType.BRACE_OPEN and not same_line and self._is_name_chain(inner):
+                raise SyntaxError(f"{_DETACH_SAME_LINE} at position '{nxt.position}'")
+            else:
+                operand = self._parse_postfix_from(inner)
+                paren_head = inner
+        else:
+            operand = self._parse_primary()
         awaits = []
         while isinstance(operand, FieldAccess) and operand.field == "await":
             awaits.append(operand)
             operand = operand.obj
-        if not isinstance(operand, (Call, MethodCall, SleepAsyncExpr)):
+        if thread is not None or not isinstance(operand, (Call, MethodCall, SleepAsyncExpr)):
             closure = FnExpr(
                 name=None,
                 params=[],
@@ -1984,10 +2131,22 @@ class Parser:
                 detached=True,
             )
             operand = Call(callee=closure, args=[], position=detach_tok.position, kwargs=[])
-        node = DetachExpr(call=operand, position=detach_tok.position)
+        node = DetachExpr(
+            call=operand,
+            position=detach_tok.position,
+            thread=thread,
+            thread_position=thread_position,
+            paren_head=paren_head,
+        )
         for await_node in reversed(awaits):
             node = FieldAccess(obj=node, field="await", position=await_node.position)
         return node
+
+    @staticmethod
+    def _is_name_chain(node) -> bool:
+        while isinstance(node, FieldAccess):
+            node = node.obj
+        return isinstance(node, Ident)
 
     def _parse_bracket_literal(self):
         """M19: `[a, b]` (Vector), `[k: v, ...]` (Map), `[]`, `[:]`. The

@@ -1,0 +1,70 @@
+# M44: threads -- jobs on other threads, shared variables, locks and channels.
+import thread from "std:thread"
+
+# Shared variables live outside every thread; `lock` changes them safely.
+shared let hits = 0
+shared let seen = []
+
+fn fib(n) {
+    if n < 2 { return n }
+    fib(n - 1) + fib(n - 2)
+}
+
+fn visit(n) {
+    for let i in 0..50 {
+        lock hits { hits = hits + 1 }
+    }
+    lock seen { seen.push(n) }
+}
+
+fn square_all(tasks: thread.Channel, results: thread.Channel) throws ThreadError {
+    for let n in tasks { results.send(n * n) }
+}
+
+fn main() throws ThreadError {
+    # 1. A job runs on another thread, on a copy of what it uses.
+    let worker = thread.spawn(name: "worker")
+    let p = detach(worker) fib(18)
+    print("fib(18) =", p.await)
+    print(worker.run(fib, 12).await, "on", detach(worker) { thread.name() }.await)
+
+    # 2. Variables are copied when the job is queued.
+    let greeting = "hello"
+    let copy_job = detach(worker) {
+        greeting = greeting + " from " + thread.name()
+        greeting
+    }
+    print(copy_job.await, "/", greeting)
+
+    # 3. Shared variables: every job changes the same ones.
+    let pool = thread.spawn(name: "pool", workers: 4)
+    let jobs = []
+    for let n in 0..8 { jobs.push(pool.run(visit, n)) }
+    for let job in jobs { job.await }
+    let snapshot = seen
+    let total = 0
+    for let n in snapshot { total = total + n }
+    print("hits:", hits, "seen:", snapshot.len(), "sum:", total)
+
+    # 4. Channels pass messages between threads.
+    let tasks = thread.channel()
+    let results = thread.channel()
+    for let i in 0..3 { pool.run(square_all, tasks, results) }
+    for let n in 1..=5 { tasks.send(n) }
+    tasks.close()
+    let sum = 0
+    for let i in 0..5 { sum = sum + results.recv() }
+    print("sum of squares:", sum)
+
+    # 5. A job's error comes back through its Promise.
+    let failing = detach(worker) { throw RuntimeError.ArgumentError { message: "bad input" } }
+    print(try { failing.await } catch { e => { "caught: " + e.message() } })
+
+    pool.join()
+    worker.join()
+    print("done")
+}
+
+try { main() } catch {
+    e: ThreadError => { print("failed:", e.message()) }
+}

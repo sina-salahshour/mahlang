@@ -243,6 +243,10 @@ def _uses_prelude(token_lists: list) -> bool:
                 return True
         for i in range(len(tokens) - 1):
             a, b = tokens[i], tokens[i + 1]
+            # M44: `shared let` and `lock NAME` can throw the prelude's
+            # `ThreadError` ("deadlock", "not_sendable").
+            if a.kind == "id" and b.kind == "id" and ((a.value == "shared" and b.value == "let") or a.value == "lock"):
+                return True
             if a.kind == "dot" and b.kind == "dot" and b.start == a.end:
                 return True
             # a `for` loop (`for let x in ...`) iterates via the prelude's
@@ -368,6 +372,12 @@ class Preprocessed:
                 return segment.start + segment.length
         return None
 
+    def std_prefix(self, name: str) -> Optional[str]:
+        """M44: the mangling prefix (`__mah_m<idx>_`) of the standard library
+        module `std:<name>` if the program includes it, else None."""
+        idx = self.module_index.get(os.path.join(STD_DIR, f"{name}.mh"))
+        return None if idx is None else f"__mah_m{idx}_"
+
     def exported_names(self, path: Optional[str]) -> set:
         return self.exports.get(path, set()) if path else set()
 
@@ -411,6 +421,13 @@ def analyze_module(tokens: list) -> ModuleInfo:
 
         if depth == 0 and tok.kind == "id" and tok.value == "export":
             nxt = tokens[i + 1] if i + 1 < count else None
+            if _is_shared_let(tokens, i + 1):
+                # M44: `export shared let NAME`
+                if i + 3 < count and tokens[i + 3].kind == "id":
+                    exported.add(tokens[i + 3].value)
+                    top_level.add(tokens[i + 3].value)
+                i += 1
+                continue
             if nxt is not None and nxt.kind == "id" and nxt.value in _EXPORTABLE_DECLS:
                 if i + 2 < count and tokens[i + 2].kind == "id":
                     name = tokens[i + 2].value
@@ -443,6 +460,17 @@ def analyze_module(tokens: list) -> ModuleInfo:
         i += 1
 
     return ModuleInfo(exported=exported, top_level=top_level, types=types)
+
+
+def _is_shared_let(tokens: list, k: int) -> bool:
+    """M44: `shared let` starting at token `k`."""
+    return (
+        k + 1 < len(tokens)
+        and tokens[k].kind == "id"
+        and tokens[k].value == "shared"
+        and tokens[k + 1].kind == "id"
+        and tokens[k + 1].value == "let"
+    )
 
 
 def _is_punct(tokens: list, k: int, ch: str) -> bool:
@@ -1002,7 +1030,11 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
             # -- export keyword (depth 0) -----------------------------------
             if depth == 0 and tok.kind == "id" and tok.value == "export":
                 nxt = tokens[i + 1] if i + 1 < count else None
-                if (nxt is not None and nxt.kind == "id" and nxt.value in _EXPORTABLE_DECLS) or _is_extern_fn(tokens, i + 1):
+                if (
+                    (nxt is not None and nxt.kind == "id" and nxt.value in _EXPORTABLE_DECLS)
+                    or _is_extern_fn(tokens, i + 1)
+                    or _is_shared_let(tokens, i + 1)
+                ):
                     emit_gap(tok.start)
                     cursor = tok.end  # drop the `export` keyword only
                     i += 1

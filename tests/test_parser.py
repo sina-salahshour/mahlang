@@ -670,5 +670,123 @@ def _parse_with_parser(source: str):
     return parser.parse_program(), parser
 
 
+class ThreadSyntaxTests(unittest.TestCase):
+    """M44 (docs/contracts/M44_threads.md #3.1, #5.1)."""
+
+    def parse(self, source: str):
+        program, parser = _parse_with_parser(source)
+        self.assertEqual(parser.errors, [])
+        return program
+
+    def first(self, source: str):
+        return self.parse(source)[0].value
+
+    def test_thread_form(self):
+        from mah.compiler.ast_nodes import FnExpr as _Fn
+
+        for src in ("detach(t) f(x)", "detach (t) f(x)"):
+            with self.subTest(src=src):
+                node = self.first(src)
+                self.assertIsInstance(node, DetachExpr)
+                self.assertEqual(node.thread, Ident(name="t", position=src.index("t)")))
+                self.assertIsInstance(node.call, Call)
+                closure = node.call.callee
+                self.assertIsInstance(closure, _Fn)
+                self.assertTrue(closure.detached)
+                self.assertEqual(closure.params, [])
+                tail = closure.body.tail
+                self.assertIsInstance(tail, Call)
+                self.assertEqual(tail.callee.name, "f")
+                self.assertEqual([a.name for a in tail.args], ["x"])
+
+    def test_todays_meanings_are_kept(self):
+        node = self.first("detach (a + b)")
+        self.assertIsNone(node.thread)
+        self.assertIsInstance(node.call.callee.body.tail, Binary)
+        node = self.first("detach (1 + 2).await")
+        self.assertIsInstance(node, FieldAccess)
+        self.assertEqual(node.field, "await")
+        self.assertIsNone(node.obj.thread)
+        node = self.first("detach (f)(x)")
+        self.assertIsNone(node.thread)
+        self.assertEqual(node.call.callee, Ident(name="f", position=8))
+        self.assertEqual([a.name for a in node.call.args], ["x"])
+        node = self.first("detach (a) - b")
+        self.assertIsInstance(node, Binary)
+        self.assertEqual(node.op, "-")
+        self.assertIsInstance(node.lhs, DetachExpr)
+
+    def test_a_newline_ends_the_detach(self):
+        program = self.parse("detach(t)\nfoo()")
+        self.assertEqual(len(program), 2)
+        self.assertIsNone(program[0].value.thread)
+
+    def test_await_belongs_to_the_promise(self):
+        node = self.first("detach(t) f(x).await")
+        self.assertIsInstance(node, FieldAccess)
+        self.assertEqual(node.field, "await")
+        self.assertEqual(node.obj.thread, Ident(name="t", position=7))
+
+    def test_no_thread_form_in_a_condition(self):
+        node = self.first("while detach (p) { break }")
+        self.assertIsInstance(node.cond, DetachExpr)
+        self.assertIsNone(node.cond.thread)
+
+    def test_paren_head(self):
+        node = self.first("detach (t)[1]")
+        self.assertIsNone(node.thread)
+        self.assertEqual(node.paren_head, Ident(name="t", position=8))
+
+    def test_compile_errors(self):
+        from tests.support import compile_source
+
+        needs = "detach(t) needs an expression; write 'detach(t) { ... }'"
+        same_line = "detach(t) and its operand must be on the same line; write 'detach(t) {' on one line"
+        for src, message in (
+            ('detach(t) print("hi")', needs),
+            ("detach(t) let x = 1", needs),
+            ("fn f() { detach(t) return }", needs),
+            ("detach(t)\n{ 1 }", same_line),
+            ("detach(a.b)\n{ 1 }", same_line),
+        ):
+            with self.subTest(src=src):
+                with self.assertRaises(SyntaxError) as cm:
+                    compile_source(text="let t = 1\nlet a = 1\n" + src)
+                self.assertIn(message, str(cm.exception))
+        _program, parser = _parse_with_parser("detach (a + b)\n{ 1 }")
+        self.assertEqual(parser.errors, [])
+
+    def test_shared_let(self):
+        node = self.parse("shared let x = 1")[0]
+        self.assertIsInstance(node, LetStmt)
+        self.assertTrue(node.shared)
+        self.assertEqual(node.position, 0)
+        node = self.parse("let shared = [1]")[0]
+        self.assertIsInstance(node, LetStmt)
+        self.assertFalse(node.shared)
+        self.assertEqual(node.name, "shared")
+
+    def test_lock(self):
+        from mah.compiler.ast_nodes import DeferStmt, LockAcquire, LockExpr
+
+        node = self.first("lock a, b { a }")
+        self.assertIsInstance(node, LockExpr)
+        self.assertEqual([t.name for t in node.targets], ["a", "b"])
+        stmts = node.block.stmts
+        self.assertEqual(len(stmts), 4)
+        self.assertIsInstance(stmts[0].value, LockAcquire)
+        self.assertEqual(stmts[0].value.name, "a")
+        self.assertIsInstance(stmts[1], DeferStmt)
+        self.assertIsInstance(stmts[2].value, LockAcquire)
+        self.assertEqual(stmts[2].value.name, "b")
+        self.assertIsInstance(stmts[3], DeferStmt)
+        self.assertEqual(node.block.tail.tail, Ident(name="a", position=12))
+
+    def test_lock_as_a_name(self):
+        program = self.parse("let lock = 2\nprint(lock)")
+        self.assertIsInstance(program[0], LetStmt)
+        self.assertIsInstance(program[1], PrintStmt)
+
+
 if __name__ == "__main__":
     unittest.main()

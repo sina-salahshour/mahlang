@@ -91,21 +91,8 @@ _BINOP_SYMBOLS = {
 }
 
 
-class _Absent:
-    """M16: the sentinel a defaulted-but-unbound parameter slot holds until
-    the callee's own `jmpset`-guarded default-computation code runs (see
-    docs/MAHC_FORMAT.md #6.1) -- never a real Mah value, never observed by
-    anything outside `_bind_params`/`jmpset` as long as an encoder emits
-    correct `jmpset` guards (the VM's own responsibility ends at providing
-    the mechanism)."""
-
-    __slots__ = ()
-
-    def __repr__(self) -> str:
-        return "<absent>"
-
-
-ABSENT = _Absent()
+# M44: moved to runtime_values (the thread runtime's copier needs it).
+from .runtime_values import ABSENT, _Absent  # noqa: E402,F401
 
 
 class NativeMethod(NamedTuple):
@@ -535,7 +522,25 @@ def _link_instr(instr, strings: list, constants: list, types: list, natives: lis
         native_idx, args, dest = a
         _name, _arity, impl = natives[native_idx]
         return ("native", impl, args, dest)
+    # M44 (1.21): shared variables (docs/MAHC_FORMAT.md #4.6).
+    if op == "sharedget":
+        index, name_idx, mode, dest = a
+        _check_mode(mode, op)
+        return ("sharedget", index, strings[name_idx], mode, dest)
+    if op == "sharedset":
+        return ("sharedset", a[0], strings[a[1]], a[2])
+    if op == "sharedlock":
+        return ("sharedlock", a[0], strings[a[1]], a[2])
+    if op == "sharedunlock":
+        index, name_idx, mode = a
+        _check_mode(mode, op)
+        return ("sharedunlock", index, strings[name_idx], mode)
     raise AssertionError(f"unknown linked opcode {op!r}")
+
+
+def _check_mode(mode: int, op: str) -> None:
+    if mode not in (0, 1):
+        raise MahRuntimeError(f"bad mode {mode} for '{op}'", kind="Internal")
 
 
 def _link_debug(debug, strings: list) -> DebugIndex:
@@ -1030,26 +1035,35 @@ class _IoHub:
     threads, which only ever report back through `done`; the scheduler
     settles their Promises on the VM's own thread. `pending` counts the
     operations started and not yet settled -- the program keeps running
-    while any is. Standard input has one reader thread, so lines are handed
-    out in the order `input` asked for them."""
+    while any is. Standard input has one reader thread per run, so lines are
+    handed out in the order `input` asked for them.
 
-    def __init__(self, args=()):
+    M44: one hub per VM (the main VM and every job VM); the open-file and
+    socket tables and the stdin reader belong to the run's ThreadRuntime and
+    are shared by every VM, and only the main VM's hub (`owns_tables`) closes
+    them. A job's hub starts with a copy of its submitter's environment."""
+
+    def __init__(self, args=(), env=None, runtime=None, owns_tables=True, done=None):
+        from .thread_runtime import HandleTables
+
         # M36 (std:process): the program's arguments, and its environment
         # table -- a snapshot of the process's environment (mah/process_natives.py).
         self.args = list(args)
-        self.env = snapshot_environment()
+        self.env = env if env is not None else snapshot_environment()
         # (promise, "line", the line or None at end of input) from the stdin
-        # reader, or (promise, "value", a Mah value) from a job (M35)
-        self.done: queue.Queue = queue.Queue()
+        # reader, or (promise, "value", a Mah value) from a job (M35), or (M44)
+        # a completion from the thread runtime.
+        self.done: queue.Queue = done if done is not None else queue.Queue()
         self.pending = 0
-        self._stdin_requests: queue.Queue | None = None
-        # M35 (std:fs): open files by id -- the VM's handle table.
-        self.files: dict = {}
-        self._next_file = 1
+        self.runtime = runtime
+        self.owns_tables = owns_tables
+        self.tables = runtime.tables if runtime is not None else HandleTables()
+        # M35 (std:fs): open files by id -- the run's handle table.
+        self.files: dict = self.tables.files
         # M38 (std:socket): open sockets and listeners by id, numbered from 1
         # (mah/socket_natives.py). Closing removes the id at once.
-        self.sockets: dict = {}
-        self._next_socket = 1
+        self.sockets: dict = self.tables.sockets
+        self._own_stdin = None
 
     def submit(self, promise, job) -> None:
         """M35: run `job()` on a worker thread; its result (a Mah value
@@ -1063,49 +1077,38 @@ class _IoHub:
         threading.Thread(target=run, daemon=True).start()
 
     def add_file(self, f) -> int:
-        file_id = self._next_file
-        self._next_file += 1
-        self.files[file_id] = f
+        tables = self.tables
+        with tables.lock:
+            file_id = tables.next_file
+            tables.next_file += 1
+            self.files[file_id] = f
         return file_id
 
     def add_socket(self, entry) -> int:
-        socket_id = self._next_socket
-        self._next_socket += 1
-        self.sockets[socket_id] = entry
+        tables = self.tables
+        with tables.lock:
+            socket_id = tables.next_socket
+            tables.next_socket += 1
+            self.sockets[socket_id] = entry
         return socket_id
 
     def read_line(self, promise) -> None:
         self.pending += 1
-        if self._stdin_requests is None:
-            self._stdin_requests = queue.Queue()
-            threading.Thread(
-                target=self._stdin_worker, args=(sys.stdin, self._stdin_requests, self.done), daemon=True
-            ).start()
-        self._stdin_requests.put(promise)
+        if self.runtime is not None:
+            self.runtime.stdin.request(self.done, promise)
+            return
+        from .thread_runtime import _StdinReader
 
-    @staticmethod
-    def _stdin_worker(stream, requests: queue.Queue, done: queue.Queue) -> None:
-        while True:
-            promise = requests.get()
-            if promise is None:
-                return
-            try:
-                line = stream.readline()
-            except (OSError, ValueError):
-                line = ""
-            if line == "":
-                done.put((promise, "line", None))
-                continue
-            if line.endswith("\n"):
-                line = line[:-1]
-                if line.endswith("\r"):
-                    line = line[:-1]
-            done.put((promise, "line", line))
+        if self._own_stdin is None:
+            self._own_stdin = _StdinReader()
+        self._own_stdin.request(self.done, promise)
 
     def close(self) -> None:
-        if self._stdin_requests is not None:
-            self._stdin_requests.put(None)
-        for f in self.files.values():
+        if self._own_stdin is not None:
+            self._own_stdin.stop()
+        if not self.owns_tables:
+            return
+        for f in list(self.files.values()):
             try:
                 f.close()
             except OSError:
@@ -1120,18 +1123,59 @@ class _IoHub:
 
 
 def _execute(linked: LinkedProgram, test_slot: int | None = None, deadline: float | None = None, args=()):
-    io = _IoHub(args)
+    from .thread_runtime import ThreadRuntime, VmThreads
+
+    rt = ThreadRuntime(linked, args)
+    io = _IoHub(args, runtime=rt)
+    rt.root_done = io.done
+    vt = VmThreads(rt, 0, io, None)
+    rt.vms[0] = vt  # the main VM is live for the whole run (docs/contracts/M44_threads.md #6.10)
     try:
-        return _execute_with(linked, io, test_slot, deadline)
+        return _execute_with(linked, io, test_slot, deadline, vt)
     finally:
+        try:
+            vt.out.flush()
+        finally:
+            rt.shutdown()
+            io.close()
+
+
+def run_job(linked: LinkedProgram, rt, pool, job, vt):
+    """M44 (docs/contracts/M44_threads.md #6.5): run one job in a fresh job
+    VM on the calling (worker) thread; `(ok, copied value)`."""
+    io = _IoHub(rt.args, env=job.env, runtime=rt, owns_tables=False, done=vt.done)
+    vt.io = io
+    try:
+        result = _execute_with(linked, io, None, None, vt, job)
+        vt.out.flush()
+        return result
+    finally:
+        rt.forget_vm(vt)
         io.close()
 
 
-def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, deadline: float | None):
+def _execute_with(
+    linked: LinkedProgram, io: _IoHub, test_slot: int | None, deadline: float | None, threads, job=None
+):
     """Run a linked program. M28: with `test_slot`, run the test whose
     closure the top-level code stored in that main-frame slot, afterwards,
     and return its `TestOutcome`; `deadline` (a `time.monotonic()` value)
-    stops it with `_Timeout`."""
+    stops it with `_Timeout`. M44: `threads` is this VM's `VmThreads`; with
+    `job`, this is a job VM (docs/contracts/M44_threads.md #6.5) that runs
+    the job instead of the program and returns `(ok, copied value)`."""
+    from .thread_runtime import (
+        NOT_SENDABLE_MESSAGE,
+        Abandoned,
+        Job,
+        NotSendable,
+        STUCK_MESSAGE,
+        JOB_STUCK_MESSAGE,
+        copy_value,
+        copy_values,
+        thread_error,
+    )
+
+    rt = threads.rt
     code = linked.code
     locate = _locate_factory(linked.debug)
     return_register = NONE_VALUE
@@ -1251,7 +1295,66 @@ def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, dead
         cancel_timer=lambda p: cancel_timer(p),
         io=io,
         reflect=ReflectData(linked, method_table),
+        started=rt.started,
+        thread=threads,
     )
+    out = threads.out
+
+    def make_job(closure: Closure, values: list):
+        """docs/contracts/M44_threads.md #2.3 steps 2-3: bind the arguments
+        here, then copy what the job needs (#4.1). May raise NotSendable."""
+        label = f"'{closure.name}'" if closure.name else "function"
+        bound = _bind_params(closure.param_count, closure.params, values, [], label, closure.rest)
+        methods = []
+        for (type_name, method_name), entry in method_table.items():
+            inherent = entry["inherent"]
+            if inherent is not None and isinstance(inherent[0], Closure):
+                methods.append((type_name, method_name, None, inherent[0], inherent[1]))
+            for trait, target in entry["traits"].items():
+                if isinstance(target[0], Closure):
+                    methods.append((type_name, method_name, trait, target[0], target[1]))
+        reflect = ctx.reflect
+        decorators = list(reflect.decorators.items())
+        hook_types = list(reflect.hook_types.items())
+        hook_params = list(reflect.hook_params.items())
+        roots = [(v, True) for v in bound]
+        roots.append((closure, False))
+        roots.extend((m[3], False) for m in methods)
+        roots.extend((v, False) for _k, v in decorators)
+        roots.extend((v, False) for _k, v in hook_types)
+        roots.extend((v, False) for _k, v in hook_params)
+        copies = copy_values(roots)
+        n = len(bound)
+        callee = copies[n]
+        i = n + 1
+        copied_methods = []
+        for m in methods:
+            copied_methods.append((m[0], m[1], m[2], copies[i], m[4]))
+            i += 1
+        copied_decorators = {}
+        for k, _v in decorators:
+            copied_decorators[k] = copies[i]
+            i += 1
+        copied_hook_types = {}
+        for k, _v in hook_types:
+            copied_hook_types[k] = copies[i]
+            i += 1
+        copied_hook_params = {}
+        for k, _v in hook_params:
+            copied_hook_params[k] = copies[i]
+            i += 1
+        return Job(
+            callee,
+            copies[:n],
+            copied_methods,
+            copied_decorators,
+            copied_hook_types,
+            copied_hook_params,
+            fn_items[0],
+            dict(io.env),
+        )
+
+    threads.make_job = make_job
 
     def enter_closure(task: Task, closure: Closure, arg_values: list) -> None:
         new_frame = Frame(slots=[NONE_VALUE] * closure.slot_count, static_parent=closure.defining_frame)
@@ -1320,6 +1423,7 @@ def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, dead
             new_frame.slots[i] = v
         promise = PromiseInstance()
         new_task = Task(pc=closure.code_address, current_frame=new_frame, watching_promise=promise)
+        promise.producer = ("task", new_task.id)  # M44: the wait-for graph's await edge
         drive(new_task)
         return promise
 
@@ -1330,6 +1434,11 @@ def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, dead
         for i, v in enumerate(bound):
             frame.slots[i] = v
         sub_task = Task(pc=closure.code_address, current_frame=frame)
+        if stepping:
+            # M44: an implicit runtime call belongs to its caller's task (the
+            # same identity and held locks, docs/contracts/M44_threads.md #5.2).
+            sub_task.id = stepping[-1].id
+            sub_task.held = stepping[-1].held
         status, value = step_task(sub_task)
         if status == "suspended":
             raise MahRuntimeError(
@@ -1378,24 +1487,65 @@ def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, dead
             raise _Timeout()
         remaining = wake_time - time.monotonic()
         if remaining > 0:
+            out.flush()  # M44: a flush point
             time.sleep(remaining)
         promise.resolve(NONE_VALUE)
         return True
 
     def settle_io(item) -> None:
         promise, what, payload = item
-        io.pending -= 1
-        if what == "value":
-            promise.resolve(payload)
-        elif payload is None:
-            promise.fail(StructInstance("EndOfInput", {}))
-        else:
-            promise.resolve(payload)
+        if what == "value" or what == "line":
+            io.pending -= 1
+            if what == "value":
+                promise.resolve(payload)
+            elif payload is None:
+                promise.fail(StructInstance("EndOfInput", {}))
+            else:
+                promise.resolve(payload)
+            return
+        # M44 (docs/contracts/M44_threads.md #6.2): thread-runtime completions.
+        if what == "stuck":
+            for waiting in rt.take_stuck(threads):
+                waiting.fail(thread_error("stuck", STUCK_MESSAGE))
+            return
+        if what == "abandon":
+            raise Abandoned()
+        if what == "exit":
+            raise ProgramExit(payload)
+        entry = threads.take_wait(promise)
+        if entry is None:
+            return  # the wait already failed (stuck): dropped
+        if what == "job":
+            ok, value = payload
+            if promise.variant != "Pending":
+                return  # settled early by hand
+            if ok:
+                promise.resolve(value)
+            else:
+                promise.fail(value)
+                failed_promises.append(promise)
+        elif what == "settle":
+            ok, value = payload
+            if ok:
+                promise.resolve(value)
+            else:
+                promise.fail(value)
+        elif what == "lock":
+            k, value = payload
+            task, _k = entry[2]
+            task.held[k] = [value, 1, 0]
+            promise.resolve(NONE_VALUE)
+        elif what == "sem":
+            promise.resolve(NONE_VALUE)
+        elif what == "recv":
+            promise.resolve(payload[1])
 
     def next_event() -> bool:
         """M33: handle the next event -- a finished I/O operation, or else
         the next timer, whichever comes first -- waiting for it if need be.
         False when there's nothing left that could happen."""
+        if rt.active:
+            threads.poll()
         try:
             settle_io(io.done.get_nowait())
             return True
@@ -1403,8 +1553,10 @@ def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, dead
             pass
         if not io.pending:
             return drain_next_timer()
-        sys.stdout.flush()
+        out.flush()
         wait = None if not timers else max(0.0, timers[0][0] - time.monotonic())
+        if wait is None and threads.internal:
+            rt.about_to_block(threads)
         if deadline is not None:
             left = max(0.0, deadline - time.monotonic())
             if wait is None or left < wait:
@@ -1608,6 +1760,13 @@ def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, dead
         `("failed", value)` rather than looping again -- the caller
         (`drive`) decides what an uncaught failure means for that task (the
         main task: fatal; a detached task: fail its Promise)."""
+        stepping.append(task)
+        try:
+            return _step_task(task, pending)
+        finally:
+            stepping.pop()
+
+    def _step_task(task: Task, pending=None):
         nonlocal return_register
         if pending is not None:
             value, pc = pending
@@ -1615,10 +1774,12 @@ def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, dead
                 return "failed", value
         steps = 0
         while True:
-            if deadline is not None:
-                steps += 1
-                if steps & 0xFFF == 0 and time.monotonic() > deadline:
+            steps += 1
+            if steps & 0xFFF == 0:
+                if deadline is not None and time.monotonic() > deadline:
                     raise _Timeout()
+                if rt.active:
+                    threads.poll()
             current_pc = task.pc
             instr = code[current_pc]
             task.pc = current_pc + 1
@@ -1784,9 +1945,14 @@ def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, dead
                     # in the enclosing `step_task` is exactly that.
                     raise MahThrow(value.fields["error"])
                 else:
+                    if rt.tracking and value.producer is not None:
+                        # M44: may throw `deadlock` here, or record the edge
+                        rt.await_check(threads, task, value)
                     resume_pc = task.pc
 
                     def _resume(ok, resolved_value, task=task, dest=dest, resume_pc=resume_pc):
+                        if task.awaits_edge:
+                            rt.clear_await(threads, task)
                         if ok:
                             _write(task.current_frame, dest, resolved_value)
                             task.pc = resume_pc
@@ -1941,6 +2107,14 @@ def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, dead
                     promise = PromiseInstance()
                     promise.resolve(_call_native(fn, bound))
                 _write(frame, dest, promise)
+            case ("sharedget", k, _name, mode, dest):
+                _write(frame, dest, threads.get(task, k, mode))
+            case ("sharedset", k, _name, src):
+                threads.set(task, k, _read(frame, src))
+            case ("sharedlock", k, name, dest):
+                _write(frame, dest, threads.lock(task, k, name))
+            case ("sharedunlock", k, name, mode):
+                threads.unlock(task, k, name, mode)
             case ("native", impl, arg_addrs, dest):
                 args = [_read(frame, a) for a in arg_addrs]
                 result = impl(ctx, args)
@@ -1956,6 +2130,9 @@ def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, dead
     # failed, in fail order -- checked at program end for ones nobody ever
     # `.await`ed (see the loop after the scheduler below).
     failed_promises: list = []
+    # M44: the tasks this VM is stepping, innermost last (an implicit-call
+    # sub-task takes its identity from the top).
+    stepping: list = []
 
     def drive(task: Task, pending=None) -> None:
         status, value = step_task(task, pending)
@@ -1994,6 +2171,56 @@ def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, dead
                 out.append((None if file_idx == 0 else debug.file_paths[file_idx], line))
         return out
 
+    def run_job_body():
+        """docs/contracts/M44_threads.md #6.5: the job's root task, then the
+        job's event loop; `(ok, copied value)`."""
+        nonlocal main_task
+        for type_name, method_name, trait, closure, is_method in job.methods:
+            entry = method_table.setdefault((type_name, method_name), {"inherent": None, "traits": {}})
+            if trait is None:
+                entry["inherent"] = (closure, is_method)
+            else:
+                entry["traits"][trait] = (closure, is_method)
+        fn_items[0] = job.fn_items
+        ctx.reflect.decorators = job.decorators
+        ctx.reflect.hook_types = job.hook_types
+        ctx.reflect.hook_params = job.hook_params
+        main_task = Task(pc=0, current_frame=None)  # never run: a root failure isn't fatal
+        callee = job.callee
+        frame = Frame(slots=[NONE_VALUE] * callee.slot_count, static_parent=callee.defining_frame)
+        for i, v in enumerate(job.bound):
+            frame.slots[i] = v
+        root_promise = PromiseInstance()
+        root = Task(pc=callee.code_address, current_frame=frame, watching_promise=root_promise)
+        with rt.lock:
+            rt.job_roots[job.id] = root.id
+        drive(root)
+        outcome = None
+        while True:
+            if root_promise.variant == "Failed":
+                root_promise.observed = True
+                outcome = (False, root_promise.fields["error"])
+                break
+            if root_promise.variant == "Settled" and not timers and not io.pending:
+                break
+            if not next_event():
+                break
+        if outcome is None:
+            if root_promise.variant == "Pending":
+                return False, thread_error("stuck", JOB_STUCK_MESSAGE)
+            for promise in failed_promises:
+                if not promise.observed:
+                    promise.observed = True
+                    outcome = (False, promise.fields["error"])
+                    break
+        if outcome is None:
+            outcome = (True, root_promise.fields["value"])
+        ok, value = outcome
+        try:
+            return ok, copy_value(value, strict=True)
+        except NotSendable:
+            return False, thread_error("not_sendable", NOT_SENDABLE_MESSAGE)
+
     def run_test(slot: int) -> TestOutcome:
         closure = main_frame.slots[slot]
         promise = PromiseInstance()
@@ -2022,6 +2249,9 @@ def _execute_with(linked: LinkedProgram, io: _IoHub, test_slot: int | None, dead
             m = _uncaught_message(error)
             message = f"Uncaught {display_name(type_name_of(error))}" + ("" if m is None else f": {m}")
         return TestOutcome("failed", message, frames_of(error), leftover)
+
+    if job is not None:
+        return run_job_body()
 
     if not linked.functions:
         raise MahcFormatError("FUNCTIONS section must declare at least one function")

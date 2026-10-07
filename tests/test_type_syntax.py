@@ -322,12 +322,12 @@ class PreprocessorTests(unittest.TestCase):
         # M25: the prelude's new `Error` trait (and its `message` method,
         # both re-implemented for `RuntimeError`) add two triggers. M29 adds
         # `to_number` (and NumberParseError/ToNumber) and the Option helpers;
-        # M33 `EndOfInput` (what `input` throws).
+        # M33 `EndOfInput` (what `input` throws); M44 `ThreadError`.
         self.assertEqual(
             sorted(PRELUDE_TRIGGERS),
             ['EndOfInput', 'Error', 'Filtered', 'FilteredIterator', 'FromRange', 'FromRangeIterator', 'Iterable', 'Iterator',
              'MapEntry', 'Mapped', 'MappedIterator', 'NumberParseError', 'Range', 'RangeIterator', 'Skipped',
-             'SkippedIterator', 'StringIterator', 'Taken', 'TakenIterator', 'ToNumber', 'ToRange',
+             'SkippedIterator', 'StringIterator', 'Taken', 'TakenIterator', 'ThreadError', 'ToNumber', 'ToRange',
              'VectorIterator', '__Iter', '__NoInitial', 'call', 'call_reduce', 'collect', 'entries', 'filter',
              'is_none', 'is_some', 'iter', 'map', 'message', 'next', 'reduce', 'require_number', 'skip', 'take',
              'to_number', 'to_string', 'unwrap', 'unwrap_or'],

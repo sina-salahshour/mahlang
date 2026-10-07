@@ -412,3 +412,12 @@ struct EndOfInput { }
 impl Error for EndOfInput {
     fn message(self) { "end of input" }
 }
+
+# M44: what threads, shared variables, locks, semaphores and channels throw.
+# `kind` is one of "closed", "full", "cancelled", "deadlock", "not_sendable",
+# "foreign_promise", "over_release", "stuck".
+struct ThreadError { kind: String, message: String }
+
+impl Error for ThreadError {
+    fn message(self) { self.message }
+}

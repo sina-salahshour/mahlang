@@ -424,7 +424,7 @@ class ArgumentTests(unittest.TestCase):
 
 class BytecodeTests(unittest.TestCase):
     def test_minor(self):
-        self.assertEqual(MINOR, 20)
+        self.assertEqual(MINOR, 21)
         self.assertEqual(NATIVE_ARITIES["socket.tls_server_config"], 2)
         self.assertEqual(NATIVE_ARITIES["socket.start_tls_server"], 3)
         self.assertEqual(NATIVE_SINCE_MINOR["socket.tls_server_config"], 20)

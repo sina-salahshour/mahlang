@@ -79,8 +79,12 @@ def _exit(ctx, args):
     code = args[0]
     if isinstance(code, bool) or not isinstance(code, Decimal) or code != code.to_integral_value() or not 0 <= code <= 255:
         raise MahRuntimeError("exit code must be a whole number from 0 to 255", kind="ArgumentError")
-    sys.stdout.flush()
-    raise ProgramExit(int(code))
+    ctx.stdout.flush()
+    code = int(code)
+    if ctx.thread is not None and ctx.thread.pool is None:
+        # M44: the main VM -- the first exit of the run wins
+        code = ctx.thread.rt.claim_exit(code)
+    raise ProgramExit(code)
 
 
 def _env_get(ctx, args):

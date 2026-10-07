@@ -130,6 +130,8 @@ class RoundTripTests(unittest.TestCase):
                     # M42: std:http's server; 1.20 since std:socket declares
                     # the server-TLS natives (M42 part B).
                     "http_server.mh": 20,
+                    # M44: std:thread, shared variables and lock.
+                    "threads.mh": 21,
                 }.get(name, 4)
                 self.assertEqual(data[:8], b"MAHC\x01\x00" + bytes([minor, 0]))
 
@@ -164,6 +166,37 @@ def _minimal_program(code, *, natives=None, functions=None, strings=None, consta
     )
 
 
+class SharedOpcodeTests(unittest.TestCase):
+    """M44 (1.21): the shared-variable opcodes and std:thread's natives."""
+
+    def test_shared_program_is_minor_21_and_disassembles(self):
+        from mah.bytecode.disasm import disassemble
+
+        data = compile_bytes(text="shared let x = 1\nlock x { x = 2 }\nprint(x)")
+        self.assertEqual(data[6], 21)
+        text = disassemble(decode(data))
+        for op in ("sharedlock", "sharedset", "sharedunlock", "sharedget"):
+            self.assertIn(op, text)
+        self.assertIn('name="x"', text)
+
+    def test_shared_opcodes_need_minor_21(self):
+        data = bytearray(compile_bytes(text="shared let x = 1\nlock x { x = 2 }"))
+        program = decode(bytes(data))
+        first = next(i for i, instr in enumerate(program.code) if instr.op.startswith("shared"))
+        name = program.code[first].op
+        data[6] = 20
+        with self.assertRaises(MahcFormatError) as cm:
+            decode(bytes(data))
+        self.assertIn(
+            f"opcode '{name}' at instruction {first} requires minor version >= 21, but this file's minor version is 20",
+            str(cm.exception),
+        )
+
+    def test_std_thread_is_minor_21(self):
+        data = compile_bytes(text='import thread from "std:thread"\nprint(thread.cores() > 0)')
+        self.assertEqual(data[6], 21)
+
+
 class LoaderValidationTests(unittest.TestCase):
     def test_bad_magic(self):
         data = compile_bytes(text="print(1)")
@@ -180,10 +213,10 @@ class LoaderValidationTests(unittest.TestCase):
         self.assertIn("major", str(cm.exception))
 
     def test_unsupported_minor_version(self):
-        # M42: this VM now implements minor version 20, so the smallest
-        # genuinely unsupported minor version is 21.
+        # M44: this VM implements minor version 21, so the smallest
+        # unsupported one is 22.
         data = bytearray(compile_bytes(text="print(1)"))
-        data[6] = 21
+        data[6] = 22
         with self.assertRaises(MahcFormatError) as cm:
             decode(bytes(data))
         self.assertIn("minor", str(cm.exception))
@@ -196,11 +229,13 @@ class LoaderValidationTests(unittest.TestCase):
         data = compile_bytes(text='import math from "std:math"\nprint(math.tan(1))')
         self.assertIn(b"math.tan", data)
         data = bytearray(data.replace(b"math.tan", b"math.zzz"))
-        data[6] = 21
+        # M44: this VM implements minor version 21, so the smallest
+        # unsupported one is 22.
+        data[6] = 22
         with self.assertRaises(MahcFormatError) as cm:
             decode(bytes(data))
         message = str(cm.exception)
-        self.assertIn("unsupported minor version 21", message)
+        self.assertIn("unsupported minor version 22", message)
         self.assertIn("natives this VM doesn't have ('math.zzz')", message)
 
     def test_minor_is_the_lowest_the_program_needs(self):
