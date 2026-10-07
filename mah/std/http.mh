@@ -1,4 +1,4 @@
-# std:http -- an HTTP/1.1 client, over std:socket (docs/STDLIB.md).
+# std:http -- an HTTP/1.1 client and server, over std:socket (docs/STDLIB.md).
 #
 #   import http from "std:http"
 #   let r = http.get("https://example.com/")
@@ -7,27 +7,43 @@
 #   let created = http.post("https://api.example.com/items", json: ["name": "mah"])
 #   print(created.json()["id"])
 #
-# One connection per request (`Connection: close`), HTTPS through the
-# socket's TLS, redirects followed (up to `max_redirects`), and the proxy
-# from the HTTP_PROXY / HTTPS_PROXY / NO_PROXY environment variables (an
-# HTTPS request goes through the proxy with CONNECT). No compression is
-# asked for. A 4xx or 5xx status is a normal Response (see `check_status`);
-# HttpError is for requests that couldn't complete.
+# The client uses one connection per request (`Connection: close`), HTTPS
+# through the socket's TLS, redirects followed (up to `max_redirects`), and
+# the proxy from the HTTP_PROXY / HTTPS_PROXY / NO_PROXY environment
+# variables (an HTTPS request goes through the proxy with CONNECT). No
+# compression is asked for. A 4xx or 5xx status is a normal Response (see
+# `check_status`); HttpError is for requests that couldn't complete.
+#
+#   fn handle(req: http.Request) -> http.Reply { http.Reply.text("hi " + req.path) }
+#   let server = http.serve(8080, handle)       # returns at once
+#   server.wait()                               # serves until shut down
+#
+# The server (`serve`) calls a handler function for each request and writes
+# the Reply it returns: keep-alive, pipelining, chunked bodies, 100-continue,
+# limits, graceful shutdown, and TLS with `tls: socket.tls_server_config(...)`.
+# Each connection is its own task, so connections are served concurrently
+# whenever a handler waits.
 
 import url from "std:url"
 import socket from "std:socket"
 import process from "std:process"
 import json_lib from "std:json"
+import time from "std:time"
+import async from "std:async"
 
 extern fn type_name(value: Unknown) -> String = "value.type_name"
+extern fn new_promise() -> Promise<Unknown> = "promise.new"
+extern fn settle(promise: Promise<Unknown>, value: Unknown) -> Bool = "promise.resolve"
 
 ## Why a request couldn't complete: `kind` is a SocketError kind for a
 ## network failure ("connection_refused", "host_not_found", "timed_out",
 ## "tls_certificate", "tls", "connection_reset", ...), or "invalid_url",
 ## "unsupported_scheme" (not http or https), "invalid_response" (the server
 ## didn't speak HTTP/1.x), "too_many_redirects", "proxy" (the proxy refused
-## a CONNECT) or "status" (from `check_status`). `method` and `url` are the
-## request's (the last one, after redirects).
+## a CONNECT), "status" (from `check_status`) or "bad_request" (a request
+## a server handler couldn't read: a bad query, JSON, form or multipart
+## body). `method` and `url` are the request's (the last one, after
+## redirects; for "bad_request", the request's method and target).
 export struct HttpError { kind: String, method: String, url: String, description: String }
 
 impl Error for HttpError {
@@ -50,23 +66,10 @@ fn lower_name(name: String) -> String { name.to_lower() }
 
 impl Response {
     ## The first value of header `name` (any case), or `none`.
-    fn header(self, name: String) -> Unknown {
-        let wanted = name.to_lower()
-        for let pair in self.headers {
-            if pair[0].to_lower() == wanted { return pair[1] }
-        }
-        none
-    }
+    fn header(self, name: String) -> Unknown { find_header(self.headers, name) }
 
     ## Every value of header `name` (any case), in order.
-    fn header_all(self, name: String) -> Vector<String> {
-        let wanted = name.to_lower()
-        let out = []
-        for let pair in self.headers {
-            if pair[0].to_lower() == wanted { out.push(pair[1]) }
-        }
-        out
-    }
+    fn header_all(self, name: String) -> Vector<String> { find_headers(self.headers, name) }
 
     ## The body as text: UTF-8, each invalid sequence replaced by U+FFFD.
     fn text(self) -> String { self.body.to_text_lossy() }
@@ -217,15 +220,153 @@ fn basic_auth(user: String, password: String) -> String throws url.UrlError {
     "Basic " + (url.decode(user) + ":" + url.decode(password)).to_bytes().to_base64()
 }
 
-# -- one exchange -------------------------------------------------------------------
+# -- wire format -------------------------------------------------------------------
+#
+# Reading HTTP/1.x messages, shared by the client (a response) and the server
+# (a request).
 
-# A failure while talking to `target`, as an HttpError.
-fn transport(e: socket.SocketError, method: String, target: String) -> HttpError {
-    HttpError { kind: e.kind, method: method, url: target, description: e.description }
+# A malformed message. `status` is the server's answer (400, 413, 414, 431, 501, ...);
+# `closed` is true when the peer closed mid-message.
+struct WireError { status: Number, closed: Bool, description: String }
+
+impl Error for WireError {
+    fn message(self) -> String { self.description }
 }
 
-fn invalid_response(method: String, target: String, description: String) -> HttpError {
-    HttpError { kind: "invalid_response", method: method, url: target, description: description }
+# How long each wait may take: `each` (ms or none) per wait, or, when `deadline` (a
+# time.monotonic() * 1000 instant) is set, whatever is left of it (0 at the least).
+struct Wait { each: Unknown, deadline: Unknown }
+
+# What is left of a size limit across several lines (a message head): `left` bytes of
+# `limit`, or both none for no limit.
+struct Budget { left: Unknown, limit: Unknown }
+
+fn now_ms() -> Number { time.monotonic() * 1000 }
+
+fn wait_ms(w: Wait) -> Unknown {
+    if w.deadline == none { return w.each }
+    let left = w.deadline - now_ms()
+    if left < 0 { return 0 }
+    left - (left % 1)
+}
+
+fn closed_mid_message() -> WireError {
+    WireError { status: 400, closed: true, description: "the connection closed mid-message" }
+}
+
+fn bad_message(status: Number, description: String) -> WireError {
+    WireError { status: status, closed: false, description: description }
+}
+
+# Appends the next bytes to arrive onto `conn.buffer`; false once the peer
+# has closed.
+fn fill(conn: socket.Socket, w: Wait) -> Bool throws socket.SocketError {
+    let held = conn.buffer
+    conn.buffer = "".to_bytes()
+    let chunk = try { conn.recv(65536, wait_ms(w)) } catch {
+        e: socket.SocketError => {
+            conn.buffer = held
+            throw e
+        }
+    }
+    held.extend(chunk)
+    conn.buffer = held
+    chunk.len() > 0
+}
+
+fn too_long(b: Budget) -> WireError {
+    bad_message(431, "the request head is larger than " + b.limit + " bytes")
+}
+
+# The next line (without its line end), or none once the peer has closed.
+# With a budget, a line that would take more than what is left of it throws
+# `too_long`.
+fn read_line_within(
+    conn: socket.Socket,
+    w: Wait,
+    budget: Budget
+) -> Unknown throws WireError | socket.SocketError {
+    if budget.limit == none { return conn.read_line(wait_ms(w)) }
+    let newline = "\n".to_bytes()
+    while true {
+        let at = conn.buffer.index_of(newline)
+        if at != none {
+            let n = at.unwrap()
+            if n + 1 > budget.left { throw too_long(budget) }
+            let line = conn.buffer[..n]
+            conn.buffer = conn.buffer[n + 1..]
+            budget.left = budget.left - (n + 1)
+            if line.len() > 0 {
+                if line[line.len() - 1] == 13 { line = line[..line.len() - 1] }
+            }
+            let text = line.to_text()
+            if text == none {
+                throw bad_message(400, "the request head isn't valid UTF-8 text")
+            }
+            return text.unwrap()
+        }
+        if conn.buffer.len() >= budget.left { throw too_long(budget) }
+        if !fill(conn, w) { return none }
+    }
+    none
+}
+
+# Exactly `n` bytes (what `Socket.recv_exactly` does, on a Wait).
+fn read_exactly(conn: socket.Socket, n: Number, w: Wait) -> Bytes throws socket.SocketError {
+    while conn.buffer.len() < n {
+        if !fill(conn, w) {
+            throw socket.SocketError {
+                kind: "closed_early",
+                op: "recv_exactly",
+                address: conn.address(),
+                description: "the connection closed before " + n + " bytes arrived"
+            }
+        }
+    }
+    let out = conn.buffer[..n]
+    conn.buffer = conn.buffer[n..]
+    out
+}
+
+# Whether `text` is an RFC 9110 token (a method or a header name).
+fn is_token(text: String) -> Bool {
+    if text == "" { return false }
+    let allowed = "!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    for let c in text {
+        if !allowed.contains(c) { return false }
+    }
+    true
+}
+
+# Header lines up to the empty line, as [name, value] pairs. `strict` (the
+# server) also refuses obsolete line folding, bad names, stray CRs and more
+# than 100 fields.
+fn read_fields(conn: socket.Socket, w: Wait, budget: Budget, strict: Bool) -> Vector<
+    Vector<String>
+> throws WireError | socket.SocketError {
+    let pairs = []
+    while true {
+        let line = read_line_within(conn, w, budget)
+        if line == none { throw closed_mid_message() }
+        if line == "" { return pairs }
+        if strict {
+            if line.starts_with(" ") | line.starts_with("\t") {
+                throw bad_message(400, "obsolete line folding isn't supported")
+            }
+        }
+        let colon = line.index_of(":")
+        if colon == none { throw bad_message(400, "a header line without ':': " + line) }
+        let name = line[..colon.unwrap()]
+        if strict {
+            if !is_token(name) { throw bad_message(400, "a bad header name: " + name) }
+            if line.contains("\r") { throw bad_message(400, "a bad header line") }
+            if pairs.len() >= 100 { throw bad_message(431, "more than 100 header fields") }
+        } else {
+            name = name.trim()
+        }
+        pairs.push([name, line[colon.unwrap() + 1..].trim()])
+    }
+    pairs
 }
 
 fn parse_hex(text: String) -> Unknown {
@@ -241,6 +382,85 @@ fn parse_hex(text: String) -> Unknown {
     n
 }
 
+# The budget for one chunk-size line: 4096 bytes on the server, none on the
+# client.
+fn chunk_line_budget(max_body: Unknown) -> Budget {
+    if max_body == none { return Budget { left: none, limit: none } }
+    Budget { left: 4096, limit: 4096 }
+}
+
+# The body framed by chunked transfer coding (RFC 9112 #7.1). With a
+# `max_body` (the server), a longer body is a 413.
+fn read_chunked(
+    conn: socket.Socket,
+    w: Wait,
+    max_body: Unknown,
+    budget: Budget
+) -> Bytes throws WireError | socket.SocketError {
+    let body = "".to_bytes()
+    while true {
+        let size_line = try { read_line_within(conn, w, chunk_line_budget(max_body)) } catch {
+            e: WireError => {
+                if e.status == 431 { throw bad_message(400, "a chunk size line is too long") }
+                throw e
+            }
+        }
+        if size_line == none { throw closed_mid_message() }
+        let semi = size_line.index_of(";")
+        let size_text = if semi == none { size_line } else { size_line[..semi.unwrap()] }
+        let size = parse_hex(size_text)
+        if max_body != none {
+            if size_text.trim().len() > 15 { size = none }
+        }
+        if size == none { throw bad_message(400, "a bad chunk size: " + size_line) }
+        if size == 0 {
+            # trailers, up to an empty line (dropped)
+            read_fields(conn, w, budget, max_body != none)
+            return body
+        }
+        if max_body != none {
+            if body.len() + size > max_body {
+                throw bad_message(413, "the request body is larger than " + max_body + " bytes")
+            }
+        }
+        body.extend(read_exactly(conn, size, w))
+        let after = read_line_within(conn, w, chunk_line_budget(max_body))
+        if after == none { throw closed_mid_message() }
+        if after != "" { throw bad_message(400, "a chunk isn't followed by a line end") }
+    }
+    body
+}
+
+# The first value of header `name` (any case) in `pairs`, or none.
+fn find_header(pairs: Vector<Vector<String>>, name: String) -> Unknown {
+    let wanted = name.to_lower()
+    for let pair in pairs {
+        if pair[0].to_lower() == wanted { return pair[1] }
+    }
+    none
+}
+
+# Every value of header `name` (any case) in `pairs`, in order.
+fn find_headers(pairs: Vector<Vector<String>>, name: String) -> Vector<String> {
+    let wanted = name.to_lower()
+    let out = []
+    for let pair in pairs {
+        if pair[0].to_lower() == wanted { out.push(pair[1]) }
+    }
+    out
+}
+
+# -- one exchange -------------------------------------------------------------------
+
+# A failure while talking to `target`, as an HttpError.
+fn transport(e: socket.SocketError, method: String, target: String) -> HttpError {
+    HttpError { kind: e.kind, method: method, url: target, description: e.description }
+}
+
+fn invalid_response(method: String, target: String, description: String) -> HttpError {
+    HttpError { kind: "invalid_response", method: method, url: target, description: description }
+}
+
 # The next line, or an invalid_response for the end of the stream.
 fn line_of(
     conn: socket.Socket,
@@ -253,33 +473,10 @@ fn line_of(
     line
 }
 
-# The body framed by chunked transfer coding (RFC 9112 #7.1).
-fn read_chunked(
-    conn: socket.Socket,
-    timeout: Unknown,
-    method: String,
-    target: String
-) -> Bytes throws HttpError | socket.SocketError {
-    let body = "".to_bytes()
-    while true {
-        let size_line = line_of(conn, timeout, method, target)
-        let semi = size_line.index_of(";")
-        let size_text = if semi == none { size_line } else { size_line[..semi.unwrap()] }
-        let size = parse_hex(size_text)
-        if size == none {
-            throw invalid_response(method, target, "a bad chunk size: " + size_line)
-        }
-        if size == 0 {
-            # trailers, up to an empty line
-            while line_of(conn, timeout, method, target) != "" { }
-            return body
-        }
-        body.extend(conn.recv_exactly(size, timeout))
-        if line_of(conn, timeout, method, target) != "" {
-            throw invalid_response(method, target, "a chunk isn't followed by a line end")
-        }
-    }
-    body
+# A malformed response, as an HttpError.
+fn wire_failure(e: WireError, method: String, target: String) -> HttpError {
+    let d = if e.closed { "the connection closed mid-response" } else { e.description }
+    invalid_response(method, target, d)
 }
 
 fn read_to_end(conn: socket.Socket, timeout: Unknown) -> Bytes throws socket.SocketError {
@@ -308,6 +505,8 @@ fn exchange(
     let data = (head + "\r\n").to_bytes()
     if body != none { data.extend(body) }
     conn.send(data)
+    let w = Wait { each: timeout, deadline: none }
+    let unlimited = Budget { left: none, limit: none }
     let status = 100
     let reason = ""
     let pairs = []
@@ -324,15 +523,8 @@ fn exchange(
             throw invalid_response(method, shown, "not an HTTP/1.x status line: " + status_line)
         }
         reason = if parts.len() == 3 { parts[2] } else { "" }
-        pairs = []
-        let line = line_of(conn, timeout, method, shown)
-        while line != "" {
-            let colon = line.index_of(":")
-            if colon == none {
-                throw invalid_response(method, shown, "a header line without ':': " + line)
-            }
-            pairs.push([line[..colon.unwrap()].trim(), line[colon.unwrap() + 1..].trim()])
-            line = line_of(conn, timeout, method, shown)
+        pairs = try { read_fields(conn, w, unlimited, false) } catch {
+            e: WireError => { throw wire_failure(e, method, shown) }
         }
     }
     let response = Response {
@@ -348,7 +540,9 @@ fn exchange(
     let length = response.header("content-length")
     if coding != none {
         if coding.to_lower().contains("chunked") {
-            response.body = read_chunked(conn, timeout, method, shown)
+            response.body = try { read_chunked(conn, w, none, unlimited) } catch {
+                e: WireError => { throw wire_failure(e, method, shown) }
+            }
             return response
         }
     }
@@ -691,4 +885,1181 @@ export fn head(
     max_redirects: Number = 10
 ) -> Response throws HttpError {
     request("HEAD", target, headers: headers, timeout: timeout, max_redirects: max_redirects)
+}
+
+# -- the server: requests and replies -------------------------------------------------
+
+fn argument_error(message: String) -> Unknown {
+    throw RuntimeError.ArgumentError { message: message }
+}
+
+# A HttpError kind "bad_request" for `req`.
+fn bad_request(method: String, target: String, description: String) -> HttpError {
+    HttpError { kind: "bad_request", method: method, url: target, description: description }
+}
+
+# The parameters of a header value (`text/html; charset=utf-8`, a
+# Content-Disposition, ...): the text after the first `;`, split on `;`
+# outside double quotes, as [name, value] pairs; the name lowercased, a
+# quoted value unquoted, items without `=` dropped.
+fn header_params(value: String) -> Vector<Vector<String>> {
+    let out = []
+    let at = value.index_of(";")
+    if at == none { return out }
+    let pieces = []
+    let current = ""
+    let quoted = false
+    let escaped = false
+    for let c in value[at.unwrap() + 1..] {
+        if escaped {
+            current = current + c
+            escaped = false
+        } elif quoted & c == "\\" {
+            current = current + c
+            escaped = true
+        } elif c == "\"" {
+            quoted = !quoted
+            current = current + c
+        } elif c == ";" & !quoted {
+            pieces.push(current)
+            current = ""
+        } else {
+            current = current + c
+        }
+    }
+    pieces.push(current)
+    for let piece in pieces {
+        let eq = piece.index_of("=")
+        if eq == none { continue }
+        let name = piece[..eq.unwrap()].trim().to_lower()
+        let v = piece[eq.unwrap() + 1..].trim()
+        if v.len() >= 2 & v.starts_with("\"") & v.ends_with("\"") {
+            let inner = v[1..v.len() - 1]
+            let plain = ""
+            let escape = false
+            for let c in inner {
+                if escape {
+                    plain = plain + c
+                    escape = false
+                } elif c == "\\" {
+                    escape = true
+                } else {
+                    plain = plain + c
+                }
+            }
+            v = plain
+        }
+        out.push([name, v])
+    }
+    out
+}
+
+fn param_of(params: Vector<Vector<String>>, name: String) -> Unknown {
+    for let pair in params {
+        if pair[0] == name { return pair[1] }
+    }
+    none
+}
+
+## An incoming request, as the server read it. `target` is the request target as sent
+## ("/a/b?x=1"); `path` is its part before "?" (still percent-encoded) and `query` the part
+## after it, or `none` (like std:url's Url). `headers` are the [name, value] pairs as received
+## (names as the client wrote them; see `header`); `body` is the whole body (empty Bytes when
+## there is none). `version` is "HTTP/1.1" or "HTTP/1.0" as sent; `tls` is true over TLS.
+export struct Request {
+    method: String,
+    target: String,
+    path: String,
+    query: Unknown,
+    version: String,
+    headers: Vector<Vector<String>>,
+    body: Bytes,
+    peer_host: String,
+    peer_port: Number,
+    tls: Bool
+}
+
+## One part of a multipart/form-data body: its form field `name`, the
+## `filename` (or `none` for a plain field), its Content-Type (or `none`),
+## its headers and its bytes.
+export struct Part {
+    name: String,
+    filename: Unknown,
+    content_type: Unknown,
+    headers: Vector<Vector<String>>,
+    body: Bytes
+}
+
+impl Part {
+    ## The body as text: UTF-8, each invalid sequence replaced by U+FFFD.
+    fn text(self) -> String { self.body.to_text_lossy() }
+
+    ## The first value of header `name` (any case), or `none`.
+    fn header(self, name: String) -> Unknown { find_header(self.headers, name) }
+}
+
+# The parts of a multipart/form-data `body` (RFC 7578) split on `boundary`.
+fn parse_multipart(method: String, target: String, body: Bytes, boundary: String) -> Vector<
+    Part
+> throws HttpError {
+    let delim = ("--" + boundary).to_bytes()
+    let crlf = "\r\n".to_bytes()
+    let first = body.index_of(delim)
+    if first == none {
+        throw bad_request(method, target, "the multipart body doesn't contain its boundary")
+    }
+    let pos = first.unwrap() + delim.len()
+    let parts = []
+    while true {
+        if body[pos..pos + 2] == "--".to_bytes() { return parts }
+        while body[pos] == 32 | body[pos] == 9 { pos = pos + 1 }
+        if body[pos..pos + 2] != crlf {
+            throw bad_request(method, target, "a malformed multipart boundary line")
+        }
+        pos = pos + 2
+        let headers = []
+        if body[pos..pos + 2] == crlf {
+            pos = pos + 2
+        } else {
+            let end = body[pos..].index_of("\r\n\r\n".to_bytes())
+            if end == none {
+                throw bad_request(method, target, "a multipart part without the end of its headers")
+            }
+            let head = body[pos..pos + end.unwrap()].to_text()
+            if head == none {
+                throw bad_request(method, target, "a multipart part's headers aren't UTF-8 text")
+            }
+            for let line in head.unwrap().split("\r\n") {
+                let colon = line.index_of(":")
+                if colon == none {
+                    throw bad_request(method, target, "a malformed multipart header: " + line)
+                }
+                headers.push([line[..colon.unwrap()].trim(), line[colon.unwrap() + 1..].trim()])
+            }
+            pos = pos + end.unwrap() + 4
+        }
+        let rest = body[pos..]
+        let close = rest.index_of(crlf + delim)
+        if close == none {
+            throw bad_request(
+                method,
+                target,
+                "the multipart body doesn't end with its closing boundary"
+            )
+        }
+        let content = rest[..close.unwrap()]
+        pos = pos + close.unwrap() + 2 + delim.len()
+        let disposition = find_header(headers, "content-disposition")
+        let kind = if disposition == none {
+            ""
+        } else {
+            disposition.split(";")[0].trim().to_lower()
+        }
+        if kind != "form-data" {
+            throw bad_request(method, target, "a multipart part isn't form-data")
+        }
+        let params = header_params(disposition)
+        let name = param_of(params, "name")
+        if name == none { throw bad_request(method, target, "a multipart part without a name") }
+        parts.push(
+            Part {
+                name: name,
+                filename: param_of(params, "filename"),
+                content_type: find_header(headers, "content-type"),
+                headers: headers,
+                body: content
+            }
+        )
+    }
+    parts
+}
+
+impl Request {
+    ## The first value of header `name` (any case), or `none`.
+    fn header(self, name: String) -> Unknown { find_header(self.headers, name) }
+
+    ## Every value of header `name` (any case), in order.
+    fn header_all(self, name: String) -> Vector<String> { find_headers(self.headers, name) }
+
+    ## The Content-Type's media type, lowercased, without its parameters
+    ## ("application/json"); "" when there is none.
+    fn content_type(self) -> String {
+        let value = find_header(self.headers, "content-type")
+        if value == none { return "" }
+        value.split(";")[0].trim().to_lower()
+    }
+
+    ## The body as text: UTF-8, each invalid sequence replaced by U+FFFD.
+    fn text(self) -> String { self.body.to_text_lossy() }
+
+    ## The body parsed as JSON (std:json's `parse`); invalid JSON throws
+    ## HttpError kind "bad_request", which the server answers with a 400.
+    fn json(self) -> Unknown throws HttpError {
+        try { json_lib.parse(self.text()) } catch {
+            e: json_lib.JsonError => {
+                throw bad_request(
+                    self.method,
+                    self.target,
+                    "the body isn't valid JSON: " + e.message()
+                )
+            }
+        }
+    }
+
+    ## The query's `[key, value]` pairs, decoded (std:url's `parse_query`);
+    ## `[]` without a query.
+    fn query_pairs(self) -> Vector<Vector<String>> throws HttpError {
+        if self.query == none { return [] }
+        try { url.parse_query(self.query) } catch {
+            e: url.UrlError => {
+                throw bad_request(self.method, self.target, "a bad query string: " + e.description)
+            }
+        }
+    }
+
+    ## The first value of query parameter `name`, or `none`.
+    fn query_param(self, name: String) -> Unknown throws HttpError {
+        for let pair in self.query_pairs() {
+            if pair[0] == name { return pair[1] }
+        }
+        none
+    }
+
+    ## The fields of a form body as `[name, value]` pairs: an
+    ## application/x-www-form-urlencoded body, or the parts of a
+    ## multipart/form-data body that aren't files.
+    fn form(self) -> Vector<Vector<String>> throws HttpError {
+        let kind = self.content_type()
+        if kind == "application/x-www-form-urlencoded" {
+            let text = self.body.to_text()
+            if text == none {
+                throw bad_request(self.method, self.target, "the form isn't valid UTF-8 text")
+            }
+            return try { url.parse_query(text.unwrap()) } catch {
+                e: url.UrlError => {
+                    throw bad_request(self.method, self.target, "a bad form: " + e.description)
+                }
+            }
+        }
+        if kind == "multipart/form-data" {
+            let out = []
+            for let part in self.multipart() {
+                if part.filename == none { out.push([part.name, part.text()]) }
+            }
+            return out
+        }
+        throw bad_request(
+            self.method,
+            self.target,
+            "the body isn't a form (Content-Type is " + find_header(
+                self.headers,
+                "content-type"
+            ) + ")"
+        )
+    }
+
+    ## The parts of a multipart/form-data body (fields and files), in order.
+    fn multipart(self) -> Vector<Part> throws HttpError {
+        let value = find_header(self.headers, "content-type")
+        if self.content_type() != "multipart/form-data" {
+            throw bad_request(
+                self.method,
+                self.target,
+                "the body isn't multipart/form-data (Content-Type is " + value + ")"
+            )
+        }
+        let boundary = param_of(header_params(value), "boundary")
+        let usable = false
+        if boundary != none {
+            if boundary != "" { usable = boundary.len() <= 70 }
+        }
+        if !usable {
+            throw bad_request(self.method, self.target, "a multipart body without a boundary")
+        }
+        parse_multipart(self.method, self.target, self.body, boundary)
+    }
+}
+
+impl Printable for Request {
+    fn to_string(self) { "Request(" + self.method + " " + self.target + ")" }
+}
+
+## What a handler answers. `body` is `none`, a String, Bytes, or a producer
+## `fn(BodyWriter)` that streams the body (see `Reply.stream`).
+export struct Reply { status: Number, headers: Vector<Vector<String>>, body: Unknown }
+
+# The ArgumentError text for a bad Reply status, or none.
+fn status_problem(status: Unknown) -> Unknown {
+    let shown = type_name(status)
+    if shown == "Number" {
+        shown = "" + status
+        if status % 1 == 0 {
+            if status >= 200 & status <= 999 { return none }
+        }
+    }
+    "http: a Reply status must be a whole number from 200 to 999, got " + shown
+}
+
+fn body_problem(body: Unknown) -> Unknown {
+    let kind = type_name(body)
+    if body == none | kind == "String" | kind == "Bytes" | kind == "Function" { return none }
+    "http: a Reply body must be none, a String, Bytes or a function, got " + kind
+}
+
+# Checks a Reply before it is written (ArgumentError), and gives its headers
+# as pairs.
+fn checked_reply(reply: Reply) -> Vector<Vector<String>> {
+    let problem = status_problem(reply.status)
+    if problem != none { argument_error(problem) }
+    let pairs = header_pairs(reply.headers)
+    let bad_body = body_problem(reply.body)
+    if bad_body != none { argument_error(bad_body) }
+    pairs
+}
+
+# A Reply with `content_type` (unless `headers` gives one) and then `headers`.
+fn make_reply(status: Unknown, body: Unknown, content_type: Unknown, headers: Unknown) -> Reply {
+    let given = header_pairs(headers)
+    let all = []
+    if content_type != none {
+        if !has_header(given, "content-type") { all.push(["Content-Type", content_type]) }
+    }
+    for let pair in given { all.push(pair) }
+    let reply = Reply { status: status, headers: all, body: body }
+    checked_reply(reply)
+    reply
+}
+
+## Where a streamed reply's producer writes the body.
+export struct BodyWriter { conn: socket.Socket, mode: String, remaining: Unknown, written: Number }
+
+fn hex_of(n: Number) -> String {
+    let digits = "0123456789abcdef"
+    if n == 0 { return "0" }
+    let out = ""
+    let left = n
+    while left > 0 {
+        out = digits[left % 16] + out
+        left = left // 16
+    }
+    out
+}
+
+impl BodyWriter {
+    ## Sends `data` (a String, as UTF-8, or Bytes) as the next piece of the
+    ## body. Empty data sends nothing.
+    fn write(self, data: Unknown) throws socket.SocketError {
+        let kind = type_name(data)
+        let b = "".to_bytes()
+        if kind == "String" {
+            b = data.to_bytes()
+        } elif kind == "Bytes" {
+            b = data
+        } else {
+            argument_error("http: write takes a String or Bytes, got " + kind)
+        }
+        if b.len() == 0 { return }
+        if self.mode == "chunked" {
+            let framed = (hex_of(b.len()) + "\r\n").to_bytes()
+            framed.extend(b)
+            framed.extend("\r\n".to_bytes())
+            self.conn.send(framed)
+        } elif self.mode == "length" {
+            if b.len() > self.remaining {
+                argument_error(
+                    "http: the body is longer than its Content-Length (" + (
+                        self.written + self.remaining
+                    ) + ")"
+                )
+            }
+            self.conn.send(b)
+            self.remaining = self.remaining - b.len()
+        } else {
+            self.conn.send(b)
+        }
+        self.written = self.written + b.len()
+    }
+}
+
+impl Reply {
+    ## A Reply as given. `headers` is a Map or `[name, value]` pairs.
+    fn new(status: Number = 200, body: Unknown = none, headers: Unknown = [:]) -> Reply {
+        make_reply(status, body, none, headers)
+    }
+
+    ## A text reply (Content-Type `text/plain; charset=utf-8`).
+    fn text(text: String, status: Number = 200, headers: Unknown = [:]) -> Reply {
+        make_reply(status, text, "text/plain; charset=utf-8", headers)
+    }
+
+    ## An HTML reply (Content-Type `text/html; charset=utf-8`).
+    fn html(html: String, status: Number = 200, headers: Unknown = [:]) -> Reply {
+        make_reply(status, html, "text/html; charset=utf-8", headers)
+    }
+
+    ## `value` as JSON (std:json's `stringify`; Content-Type `application/json`).
+    fn json(value: Unknown, status: Number = 200, headers: Unknown = [:]) -> Reply {
+        let text = try { json_lib.stringify(value) } catch {
+            e: json_lib.JsonError => {
+                throw RuntimeError.ArgumentError { message: "http: json " + e.message() }
+            }
+        }
+        make_reply(status, text, "application/json", headers)
+    }
+
+    ## Binary data with its Content-Type.
+    fn bytes(
+        data: Bytes,
+        content_type: String = "application/octet-stream",
+        status: Number = 200,
+        headers: Unknown = [:]
+    ) -> Reply {
+        make_reply(status, data, content_type, headers)
+    }
+
+    ## A redirect to `location` (no body).
+    fn redirect(location: String, status: Number = 302) -> Reply {
+        make_reply(status, none, none, [["Location", location]])
+    }
+
+    ## A reply without a body (204 No Content by default).
+    fn empty(status: Number = 204) -> Reply { make_reply(status, none, none, [:]) }
+
+    ## A reply whose body `producer` writes piece by piece with its
+    ## BodyWriter's `write`: chunked over HTTP/1.1, unless `headers` sets a
+    ## Content-Length (then exactly that many bytes must be written).
+    fn stream(
+        producer: fn(BodyWriter) -> Unknown,
+        status: Number = 200,
+        headers: Unknown = [:]
+    ) -> Reply {
+        make_reply(status, producer, none, headers)
+    }
+
+    ## The first value of header `name` (any case), or `none`.
+    fn header(self, name: String) -> Unknown { find_header(self.headers, name) }
+
+    ## Replaces every header `name` (any case) with one `name: value`; returns
+    ## the Reply.
+    fn set_header(self, name: String, value: String) -> Reply {
+        let pair = header_pairs([[name, value]])[0]
+        self.headers = without_header(self.headers, name.to_lower())
+        self.headers.push(pair)
+        self
+    }
+
+    ## Adds a header (for one that may repeat, like Set-Cookie); returns the
+    ## Reply.
+    fn add_header(self, name: String, value: String) -> Reply {
+        self.headers.push(header_pairs([[name, value]])[0])
+        self
+    }
+}
+
+## The standard reason phrase of `status` ("Not Found" for 404), or "" for
+## one without.
+export fn reason_phrase(status: Number) -> String {
+    match status {
+        100 => { "Continue" }
+        101 => { "Switching Protocols" }
+        200 => { "OK" }
+        201 => { "Created" }
+        202 => { "Accepted" }
+        203 => { "Non-Authoritative Information" }
+        204 => { "No Content" }
+        205 => { "Reset Content" }
+        206 => { "Partial Content" }
+        300 => { "Multiple Choices" }
+        301 => { "Moved Permanently" }
+        302 => { "Found" }
+        303 => { "See Other" }
+        304 => { "Not Modified" }
+        307 => { "Temporary Redirect" }
+        308 => { "Permanent Redirect" }
+        400 => { "Bad Request" }
+        401 => { "Unauthorized" }
+        402 => { "Payment Required" }
+        403 => { "Forbidden" }
+        404 => { "Not Found" }
+        405 => { "Method Not Allowed" }
+        406 => { "Not Acceptable" }
+        408 => { "Request Timeout" }
+        409 => { "Conflict" }
+        410 => { "Gone" }
+        411 => { "Length Required" }
+        412 => { "Precondition Failed" }
+        413 => { "Content Too Large" }
+        414 => { "URI Too Long" }
+        415 => { "Unsupported Media Type" }
+        416 => { "Range Not Satisfiable" }
+        417 => { "Expectation Failed" }
+        421 => { "Misdirected Request" }
+        422 => { "Unprocessable Content" }
+        426 => { "Upgrade Required" }
+        428 => { "Precondition Required" }
+        429 => { "Too Many Requests" }
+        431 => { "Request Header Fields Too Large" }
+        500 => { "Internal Server Error" }
+        501 => { "Not Implemented" }
+        502 => { "Bad Gateway" }
+        503 => { "Service Unavailable" }
+        504 => { "Gateway Timeout" }
+        505 => { "HTTP Version Not Supported" }
+        _ => { "" }
+    }
+}
+
+## `timestamp` (seconds since 1970) as an HTTP date:
+## `Wed, 07 Oct 2026 12:00:00 GMT`.
+export fn http_date(timestamp: Number) -> String {
+    let t = timestamp - (timestamp % 1)
+    time.format(time.utc(t), "%a, %d %b %Y %H:%M:%S GMT")
+}
+
+# -- the server: connections -------------------------------------------------------------
+
+struct ConnEntry { conn: socket.Socket, busy: Bool }
+
+struct ServerState {
+    listener: socket.Listener,
+    handler: Unknown,
+    on_error: Unknown,
+    tls: Unknown,
+    max_head: Number,
+    max_body: Number,
+    read_timeout: Unknown,
+    idle_timeout: Unknown,
+    max_connections: Number,
+    conns: Map<Number, ConnEntry>,
+    closing: Bool,
+    accepting: Bool,
+    stopped: Bool,
+    done: Promise<Unknown>,
+    timer: Unknown
+}
+
+## A running server (see `serve`). `state` is private.
+export struct Server { host: String, port: Number, tls: Bool, state: Unknown }
+
+# The comma-separated items of every value, trimmed (and lowercased), the
+# empty ones dropped.
+fn tokens(values: Vector<String>, lower: Bool) -> Vector<String> {
+    let out = []
+    for let item in values.join(",").split(",") {
+        let t = if lower { item.trim().to_lower() } else { item.trim() }
+        if t != "" { out.push(t) }
+    }
+    out
+}
+
+fn has_token(items: Vector<String>, wanted: String) -> Bool {
+    for let item in items {
+        if item == wanted { return true }
+    }
+    false
+}
+
+fn all_digits(text: String) -> Bool {
+    if text == "" { return false }
+    for let c in text {
+        if !"0123456789".contains(c) { return false }
+    }
+    true
+}
+
+# A Request with nothing read yet.
+fn blank_request(conn: socket.Socket, tls: Bool) -> Request {
+    Request {
+        method: "",
+        target: "",
+        path: "",
+        query: none,
+        version: "HTTP/1.1",
+        headers: [],
+        body: "".to_bytes(),
+        peer_host: conn.peer_host,
+        peer_port: conn.peer_port,
+        tls: tls
+    }
+}
+
+# Reads one request into `req` (§3.5 of docs/contracts/M42_http_server.md).
+fn parse_request(
+    state: ServerState,
+    conn: socket.Socket,
+    w: Wait,
+    req: Request
+) throws WireError | socket.SocketError {
+    let head = Budget { left: state.max_head, limit: state.max_head }
+    let line = ""
+    while line == "" {
+        line = try { read_line_within(conn, w, head) } catch {
+            e: WireError => {
+                if e.status == 431 {
+                    throw bad_message(
+                        414,
+                        "the request line is longer than " + state.max_head + " bytes"
+                    )
+                }
+                throw e
+            }
+        }
+        if line == none { throw closed_mid_message() }
+    }
+    let parts = line.split(" ")
+    let complete = parts.len() == 3
+    for let part in parts {
+        if part == "" { complete = false }
+    }
+    if !complete {
+        throw bad_message(400, "a request line needs a method, a target and a version")
+    }
+    let method = parts[0]
+    let target = parts[1]
+    let version = parts[2]
+    req.method = method
+    if !is_token(method) { throw bad_message(400, "a bad method: " + method) }
+    let digits = "0123456789"
+    let shaped = version.len() == 8 & version.starts_with("HTTP/")
+    if shaped {
+        shaped = digits.contains(version[5]) & version[6] == "." & digits.contains(version[7])
+    }
+    if !shaped { throw bad_message(400, "a bad HTTP version: " + version) }
+    if version[5] != "1" { throw bad_message(505, "only HTTP/1.x is supported") }
+    req.version = version
+    if method == "CONNECT" { throw bad_message(501, "CONNECT isn't supported") }
+    req.target = target
+    let lowered = target.to_lower()
+    if target.starts_with("/") {
+        let q = target.index_of("?")
+        if q == none {
+            req.path = target
+        } else {
+            req.path = target[..q.unwrap()]
+            req.query = target[q.unwrap() + 1..]
+        }
+    } elif target == "*" & method == "OPTIONS" {
+        req.path = "*"
+    } elif lowered.starts_with("http://") | lowered.starts_with("https://") {
+        let u = try { url.parse(target) } catch {
+            _: url.UrlError => { throw bad_message(400, "a bad request target: " + target) }
+        }
+        req.path = if u.path == "" { "/" } else { u.path }
+        req.query = u.query
+    } else {
+        throw bad_message(400, "a bad request target: " + target)
+    }
+    req.headers = read_fields(conn, w, head, true)
+    let http10 = version == "HTTP/1.0"
+    if !http10 {
+        let hosts = find_headers(req.headers, "host")
+        if hosts.len() == 0 { throw bad_message(400, "a request without a Host header") }
+        if hosts.len() > 1 { throw bad_message(400, "more than one Host header") }
+    }
+    let te = tokens(find_headers(req.headers, "transfer-encoding"), true)
+    let cl = tokens(find_headers(req.headers, "content-length"), false)
+    let chunked = false
+    let length = 0
+    if te.len() > 0 & cl.len() > 0 {
+        throw bad_message(400, "both Transfer-Encoding and Content-Length")
+    }
+    if te.len() > 0 {
+        if http10 { throw bad_message(400, "Transfer-Encoding in an HTTP/1.0 request") }
+        if te[te.len() - 1] != "chunked" {
+            throw bad_message(400, "chunked must be the last transfer coding")
+        }
+        if te.len() > 1 {
+            throw bad_message(501, "only the chunked transfer coding is supported")
+        }
+        chunked = true
+    }
+    if cl.len() > 0 {
+        let fine = true
+        for let item in cl {
+            if !all_digits(item) | item != cl[0] { fine = false }
+        }
+        if !fine { throw bad_message(400, "a bad Content-Length: " + cl.join(", ")) }
+        let too_big = cl[0].len() > 15
+        if !too_big {
+            length = cl[0].parse_number()
+            too_big = length > state.max_body
+        }
+        if too_big {
+            throw bad_message(413, "the request body is larger than " + state.max_body + " bytes")
+        }
+    }
+    let expect = find_header(req.headers, "expect")
+    if expect != none & !http10 & (chunked | length > 0) {
+        if expect.trim().to_lower() != "100-continue" {
+            throw bad_message(417, "only 100-continue is supported in Expect")
+        }
+        conn.send_text("HTTP/1.1 100 Continue\r\n\r\n")
+    }
+    if chunked {
+        req.body = read_chunked(
+            conn,
+            w,
+            state.max_body,
+            Budget { left: state.max_head, limit: state.max_head }
+        )
+    } elif length > 0 {
+        req.body = read_exactly(conn, length, w)
+    }
+}
+
+# Whether the client wants the connection kept after this request.
+fn keeps_alive(req: Request) -> Bool {
+    let options = tokens(find_headers(req.headers, "connection"), true)
+    if req.version == "HTTP/1.0" { return has_token(options, "keep-alive") }
+    !has_token(options, "close")
+}
+
+fn error_reply(status: Number, text: String) -> Reply {
+    Reply { status: status, headers: [["Content-Type", "text/plain; charset=utf-8"]], body: text }
+}
+
+# Stops sending, then reads (and drops) what the client still sends, so it
+# reads the reply instead of a reset.
+fn linger(conn: socket.Socket) {
+    try conn.shutdown() else none;
+    let total = 0
+    while total < 262144 {
+        let chunk = try conn.recv(65536, 1000) else none
+        if chunk == none { return }
+        if chunk.len() == 0 { return }
+        total = total + chunk.len()
+    }
+}
+
+# Tells `on_error` about a failure it can't change any more.
+fn report(state: ServerState, e: Unknown, req: Request) {
+    if state.on_error != none { try (state.on_error)(e, req) else none; }
+}
+
+# Writes `reply` (already checked) for `req`; the result is whether the
+# connection stays open (§3.6).
+fn write_reply(
+    state: ServerState,
+    conn: socket.Socket,
+    req: Request,
+    reply: Reply,
+    keep: Bool
+) -> Bool throws socket.SocketError {
+    let given = header_pairs(reply.headers)
+    let streaming = type_name(reply.body) == "Function"
+    let stream_length = none
+    let headers = []
+    for let pair in given {
+        let name = pair[0].to_lower()
+        if name == "content-length" {
+            if streaming & stream_length == none {
+                if all_digits(pair[1]) { stream_length = pair[1].parse_number() }
+            }
+        } elif name == "connection" {
+            if has_token(tokens([pair[1]], true), "close") { keep = false }
+        } elif name != "transfer-encoding" {
+            headers.push(pair)
+        }
+    }
+    let bodiless = reply.status == 204 | reply.status == 304
+    let send_body = !bodiless & req.method != "HEAD"
+    let mode = "fixed"
+    let data = "".to_bytes()
+    if streaming {
+        if stream_length != none {
+            mode = "length"
+        } elif req.version != "HTTP/1.0" {
+            mode = "chunked"
+        } else {
+            mode = "close"
+            keep = false
+        }
+    } elif type_name(reply.body) == "String" {
+        data = reply.body.to_bytes()
+    } elif reply.body != none {
+        data = reply.body
+    }
+    let text = "HTTP/1.1 " + reply.status + " " + reason_phrase(reply.status) + "\r\n"
+    for let pair in headers { text = text + pair[0] + ": " + pair[1] + "\r\n" }
+    if !has_header(headers, "content-type") {
+        let kind = type_name(reply.body)
+        if kind == "String" {
+            text = text + "Content-Type: text/plain; charset=utf-8\r\n"
+        } elif kind == "Bytes" {
+            text = text + "Content-Type: application/octet-stream\r\n"
+        }
+    }
+    if !bodiless {
+        if mode == "fixed" {
+            text = text + "Content-Length: " + data.len() + "\r\n"
+        } elif mode == "length" {
+            text = text + "Content-Length: " + stream_length + "\r\n"
+        } elif mode == "chunked" {
+            text = text + "Transfer-Encoding: chunked\r\n"
+        }
+    }
+    if !has_header(headers, "date") { text = text + "Date: " + http_date(time.now()) + "\r\n" }
+    if !keep | state.closing {
+        text = text + "Connection: close\r\n"
+    } elif req.version == "HTTP/1.0" {
+        text = text + "Connection: keep-alive\r\n"
+    }
+    let out = (text + "\r\n").to_bytes()
+    if mode == "fixed" | !send_body {
+        if send_body { out.extend(data) }
+        conn.send(out)
+        return keep & !state.closing
+    }
+    conn.send(out)
+    let writer = BodyWriter { conn: conn, mode: mode, remaining: stream_length, written: 0 }
+    let failed = false
+    try {
+        (reply.body)(writer)
+        if mode == "length" {
+            if writer.remaining > 0 {
+                argument_error(
+                    "http: the body is shorter than its Content-Length (" + stream_length + ")"
+                )
+            }
+        }
+    } catch {
+        e => {
+            failed = true
+            report(state, e, req)
+        }
+    }
+    if failed { return false }
+    if mode == "chunked" { conn.send_text("0\r\n\r\n") }
+    if mode == "close" { keep = false }
+    keep & !state.closing
+}
+
+# What to answer after the handler (or a Reply check) failed with `e` (§3.9).
+fn recover(state: ServerState, e: Unknown, req: Request) -> Reply {
+    if state.on_error != none {
+        let chosen = try (state.on_error)(e, req) else none
+        if type_name(chosen) == "Reply" { return chosen }
+    }
+    match e {
+        HttpError { kind, method: _, url: _, description } if kind == "bad_request" => {
+            Reply.text(description, status: 400)
+        }
+        _ => { Reply.text("Internal Server Error", status: 500) }
+    }
+}
+
+# Calls the handler and writes its reply; the result is whether the
+# connection stays open.
+fn answer(
+    state: ServerState,
+    conn: socket.Socket,
+    req: Request,
+    keep: Bool
+) -> Bool throws socket.SocketError {
+    let reply = none
+    let failure = none
+    let failed = false
+    try {
+        let r = (state.handler)(req)
+        if type_name(r) != "Reply" {
+            argument_error("http: the handler must return an http.Reply, got " + type_name(r))
+        }
+        checked_reply(r)
+        reply = r
+    } catch {
+        e => {
+            failed = true
+            failure = e
+        }
+    }
+    if failed {
+        reply = recover(state, failure, req)
+        let usable = try {
+            checked_reply(reply);
+            true
+        } catch { _ => { false } }
+        if !usable { reply = Reply.text("Internal Server Error", status: 500) }
+    }
+    write_reply(state, conn, req, reply, keep)
+}
+
+# Reads the next request; on a failure, answers it (§3.5's table), lingers
+# and gives none.
+fn next_request(state: ServerState, conn: socket.Socket, w: Wait) -> Unknown {
+    let req = blank_request(conn, state.tls != none)
+    let status = 0
+    let text = ""
+    try {
+        parse_request(state, conn, w, req)
+        return req
+    } catch {
+        e: WireError => {
+            if !e.closed {
+                status = e.status
+                text = e.description
+            }
+        }
+        e: socket.SocketError => {
+            if e.kind == "timed_out" {
+                status = 408
+                text = "the request took too long to arrive"
+            } elif e.kind == "invalid_utf8" {
+                status = 400
+                text = "the request head isn't valid UTF-8 text"
+            }
+        }
+    }
+    if status != 0 {
+        try write_reply(state, conn, req, error_reply(status, text), false) else false;
+        linger(conn)
+    }
+    none
+}
+
+fn run_connection(state: ServerState, conn: socket.Socket) throws socket.SocketError {
+    let entry = state.conns[conn.id]
+    if state.tls != none {
+        # Socket.start_tls_server is std:socket's (M42's server TLS), looked
+        # up at run time.
+        let raw: Unknown = conn
+        raw.start_tls_server(state.tls, state.read_timeout)
+    }
+    let keep = true
+    while keep {
+        entry.busy = false
+        if state.closing { return }
+        if conn.buffer.len() == 0 {
+            let chunk = try conn.recv(65536, state.idle_timeout) else none
+            if chunk == none { return }
+            if chunk.len() == 0 { return }
+            conn.buffer = chunk
+        }
+        entry.busy = true
+        let deadline = if state.read_timeout == none { none } else { now_ms() + state.read_timeout }
+        let req = next_request(state, conn, Wait { each: none, deadline: deadline })
+        if req == none { return }
+        keep = answer(state, conn, req, keeps_alive(req))
+    }
+}
+
+fn maybe_stopped(state: ServerState) {
+    if state.closing {
+        if !state.accepting {
+            if state.conns.len() == 0 {
+                if !state.stopped {
+                    state.stopped = true
+                    if state.timer != none { async.clear_timeout(state.timer) }
+                    settle(state.done, none)
+                }
+            }
+        }
+    }
+}
+
+# One connection's task: it never fails (a failed detached task would stop
+# the program).
+fn connection(state: ServerState, conn: socket.Socket) {
+    try { run_connection(state, conn) } catch { _ => { } }
+    try conn.close() else none;
+    state.conns.remove(conn.id)
+    maybe_stopped(state)
+}
+
+# A connection over `max_connections`: a 503 and close.
+fn refuse(state: ServerState, conn: socket.Socket) {
+    try {
+        if state.tls == none {
+            write_reply(
+                state,
+                conn,
+                blank_request(conn, false),
+                error_reply(503, "too many connections"),
+                false
+            )
+            linger(conn)
+        }
+    } catch {
+        _ => { }
+    }
+    try conn.close() else none;
+}
+
+fn accept_loop(state: ServerState) {
+    let running = true
+    while running {
+        let conn = none
+        let failure = none
+        try { conn = state.listener.accept() } catch { e => { failure = e } }
+        if failure != none {
+            let kind = try failure.kind else "other"
+            if state.closing | kind == "closed" {
+                running = false
+            } else {
+                sleep_async(50)
+            }
+        } elif state.closing {
+            try conn.close() else none;
+        } elif state.conns.len() >= state.max_connections {
+            detach refuse(state, conn)
+        } else {
+            state.conns[conn.id] = ConnEntry { conn: conn, busy: false }
+            detach connection(state, conn)
+        }
+    }
+    state.accepting = false
+    maybe_stopped(state)
+}
+
+# Closes every connection still open (the end of shutdown's grace period).
+fn force_close(state: ServerState) {
+    for let entry in state.conns.values() {
+        try entry.conn.close() else none;
+        state.conns.remove(entry.conn.id)
+    }
+    maybe_stopped(state)
+}
+
+fn count_problem(name: String, value: Unknown) -> Unknown {
+    let shown = type_name(value)
+    if shown == "Number" {
+        shown = "" + value
+        if value % 1 == 0 {
+            if value >= 1 { return none }
+        }
+    }
+    "http: " + name + " must be a whole number of at least 1, got " + shown
+}
+
+fn wait_problem(name: String, value: Unknown) -> Unknown {
+    if value == none { return none }
+    let shown = type_name(value)
+    if shown == "Number" {
+        shown = "" + value
+        if value % 1 == 0 {
+            if value >= 0 { return none }
+        }
+    }
+    "http: " + name + " must be none or a whole number of at least 0, got " + shown
+}
+
+## Starts serving HTTP on `host:port` (port 0 picks a free one; see the
+## Server's `port`) and returns at once: each request is read, given to
+## `handler`, and its Reply written; connections are kept alive and served
+## concurrently. `tls` is `none` or a `socket.TlsServerConfig` (from
+## `socket.tls_server_config`) to serve HTTPS. Limits: `max_head` bytes of
+## request line and headers (414/431), `max_body` bytes of body (413),
+## `read_timeout` ms to receive a whole request (408), `idle_timeout` ms for
+## a connection to wait for its next request, `max_connections` open at once
+## (503). `on_error(error, request)` sees every error a handler throws and
+## may return the Reply to send instead of the 500 (or the 400 for an
+## HttpError kind "bad_request"). Stop it with `shutdown`, `wait` or `close`.
+export fn serve(
+    port: Number,
+    handler: fn(Request) -> Reply,
+    host: String = "127.0.0.1",
+    tls: Unknown = none,
+    max_head: Number = 16384,
+    max_body: Number = 10485760,
+    read_timeout: Unknown = 30000,
+    idle_timeout: Unknown = 5000,
+    max_connections: Number = 256,
+    backlog: Number = 128,
+    on_error: Unknown = none
+) -> Server throws socket.SocketError {
+    if type_name(handler) != "Function" {
+        argument_error("http: the handler must be a function, got " + type_name(handler))
+    }
+    let problems = [
+        count_problem("max_head", max_head),
+        count_problem("max_body", max_body),
+        count_problem("max_connections", max_connections),
+        wait_problem("read_timeout", read_timeout),
+        wait_problem("idle_timeout", idle_timeout)
+    ]
+    for let problem in problems {
+        if problem != none { argument_error(problem) }
+    }
+    if tls != none {
+        if type_name(tls) != "TlsServerConfig" {
+            argument_error(
+                "http: tls must be a socket.TlsServerConfig (from socket.tls_server_config), got " + type_name(
+                    tls
+                )
+            )
+        }
+    }
+    if on_error != none {
+        if type_name(on_error) != "Function" {
+            argument_error("http: on_error must be a function, got " + type_name(on_error))
+        }
+    }
+    let listener = socket.listen(port, host, backlog)
+    let state = ServerState {
+        listener: listener,
+        handler: handler,
+        on_error: on_error,
+        tls: tls,
+        max_head: max_head,
+        max_body: max_body,
+        read_timeout: read_timeout,
+        idle_timeout: idle_timeout,
+        max_connections: max_connections,
+        conns: [:],
+        closing: false,
+        accepting: true,
+        stopped: false,
+        done: new_promise(),
+        timer: none
+    }
+    detach accept_loop(state)
+    Server { host: host, port: listener.port, tls: tls != none, state: state }
+}
+
+impl Server {
+    ## The URL of `path` on this server (`http://127.0.0.1:8080/`); a server
+    ## on every address ("0.0.0.0" or "::") gives the loopback one.
+    fn url(self, path: String = "/") -> String {
+        let scheme = if self.tls { "https" } else { "http" }
+        let h = self.host
+        if h == "0.0.0.0" {
+            h = "127.0.0.1"
+        } elif h == "::" {
+            h = "[::1]"
+        } elif h.contains(":") {
+            h = "[" + h + "]"
+        }
+        scheme + "://" + h + ":" + self.port + path
+    }
+
+    ## Begins a graceful shutdown and returns at once: stops accepting,
+    ## closes idle connections, lets requests in flight finish (their replies
+    ## say `Connection: close`), and closes whatever is left after `grace`
+    ## ms (none: never). Calling it again does nothing.
+    fn shutdown(self, grace: Unknown = 10000) {
+        let state = self.state
+        if state.closing { return }
+        state.closing = true
+        if grace != none { state.timer = async.set_timeout(fn() { force_close(state) }, grace) }
+        for let entry in state.conns.values() {
+            if !entry.busy { try entry.conn.close() else none; }
+        }
+        try state.listener.close() else none;
+        maybe_stopped(state)
+    }
+
+    ## Waits until the server has shut down and every connection has ended.
+    fn wait(self) { self.state.done.await }
+
+    ## `shutdown(grace)`, then `wait()`.
+    fn close(self, grace: Unknown = 10000) {
+        self.shutdown(grace)
+        self.wait()
+    }
+
+    ## How many connections are open now.
+    fn connections(self) -> Number { self.state.conns.len() }
+}
+
+impl Printable for Server {
+    fn to_string(self) { "Server(" + self.url("") + ")" }
 }

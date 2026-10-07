@@ -780,9 +780,11 @@ section) and §5 (the `Type` value). In short:
 
 ### `std:http`
 
-✅ **Landed (M39)**, in `mah/std/http.mh`: an HTTP/1.1 client written in
-Mah over `std:socket` (so both VMs share it), TLS through
-`socket.start_tls`. Decisions:
+✅ **Landed (M39, client; M42, server)**, in `mah/std/http.mh`: an HTTP/1.1
+client and server written in Mah over `std:socket` (so both VMs share them),
+TLS through `socket.start_tls` (client) and `socket.start_tls_server`
+(server). The client and the server share the wire code (header-line reader,
+header helpers, chunked decoder). Client decisions:
 
 - **Surface**: `request(method, url, body = none, json = none, form = none,
   headers = [:], timeout = 30000, max_redirects = 10)`, and `get`, `post`,
@@ -805,8 +807,8 @@ Mah over `std:socket` (so both VMs share it), TLS through
   (`connection_refused`, `host_not_found`, `timed_out`, `tls_certificate`,
   `tls`, `closed_early`, ...), or `invalid_url`, `unsupported_scheme`,
   `invalid_response`, `too_many_redirects`, `proxy`, `status`.
-- **One connection per request** (`Connection: close`); no keep-alive,
-  no compression (no `Accept-Encoding` is sent), no HTTP/2. Bodies framed
+- **The client uses one connection per request** (`Connection: close`);
+  no client keep-alive, no compression (no `Accept-Encoding` is sent), no HTTP/2. Bodies framed
   by chunked encoding (extensions and trailers ignored), Content-Length,
   or the connection closing; HEAD, 204 and 304 have none; 1xx responses
   are skipped.
@@ -823,6 +825,72 @@ Mah over `std:socket` (so both VMs share it), TLS through
   `*.` ignored, ports dropped; no CIDR ranges). Plain http goes to the
   proxy with the absolute URL; https uses `CONNECT host:port`, then TLS to
   the real host through the tunnel.
+
+**Server** (M42, `docs/contracts/M42_http_server.md` part A):
+
+- **Surface**: `serve(port, handler, host = "127.0.0.1", tls = none,
+  max_head = 16384, max_body = 10485760, read_timeout = 30000,
+  idle_timeout = 5000, max_connections = 256, backlog = 128,
+  on_error = none)` listens (port 0 picks a free one), returns a
+  **Server** `{ host, port, tls, state }` at once and serves in the
+  background. Bad options are `RuntimeError.ArgumentError`s; bind failures
+  throw `socket.SocketError` (`address_in_use`, ...) from `serve` itself.
+- **Handler shape `fn(Request) -> Reply`** (Fetch/Hono style, not Node's
+  `(req, res)`): routing and middleware are function composition, and a
+  handler is testable without a socket by building an `http.Request`
+  literal. **Request** `{ method, target, path, query, version, headers,
+  body, peer_host, peer_port, tls }` (`path`/`query` split at the first `?`,
+  still percent-encoded; `body` Bytes, read whole before the handler runs)
+  with `header`, `header_all`, `content_type()` (media type, lowercased),
+  `text()`, `json()`, `query_pairs()`, `query_param(name)`, `form()` and
+  `multipart()` (a Vector of **Part** `{ name, filename, content_type,
+  headers, body }`). **Reply** `{ status, headers, body }` with
+  constructors `Reply.new`, `text`, `html`, `json`, `bytes`, `redirect`,
+  `empty`, `stream` and `set_header`/`add_header`; `body` is `none`, a
+  String, Bytes or a producer `fn(BodyWriter)` whose `write(data)` streams
+  the body (chunked on HTTP/1.1, exactly the bytes of a given
+  Content-Length, or close-delimited on HTTP/1.0). Also `reason_phrase`
+  and `http_date`.
+- **Limits and statuses**: a request line over `max_head` is 414, a head
+  over it or more than 100 header fields 431, a body over `max_body` 413
+  (checked before reading it), a request not fully received within
+  `read_timeout` ms of its first byte 408, more than `max_connections`
+  open connections 503; a connection waiting longer than `idle_timeout`
+  for its next request is closed silently. Malformed requests (bad request
+  line, missing or repeated Host, bad Content-Length, Transfer-Encoding
+  with Content-Length, a coding other than a final `chunked`, obsolete
+  line folding, bad header names) are 400, 501 or 505, always closing the
+  connection after the reply (the server then reads what the client still
+  sends for a moment, so the client sees the reply, not a reset).
+- **Keep-alive** (HTTP/1.1 unless `Connection: close`; HTTP/1.0 with
+  `Connection: keep-alive`), pipelined requests answered in order;
+  **`Expect: 100-continue`** answered with `100 Continue` once the head has
+  passed the checks (any other expectation is 417); chunked request bodies
+  (extensions and trailers ignored). Every reply carries `Date`; HEAD, 204
+  and 304 replies have no body.
+- **Errors**: `Request.json`/`query_pairs`/`form`/`multipart` throw
+  `HttpError` kind `bad_request`, which the server answers with 400 and its
+  description; anything else a handler throws (or a non-Reply result) is a
+  bare 500. `on_error(error, request)` sees every handler or body-producer
+  error and may return the Reply to send instead. No default logging.
+- **Shutdown**: `server.shutdown(grace = 10000)` returns at once, stops
+  accepting, closes idle connections, lets requests in flight finish (with
+  `Connection: close`) and force-closes what is left after `grace` ms;
+  `server.wait()` returns once everything has stopped, `server.close(grace)`
+  is both, `server.connections()` counts open connections. A server that is
+  never shut down keeps the program running, so a script can end with
+  `http.serve(...).wait()`.
+- **Concurrency**: the accept loop and each connection are detached tasks,
+  so connections are served concurrently whenever a handler waits (I/O,
+  `sleep_async`, `.await`); the scheduler stays single-threaded (M44).
+- **TLS**: `tls: socket.tls_server_config(cert_path, key_path)` (a PEM
+  chain and key, loaded and checked once) serves HTTPS; each connection
+  runs `start_tls_server` first, with `read_timeout` as its handshake
+  timeout, and a failed handshake closes it silently.
+- Not yet: HTTP/2, WebSockets/`Upgrade`/1xx replies, streaming request
+  bodies, compression, Range, static files, cookie helpers, routing and
+  middleware (the web framework, a separate repository, builds them on
+  this API).
 
 ## `std:test` and `mah test`
 

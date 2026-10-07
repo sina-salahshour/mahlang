@@ -2,14 +2,15 @@
 title: std:http
 order: 15
 section: Networking
-summary: An HTTP/1.1 client for http and https with JSON and form bodies, redirects, proxies and timeouts.
+summary: An HTTP/1.1 client (http and https, JSON and form bodies, redirects, proxies) and server (handler functions, keep-alive, limits, graceful shutdown, TLS).
 ---
 
 # `std:http`
 
-An HTTP/1.1 client for `http://` and `https://` URLs. It's written in Mah
-over [`std:socket`](/std/socket) (only TLS is native), so both runtimes
-run exactly the same code.
+An HTTP/1.1 client for `http://` and `https://` URLs, and an HTTP/1.1
+server (see [Serving HTTP](#serving-http)). Both are written in Mah over
+[`std:socket`](/std/socket) (only TLS is native), so both runtimes run
+exactly the same code.
 
 ```mah
 import http from "std:http"
@@ -142,7 +143,150 @@ It also carries the `method` and `url`.
   honored; HTTPS goes through the proxy with `CONNECT`.
 - HTTPS verifies certificates against the system's roots (or
   `SSL_CERT_FILE`), as in `std:socket`.
-- Each request uses a new connection (no keep-alive pooling yet).
+- The client uses a new connection for each request (no keep-alive pooling yet).
+
+## Serving HTTP
+
+`http.serve(port, handler)` starts a server and returns an `http.Server`
+**at once**; it serves in the background until you stop it. A handler is a
+plain function from an `http.Request` to an `http.Reply`, called once per
+request:
+
+```mah
+import http from "std:http"
+
+fn handle(req: http.Request) -> http.Reply {
+    if req.path == "/" { return http.Reply.text("hello") }
+    if req.path == "/greet" {
+        let name = req.query_param("name")
+        return http.Reply.json(["greeting": "hi " + (if name == none { "you" } else { name })])
+    }
+    if req.path == "/items" & req.method == "POST" {
+        let item = req.json()                 # bad JSON: answered with 400
+        return http.Reply.json(["created": item], status: 201)
+    }
+    http.Reply.text("no route for " + req.path, status: 404)
+}
+
+let server = http.serve(0, handle)            # port 0: a free one (see server.port)
+print(http.get(server.url("/greet?name=mah")).text())   # {"greeting":"hi mah"}
+server.close()                                # or server.wait() to serve until shut down
+```
+
+To serve for real, listen on a fixed port and wait: `http.serve(8080,
+handle, host: "0.0.0.0").wait()` (the default host, `127.0.0.1`, only
+accepts local connections).
+
+### Requests
+
+An `http.Request` has `method`, `target` (as sent, `"/a/b?x=1"`), `path`
+(`"/a/b"`, still percent-encoded), `query` (`"x=1"`, or `none`), `version`,
+`headers` (`[name, value]` pairs as received), `body` (Bytes, read whole
+before the handler runs), `peer_host`, `peer_port` and `tls`, and:
+
+- `header(name)`, `header_all(name)`: header values, any case.
+- `content_type()`: the media type, lowercased (`"application/json"`), `""`
+  without one.
+- `text()`, `json()`: the body decoded.
+- `query_pairs()`, `query_param(name)`: the decoded query.
+- `form()`: an urlencoded or multipart form's fields as `[name, value]`
+  pairs; `multipart()`: every part (`http.Part { name, filename,
+  content_type, headers, body }`), files included.
+
+When the body or query can't be read (bad JSON, a malformed form), these
+throw `http.HttpError` kind `"bad_request"`, and if the handler lets it
+escape the client gets a **400** with the reason.
+
+Because a handler is just a function, you can test it without a server:
+
+```mah
+import http from "std:http"
+
+fn hello(req: http.Request) -> http.Reply { http.Reply.text("hi " + req.path) }
+
+let req = http.Request { method: "GET", target: "/x", path: "/x", query: none, version: "HTTP/1.1", headers: [], body: "".to_bytes(), peer_host: "test", peer_port: 0, tls: false }
+print(hello(req).body)                        # hi /x
+```
+
+### Replies
+
+| | |
+|---|---|
+| `Reply.text(s)`, `Reply.html(s)` | text with `text/plain` / `text/html; charset=utf-8` |
+| `Reply.json(value)` | `application/json` |
+| `Reply.bytes(data, content_type = "application/octet-stream")` | binary |
+| `Reply.redirect(location, status = 302)` | a redirect |
+| `Reply.empty(status = 204)` | no body |
+| `Reply.new(status = 200, body = none, headers = [:])` | anything |
+| `Reply.stream(fn(w) { ... })` | a body written piece by piece |
+
+Each takes `status:` and `headers:` (a Map or pairs; a `Content-Type` you
+give wins). `reply.set_header(name, value)` replaces a header and
+`reply.add_header(name, value)` adds one (for `Set-Cookie`); both return
+the Reply. The server adds `Content-Length` (or chunked coding for a
+stream), `Date`, and `Connection` when needed. A streamed body's producer
+gets an `http.BodyWriter` whose `write(text_or_bytes)` sends the next piece:
+
+```mah
+import http from "std:http"
+
+fn countdown(req: http.Request) -> http.Reply {
+    http.Reply.stream(fn(w: http.BodyWriter) {
+        for let i in 0..3 {
+            w.write("" + (3 - i) + "\n")
+            sleep_async(100)
+        }
+    })
+}
+```
+
+### Errors
+
+Anything a handler throws, or a result that isn't a Reply, becomes a bare
+**500** (an uncaught `"bad_request"` HttpError is a **400**). Pass
+`on_error: fn(e, req) { ... }` to see every such error (to log it, say) and
+optionally return the Reply to send instead.
+
+### Limits, keep-alive and concurrency
+
+The server speaks HTTP/1.1 and 1.0, keeps connections alive, answers
+pipelined requests in order, reads chunked request bodies and answers
+`Expect: 100-continue`. Malformed requests get a 400 (or 501/505) and are
+closed. Options of `serve`:
+
+| option | default | |
+|---|---|---|
+| `host` | `"127.0.0.1"` | `"0.0.0.0"` for every interface |
+| `max_head` | 16384 | bytes of request line and headers (414, 431) |
+| `max_body` | 10485760 | bytes of body (413) |
+| `read_timeout` | 30000 | ms to receive a whole request (408) |
+| `idle_timeout` | 5000 | ms a kept-alive connection may wait for its next request |
+| `max_connections` | 256 | open connections (503 beyond) |
+| `tls` | `none` | a `socket.tls_server_config(cert, key)` to serve HTTPS |
+| `on_error` | `none` | see Errors |
+
+Each connection is its own task, so requests are handled concurrently
+whenever a handler waits (for I/O, `sleep_async` or `.await`).
+
+### Shutting down
+
+`server.shutdown(grace = 10000)` stops accepting, closes idle connections,
+lets requests in flight finish and closes whatever is left after `grace`
+ms; it returns at once. `server.wait()` waits until everything has
+stopped, and `server.close()` is both. `server.connections()` counts open
+connections, and `server.url(path)` gives a URL on the server.
+
+### HTTPS
+
+```mah
+import http from "std:http"
+import socket from "std:socket"
+
+fn serve_https(handle: fn(http.Request) -> http.Reply) throws socket.SocketError {
+    let identity = socket.tls_server_config("cert.pem", "key.pem")   # checked once, here
+    http.serve(8443, handle, host: "0.0.0.0", tls: identity).wait()
+}
+```
 
 ## Reference
 
@@ -166,5 +310,15 @@ It also carries the `method` and `url`.
 | `is_success()` | 2xx |
 | `check_status()` | the Response, or throws for 4xx/5xx |
 
-`http.HttpError { kind, method, url, description }` is the error type.
-Programs that import `std:http` need bytecode 1.19.
+| Server side | |
+|---|---|
+| `serve(port, handler, host, tls, max_head, max_body, read_timeout, idle_timeout, max_connections, backlog, on_error)` | starts a `Server` |
+| `Server` | `host`, `port`, `tls`; `url(path)`, `shutdown(grace)`, `wait()`, `close(grace)`, `connections()` |
+| `Request` | see [Requests](#requests) |
+| `Reply` | `status`, `headers`, `body`; see [Replies](#replies) |
+| `reason_phrase(status)` | `"Not Found"` for 404 |
+| `http_date(timestamp)` | `"Wed, 07 Oct 2026 12:00:00 GMT"` |
+
+`http.HttpError { kind, method, url, description }` is the error type
+(`kind` `"bad_request"` for a request a server handler couldn't read).
+Programs that import `std:http` need bytecode 1.20.

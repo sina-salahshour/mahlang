@@ -640,8 +640,8 @@ print(url.parse_query("a=1&b=x+y"))                  # [[a, 1], [b, x y]]
 
 *Full guide: [std:http](/std/http).*
 
-An HTTP/1.1 client for `http://` and `https://`, written in Mah over
-`std:socket`. `get`, `post`, `put`, `patch`, `delete`, `head` and
+An HTTP/1.1 client for `http://` and `https://`, and a server, written in
+Mah over `std:socket`. `get`, `post`, `put`, `patch`, `delete`, `head` and
 `request(method, url, ...)` take `headers` (a Map), `timeout` and
 `max_redirects`; the body-sending ones take `body` (String or Bytes),
 `json` or `form`.
@@ -661,6 +661,20 @@ A 404 or 500 is still a `Response` (`r.is_success()`, `r.check_status()`);
 out connections, untrusted certificates, bad URLs, too many redirects.
 Redirects are followed, and the `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`
 environment variables are honored.
+
+`http.serve(port, handler)` serves HTTP: a handler is a function from an
+`http.Request` to an `http.Reply` (`Reply.text`, `json`, `html`, `bytes`,
+`redirect`, `empty`, `stream`), and the server handles keep-alive, chunked
+bodies, limits, concurrency (one task per connection), graceful shutdown
+(`server.close()`) and, with `tls: socket.tls_server_config(cert, key)`,
+HTTPS.
+
+```mah
+import http from "std:http"
+let server = http.serve(0, fn(req: http.Request) -> http.Reply { http.Reply.text("hi " + req.path) })
+print(http.get(server.url("/there")).text())   # hi /there
+server.close()
+```
 
 ## `std:reflect`
 

@@ -871,6 +871,66 @@ print(r.status, r.reason, r.text(), r.header("x-a"), r.headers.len())
 server.close()
 print(try { http.get("gopher://h/") } catch { e: http.HttpError => { e.kind + ": " + e.message() } })
 """, b""),
+    ("std_http_server", """
+import http from "std:http"
+import socket from "std:socket"
+fn handle(req: http.Request) -> Unknown {
+    if req.path == "/form" { return http.Reply.json(req.form()) }
+    if req.path == "/stream" {
+        return http.Reply.stream(fn(w: http.BodyWriter) { w.write("ab"); w.write("c".to_bytes()) })
+    }
+    if req.path == "/bad" { return "not a reply" }
+    http.Reply.text("hi " + req.path)
+}
+fn read_reply(c: socket.Socket) -> String {
+    let out = c.read_line(5000)
+    let n = 0
+    let line = c.read_line(5000)
+    while line != "" {
+        if !line.starts_with("Date:") { out = out + " | " + line }
+        if line.starts_with("Content-Length:") { n = line[16..].trim().to_number() }
+        line = c.read_line(5000)
+    }
+    if n > 0 { out = out + " | " + c.recv_exactly(n, 5000).to_text_lossy() }
+    out
+}
+fn raw(server: http.Server, text: String) -> socket.Socket {
+    let c = socket.connect("127.0.0.1", server.port, 5000)
+    c.send_text(text)
+    c
+}
+let server = http.serve(0, handle, max_body: 64)
+let r = http.get(server.url("/x"))
+print(r.status, r.text(), r.header("content-type"), r.header("content-length"))
+let k = raw(server, "GET /a HTTP/1.1\\r\\nHost: x\\r\\n\\r\\n")
+print(read_reply(k))
+k.send_text("GET /b HTTP/1.1\\r\\nHost: x\\r\\n\\r\\n")
+print(read_reply(k))
+k.close()
+print(http.post(server.url("/form"), form: ["a": "1 2", "b": "é"]).text())
+let bad = raw(server, "BAD\\r\\n\\r\\n")
+print(read_reply(bad))
+bad.close()
+let big = raw(server, "POST / HTTP/1.1\\r\\nHost: x\\r\\nContent-Length: 100\\r\\n\\r\\nabcdef")
+print(read_reply(big))
+big.close()
+let s = raw(server, "GET /stream HTTP/1.1\\r\\nHost: x\\r\\nConnection: close\\r\\n\\r\\n")
+print(read_reply(s))
+let rest = "".to_bytes()
+let chunk = s.recv(65536, 5000)
+while chunk.len() > 0 {
+    rest.extend(chunk)
+    chunk = s.recv(65536, 5000)
+}
+print(rest)
+s.close()
+let failed = http.get(server.url("/bad"))
+print(failed.status, failed.text())
+print(http.reason_phrase(200), http.reason_phrase(431), "[" + http.reason_phrase(299) + "]", http.http_date(86400))
+print(server.connections() >= 0)
+server.close()
+print(server.connections())
+""", b""),
     ("std_csv", """
 import csv from "std:csv"
 print(csv.parse("a,\\"b,c\\"\\r\\n\\n\\"q\\"\\"x\\",\\n"), csv.parse_records("n,v\\nx,1\\n"))

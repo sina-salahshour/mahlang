@@ -241,15 +241,17 @@ right after errors and `std:` resolution.
 
 ## The HTTP server
 
-Next after M39: `std:http`'s server side over `std:socket`'s `listen`/
-`accept`, sharing the client's request/response parsing (chunked bodies,
-headers as pairs), with keep-alive, form and multipart bodies, and graceful
-shutdown. TLS on the server side would need a `start_tls` for accepted
-sockets (a certificate and key), which is a separate native.
+✅ Landed as M42 -- see docs/V2_DESIGN.md's M42 entry and
+docs/contracts/M42_http_server.md. Deferred: HTTP/2, `Upgrade`/WebSockets/1xx
+replies, streaming request bodies (they are read whole), response
+compression, Range requests, static files, cookie helpers, per-connection
+request caps, write timeouts, client certificates, SNI/several certificates,
+ALPN and certificate reloading.
 
 ## A NestJS/Hono-style web framework
 
-Built on the HTTP server and M41b/M41c's decorators and hooks: controllers
+It will live in a separate repository, built on `http.serve`'s
+`fn(Request) -> Reply` handlers. Built on the HTTP server and M41b/M41c's decorators and hooks: controllers
 and routes declared with decorators, **parameter decorators** binding path,
 query, header and body values to typed parameters, **validation** from the
 declared types and validator decorators, **pipes** and **transforms** that

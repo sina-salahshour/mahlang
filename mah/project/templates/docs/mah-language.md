@@ -1137,7 +1137,7 @@ print(u.resolve("../b?y=2"))                         # https://example.com:8443/
 print(url.encode("a b/c"), url.encode_query(["q": "mah lang", "n": 2]))   # a%20b%2Fc q=mah+lang&n=2
 ```
 
-`std:http`: an HTTP/1.1 client (http and https). `http.get(url, headers = [:],
+`std:http`: an HTTP/1.1 client (http and https) and server (below). `http.get(url, headers = [:],
 timeout = 30000, max_redirects = 10)`, `http.post(url, body = none, json = none,
 form = none, headers = [:], ...)`, likewise `put`, `patch`, `delete`, `head`,
 and `http.request(method, url, ...)`. `body` is a String or Bytes; `json:`
@@ -1163,6 +1163,45 @@ fn fetch_title() -> String throws http.HttpError {
 let created = try { http.post("https://api.example.com/items", json: ["name": "mah"]) } catch {
     e: http.HttpError => { print(e.kind, e.message()); none }
 }
+```
+
+**The server**: `http.serve(port, handler, host = "127.0.0.1", ...)` listens
+(port 0 picks a free one), returns an `http.Server` at once and serves in the
+background. A handler is a plain function `fn(http.Request) -> http.Reply`.
+A Request has `method`, `target`, `path`, `query` (`none` without one),
+`version`, `headers` (pairs), `body` (Bytes, read whole), `peer_host`,
+`peer_port`, `tls`, and `header(name)`, `content_type()`, `text()`, `json()`,
+`query_param(name)`, `query_pairs()`, `form()` (`[name, value]` pairs) and
+`multipart()` (a Vector of `http.Part { name, filename, content_type,
+headers, body }`). Answer with `http.Reply.text(s)`, `html`, `json(value)`,
+`bytes(b, content_type)`, `redirect(location)`, `empty()` (204),
+`Reply.new(status, body, headers)` or `Reply.stream(fn(w) { w.write(...) })`
+(each takes `status:` and `headers:`), and `set_header`/`add_header`.
+A bad JSON, form or query in `req.json()` & co. throws `http.HttpError` kind
+`"bad_request"`, answered with 400; any other error a handler throws is a 500
+(`on_error: fn(e, req) { ... }` may return the Reply to send instead).
+Keep-alive, chunked bodies and `Expect: 100-continue` are handled; options
+`max_head`, `max_body`, `read_timeout`, `idle_timeout`, `max_connections`
+set the limits (431/414, 413, 408, 503). Connections run as tasks, so slow
+handlers that wait don't block each other. `server.shutdown()` stops
+gracefully and returns at once, `server.wait()` waits until it has stopped,
+`server.close()` does both; a server keeps the program running until then.
+`tls: socket.tls_server_config("cert.pem", "key.pem")` serves HTTPS.
+
+```mah
+import http from "std:http"
+fn handle(req: http.Request) -> http.Reply {
+    if req.path == "/" { return http.Reply.text("hello") }
+    if req.path == "/add" & req.method == "POST" {
+        let data = req.json()                    # bad JSON: a 400 for the client
+        return http.Reply.json(["sum": data["a"] + data["b"]])
+    }
+    http.Reply.text("not found", status: 404)
+}
+let server = http.serve(0, handle)               # a free port; serve(8080, handle).wait() runs forever
+print(http.get(server.url("/")).text())          # hello
+print(http.post(server.url("/add"), json: ["a": 1, "b": 2]).text())   # {"sum":3}
+server.close()
 ```
 
 ### Type values and reflection
@@ -1487,7 +1526,7 @@ test "not ready yet" {
 - Hooks for enums or variants, field *get* hooks, and `impl` for a nested
   `fn` or closure (only top-level `fn`s and types are impl targets).
 - Decorators on `let`s, traits, `impl` blocks, nested functions or closures.
-- UDP and TLS, an HTTP client or server, spawning a process to stream from, and every other planned
+- UDP, HTTP/2, WebSockets, spawning a process to stream from, and every other planned
   `std:` module besides `std:math`, `std:path`, `std:json`, `std:csv`,
   `std:random`, `std:collections`, `std:regex`, `std:time`, `std:async`,
   `std:bytes`, `std:fs`, `std:process`, `std:socket`, `std:reflect` and `std:test`. A Bytes literal. Time zones (`std:time` is UTC only).
