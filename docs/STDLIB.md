@@ -62,6 +62,8 @@ import "std:math"            # flat import works too
    read `std:math#20:9` (compile errors, hover), never the install path. An
    uncaught runtime error from inside a std module is located at the
    program's own call into it (M30, like the prelude's since M29).
+   `pkg:` is the other reserved prefix: it imports an installed package
+   from GitHub (M43, `docs/PACKAGES.md`).
 2. **`extern fn`. ✅ Landed (M27).** Std modules reach natives through
    declarations that only `std:` files (and the prelude) may use; anywhere
    else it's a compile error. `extern` is contextual (`let extern = 1`

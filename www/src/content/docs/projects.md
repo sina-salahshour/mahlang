@@ -45,7 +45,7 @@ out = "build/my-app.mahc"
 check = "loose"           # "loose" | "strict" | "explicit": see Types
 
 [dependencies]
-# reserved for third-party packages, not supported yet
+# json5 = { github = "owner/repo", tag = "v1.0.0" }   # fetched by `mah install`
 ```
 
 - `[package]`: `name`, `version` (yours to manage), `entry` (defaults to
@@ -62,8 +62,8 @@ check = "loose"           # "loose" | "strict" | "explicit": see Types
   `"loose"` (default, editor warnings only), `"strict"` (type errors fail
   `mah run`/`mah build`), or `"explicit"` (strict, plus annotations
   wherever a type can't be inferred). See [Types](/docs/types).
-- `[dependencies]`: reserved for third-party packages, which aren't
-  supported yet — keep it empty.
+- `[dependencies]`: packages from GitHub repositories, fetched by `mah
+  install` — see [Packages](#packages) below.
 
 ## Commands
 
@@ -81,12 +81,60 @@ mah build --self-contained  # make every target standalone (runs without mah, sa
 mah format                  # lay out every .mh file in the standard style
 mah format --check          # list files that aren't formatted (exit 1 if any)
 mah check                   # run the static type checker at the project's level
+mah install                 # fetch [dependencies] into .mah/ and write mah-lock.toml
 ```
 
 A compile error (syntax, undefined name, wrong struct fields) is
 reported before anything runs. A runtime error stops the program and
 says where it happened, `at position #LINE:COL` (or `file.mh#LINE:COL`
 inside an imported file).
+
+## Packages
+
+A project can use Mah code from GitHub repositories. Declare each package
+under `[dependencies]` with a local name:
+
+```toml
+[dependencies]
+json5  = { github = "acme/mah-json5", tag = "v1.2.0" }
+utils  = { github = "acme/monorepo", branch = "main", path = "packages/utils" }
+pinned = { github = "acme/thing", rev = "0123456789abcdef0123456789abcdef01234567" }
+latest = { github = "acme/other" }            # the default branch
+```
+
+`tag`, `branch` or a full 40-character `rev` choose the version (at most
+one); `path` uses a subdirectory of the repository as the package. Then run
+`mah install`: it fetches the packages (and the packages *they* declare)
+into `.mah/packages/`, and writes `mah-lock.toml`, which pins the exact
+commit and a content hash of each. Commit the lock; `.mah/` is git-ignored.
+
+Import a package with the reserved `pkg:` prefix:
+
+```
+import json5 from "pkg:json5"          # the package's library file
+import "pkg:json5/src/extra.mh"        # any file in it (.mh optional)
+```
+
+The library file is the package's `[package] lib` (default `src/lib.mh`), or
+`lib.mh` for a directory without a `mah-project.toml`. Your code may import
+only the packages your `[dependencies]` declare. Nothing is installed
+automatically: a missing or out-of-date package is a compile error at the
+import telling you to run `mah install`. A built `.mahc` contains the
+package code, so it runs without `.mah/`.
+
+- `mah install` keeps what the lock pins (offline, without git, when
+  nothing changed), resolves only new or changed entries, reinstalls files
+  edited by hand, and removes packages no longer needed.
+- `mah install --update` moves every branch and tag to its current commit;
+  `mah install --update NAME` just that package.
+- `mah install --frozen` installs exactly the lock and fails if it's missing
+  or out of date: use it in CI.
+
+Fetching uses the `git` command. `GITHUB_TOKEN` is sent to github.com for
+private repositories (your git credentials work too), and
+`MAH_GITHUB_URL_BASE` points at a mirror or GitHub Enterprise. The full
+reference, with every error message, is `docs/PACKAGES.md` in the Mah
+repository.
 
 ## Self-contained executables
 

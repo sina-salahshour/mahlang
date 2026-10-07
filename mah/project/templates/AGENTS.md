@@ -17,6 +17,8 @@ what doesn't (no tuples, no string interpolation, ...).
 | `src/*.test.mh` | tests, run by `mah test` (`src/main.test.mh` tests `src/main.mh`) |
 | `docs/mah-language.md` | the complete Mah language reference |
 | `build/` | compiled output from `mah build` (git-ignored) |
+| `mah-lock.toml` | the exact package versions `mah install` pinned (commit it) |
+| `.mah/` | installed packages, written by `mah install` (git-ignored) |
 
 ## Commands
 
@@ -36,6 +38,8 @@ mah run --vm rust           # run on the native Rust runtime (if it's installed)
 mah build --self-contained  # make every target standalone (runs without mah, same OS/CPU)
 mah format                  # lay out every .mh file in the standard style
 mah format --check          # list files that aren't formatted (exit 1 if any)
+mah install                 # fetch [dependencies] into .mah/ and write mah-lock.toml
+mah install --frozen        # install exactly what mah-lock.toml pins (for CI)
 ```
 
 Run `mah format` after editing Mah code. It only changes whitespace and
@@ -68,8 +72,13 @@ test with every change, and make sure `mah test` passes.
   build` too; `"explicit"` is `"strict"` plus every declaration whose type
   can't be inferred must be annotated. `mah check` reports at whichever
   level is set (`--level` overrides it for one run).
-- `[dependencies]`: reserved for third-party packages, which aren't supported
-  yet. Keep it empty.
+- `[dependencies]`: packages from GitHub, one per line:
+  `NAME = { github = "owner/repo", tag = "v1.0.0" }` (or `branch = "main"`,
+  `rev = "<40-character commit>"`, or none of them for the default branch;
+  `path = "sub/dir"` uses a subdirectory as the package). After changing it,
+  run `mah install`, which fetches them into `.mah/` and pins the exact
+  commits in `mah-lock.toml` (commit that file; `.mah/` is ignored).
+  `mah install --update [NAME]` moves branches and tags forward.
 
 ## Writing Mah here
 
@@ -84,6 +93,10 @@ test with every change, and make sure `mah test` passes.
   `std:bytes` (the mutable `Bytes` type's helpers), `std:fs`, `std:process`, `std:socket` (TCP clients and servers, TLS clients), `std:url`, `std:http` (an HTTP/HTTPS client), `std:reflect` (types, `##` docs, decorators and their hooks at run time,
   which `json.decode` uses to read JSON into your structs) and `std:test` for
   tests (see `docs/mah-language.md`).
+- Packages from `[dependencies]` are imported as `"pkg:NAME"` (the
+  package's library file) or `"pkg:NAME/path/to/file.mh"` (any file in it),
+  the same two ways as a file. Don't edit anything under `.mah/`: it's
+  rewritten by `mah install`.
 - Model data with `struct`/`enum` + `match`, and give behavior to types with
   `impl` blocks and traits. Implement `Printable` (`fn to_string(self)`) to
   control how a value prints.

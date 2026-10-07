@@ -822,6 +822,16 @@ print(try math.log(0) else "undefined")         # undefined
 A domain error (`log(0)`, `sqrt(-1)`, `asin(2)`) throws
 `RuntimeError.ArgumentError`. Any other `std:` name is a compile error.
 
+Packages from GitHub are declared in `mah-project.toml`'s `[dependencies]`
+(for example `json5 = { github = "owner/repo", tag = "v1.0.0" }`), fetched
+into `.mah/` by `mah install` and pinned in `mah-lock.toml`. They're imported
+with the reserved `pkg:` prefix, the same two ways as a file: `import json5
+from "pkg:json5"` gives the package's library file (its `[package] lib`,
+`src/lib.mh` by default), and `import "pkg:json5/src/extra.mh"` any other
+file in it (`.mh` is optional). A file may import only the packages its own
+project declares; a missing or out-of-date package is a compile error that
+says to run `mah install`. Don't edit `.mah/`.
+
 `std:path` is string logic on paths (`/` or `\`, answers use `/`):
 
 ```mah

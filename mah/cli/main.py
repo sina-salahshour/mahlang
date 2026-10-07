@@ -26,7 +26,7 @@ from ..project.manifest import MANIFEST_NAME, MahProjectError, check_level_for, 
 
 sys.tracebacklimit = 0
 
-_SUBCOMMANDS = {"run", "build", "runc", "dis", "lsp", "init", "format", "check", "test"}
+_SUBCOMMANDS = {"run", "build", "runc", "dis", "lsp", "init", "format", "check", "test", "install"}
 
 
 def read_file(file_name):
@@ -246,6 +246,23 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     _add_vm_argument(test_parser)
 
+    install_parser = subparsers.add_parser(
+        "install",
+        help="fetch the project's [dependencies] into .mah/ and write mah-lock.toml (see docs/PACKAGES.md)",
+    )
+    install_parser.add_argument(
+        "directory", nargs="?", default=None,
+        help="the project directory (defaults to the current project, found by searching upward)",
+    )
+    install_parser.add_argument(
+        "--frozen", action="store_true",
+        help="install exactly what mah-lock.toml says; fail if it's missing or out of date (for CI)",
+    )
+    install_parser.add_argument(
+        "--update", nargs="*", default=None, metavar="NAME",
+        help="re-resolve branches, tags and default branches: of the named packages, or of all",
+    )
+
     lsp_parser = subparsers.add_parser("lsp", help="start the Mah language server (speaks LSP over stdio)")
     lsp_parser.add_argument(
         "--version", action="store_true",
@@ -335,6 +352,17 @@ def main(argv: list[str] | None = None) -> int:
             _report_runtime_error(e)
             return 1
         return 0
+
+    if args.command == "install":
+        from ..project.install import find_project_root, install
+
+        if args.frozen and args.update is not None:
+            print("error: --frozen and --update can't be used together", file=sys.stderr)
+            return 2
+        install_project, err = find_project_root(args.directory, sys.stderr)
+        if err is not None:
+            return err
+        return install(install_project.root, frozen=args.frozen, update=args.update)
 
     if args.command == "test":
         from .test_runner import run as run_tests

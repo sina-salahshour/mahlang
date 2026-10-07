@@ -260,6 +260,13 @@ on parameters reaching hooks with enough information, and async hooks.
 
 ## Packages from GitHub repositories
 
+Landed as M43 -- see docs/V2_DESIGN.md's M43 entry and docs/PACKAGES.md.
+Deferred: `mah add`/`mah remove`, hosts other than GitHub and `git = "url"`
+sources, semver ranges and version solving, a download cache shared between
+projects, package registries, `mah init --lib`, several versions of one name
+in a project, packages that bind natives, locking concurrent `mah install`
+runs against each other, and verifying commit signatures.
+
 `[dependencies]` in `mah-project.toml` (reserved since projects landed)
 becomes real: each entry names a GitHub repository, with an optional
 branch, tag or commit hash to install, and an optional subdirectory of the

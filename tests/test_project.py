@@ -504,7 +504,10 @@ class ManifestValidationTests(unittest.TestCase):
             path = self._write(
                 td, '[package]\nname = "x"\nversion = "1"\n\n[dependencies]\nfoo = "1.0"\n'
             )
-            self._assert_error(path, "aren't supported yet")
+            # M43: [dependencies] entries are tables (docs/PACKAGES.md)
+            self._assert_error(
+                path, 'dependency \'foo\' must be a table, like foo = { github = "owner/repo", tag = "v1.0" }'
+            )
 
     def test_entry_defaults_to_src_main_mh(self):
         with tempfile.TemporaryDirectory() as td:

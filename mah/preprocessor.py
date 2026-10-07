@@ -70,6 +70,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
+from .project.package_paths import PKG_PREFIX, package_label, package_of_path
+
 BUFFER_PATH = "<buffer>"
 DEFAULT_EXT = ".mh"
 
@@ -109,6 +111,10 @@ def source_label(path: str) -> str:
     name = std_module_name(path)
     if name is not None:
         return STD_PREFIX + name
+    # M43: a file inside an installed package is `pkg:NAME/REL`.
+    label = package_label(path)
+    if label is not None:
+        return label
     return os.path.basename(path)
 
 # Prefix used when mangling a module's top-level names.
@@ -669,7 +675,11 @@ def _resolve_import(base_dir: str, literal: str):
 
     Returns ``(resolved_path, exists)``. M27: `std:<name>` is a standard
     library module, looked up only in `STD_DIR` (the prelude isn't one).
+    M43: a `pkg:` literal is returned as-is, unresolved -- `preprocess`
+    resolves those through its `PackageContext` (docs/PACKAGES.md).
     """
+    if literal.startswith(PKG_PREFIX):
+        return literal, False
     if literal.startswith(STD_PREFIX):
         name = literal[len(STD_PREFIX) :]
         candidate = os.path.join(STD_DIR, name + DEFAULT_EXT)
@@ -730,6 +740,18 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
 
     def directory_of(fpath: str) -> str:
         return os.path.dirname(fpath) if fpath != BUFFER_PATH else base_dir
+
+    # M43: the package context, created the first time a `pkg:` import is
+    # seen -- a program that imports no package never looks at packages.
+    pkg_state: dict = {}
+
+    def package_context():
+        if "ctx" not in pkg_state:
+            from .project.packages import PackageContext
+
+            start = entry_path if path else os.path.join(os.getcwd(), BUFFER_PATH)
+            pkg_state["ctx"] = PackageContext.find(start) or PackageContext(None)
+        return pkg_state["ctx"]
 
     def module_name(idx: int, name: str) -> str:
         return f"{_MODULE_PREFIX}{idx}_{name}"
@@ -853,6 +875,24 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
                         directory_of(fpath), literal
                     )
                     root_record = root
+                    # M43 (docs/PACKAGES.md): `pkg:` imports, and the two
+                    # extra rules for relative imports inside a package.
+                    pkg_error = None
+                    if literal.startswith(PKG_PREFIX):
+                        resolved, pkg_error = package_context().resolve(fpath, literal)
+                        exists = resolved is not None
+                    elif not literal.startswith(STD_PREFIX) and fpath != BUFFER_PATH:
+                        owner = package_of_path(fpath)
+                        if owner is not None:
+                            pkg_dir = os.path.join(owner[0], ".mah", "packages", owner[1])
+                            if os.path.commonpath([os.path.abspath(resolved), pkg_dir]) != pkg_dir:
+                                pkg_error = (
+                                    f"import '{literal}' leaves package '{owner[1]}'; "
+                                    f'import other packages as "pkg:NAME"'
+                                )
+                                exists = False
+                            elif not exists:
+                                pkg_error = f"cannot find imported file '{literal}'"
 
                     if is_entry:
                         if kind == "ns":
@@ -880,7 +920,13 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
                             entry_imports.append(record)
                         root_record = record
 
-                    if exists and resolved.endswith(TEST_SUFFIX):
+                    if pkg_error is not None:
+                        exists = False
+                        if is_entry:
+                            errors.append((pkg_error, str_tok.start, len(str_tok.value)))
+                        elif root is not None:
+                            errors.append((f"{pkg_error} (in '{source_label(fpath)}')", root.offset, root.length))
+                    elif exists and resolved.endswith(TEST_SUFFIX):
                         # M28: tests only ever run through `mah test`.
                         exists = False
                         if is_entry:

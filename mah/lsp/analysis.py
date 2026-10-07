@@ -29,6 +29,7 @@ from ..compiler.resolve import Resolver  # noqa: E402
 from ..compiler import typecheck  # noqa: E402
 from ..compiler.types import TCon, TFn, prune as prune_type, show as show_type, show_throws  # noqa: E402
 from ..preprocessor import BUFFER_PATH, PRELUDE_PATH, STD_DIR, STD_PREFIX, demangle_message, preprocess, source_label  # noqa: E402
+from ..project.package_paths import PKG_PREFIX, package_of_path  # noqa: E402
 from ..project.manifest import check_level_for  # noqa: E402
 from ..runtime_values import BUILTIN_TYPE_NAMES  # noqa: E402
 
@@ -640,6 +641,10 @@ def get_diagnostics(text: str, path: Optional[str] = None) -> list[dict]:
                 except Exception:  # noqa: BLE001 - _log itself, or importing it, failed
                     pass
             else:
+                # M43: nothing is reported from inside an installed package.
+                from ..compiler.driver import drop_package_diagnostics
+
+                type_diagnostics = drop_package_diagnostics(pp, type_diagnostics)
                 for diag in typecheck.reportable(type_diagnostics, level):
                     severity = SEVERITY_WARNING if typecheck.is_warning(diag, level) else SEVERITY_ERROR
                     length = _token_length_at(combined, diag.position)
@@ -1036,6 +1041,10 @@ def _import_path_completions(text: str, path: Optional[str], offset: int):
     std_items = _std_module_completions(text, partial, quote_offset, offset)
     if partial.startswith(STD_PREFIX):
         return std_items
+    pkg_items = _package_completions(text, path, partial, quote_offset, offset)
+    if partial.startswith(PKG_PREFIX):
+        return pkg_items
+    std_items = pkg_items + std_items
     base_dir = os.path.dirname(path) if path else os.getcwd()
     typed_dir, _sep, typed_prefix = partial.rpartition("/")
     search_dir = os.path.join(base_dir, typed_dir) if typed_dir else base_dir
@@ -1059,6 +1068,61 @@ def _import_path_completions(text: str, path: Optional[str], offset: int):
                 }
             )
     return items + std_items
+
+
+def _package_completions(text: str, path: Optional[str], partial: str, quote_offset: int, offset: int) -> list[dict]:
+    """M43 (docs/PACKAGES.md): `pkg:NAME` for every package the file may
+    import, while what's typed could still become one; and inside
+    `pkg:NAME/...`, the folders and `.mh` files of that installed package."""
+    from ..project.packages import PackageContext, PackageError, package_root
+
+    if not (partial.startswith(PKG_PREFIX) or PKG_PREFIX.startswith(partial)):
+        return []
+    start = os.path.abspath(path) if path and path != BUFFER_PATH else os.path.join(os.getcwd(), BUFFER_PATH)
+    importer = start if path and path != BUFFER_PATH else BUFFER_PATH
+    try:
+        context = PackageContext.find(start)
+        if context is None:
+            return []
+        names = context.importable_names(importer)
+    except (PackageError, OSError):
+        return []
+    if "/" not in partial:
+        replace = make_range(text, quote_offset, offset)
+        items = []
+        for name, dep in names.items():
+            label = PKG_PREFIX + name
+            items.append(
+                {
+                    "label": label,
+                    "kind": COMPLETION_MODULE,
+                    "detail": dep.describe(),
+                    "filterText": label,
+                    "textEdit": {"range": replace, "newText": label},
+                }
+            )
+        return items
+    name, _sep, rest = partial[len(PKG_PREFIX):].partition("/")
+    if name not in names:
+        return []
+    typed_dir, _sep, typed_prefix = rest.rpartition("/")
+    search_dir = package_root(context.root, name)
+    if typed_dir:
+        search_dir = os.path.join(search_dir, *typed_dir.split("/"))
+    try:
+        entries = os.listdir(search_dir)
+    except OSError:
+        return []
+    items = []
+    for entry in sorted(entries):
+        if not entry.startswith(typed_prefix):
+            continue
+        full = os.path.join(search_dir, entry)
+        if os.path.isdir(full):
+            items.append({"label": entry, "kind": COMPLETION_FOLDER, "detail": "directory"})
+        elif entry.endswith(".mh") and not entry.endswith(".test.mh"):
+            items.append({"label": entry[: -len(".mh")], "kind": COMPLETION_FILE, "detail": entry})
+    return items
 
 
 def _std_module_summary(path: str) -> str:
@@ -2383,6 +2447,9 @@ def _rename_variable_cross_file(found, new_name: str, entry_text: str) -> Option
     file is worse than refusing entirely."""
     pp, _resolver, symbol = found
     decl_path, decl_offset = pp.map_to_source(symbol.decl_position)
+    # M43: a declaration inside an installed package is never renamed.
+    if package_of_path(decl_path) is not None:
+        return None
 
     root = _find_workspace_root(decl_path)
     importers: set = set()
@@ -2469,7 +2536,7 @@ def _rename_type_cross_file(pp, resolver, kind: str, name: str, new_name: str, e
     if decl_pos is None:
         return None
     decl_path, decl_offset = pp.map_to_source(decl_pos)
-    if decl_path == PRELUDE_PATH or os.path.dirname(decl_path) == STD_DIR:
+    if decl_path == PRELUDE_PATH or os.path.dirname(decl_path) == STD_DIR or package_of_path(decl_path) is not None:
         return None
 
     root = _find_workspace_root(decl_path)

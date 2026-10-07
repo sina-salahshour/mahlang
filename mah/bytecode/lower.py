@@ -20,6 +20,7 @@ from decimal import Decimal
 
 from ..compiler.ast_nodes import BoolLit, EnumLit, FnExpr, FnType, NamedType, NumberLit, StringLit, Unary
 from ..preprocessor import BUFFER_PATH, PRELUDE_PATH, demangle_message, source_label, std_module_name
+from ..project.package_paths import package_label
 from ..runtime_values import NONE_VALUE, PRIMITIVE_TYPE_NAMES
 from .format import (
     METHOD_CALL_OPCODES,
@@ -644,6 +645,10 @@ class _Lowerer:
             # where this Mah installation happens to keep prelude.mh. M27:
             # a standard library module is likewise `std:<name>`.
             name = source_label(path)
+        elif package_label(path) is not None:
+            # M43: a file inside an installed package is `pkg:NAME/REL`
+            # (docs/PACKAGES.md), wherever the project lives.
+            name = package_label(path)
         elif path == self.pp.entry_path:
             name = "<buffer>" if path == BUFFER_PATH else os.path.basename(path)
         else:
