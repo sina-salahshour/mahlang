@@ -15,7 +15,7 @@ use std::fmt;
 
 pub const MAGIC: &[u8; 4] = b"MAHC";
 pub const MAJOR: u16 = 1;
-pub const MINOR: u16 = 19;
+pub const MINOR: u16 = 20;
 
 const SEC_STRINGS: u8 = 0x01;
 const SEC_CONSTANTS: u8 = 0x02;
@@ -1023,6 +1023,7 @@ fn native_since_minor(name: &str) -> Option<u16> {
         "socket.connect" | "socket.listen" | "socket.accept" | "socket.send" | "socket.recv"
         | "socket.shutdown" | "socket.close" => Some(18),
         "socket.start_tls" => Some(19),
+        "socket.tls_server_config" | "socket.start_tls_server" => Some(20),
         _ => None,
     }
 }
@@ -2131,7 +2132,7 @@ mod tests {
         // M27: the current maximum is 5; the file has no sections at all,
         // so there are no natives to name.
         assert_eq!(e.0, format!("unsupported minor version 99 (this VM supports up to minor version {MINOR})"));
-        assert_eq!(MINOR, 19);
+        assert_eq!(MINOR, 20);
     }
 
     #[test]

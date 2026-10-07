@@ -1,4 +1,5 @@
-# std:socket -- TCP connections (docs/STDLIB.md).
+# std:socket -- TCP connections, with TLS for clients and servers
+# (docs/STDLIB.md).
 #
 #   import socket from "std:socket"
 #   let server = socket.listen(0)               # 127.0.0.1, a free port
@@ -20,6 +21,13 @@
 # milliseconds (like std:async's); `none` waits forever and 0 takes only what
 # is already there. Closing a socket or listener ends any call waiting on it,
 # which fails with kind "closed".
+#
+# A TLS server loads its certificate and key once, then runs a handshake on
+# each accepted socket:
+#
+#   let identity = socket.tls_server_config("cert.pem", "key.pem")
+#   let conn = server.accept()
+#   conn.start_tls_server(identity, 5000)      # then send/recv as usual
 
 extern fn native_connect(host: String, port: Number, timeout: Unknown) -> Promise<
     Vector<Unknown>
@@ -37,12 +45,19 @@ extern fn native_close(id: Number) -> Promise<Vector<Unknown>> = "socket.close"
 extern fn native_start_tls(id: Number, server_name: String, timeout: Unknown) -> Promise<
     Vector<Unknown>
 > = "socket.start_tls"
+extern fn native_tls_server_config(cert_path: String, key_path: String) -> Promise<
+    Vector<Unknown>
+> = "socket.tls_server_config"
+extern fn native_start_tls_server(id: Number, config: Number, timeout: Unknown) -> Promise<
+    Vector<Unknown>
+> = "socket.start_tls_server"
 
 ## What went wrong: `kind` is "connection_refused", "connection_reset",
 ## "timed_out", "address_in_use", "address_not_available", "host_not_found",
 ## "permission_denied", "closed" (a closed socket or listener),
 ## "tls_certificate" (the server's certificate isn't trusted or doesn't
-## name the server), "tls" (any other TLS failure),
+## name the server), "tls" (any other TLS failure), "tls_config"
+## (`tls_server_config` couldn't use the files; `description` says why),
 ## "closed_early" (`recv_exactly` ran out of data), "invalid_utf8"
 ## (`read_line`) or "other"; `op` the function; `address` the `host:port`
 ## involved.
@@ -75,6 +90,10 @@ export struct Socket {
 ## A server socket waiting for connections, bound to `host` and `port`.
 export struct Listener { id: Number, host: String, port: Number }
 
+## A TLS server's certificate chain and private key, loaded and checked once by
+## `tls_server_config`; `Socket.start_tls_server` uses it for each connection.
+export struct TlsServerConfig { id: Number, cert_path: String, key_path: String }
+
 ## Opens a connection to `host:port` (a name or an IP address), trying each
 ## address the name has. `timeout` (milliseconds, or none) covers the whole
 ## attempt.
@@ -102,6 +121,36 @@ export fn connect_tls(
         }
     };
     conn
+}
+
+## Loads a TLS server's certificate chain (`cert_path`, PEM, the server's own
+## certificate first) and its unencrypted private key (`key_path`, PEM: RSA or
+## ECDSA) and checks that they match, so a wrong path or file fails here
+## rather than at the first connection: kind "tls_config", whose description
+## says what is wrong. Use it with `Socket.start_tls_server` (or std:http's
+## `serve(tls:)`) for any number of connections; `close` it when done.
+export fn tls_server_config(
+    cert_path: String,
+    key_path: String
+) -> TlsServerConfig throws SocketError {
+    let id = result(
+        native_tls_server_config(cert_path, key_path).await,
+        "tls_server_config",
+        cert_path
+    )
+    TlsServerConfig { id: id, cert_path: cert_path, key_path: key_path }
+}
+
+impl TlsServerConfig {
+    ## Frees the loaded certificate and key; `start_tls_server` with it then
+    ## fails with kind "closed". Closing twice does nothing.
+    fn close(self) throws SocketError {
+        result(native_close(self.id).await, "close", self.cert_path)
+    }
+}
+
+impl Printable for TlsServerConfig {
+    fn to_string(self) { "TlsServerConfig(" + self.cert_path + ")" }
 }
 
 ## Starts listening on `host:port`; port 0 picks a free one (see the
@@ -261,6 +310,23 @@ impl Socket {
             }
         }
         result(native_start_tls(self.id, server_name, timeout).await, "start_tls", self.address())
+    }
+
+    ## Makes this a TLS connection, as the server, with the certificate and
+    ## key in `config` (from `tls_server_config`): TLS 1.2 or 1.3, no client
+    ## certificates. Afterwards it works as after `start_tls`. A client that
+    ## doesn't speak TLS or rejects the certificate fails with kind "tls".
+    fn start_tls_server(self, config: TlsServerConfig, timeout: Unknown = none) throws SocketError {
+        if self.buffer.len() > 0 {
+            throw RuntimeError.ArgumentError {
+                message: "start_tls_server: the socket has unread bytes in its buffer"
+            }
+        }
+        result(
+            native_start_tls_server(self.id, config.id, timeout).await,
+            "start_tls_server",
+            self.address()
+        )
     }
 
     ## Closes the connection; a call waiting on it fails with kind "closed".

@@ -1,4 +1,4 @@
-# The `.mahc` bytecode format (version 1.19)
+# The `.mahc` bytecode format (version 1.20)
 
 `mah build prog.mh` compiles a program (its entry file plus everything it
 imports) into a single `.mahc` file; `mah runc prog.mahc` runs one. This
@@ -64,7 +64,7 @@ sections   (id u8, length varuint, payload bytes(length))*   until end of file
   version whose features it uses. *(1.5)* The reference encoder writes 4
   (every file it produces has 1.4's TYPES layout and HANDLERS section),
   or the highest `(1.x)` marker among the natives the file lists (5 for
-  the `std:math` natives, 7 for the ones behind `std:json`/`std:csv`, 8 for `std:random`'s, 9 for `std:regex`'s, 10 for `io.read_line`, 11 for `std:time`/`std:async`'s, 12 for `std:fs`'s, 13 for `std:process`'s, 14 for `std:reflect`'s, 17 for the `bytes.*` natives and the binary `fs.*` ones, 18 for `std:socket`'s, 19 for `socket.start_tls`), so a program that doesn't call newer natives
+  the `std:math` natives, 7 for the ones behind `std:json`/`std:csv`, 8 for `std:random`'s, 9 for `std:regex`'s, 10 for `io.read_line`, 11 for `std:time`/`std:async`'s, 12 for `std:fs`'s, 13 for `std:process`'s, 14 for `std:reflect`'s, 17 for the `bytes.*` natives and the binary `fs.*` ones, 18 for `std:socket`'s, 19 for `socket.start_tls`, 20 for `socket.tls_server_config`/`socket.start_tls_server`), so a program that doesn't call newer natives
   still runs on an older VM. *(1.6)* Native methods (§6.7) are called by
   name, so it also writes the minor that added any native method whose
   *name* a `callmethod`/`callmethodkw`/`detachmethod`/`detachmethodkw` in
@@ -99,6 +99,10 @@ sections   (id u8, length varuint, payload bytes(length))*   until end of file
   *(1.19)* It writes 19 when the file lists `socket.start_tls`. std:socket
   declares it, so every program importing `std:socket` (or `std:http`, which
   imports it) is 1.19; `std:url` alone needs no newer VM.
+  *(1.20)* It writes 20 when the file lists `socket.tls_server_config` or
+  `socket.start_tls_server`. std:socket declares them, so every program
+  importing `std:socket` (or `std:http`) is 1.20; `std:url` alone still
+  needs no newer VM.
 - **Required sections**, each present exactly once and in increasing id
   order: STRINGS (`0x01`), CONSTANTS (`0x02`), TYPES (`0x03`), NATIVES
   (`0x04`), FUNCTIONS (`0x05`), CODE (`0x06`), — in files with minor ≥ 1 —
@@ -285,6 +289,8 @@ Version 1.0 defines:
 | `socket.shutdown` | 1 | *(1.18)* `id` → `none`, shutting down the write side (the peer's `recv` then reaches the end); reading still works |
 | `socket.close` | 1 | *(1.18)* `id` → `none`; an unknown or already closed id is fine (`[true, none]`) |
 | `socket.start_tls` | 3 | *(1.19)* `id, server_name, timeout` → `none` once a TLS client handshake on the open socket has finished; from then on `send`/`recv` on that id carry plaintext through TLS. See below |
+| `socket.tls_server_config` | 2 | *(1.20)* `cert_path, key_path` → `id` (a socket-table id of kind TLS config) once the PEM certificate chain and private key have been read, parsed and checked to match. See below |
+| `socket.start_tls_server` | 3 | *(1.20)* `id, config, timeout` → `none` once a TLS **server** handshake on the open socket `id`, with config `config`, has finished; from then on `send`/`recv`/`shutdown`/`close` behave as after `start_tls`. See below |
 | `math.sin` | 1 | sine of a Number (radians); the result is computed in IEEE-754 double precision and converted to Number via its shortest round-trip decimal text |
 | `math.cos` | 1 | cosine, same rules |
 | `time.sleep_async` | 1 | returns a new pending Promise that the scheduler settles with `none` after the argument's number of milliseconds (§6.4) |
@@ -500,6 +506,45 @@ sending side of the TCP connection without sending a close notice, and
 `close` closes it. A send and a recv on one TLS socket may still run at the
 same time (they take turns at the TLS state, holding it at most one 50 ms
 slice).
+
+The `(1.20)` natives make TLS **servers**. `socket.tls_server_config` reads
+the PEM certificate chain at `cert_path` (the server's own certificate first)
+and the unencrypted PEM private key at `key_path` (PKCS#8, PKCS#1 RSA or SEC1
+EC), checks that they match, and adds them to the socket table as a **TLS
+config** id. That id is "not open" for every other socket native (they settle
+with `closed`, as a listener id does for `recv`); `socket.close` on it removes
+it (`none`, and closing twice is fine). Argument checks, on the VM's thread:
+`TypeMismatch`, `tls_server_config: certificate path must be a String, got
+TYPE` and `tls_server_config: key path must be a String, got TYPE`. Its
+failures are kind `tls_config`, whose description, unlike other kinds' (but
+`other`), is one of a fixed set, the first that applies in this order:
+`can't read the certificate file` (opening or reading `cert_path` fails), `can't
+read the private key file` (likewise `key_path`), `no certificate in the
+certificate file` (the bytes lack `-----BEGIN CERTIFICATE-----`), `the private
+key is encrypted` (the key bytes contain `-----BEGIN ENCRYPTED PRIVATE
+KEY-----` or `Proc-Type: 4,ENCRYPTED`), `no private key in the key file`
+(they contain none of `-----BEGIN PRIVATE KEY-----`, `-----BEGIN RSA PRIVATE
+KEY-----`, `-----BEGIN EC PRIVATE KEY-----`), `the private key doesn't match
+the certificate`, and `the certificate or private key isn't usable` (any other
+parse or load failure). The third to fifth are a plain byte search, done the
+same way by every VM before the TLS library sees the data. RSA (2048 bits and
+up) and ECDSA P-256 keys are supported; other key types may load on one VM
+only.
+
+`socket.start_tls_server` runs a TLS server handshake (TLS 1.2 or 1.3, one
+certificate: no client certificates, no SNI handling, no ALPN) on the open
+socket `id` with the TLS config `config`. Checks: `id` not a Number is
+`TypeMismatch`, `start_tls_server: expected a socket id, got TYPE`; `config`
+not a Number, `start_tls_server: expected a TLS config id, got TYPE`; then the
+`timeout` rules above, covering the whole handshake. It settles at once with
+`closed` when `id` isn't an open socket or `config` isn't an open TLS config
+(fractional and negative ids are never open). Its failures are `start_tls`'s:
+`tls` (a client that doesn't speak TLS, a handshake alert such as a client
+that doesn't trust the certificate, or calling it on a socket that already
+uses TLS), `connection_reset` (the client closed during the handshake),
+`timed_out` and `closed`. Afterwards the socket is exactly like a `start_tls`
+one: a client closing without a close notice is a normal end, and `shutdown`
+sends none.
 
 The `(1.11)` natives are `std:time`'s clocks and the building blocks of
 `std:async`. A non-Promise argument to `time.cancel`, `promise.resolve`
@@ -1596,6 +1641,11 @@ message
   std:socket's `start_tls`/`connect_tls` and `std:http`; and nothing else.
   The encoder writes 19 for a file that lists it, which every program
   importing `std:socket` does.
+- **1.20** added `socket.tls_server_config` and `socket.start_tls_server`
+  (§4.4, M42), TLS servers, behind std:socket's `tls_server_config`/
+  `start_tls_server` and `std:http`'s `serve(tls:)`; and nothing else. The
+  encoder writes 20 for a file that lists them, which every program importing
+  std:socket does.
 - Planned growth, for orientation: error-set checking (the static
   checker's `throws` inference and "unhandled error" diagnostics -- M26),
   string utilities, filesystem, networking, and process natives.

@@ -814,7 +814,7 @@ class BytecodeTests(unittest.TestCase):
         # M41c: decorators import std:reflect implicitly, and std:reflect (like
         # std:json) uses the 1.16 `hooks.*` natives; a program with neither
         # keeps its old minor.
-        self.assertEqual(MINOR, 19)  # M39
+        self.assertEqual(MINOR, 20)  # M42
         self.assertEqual(decode(compile_bytes(text=self.SRC)).minor, 16)
         self.assertEqual(decode(compile_bytes(text="fn f(a) { a }\nprint(f(1))")).minor, 4)
         self.assertEqual(decode(compile_bytes(text=REFLECT + "print(reflect.type_of(1))")).minor, 16)

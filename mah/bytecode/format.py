@@ -83,6 +83,11 @@ docs/MAHC_FORMAT.md #4.4.
 
 M39 bumps MINOR to 19: a new native (`socket.start_tls`, TLS on an open
 socket, behind std:http) -- docs/MAHC_FORMAT.md #4.4.
+
+M42 bumps MINOR to 20: new natives only (`socket.tls_server_config`, a
+TLS server's certificate and key loaded into the socket table, and
+`socket.start_tls_server`, a TLS server handshake on an accepted socket;
+behind std:socket and std:http's `serve(tls:)`) -- docs/MAHC_FORMAT.md #4.4.
 """
 
 from __future__ import annotations
@@ -95,7 +100,7 @@ MAGIC = b"MAHC"
 # `.mahc` extension).
 SHEBANG = b"#!/usr/bin/env -S mah runc\n"
 MAJOR = 1
-MINOR = 19
+MINOR = 20
 
 # -- section ids (docs/MAHC_FORMAT.md #3) -----------------------------------
 SEC_STRINGS = 0x01
@@ -282,6 +287,9 @@ NATIVE_ARITIES = {
     "socket.close": 1,
     # M39 (1.19): TLS, for std:http.
     "socket.start_tls": 3,
+    # M42 (1.20): TLS servers.
+    "socket.tls_server_config": 2,
+    "socket.start_tls_server": 3,
 }
 
 # M16: which minor version introduced each 1.1+ native -- a 1.0 file
@@ -375,6 +383,9 @@ NATIVE_SINCE_MINOR = {
     "socket.shutdown": 18,
     "socket.close": 18,
     "socket.start_tls": 19,
+    # M42 (1.20)
+    "socket.tls_server_config": 20,
+    "socket.start_tls_server": 20,
 }
 
 # M29: native inherent methods added after 1.0, by the minor that added

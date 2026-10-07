@@ -15,6 +15,14 @@ with `closed`. A worker waiting in `connect`/`accept`/`recv` polls in slices
 of at most 50 ms, checking its deadline and whether its id is still in the
 table, so `close` (which removes the id at once) ends it with `closed`.
 
+M42 (1.20): TLS servers. `tls_server_config` loads a PEM certificate chain
+and private key once into the socket table as an entry of kind "tls_config"
+(an id no other native accepts: it is "not open" for them), and
+`start_tls_server` runs a server handshake on an accepted socket with it.
+Failures to load are kind "tls_config", whose description -- unlike every
+other kind's but "other" -- is one of a fixed set (`_pem_problem` and
+`_TLS_CONFIG_PROBLEMS`), the same text on both VMs.
+
 Like the VM, this module never imports the compiler.
 """
 
@@ -41,7 +49,19 @@ DESCRIPTIONS = {
     # M39: start_tls
     "tls_certificate": "the server's certificate isn't trusted",
     "tls": "the TLS handshake or connection failed",
+    # M42: tls_server_config; this generic text is the last of its fixed
+    # descriptions (see _TLS_CONFIG_PROBLEMS)
+    "tls_config": "the certificate or private key isn't usable",
 }
+
+# M42: tls_server_config's descriptions, in the order they are checked.
+CANT_READ_CERT = "can't read the certificate file"
+CANT_READ_KEY = "can't read the private key file"
+NO_CERT = "no certificate in the certificate file"
+KEY_ENCRYPTED = "the private key is encrypted"
+NO_KEY = "no private key in the key file"
+KEY_MISMATCH = "the private key doesn't match the certificate"
+UNUSABLE = DESCRIPTIONS["tls_config"]
 
 # M39: the TLS layer asks to wait for the socket before retrying.
 _WANT = (BlockingIOError, InterruptedError, ssl.SSLWantReadError, ssl.SSLWantWriteError)
@@ -66,6 +86,23 @@ class _TimedOut(Exception):
     pass
 
 
+class _TlsConfigProblem(Exception):
+    """M42: tls_server_config can't use its files; args[0] is the description."""
+
+
+class _TlsServerConfig:
+    """M42: a socket-table entry of kind "tls_config". `close` does nothing
+    (the table's `close` paths call `entry.sock.close()`)."""
+
+    __slots__ = ("context",)
+
+    def __init__(self, context):
+        self.context = context
+
+    def close(self):
+        pass
+
+
 class _Entry:
     """A table slot: a connected socket (`kind` "socket") or a listener."""
 
@@ -77,6 +114,8 @@ class _Entry:
 
 
 def _classify(exc: BaseException) -> VectorValue:
+    if isinstance(exc, _TlsConfigProblem):
+        return _failure("tls_config", exc.args[0])
     if isinstance(exc, _Closed):
         return _failure("closed")
     if isinstance(exc, (_TimedOut, TimeoutError, socket.timeout)):
@@ -111,7 +150,7 @@ def _guarded(job):
     def run():
         try:
             return _ok(job())
-        except (OSError, _Closed, _TimedOut) as exc:
+        except (OSError, _Closed, _TimedOut, _TlsConfigProblem) as exc:
             return _classify(exc)
 
     return run
@@ -432,14 +471,108 @@ def _start_tls(ctx, args):
         context = ssl.create_default_context()
         tls = context.wrap_socket(entry.sock, server_hostname=server_name, do_handshake_on_connect=False)
         entry.sock = tls
-        while True:
-            try:
-                tls.do_handshake()
-                return NONE_VALUE
-            except ssl.SSLWantReadError:
-                _wait(ctx, sock_id, entry, deadline)
-            except ssl.SSLWantWriteError:
-                _wait(ctx, sock_id, entry, deadline, want_write=True)
+        return _handshake(ctx, sock_id, entry, tls, deadline)
+
+    return _async(ctx, job)
+
+
+def _handshake(ctx, sock_id, entry, tls, deadline):
+    """Drives `tls`'s handshake (client or server) to the end, waiting for the
+    socket in slices like every other worker."""
+    while True:
+        try:
+            tls.do_handshake()
+            return NONE_VALUE
+        except ssl.SSLWantReadError:
+            _wait(ctx, sock_id, entry, deadline)
+        except ssl.SSLWantWriteError:
+            _wait(ctx, sock_id, entry, deadline, want_write=True)
+
+
+# -- M42: TLS servers -------------------------------------------------------------
+
+_CERT_BEGIN = b"-----BEGIN CERTIFICATE-----"
+_ENCRYPTED_MARKS = (b"-----BEGIN ENCRYPTED PRIVATE KEY-----", b"Proc-Type: 4,ENCRYPTED")
+_KEY_BEGINS = (b"-----BEGIN PRIVATE KEY-----", b"-----BEGIN RSA PRIVATE KEY-----", b"-----BEGIN EC PRIVATE KEY-----")
+
+
+def _pem_problem(cert: bytes, key: bytes) -> str | None:
+    """The common mistakes, found by a plain byte search before any TLS
+    library sees the data (`pem_problem` in socket.rs does the same)."""
+    if _CERT_BEGIN not in cert:
+        return NO_CERT
+    if any(mark in key for mark in _ENCRYPTED_MARKS):
+        return KEY_ENCRYPTED
+    if not any(begin in key for begin in _KEY_BEGINS):
+        return NO_KEY
+    return None
+
+
+def _tls_server_config(ctx, args):
+    if not isinstance(args[0], str):
+        raise MahRuntimeError(
+            f"tls_server_config: certificate path must be a String, got {type_name_of(args[0])}",
+            kind="TypeMismatch",
+        )
+    if not isinstance(args[1], str):
+        raise MahRuntimeError(
+            f"tls_server_config: key path must be a String, got {type_name_of(args[1])}", kind="TypeMismatch"
+        )
+    cert_path, key_path = args[0], args[1]
+
+    def job():
+        try:
+            with open(cert_path, "rb") as f:
+                cert = f.read()
+        except OSError:
+            raise _TlsConfigProblem(CANT_READ_CERT) from None
+        try:
+            with open(key_path, "rb") as f:
+                key = f.read()
+        except OSError:
+            raise _TlsConfigProblem(CANT_READ_KEY) from None
+        problem = _pem_problem(cert, key)
+        if problem is not None:
+            raise _TlsConfigProblem(problem)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        try:
+            # the password callback keeps OpenSSL from ever prompting
+            context.load_cert_chain(cert_path, key_path, password=lambda: b"")
+        except ssl.SSLError as exc:
+            if getattr(exc, "reason", None) == "KEY_VALUES_MISMATCH":
+                raise _TlsConfigProblem(KEY_MISMATCH) from None
+            raise _TlsConfigProblem(UNUSABLE) from None
+        except (OSError, ValueError):
+            raise _TlsConfigProblem(UNUSABLE) from None
+        return Decimal(_register(ctx, "tls_config", _TlsServerConfig(context)))
+
+    return _async(ctx, job)
+
+
+def _start_tls_server(ctx, args):
+    """M42: a TLS server handshake on the open socket `id`, with the loaded
+    config `config`; afterwards send/recv/shutdown/close work as after
+    `start_tls`."""
+    sock_id = _id("start_tls_server", args[0])
+    if not _number(args[1]):
+        raise MahRuntimeError(
+            f"start_tls_server: expected a TLS config id, got {type_name_of(args[1])}", kind="TypeMismatch"
+        )
+    config_id = int(args[1]) if args[1] == args[1].to_integral_value() else None
+    timeout = _timeout("start_tls_server", args[2])
+    entry = _lookup(ctx, sock_id, "socket")
+    config = _lookup(ctx, config_id, "tls_config")
+    if entry is None or config is None:
+        return _closed_now()
+
+    def job():
+        if isinstance(entry.sock, ssl.SSLSocket):
+            raise ssl.SSLError("the socket already uses TLS")
+        deadline = _deadline(timeout)
+        tls = config.sock.context.wrap_socket(entry.sock, server_side=True, do_handshake_on_connect=False)
+        entry.sock = tls
+        return _handshake(ctx, sock_id, entry, tls, deadline)
 
     return _async(ctx, job)
 
@@ -483,4 +616,6 @@ NATIVES = {
     "socket.shutdown": (1, _shutdown),
     "socket.close": (1, _close),
     "socket.start_tls": (3, _start_tls),
+    "socket.tls_server_config": (2, _tls_server_config),
+    "socket.start_tls_server": (3, _start_tls_server),
 }

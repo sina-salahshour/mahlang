@@ -2,7 +2,7 @@
 title: std:socket
 order: 14
 section: Networking
-summary: TCP clients and servers, line and byte reads with timeouts, and TLS with certificate verification.
+summary: TCP clients and servers, line and byte reads with timeouts, and TLS for clients (with certificate verification) and servers.
 ---
 
 # `std:socket`
@@ -145,7 +145,41 @@ fn fetch_head(host: String) -> String throws socket.SocketError {
 }
 ```
 
-TLS here is client-side only (connecting to TLS servers).
+## TLS servers
+
+A TLS server loads its certificate chain and private key (PEM files, the
+key unencrypted) **once** with `tls_server_config`, which checks that they
+match, so a wrong path fails at startup rather than at the first
+connection. Each accepted socket then runs `start_tls_server(config)`;
+afterwards it sends and receives like any other socket. One config serves
+any number of connections, and `std:http`'s `serve(..., tls: config)`
+takes the same value.
+
+```mah
+import socket from "std:socket"
+
+let identity = socket.tls_server_config("cert.pem", "key.pem")
+let server = socket.listen(8443, host: "0.0.0.0")
+while true {
+    let conn = server.accept()
+    try {
+        conn.start_tls_server(identity, timeout: 5000)
+        conn.send_text("hello over TLS\n")
+    } catch {
+        e: socket.SocketError => { print("handshake failed: " + e.kind) }
+    }
+    conn.close()
+}
+```
+
+Loading failures are kind `"tls_config"`, and the description says what
+is wrong: `can't read the certificate file`, `can't read the private key
+file`, `no certificate in the certificate file`, `the private key is
+encrypted`, `no private key in the key file`, `the private key doesn't
+match the certificate` or `the certificate or private key isn't usable`.
+A failed handshake is kind `"tls"` (a client that doesn't speak TLS or
+doesn't trust the certificate), `"connection_reset"` or `"timed_out"`.
+TLS 1.2 and 1.3 with one certificate; no client certificates.
 
 ## Errors
 
@@ -154,7 +188,8 @@ Failures throw `socket.SocketError { kind, op, address, description }`.
 `"timed_out"`, `"address_in_use"`, `"address_not_available"`,
 `"host_not_found"`, `"permission_denied"`, `"closed"` (a closed socket or
 listener), `"tls_certificate"` (an untrusted or mismatched certificate),
-`"tls"`, `"closed_early"` (`recv_exactly`), `"invalid_utf8"`
+`"tls"`, `"tls_config"` (`tls_server_config` couldn't use its files),
+`"closed_early"` (`recv_exactly`), `"invalid_utf8"`
 (`read_line`) or `"other"`.
 
 ```mah
@@ -177,6 +212,7 @@ try {
 | `connect(host, port, timeout = none)` | a `Socket` |
 | `connect_tls(host, port, timeout = none)` | `connect`, then `start_tls(host)` |
 | `listen(port, host = "127.0.0.1", backlog = 128)` | a `Listener` (port 0: any free port) |
+| `tls_server_config(cert_path, key_path)` | a `TlsServerConfig` for `start_tls_server` (`close()` frees it) |
 
 | `Listener` | |
 |---|---|
@@ -194,6 +230,7 @@ try {
 | `read_line(timeout = none)` | the next line, or `none` at the end |
 | `shutdown()` | stop sending |
 | `start_tls(server_name, timeout = none)` | upgrade to TLS as a client |
+| `start_tls_server(config, timeout = none)` | upgrade to TLS as the server |
 | `close()` | close (twice does nothing) |
 
-Programs that import `std:socket` need bytecode 1.19.
+Programs that import `std:socket` need bytecode 1.20.

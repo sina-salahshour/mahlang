@@ -9,6 +9,13 @@
 //!
 //! M39 (1.19): `start_tls` turns an open stream into a TLS client
 //! (rustls); from then on `send`/`recv` go through the TLS layer.
+//!
+//! M42 (1.20, docs/contracts/M42_http_server.md): TLS servers.
+//! `tls_server_config` loads a PEM certificate chain and private key once
+//! into the table as an `Entry::TlsConfig` (an id every other native treats
+//! as not open), and `start_tls_server` runs a server handshake with it on
+//! an accepted stream. Load failures are kind `tls_config` with one of a
+//! fixed set of descriptions, in the same order as the Python VM's.
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
@@ -18,8 +25,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rustls::pki_types::pem::PemObject;
-use rustls::pki_types::{CertificateDer, ServerName};
-use rustls::{ClientConfig, ClientConnection, RootCertStore};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use rustls::{ClientConfig, ClientConnection, Connection, RootCertStore, ServerConfig, ServerConnection};
 
 use crate::decimal::Decimal;
 
@@ -34,14 +41,17 @@ const SLICE: Duration = Duration::from_millis(50);
 enum Entry {
     Stream(Arc<Conn>),
     Listener(Arc<TcpListener>),
+    /// M42: a TLS server's loaded certificate chain and key.
+    TlsConfig(Arc<ServerConfig>),
 }
 
-/// A connected stream, and its TLS layer once `start_tls` has run. A worker
+/// A connected stream, and its TLS layer (client or server) once
+/// `start_tls` or `start_tls_server` has run. A worker
 /// holds the lock for at most one slice of waiting, so a send and a recv on
 /// the same TLS socket take turns.
 struct Conn {
     tcp: TcpStream,
-    tls: Mutex<Option<ClientConnection>>,
+    tls: Mutex<Option<Connection>>,
 }
 
 impl Conn {
@@ -105,6 +115,7 @@ fn description_of(kind: &str) -> &'static str {
         "closed" => "the socket is closed",
         "tls_certificate" => "the server's certificate isn't trusted",
         "tls" => "the TLS handshake or connection failed",
+        "tls_config" => UNUSABLE,
         _ => "",
     }
 }
@@ -223,6 +234,27 @@ fn spawn(vm: &mut Vm, job: impl FnOnce() -> IoValue + Send + 'static) -> Value {
     let promise = PromiseData::new_pending();
     vm.submit(promise.clone(), Box::new(job));
     Value::Promise(promise)
+}
+
+fn number_arg(vm: &Vm, name: &str, what: &str, v: &Value) -> Result<Option<u64>, RuntimeError> {
+    match v {
+        Value::Number(n) => Ok(match n.to_sign_u64() {
+            Some((false, id)) => Some(id),
+            _ => None,
+        }),
+        other => Err(RuntimeError::with_kind(
+            format!("{name}: expected {what}, got {}", type_name_of(other, &vm.names)),
+            ErrorKind::TypeMismatch,
+        )),
+    }
+}
+
+/// M42: the TLS config `id` names, when it's open.
+fn config_of(vm: &Vm, id: Option<u64>) -> Option<Arc<ServerConfig>> {
+    match vm.sockets().get(id?) {
+        Some(Entry::TlsConfig(c)) => Some(c),
+        _ => None,
+    }
 }
 
 fn closed() -> Value {
@@ -494,41 +526,160 @@ pub fn start_tls(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
             return fixed("tls");
         }
         let Ok(name) = ServerName::try_from(server_name) else { return fixed("tls_certificate") };
-        let mut tls = match ClientConnection::new(client_config(), name) {
+        let tls = match ClientConnection::new(client_config(), name) {
             Ok(c) => c,
             Err(_) => return fixed("tls"),
         };
-        while tls.is_handshaking() {
-            if !table.is_open(id) {
-                return fixed("closed");
-            }
-            let Some(slice) = slice_of(deadline) else { return fixed("timed_out") };
-            if tls.wants_write() {
-                let _ = conn.tcp.set_write_timeout(Some(slice));
-                match tls.write_tls(&mut &conn.tcp) {
-                    Ok(_) => {}
-                    Err(e) if waiting(&e) => {}
-                    Err(e) => return classify(&e),
-                }
-                continue;
-            }
-            let _ = conn.tcp.set_read_timeout(Some(slice));
-            match tls.read_tls(&mut &conn.tcp) {
-                Ok(0) => return fixed("connection_reset"),
-                Ok(_) => {
-                    if let Err(e) = tls.process_new_packets() {
-                        // Tell the server why, best effort.
-                        let _ = conn.tcp.set_write_timeout(Some(SLICE));
-                        let _ = tls.write_tls(&mut &conn.tcp);
-                        return tls_failure(&e);
-                    }
-                }
+        handshake(&table, id, &conn, &mut guard, Connection::Client(tls), deadline)
+    }))
+}
+
+/// Drives a client or server handshake on `conn` to the end and installs
+/// the TLS layer in `slot` (the locked `conn.tls`), sending whatever the
+/// handshake left to send (a client's Finished, a server's tickets) before
+/// returning.
+fn handshake(
+    table: &SocketTable,
+    id: u64,
+    conn: &Conn,
+    slot: &mut Option<Connection>,
+    mut tls: Connection,
+    deadline: Option<Instant>,
+) -> IoValue {
+    while tls.is_handshaking() || tls.wants_write() {
+        if !table.is_open(id) {
+            return fixed("closed");
+        }
+        let Some(slice) = slice_of(deadline) else { return fixed("timed_out") };
+        if tls.wants_write() {
+            let _ = conn.tcp.set_write_timeout(Some(slice));
+            match tls.write_tls(&mut &conn.tcp) {
+                Ok(_) => {}
                 Err(e) if waiting(&e) => {}
                 Err(e) => return classify(&e),
             }
+            continue;
         }
-        *guard = Some(tls);
-        ok(IoValue::None)
+        let _ = conn.tcp.set_read_timeout(Some(slice));
+        match tls.read_tls(&mut &conn.tcp) {
+            Ok(0) => return fixed("connection_reset"),
+            Ok(_) => {
+                if let Err(e) = tls.process_new_packets() {
+                    // Tell the peer why, best effort.
+                    let _ = conn.tcp.set_write_timeout(Some(SLICE));
+                    let _ = tls.write_tls(&mut &conn.tcp);
+                    return tls_failure(&e);
+                }
+            }
+            Err(e) if waiting(&e) => {}
+            Err(e) => return classify(&e),
+        }
+    }
+    *slot = Some(tls);
+    ok(IoValue::None)
+}
+
+// -- M42: TLS servers --------------------------------------------------------------
+
+const CANT_READ_CERT: &str = "can't read the certificate file";
+const CANT_READ_KEY: &str = "can't read the private key file";
+const NO_CERT: &str = "no certificate in the certificate file";
+const KEY_ENCRYPTED: &str = "the private key is encrypted";
+const NO_KEY: &str = "no private key in the key file";
+const KEY_MISMATCH: &str = "the private key doesn't match the certificate";
+const UNUSABLE: &str = "the certificate or private key isn't usable";
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// The common mistakes, found by a plain byte search before rustls sees the
+/// data (`_pem_problem` in mah/socket_natives.py does the same).
+fn pem_problem(cert: &[u8], key: &[u8]) -> Option<&'static str> {
+    if !contains(cert, b"-----BEGIN CERTIFICATE-----") {
+        return Some(NO_CERT);
+    }
+    if contains(key, b"-----BEGIN ENCRYPTED PRIVATE KEY-----") || contains(key, b"Proc-Type: 4,ENCRYPTED") {
+        return Some(KEY_ENCRYPTED);
+    }
+    let begins: [&[u8]; 3] =
+        [b"-----BEGIN PRIVATE KEY-----", b"-----BEGIN RSA PRIVATE KEY-----", b"-----BEGIN EC PRIVATE KEY-----"];
+    if !begins.iter().any(|b| contains(key, b)) {
+        return Some(NO_KEY);
+    }
+    None
+}
+
+/// The server config for a certificate chain and key (PEM), or the
+/// description of why they can't be used.
+fn server_config(cert: &[u8], key: &[u8]) -> Result<ServerConfig, &'static str> {
+    if let Some(problem) = pem_problem(cert, key) {
+        return Err(problem);
+    }
+    let certs: Vec<CertificateDer<'static>> = match CertificateDer::pem_slice_iter(cert).collect() {
+        Ok(c) => c,
+        Err(_) => return Err(UNUSABLE),
+    };
+    if certs.is_empty() {
+        return Err(UNUSABLE);
+    }
+    let Ok(key) = PrivateKeyDer::from_pem_slice(key) else { return Err(UNUSABLE) };
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let builder = match ServerConfig::builder_with_provider(provider).with_safe_default_protocol_versions() {
+        Ok(b) => b,
+        Err(_) => return Err(UNUSABLE),
+    };
+    // with_single_cert checks that the key matches the certificate
+    // (CertifiedKey::from_der's keys_match).
+    match builder.with_no_client_auth().with_single_cert(certs, key) {
+        Ok(config) => Ok(config),
+        Err(rustls::Error::InconsistentKeys(_)) => Err(KEY_MISMATCH),
+        Err(_) => Err(UNUSABLE),
+    }
+}
+
+/// `socket.tls_server_config(cert_path, key_path)`: the id of a loaded TLS
+/// server config.
+pub fn tls_server_config(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
+    let cert_path = match &args[0] {
+        Value::Str(s) => s.to_string(),
+        other => return Err(type_err(vm, "tls_server_config", "certificate path", "a String", other)),
+    };
+    let key_path = match &args[1] {
+        Value::Str(s) => s.to_string(),
+        other => return Err(type_err(vm, "tls_server_config", "key path", "a String", other)),
+    };
+    let table = vm.sockets().clone();
+    Ok(spawn(vm, move || {
+        let Ok(cert) = std::fs::read(&cert_path) else { return failure("tls_config", CANT_READ_CERT) };
+        let Ok(key) = std::fs::read(&key_path) else { return failure("tls_config", CANT_READ_KEY) };
+        match server_config(&cert, &key) {
+            Ok(config) => ok(IoValue::Num(table.add(Entry::TlsConfig(Arc::new(config))))),
+            Err(text) => failure("tls_config", text),
+        }
+    }))
+}
+
+/// `socket.start_tls_server(id, config, timeout)`: a TLS server handshake on
+/// an open stream with a loaded config.
+pub fn start_tls_server(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
+    let id = id_arg(vm, "start_tls_server", &args[0])?;
+    let config_id = number_arg(vm, "start_tls_server", "a TLS config id", &args[1])?;
+    let timeout = timeout_arg(vm, "start_tls_server", &args[2])?;
+    let Some((id, conn)) = stream_of(vm, id) else { return Ok(closed()) };
+    let Some(config) = config_of(vm, config_id) else { return Ok(closed()) };
+    let table = vm.sockets().clone();
+    Ok(spawn(vm, move || {
+        let deadline = timeout.map(|t| Instant::now() + t);
+        let mut guard = conn.tls.lock().expect("tls");
+        if guard.is_some() {
+            return fixed("tls");
+        }
+        let tls = match ServerConnection::new(config) {
+            Ok(c) => c,
+            Err(_) => return fixed("tls"),
+        };
+        handshake(&table, id, &conn, &mut guard, Connection::Server(tls), deadline)
     }))
 }
 
@@ -714,6 +865,27 @@ mod tests {
         assert_eq!(description_of("closed"), "the socket is closed");
         assert_eq!(description_of("host_not_found"), "host not found");
         assert_eq!(os_text(&io::Error::from_raw_os_error(2)), "No such file or directory");
+    }
+
+    #[test]
+    fn pem_problems() {
+        let cert = b"junk\n-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
+        let key = b"-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n";
+        assert_eq!(pem_problem(b"", key), Some(NO_CERT));
+        assert_eq!(pem_problem(key, key), Some(NO_CERT));
+        assert_eq!(pem_problem(cert, b"-----BEGIN ENCRYPTED PRIVATE KEY-----\nAAAA\n"), Some(KEY_ENCRYPTED));
+        assert_eq!(
+            pem_problem(cert, b"-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\n"),
+            Some(KEY_ENCRYPTED)
+        );
+        assert_eq!(pem_problem(cert, cert), Some(NO_KEY));
+        assert_eq!(pem_problem(cert, b""), Some(NO_KEY));
+        assert_eq!(pem_problem(cert, key), None);
+        assert_eq!(pem_problem(cert, b"-----BEGIN RSA PRIVATE KEY-----\n"), None);
+        assert_eq!(pem_problem(cert, b"-----BEGIN EC PRIVATE KEY-----\n"), None);
+        // the byte checks pass but the base64 is junk
+        assert_eq!(server_config(cert, key).err(), Some(UNUSABLE));
+        assert_eq!(description_of("tls_config"), UNUSABLE);
     }
 
     #[test]

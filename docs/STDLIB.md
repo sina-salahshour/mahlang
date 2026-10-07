@@ -707,8 +707,9 @@ section) and §5 (the `Type` value). In short:
   `recv` sees the end) and `close()` (closing twice does nothing). Both
   print as `Socket(127.0.0.1:5000)` / `Listener(127.0.0.1:5000)` (the peer's
   address, the listen address).
-- **TCP only**, plus TLS clients since M39 (`start_tls`, `connect_tls`;
-  below). UDP and TLS servers come later.
+- **TCP only**, plus TLS clients since M39 (`start_tls`, `connect_tls`)
+  and TLS servers since M42 (`tls_server_config`, `start_tls_server`; both
+  below). UDP comes later.
 - **Timeouts are in milliseconds**, like `std:async`'s; `none` waits
   forever, 0 means "only what is already there", and running out throws kind
   `timed_out`.
@@ -741,7 +742,8 @@ section) and §5 (the `Type` value). In short:
   once; `connect` tries every address the name resolves to (IPv4 or IPv6).
   When the VM finishes, every open socket and listener is closed.
 - Bytecode 1.18 (docs/MAHC_FORMAT.md §4.4): only programs importing
-  `std:socket` are 1.18 (1.19 since M39, which added `socket.start_tls`).
+  `std:socket` are 1.18 (1.19 since M39, which added `socket.start_tls`;
+  1.20 since M42, which added the two TLS server natives).
 - **TLS (M39)**: `sock.start_tls(server_name, timeout = none)` turns a
   connected Socket into a TLS client (its `buffer` must be empty, else
   `RuntimeError.ArgumentError`), and `connect_tls(host, port, timeout =
@@ -752,6 +754,29 @@ section) and §5 (the `Type` value). In short:
   failed, including the wrong name) and `tls` (any other TLS failure). A
   peer closing without TLS's close notice is a normal end; `shutdown` on a
   TLS socket sends no close notice. Python uses `ssl`, Rust `rustls`.
+- **TLS servers (M42)**: `tls_server_config(cert_path, key_path)` loads a
+  PEM certificate chain (the server's certificate first) and an unencrypted
+  PEM private key (RSA 2048+ or ECDSA P-256 tested), checks that they match,
+  and returns a `TlsServerConfig { id, cert_path, key_path }` (printed as
+  `TlsServerConfig(cert_path)`; `close()` frees it, twice is fine). It is
+  loaded **once**, so a wrong path fails at startup, not at the first
+  connection. `sock.start_tls_server(config, timeout = none)` then runs a
+  server handshake on an accepted Socket (its `buffer` must be empty, else
+  `RuntimeError.ArgumentError`); afterwards the Socket works as after
+  `start_tls`. One config serves any number of connections (and servers):
+  `std:http`'s `serve(tls: config)` uses it per connection. Loading failures
+  are kind `tls_config`, with `address` the certificate path and a
+  description from a fixed list, checked in this order: `can't read the
+  certificate file`, `can't read the private key file`, `no certificate in
+  the certificate file`, `the private key is encrypted`, `no private key in
+  the key file` (those three are a plain search for the PEM markers, the
+  same on both VMs), `the private key doesn't match the certificate`, `the
+  certificate or private key isn't usable`. Handshake failures are
+  `start_tls`'s kinds: `tls` (a client that doesn't speak TLS or rejects
+  the certificate, or a socket already using TLS), `connection_reset`,
+  `timed_out`, `closed`. TLS 1.2 and 1.3; no client certificates, SNI
+  (one certificate per config) or ALPN. A config id is "not open" for every
+  other socket function. Bytecode 1.20.
 
 ### `std:url`
 

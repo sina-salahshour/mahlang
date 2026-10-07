@@ -715,7 +715,7 @@ class MetaTests(unittest.TestCase):
 
     def test_loadtype_a_spread_and_reflect_natives_write_minor_14(self):
         # (M41b raised MINOR to 15, M41c to 16, M37 to 17 and M38 to 18, but only a file that uses those features is written there)
-        self.assertEqual(MINOR, 19)
+        self.assertEqual(MINOR, 20)
         self.assertEqual(decode(compile_bytes(text="print(Number)")).minor, 14)
         self.assertEqual(decode(compile_bytes(text="fn f(a) { a }\nprint(f(...[1]))")).minor, 14)
         self.assertEqual(decode(compile_bytes(text="fn f(a) { a }\nprint(f(**[\"a\": 1]))")).minor, 14)

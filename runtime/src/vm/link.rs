@@ -124,6 +124,9 @@ pub enum NativeFn {
     SocketClose,
     /// M39 (1.19): TLS on an open socket (std:http).
     SocketStartTls,
+    /// M42 (1.20): TLS servers.
+    SocketTlsServerConfig,
+    SocketStartTlsServer,
 }
 
 /// Whether this VM implements a native of that name (any arity) -- for
@@ -225,6 +228,8 @@ fn native_by_name(name: &str) -> Option<(u64, NativeFn)> {
         "socket.shutdown" => Some((1, NativeFn::SocketShutdown)),
         "socket.close" => Some((1, NativeFn::SocketClose)),
         "socket.start_tls" => Some((3, NativeFn::SocketStartTls)),
+        "socket.tls_server_config" => Some((2, NativeFn::SocketTlsServerConfig)),
+        "socket.start_tls_server" => Some((3, NativeFn::SocketStartTlsServer)),
         _ => None,
     }
 }
