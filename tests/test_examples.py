@@ -310,6 +310,18 @@ class ExampleTests(unittest.TestCase):
             "unsupported_scheme\n",
         )
 
+    def test_http_server(self):
+        # M42: std:http's server, answered by std:http's client in one program
+        self.assertEqual(
+            run_file(example_path("http_server.mh")),
+            "200 text/plain; charset=utf-8 hello from mah\n"
+            '{"greeting":"hi mah"}\n'
+            '{"you_sent":[["name","mah"],["n","1"]]}\n'
+            "chunked [1, 2, 3]\n"
+            "404 no route for /nope\n"
+            "stopped with 0 connections\n",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

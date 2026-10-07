@@ -1,0 +1,977 @@
+# Tests for std:http's server (M42, docs/contracts/M42_http_server.md), run by
+# tests/test_stdlib.py (or `mah test --file mah/std/http_server.test.mh`) on
+# both VMs. Each test serves on a free port of 127.0.0.1 and talks to it with
+# std:http's client or with raw std:socket connections (for exact wire
+# checks); every test closes its server. HTTPS serving is covered by
+# tests/test_tls_server.py, which needs a certificate.
+import "std:test"
+import http from "./http"
+import socket from "./socket"
+import time from "./time"
+import regex from "./regex"
+import bytes from "./bytes"
+
+## A reply as read off the wire: the status line, the header pairs and the
+## body (as text).
+struct Raw { status_line: String, headers: Vector<Vector<String>>, body: String }
+
+impl Raw {
+    fn header(self, name: String) -> Unknown {
+        for let pair in self.headers {
+            if pair[0].to_lower() == name.to_lower() { return pair[1] }
+        }
+        none
+    }
+}
+
+struct Boom { why: String }
+
+impl Error for Boom {
+    fn message(self) -> String { self.why }
+}
+
+fn is_date(text: Unknown) -> Bool {
+    if text == none { return false }
+    regex.must_compile(
+        "^[A-Z][a-z]{2}, \\d\\d [A-Z][a-z]{2} \\d{4} \\d\\d:\\d\\d:\\d\\d GMT$"
+    ).is_match(text)
+}
+
+fn hex_value(text: String) -> Number {
+    let n = 0
+    for let c in text.to_lower() { n = n * 16 + "0123456789abcdef".index_of(c).unwrap() }
+    n
+}
+
+fn connect(server: http.Server) -> socket.Socket { socket.connect("127.0.0.1", server.port, 5000) }
+
+# The status line and headers of the next reply.
+fn read_head(conn: socket.Socket) -> Raw {
+    let status_line = conn.read_line(5000)
+    let headers = []
+    let line = conn.read_line(5000)
+    while line != "" & line != none {
+        let colon = line.index_of(":").unwrap()
+        headers.push([line[..colon], line[colon + 1..].trim()])
+        line = conn.read_line(5000)
+    }
+    Raw { status_line: status_line, headers: headers, body: "" }
+}
+
+# The next reply, its body framed by Content-Length or chunked coding.
+fn read_reply(conn: socket.Socket) -> Raw {
+    let raw = read_head(conn)
+    let length = raw.header("content-length")
+    if raw.header("transfer-encoding") == "chunked" {
+        let body = "".to_bytes()
+        let size = hex_value(conn.read_line(5000))
+        while size > 0 {
+            body.extend(conn.recv_exactly(size, 5000))
+            conn.read_line(5000)
+            size = hex_value(conn.read_line(5000))
+        }
+        conn.read_line(5000)
+        raw.body = body.to_text_lossy()
+    } elif length != none {
+        if length != "0" { raw.body = conn.recv_exactly(length.to_number(), 5000).to_text_lossy() }
+    }
+    raw
+}
+
+# Whether the server has closed the connection (nothing more arrives).
+fn closed(conn: socket.Socket) -> Bool {
+    let got = try conn.recv(65536, 2000) else "".to_bytes()
+    got.len() == 0
+}
+
+fn get(path: String) -> String { "GET " + path + " HTTP/1.1\r\nHost: x\r\n\r\n" }
+
+# Echoes the request's path as text.
+fn echo_path(req: http.Request) -> http.Reply { http.Reply.text(req.path) }
+
+test "a GET" {
+    let seen = []
+    let server = http.serve(0, fn(req: http.Request) -> http.Reply {
+        seen.push(req)
+        http.Reply.text("héllo")
+    })
+    defer server.close()
+    let r = http.get(server.url("/a/b?x=1&y=2"))
+    assert_eq(r.status, 200)
+    assert_eq(r.reason, "OK")
+    assert_eq(r.text(), "héllo")
+    assert_eq(r.header("content-type"), "text/plain; charset=utf-8")
+    assert_eq(r.header("content-length"), "6")
+    assert(is_date(r.header("date")), "a Date header")
+    let req = seen[0]
+    assert_eq(req.method, "GET")
+    assert_eq(req.target, "/a/b?x=1&y=2")
+    assert_eq(req.path, "/a/b")
+    assert_eq(req.query, "x=1&y=2")
+    assert_eq(req.version, "HTTP/1.1")
+    assert_eq(req.header("HOST"), "127.0.0.1:" + server.port)
+    assert_eq(req.peer_host, "127.0.0.1")
+    assert_eq(req.tls, false)
+    assert_eq(req.body, "".to_bytes())
+    assert_eq(req.query_param("y"), "2")
+    assert_eq(req.query_param("z"), none)
+    assert_eq(req.to_string(), "Request(GET /a/b?x=1&y=2)")
+}
+
+test "request bodies" {
+    fn handle(req: http.Request) -> http.Reply {
+        if req.path == "/text" { return http.Reply.text(req.text()) }
+        if req.path == "/json" { return http.Reply.json(req.json()) }
+        if req.path == "/form" { return http.Reply.json(req.form()) }
+        http.Reply.json(req.query_pairs())
+    }
+    let server = http.serve(0, handle)
+    defer server.close()
+    assert_eq(http.post(server.url("/text"), body: "héllo").text(), "héllo")
+    assert_eq(http.post(server.url("/json"), json: ["a": [1, true]]).text(), "{\"a\":[1,true]}")
+    let form = http.post(server.url("/form"), form: ["q": "a b", "n": 1])
+    assert_eq(form.text(), "[[\"q\",\"a b\"],[\"n\",\"1\"]]")
+    let bad = http.post(server.url("/json"), body: "{")
+    assert_eq(bad.status, 400)
+    assert(bad.text().starts_with("the body isn't valid JSON: "), bad.text())
+    let c = connect(server)
+    defer c.close()
+    c.send_text(get("/q?q=%zz"))
+    let r = read_reply(c)
+    assert_eq(r.status_line, "HTTP/1.1 400 Bad Request")
+    assert(r.body.starts_with("a bad query string: "), r.body)
+}
+
+test "keep-alive" {
+    let server = http.serve(0, echo_path)
+    defer server.close()
+    let c = connect(server)
+    defer c.close()
+    c.send_text(get("/one"))
+    let a = read_reply(c)
+    assert_eq(a.status_line, "HTTP/1.1 200 OK")
+    assert_eq(a.body, "/one")
+    assert_eq(a.header("connection"), none)
+    c.send_text(get("/two"))
+    let b = read_reply(c)
+    assert_eq(b.body, "/two")
+    assert_eq(b.header("connection"), none)
+    c.send_text("GET /three HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+    let d = read_reply(c)
+    assert_eq(d.body, "/three")
+    assert_eq(d.header("connection"), "close")
+    assert(closed(c), "closed after Connection: close")
+}
+
+test "pipelining" {
+    let server = http.serve(0, echo_path)
+    defer server.close()
+    let c = connect(server)
+    defer c.close()
+    c.send_text(get("/first") + get("/second"))
+    assert_eq(read_reply(c).body, "/first")
+    assert_eq(read_reply(c).body, "/second")
+}
+
+test "HTTP/1.0" {
+    let server = http.serve(0, echo_path)
+    defer server.close()
+    let c = connect(server)
+    defer c.close()
+    c.send_text("GET /old HTTP/1.0\r\n\r\n")
+    let r = read_reply(c)
+    assert_eq(r.status_line, "HTTP/1.1 200 OK")
+    assert_eq(r.body, "/old")
+    assert_eq(r.header("connection"), "close")
+    assert(closed(c), "an HTTP/1.0 connection closes")
+    let k = connect(server)
+    defer k.close()
+    k.send_text("GET /a HTTP/1.0\r\nConnection: keep-alive\r\n\r\n")
+    let a = read_reply(k)
+    assert_eq(a.header("connection"), "keep-alive")
+    k.send_text("GET /b HTTP/1.0\r\nConnection: keep-alive\r\n\r\n")
+    assert_eq(read_reply(k).body, "/b")
+}
+
+test "a chunked request" {
+    let server = http.serve(0, fn(req: http.Request) -> http.Reply { http.Reply.text(req.text()) })
+    defer server.close()
+    let c = connect(server)
+    defer c.close()
+    c.send_text(
+        "POST /c HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6;x=y\r\n world\r\n0\r\nT: 1\r\n\r\n"
+    )
+    let r = read_reply(c)
+    assert_eq(r.status_line, "HTTP/1.1 200 OK")
+    assert_eq(r.body, "hello world")
+}
+
+test "100-continue" {
+    let server = http.serve(
+        0,
+        fn(req: http.Request) -> http.Reply { http.Reply.text(req.text()) },
+        max_body: 10
+    )
+    defer server.close()
+    let c = connect(server)
+    defer c.close()
+    c.send_text("POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\nExpect: 100-continue\r\n\r\n")
+    assert_eq(c.read_line(5000), "HTTP/1.1 100 Continue")
+    assert_eq(c.read_line(5000), "")
+    c.send_text("abcd")
+    let r = read_reply(c)
+    assert_eq(r.status_line, "HTTP/1.1 200 OK")
+    assert_eq(r.body, "abcd")
+    let big = connect(server)
+    defer big.close()
+    big.send_text(
+        "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 11\r\nExpect: 100-continue\r\n\r\n"
+    )
+    let refused = read_reply(big)
+    assert_eq(refused.status_line, "HTTP/1.1 413 Content Too Large")
+    assert_eq(refused.body, "the request body is larger than 10 bytes")
+    let odd = connect(server)
+    defer odd.close()
+    odd.send_text("POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\nExpect: x\r\n\r\n")
+    let r417 = read_reply(odd)
+    assert_eq(r417.status_line, "HTTP/1.1 417 Expectation Failed")
+    assert_eq(r417.body, "only 100-continue is supported in Expect")
+}
+
+test "protocol errors" {
+    let server = http.serve(0, echo_path)
+    defer server.close()
+    let h = "Host: x\r\n"
+    let cases = [
+        ["BAD\r\n\r\n", "400 Bad Request", "a request line needs a method, a target and a version"],
+        ["GET / HTTP/1.1\r\n\r\n", "400 Bad Request", "a request without a Host header"],
+        [
+            "GET / HTTP/1.1\r\n" + h + h + "\r\n",
+            "400 Bad Request",
+            "more than one Host header"
+        ],
+        [
+            "GET / HTTP/2.0\r\n" + h + "\r\n",
+            "505 HTTP Version Not Supported",
+            "only HTTP/1.x is supported"
+        ],
+        ["GET / HTTP/1\r\n" + h + "\r\n", "400 Bad Request", "a bad HTTP version: HTTP/1"],
+        ["G@T / HTTP/1.1\r\n" + h + "\r\n", "400 Bad Request", "a bad method: G@T"],
+        ["GET x HTTP/1.1\r\n" + h + "\r\n", "400 Bad Request", "a bad request target: x"],
+        [
+            "GET / HTTP/1.1\r\n" + h + "bad\r\n\r\n",
+            "400 Bad Request",
+            "a header line without ':': bad"
+        ],
+        [
+            "GET / HTTP/1.1\r\n" + h + "A: 1\r\n folded\r\n\r\n",
+            "400 Bad Request",
+            "obsolete line folding isn't supported"
+        ],
+        ["GET / HTTP/1.1\r\n" + h + "B@d: 1\r\n\r\n", "400 Bad Request", "a bad header name: B@d"],
+        [
+            "POST / HTTP/1.1\r\n" + h + "Content-Length: abc\r\n\r\n",
+            "400 Bad Request",
+            "a bad Content-Length: abc"
+        ],
+        [
+            "POST / HTTP/1.1\r\n" + h + "Content-Length: 1\r\nContent-Length: 2\r\n\r\n",
+            "400 Bad Request",
+            "a bad Content-Length: 1, 2"
+        ],
+        [
+            "POST / HTTP/1.1\r\n" + h + "Transfer-Encoding: chunked\r\nContent-Length: 1\r\n\r\n",
+            "400 Bad Request",
+            "both Transfer-Encoding and Content-Length"
+        ],
+        [
+            "POST / HTTP/1.1\r\n" + h + "Transfer-Encoding: gzip, chunked\r\n\r\n",
+            "501 Not Implemented",
+            "only the chunked transfer coding is supported"
+        ],
+        [
+            "POST / HTTP/1.1\r\n" + h + "Transfer-Encoding: chunked, gzip\r\n\r\n",
+            "400 Bad Request",
+            "chunked must be the last transfer coding"
+        ],
+        [
+            "POST / HTTP/1.0\r\nTransfer-Encoding: chunked\r\n\r\n",
+            "400 Bad Request",
+            "Transfer-Encoding in an HTTP/1.0 request"
+        ],
+        [
+            "CONNECT h:1 HTTP/1.1\r\nHost: h:1\r\n\r\n",
+            "501 Not Implemented",
+            "CONNECT isn't supported"
+        ],
+        [
+            "POST / HTTP/1.1\r\n" + h + "Transfer-Encoding: chunked\r\n\r\nzz\r\n",
+            "400 Bad Request",
+            "a bad chunk size: zz"
+        ],
+        [
+            "POST / HTTP/1.1\r\n" + h + "Transfer-Encoding: chunked\r\n\r\n2\r\nabc\r\n",
+            "400 Bad Request",
+            "a chunk isn't followed by a line end"
+        ]
+    ]
+    for let case in cases {
+        let c = connect(server)
+        defer c.close()
+        c.send_text(case[0])
+        let r = read_reply(c)
+        assert_eq(r.status_line, "HTTP/1.1 " + case[1], case[0])
+        assert_eq(r.body, case[2], case[0])
+        assert_eq(r.header("connection"), "close", case[0])
+        assert_eq(r.header("content-type"), "text/plain; charset=utf-8", case[0])
+        assert(closed(c), "closed after " + case[0])
+    }
+}
+
+test "empty framing headers aren't ignored" {
+    # an empty Content-Length or Transfer-Encoding must not make the body
+    # look like the next request (request smuggling)
+    let server = http.serve(0, echo_path)
+    defer server.close()
+    let h = "Host: x\r\n"
+    let smuggled = "GET /smuggled HTTP/1.1\r\n" + h + "\r\n"
+    let cases = [
+        [
+            "POST / HTTP/1.1\r\n" + h + "Content-Length:\r\n\r\n" + smuggled,
+            "400 Bad Request",
+            "a bad Content-Length: "
+        ],
+        [
+            "POST / HTTP/1.1\r\n" + h + "Content-Length: ,\r\n\r\n" + smuggled,
+            "400 Bad Request",
+            "a bad Content-Length: "
+        ],
+        [
+            "POST / HTTP/1.1\r\n" + h + "Transfer-Encoding:\r\nContent-Length: 3\r\n\r\nabc",
+            "400 Bad Request",
+            "both Transfer-Encoding and Content-Length"
+        ],
+        [
+            "POST / HTTP/1.1\r\n" + h + "Transfer-Encoding: \r\n\r\n" + smuggled,
+            "400 Bad Request",
+            "chunked must be the last transfer coding"
+        ],
+        [
+            "POST / HTTP/1.1\r\n" + h + "Transfer-Encoding: chunked\r\n\r\n1\r\na" + "x".repeat(
+                5000
+            ) + "\r\n",
+            "400 Bad Request",
+            "a chunk isn't followed by a line end"
+        ]
+    ]
+    for let case in cases {
+        let c = connect(server)
+        defer c.close()
+        c.send_text(case[0])
+        let r = read_reply(c)
+        assert_eq(r.status_line, "HTTP/1.1 " + case[1], case[0])
+        assert_eq(r.body, case[2], case[0])
+        assert_eq(r.header("connection"), "close", case[0])
+        assert(closed(c), "closed after " + case[0])
+    }
+    # a runtime error in a handler (not a throw) is a 500 too, and the
+    # connection stays usable
+    let broken = http.serve(0, fn(req: http.Request) -> http.Reply {
+        if req.path == "/oops" {
+            let empty: Vector<String> = []
+            return http.Reply.text(empty.pop().unwrap())
+        }
+        http.Reply.text("fine")
+    })
+    defer broken.close()
+    let c = connect(broken)
+    defer c.close()
+    c.send_text(get("/oops"))
+    let r = read_reply(c)
+    assert_eq(r.status_line, "HTTP/1.1 500 Internal Server Error")
+    assert_eq(r.body, "Internal Server Error")
+    c.send_text(get("/"))
+    assert_eq(read_reply(c).body, "fine")
+}
+
+test "limits" {
+    let small = http.serve(0, echo_path, max_head: 64, max_body: 10)
+    defer small.close()
+    let cases = [
+        [
+            "GET /" + "a" * 100 + " HTTP/1.1\r\nHost: x\r\n\r\n",
+            "414 URI Too Long",
+            "the request line is longer than 64 bytes"
+        ],
+        [
+            "GET / HTTP/1.1\r\nHost: x\r\nA: 1234567890\r\nB: 1234567890\r\nC: 1234567890\r\n\r\n",
+            "431 Request Header Fields Too Large",
+            "the request head is larger than 64 bytes"
+        ],
+        [
+            "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 11\r\n\r\nhello world",
+            "413 Content Too Large",
+            "the request body is larger than 10 bytes"
+        ],
+        [
+            "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 1234567890123456\r\n\r\n",
+            "413 Content Too Large",
+            "the request body is larger than 10 bytes"
+        ],
+        [
+            "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n6\r\nhello \r\n5\r\nworld\r\n0\r\n\r\n",
+            "413 Content Too Large",
+            "the request body is larger than 10 bytes"
+        ]
+    ]
+    for let case in cases {
+        let c = connect(small)
+        defer c.close()
+        c.send_text(case[0])
+        let r = read_reply(c)
+        assert_eq(r.status_line, "HTTP/1.1 " + case[1], case[0])
+        assert_eq(r.body, case[2], case[0])
+        assert(closed(c), "closed after " + case[0])
+    }
+    let server = http.serve(0, echo_path)
+    defer server.close()
+    let many = "GET / HTTP/1.1\r\nHost: x\r\n"
+    for let i in 0..100 { many = many + "X-" + i + ": y\r\n" }
+    let c = connect(server)
+    defer c.close()
+    c.send_text(many + "\r\n")
+    let r = read_reply(c)
+    assert_eq(r.status_line, "HTTP/1.1 431 Request Header Fields Too Large")
+    assert_eq(r.body, "more than 100 header fields")
+    # exactly 100 fields is fine
+    let hundred = "GET /ok HTTP/1.1\r\nHost: x\r\n"
+    for let i in 0..99 { hundred = hundred + "X-" + i + ": y\r\n" }
+    let d = connect(server)
+    defer d.close()
+    d.send_text(hundred + "\r\n")
+    assert_eq(read_reply(d).body, "/ok")
+}
+
+test "timeouts" {
+    let server = http.serve(0, echo_path, read_timeout: 200, idle_timeout: 200)
+    defer server.close()
+    let c = connect(server)
+    defer c.close()
+    c.send_text("GET /sl")
+    let r = read_reply(c)
+    assert_eq(r.status_line, "HTTP/1.1 408 Request Timeout")
+    assert_eq(r.body, "the request took too long to arrive")
+    let idle = connect(server)
+    defer idle.close()
+    assert_eq(idle.recv(65536, 2000).len(), 0)
+}
+
+test "handler errors" {
+    fn handle(req: http.Request) -> Unknown {
+        if req.path == "/throw" { throw Boom { why: "boom" } }
+        if req.path == "/string" { return "not a reply" }
+        if req.path == "/bad" { return http.Reply { status: 99, headers: [], body: none } }
+        http.Reply.text("fine")
+    }
+    let server = http.serve(0, handle)
+    defer server.close()
+    let c = connect(server)
+    defer c.close()
+    for let path in ["/throw", "/string", "/bad"] {
+        c.send_text(get(path))
+        let r = read_reply(c)
+        assert_eq(r.status_line, "HTTP/1.1 500 Internal Server Error", path)
+        assert_eq(r.body, "Internal Server Error", path)
+        assert_eq(r.header("connection"), none, path)
+    }
+    c.send_text(get("/"))
+    assert_eq(read_reply(c).body, "fine")
+    let seen = []
+    let with_hook = http.serve(0, handle, on_error: fn(e: Unknown, req: http.Request) -> Unknown {
+        seen.push(e)
+        seen.push(req.path)
+        http.Reply.text("oops", status: 503)
+    })
+    defer with_hook.close()
+    let r = http.get(with_hook.url("/throw"))
+    assert_eq(r.status, 503)
+    assert_eq(r.text(), "oops")
+    assert_eq(seen[0].why, "boom")
+    assert_eq(seen[1], "/throw")
+    let ignored = http.serve(
+        0,
+        handle,
+        on_error: fn(e: Unknown, req: http.Request) -> Unknown { none }
+    )
+    defer ignored.close()
+    assert_eq(http.get(ignored.url("/throw")).status, 500)
+}
+
+test "replies" {
+    fn handle(req: http.Request) -> http.Reply {
+        if req.path == "/html" { return http.Reply.html("<b>hi</b>") }
+        if req.path == "/bytes" { return http.Reply.bytes(bytes.from_vector([0, 1, 255])) }
+        if req.path == "/png" {
+            return http.Reply.bytes("x".to_bytes(), content_type: "image/png", status: 201)
+        }
+        if req.path == "/redirect" { return http.Reply.redirect("/html") }
+        if req.path == "/empty" { return http.Reply.empty() }
+        if req.path == "/304" { return http.Reply.new(304, body: "ignored") }
+        if req.path == "/cookies" {
+            return http.Reply.text("c").add_header("Set-Cookie", "a=1").add_header(
+                "Set-Cookie",
+                "b=2"
+            )
+        }
+        if req.path == "/set" {
+            return http.Reply.text("s", headers: ["X-A": "1", "x-a": "2"]).set_header("X-a", "3")
+        }
+        if req.path == "/length" {
+            return http.Reply.text(
+                "abc",
+                headers: [["Content-Length", "99"], ["Connection", "keep-alive"]]
+            )
+        }
+        if req.path == "/typed" {
+            return http.Reply.text("t", headers: ["content-type": "text/csv"])
+        }
+        if req.path == "/json" { return http.Reply.json(["ok": true], status: 201) }
+        http.Reply.new()
+    }
+    let server = http.serve(0, handle)
+    defer server.close()
+    let html = http.get(server.url("/html"))
+    assert_eq(html.header("content-type"), "text/html; charset=utf-8")
+    assert_eq(html.text(), "<b>hi</b>")
+    let b = http.get(server.url("/bytes"))
+    assert_eq(b.header("content-type"), "application/octet-stream")
+    assert_eq(b.body, bytes.from_vector([0, 1, 255]))
+    let png = http.get(server.url("/png"))
+    assert_eq(png.status, 201)
+    assert_eq(png.header("content-type"), "image/png")
+    let moved = http.get(server.url("/redirect"), max_redirects: 0)
+    assert_eq(moved.status, 302)
+    assert_eq(moved.reason, "Found")
+    assert_eq(moved.header("location"), "/html")
+    assert_eq(moved.header("content-length"), "0")
+    assert_eq(http.get(server.url("/redirect")).text(), "<b>hi</b>")
+    let empty = http.get(server.url("/empty"))
+    assert_eq(empty.status, 204)
+    assert_eq(empty.header("content-length"), none)
+    let c = connect(server)
+    defer c.close()
+    c.send_text(get("/304"))
+    let not_modified = read_head(c)
+    assert_eq(not_modified.status_line, "HTTP/1.1 304 Not Modified")
+    assert_eq(not_modified.header("content-length"), none)
+    assert_eq(not_modified.header("content-type"), "text/plain; charset=utf-8")
+    c.send_text(get("/"))
+    let plain = read_reply(c)
+    assert_eq(plain.status_line, "HTTP/1.1 200 OK")
+    assert_eq(plain.header("content-length"), "0")
+    assert_eq(plain.header("content-type"), none)
+    let cookies = http.get(server.url("/cookies"))
+    assert_eq(cookies.header_all("set-cookie").join(" "), "a=1 b=2")
+    let set = http.get(server.url("/set"))
+    assert_eq(set.header_all("x-a").join(" "), "3")
+    let length = http.get(server.url("/length"))
+    assert_eq(length.header("content-length"), "3")
+    assert_eq(length.text(), "abc")
+    assert_eq(http.get(server.url("/typed")).header_all("content-type").join(" "), "text/csv")
+    assert_eq(http.get(server.url("/json")).text(), "{\"ok\":true}")
+    let head = http.head(server.url("/html"))
+    assert_eq(head.header("content-length"), "9")
+    assert_eq(head.body, "".to_bytes())
+    let h = connect(server)
+    defer h.close()
+    h.send_text("HEAD /html HTTP/1.1\r\nHost: x\r\n\r\n")
+    assert_eq(read_head(h).header("content-length"), "9")
+    h.send_text(get("/json"))
+    assert_eq(read_reply(h).body, "{\"ok\":true}")
+}
+
+test "Reply argument errors" {
+    let cases = [
+        [
+            fn() { http.Reply.new(99) },
+            "http: a Reply status must be a whole number from 200 to 999, got 99"
+        ],
+        [
+            fn() { http.Reply.text("x", status: 200.5) },
+            "http: a Reply status must be a whole number from 200 to 999, got 200.5"
+        ],
+        [
+            fn() { http.Reply.new(1000) },
+            "http: a Reply status must be a whole number from 200 to 999, got 1000"
+        ],
+        [
+            fn() { http.Reply.new(200, 5) },
+            "http: a Reply body must be none, a String, Bytes or a function, got Number"
+        ],
+        [fn() { http.Reply.text("x", headers: ["X": "a\r\nb"]) }, "http: invalid header X"],
+        [
+            fn() { http.Reply.text("x", headers: 5) },
+            "http: headers must be a Map or a Vector of pairs, got Number"
+        ],
+        [fn() { http.Reply.text("x").set_header("Y", "a\nb") }, "http: invalid header Y"],
+        [fn() { http.Reply.text("x").add_header("", "v") }, "http: invalid header "],
+        [fn() { http.Reply.json(fn() { 1 }) }, "http: json "]
+    ]
+    for let case in cases {
+        let e = assert_throws(case[0])
+        assert(e.message.starts_with(case[1]), e.message)
+    }
+}
+
+test "streams" {
+    fn handle(req: http.Request) -> http.Reply {
+        if req.path == "/s" {
+            return http.Reply.stream(fn(w: http.BodyWriter) {
+                w.write("a")
+                w.write("bc".to_bytes())
+                w.write("")
+            })
+        }
+        if req.path == "/sized" {
+            return http.Reply.stream(
+                fn(w: http.BodyWriter) {
+                    w.write("ab")
+                    w.write("c")
+                },
+                headers: ["Content-Length": "3"]
+            )
+        }
+        if req.path == "/long" {
+            return http.Reply.stream(
+                fn(w: http.BodyWriter) { w.write("abc") },
+                headers: ["Content-Length": "2"]
+            )
+        }
+        if req.path == "/short" {
+            return http.Reply.stream(
+                fn(w: http.BodyWriter) { w.write("a") },
+                headers: ["Content-Length": "2"]
+            )
+        }
+        if req.path == "/bad" { return http.Reply.stream(fn(w: http.BodyWriter) { w.write(5) }) }
+        http.Reply.stream(fn(w: http.BodyWriter) {
+            w.write("a")
+            throw Boom { why: "midway" }
+        })
+    }
+    let errors = []
+    let server = http.serve(0, handle, on_error: fn(e: Unknown, req: http.Request) -> Unknown {
+        errors.push(req.path)
+        none
+    })
+    defer server.close()
+    let c = connect(server)
+    defer c.close()
+    c.send_text(get("/s"))
+    let head = read_head(c)
+    assert_eq(head.status_line, "HTTP/1.1 200 OK")
+    assert_eq(head.header("transfer-encoding"), "chunked")
+    assert_eq(head.header("content-length"), none)
+    assert_eq(head.header("content-type"), none)
+    assert_eq(c.recv_exactly(18, 5000).to_text_lossy(), "1\r\na\r\n2\r\nbc\r\n0\r\n\r\n")
+    let sized = http.get(server.url("/sized"))
+    assert_eq(sized.text(), "abc")
+    assert_eq(sized.header("content-length"), "3")
+    assert_eq(sized.header("transfer-encoding"), none)
+    assert(
+        try {
+            http.get(server.url("/long"));
+            false
+        } catch { _: http.HttpError => { true } },
+        "long"
+    )
+    assert(
+        try {
+            http.get(server.url("/short"));
+            false
+        } catch { _: http.HttpError => { true } },
+        "short"
+    )
+    assert(
+        try {
+            http.get(server.url("/bad"));
+            false
+        } catch { _: http.HttpError => { true } },
+        "bad"
+    )
+    let failed = try { http.get(server.url("/fail")).text() } catch {
+        e: http.HttpError => { e.kind + ": " + e.description }
+    }
+    assert_eq(failed, "invalid_response: the connection closed mid-response")
+    assert_eq(errors.join(" "), "/long /short /bad /fail")
+    let old = connect(server)
+    defer old.close()
+    old.send_text("GET /s HTTP/1.0\r\n\r\n")
+    let r = read_head(old)
+    assert_eq(r.header("connection"), "close")
+    assert_eq(r.header("transfer-encoding"), none)
+    let rest = "".to_bytes()
+    let chunk = old.recv(65536, 5000)
+    while chunk.len() > 0 {
+        rest.extend(chunk)
+        chunk = old.recv(65536, 5000)
+    }
+    assert_eq(rest.to_text_lossy(), "abc")
+}
+
+test "multipart" {
+    let seen = []
+    fn handle(req: http.Request) -> http.Reply {
+        seen.push(req)
+        if req.path == "/parts" { req.multipart() }
+        http.Reply.json(req.form())
+    }
+    let server = http.serve(0, handle)
+    defer server.close()
+    let body = (
+        "preamble\r\n--XyZ\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nhello\r\n" + "--XyZ  \r\ncontent-disposition: form-data; name=\"a;b\"\r\n\r\nsemi\r\n" + "--XyZ\r\nContent-Disposition: form-data; name=\"file\"; filename=\"x.txt\"\r\n" + "Content-Type: text/plain\r\n\r\n"
+    ).to_bytes()
+    body.extend(bytes.from_vector([0, 255, 10]))
+    body.extend("\r\n--XyZ--\r\nepilogue".to_bytes())
+    let r = http.post(
+        server.url("/"),
+        body: body,
+        headers: ["Content-Type": "multipart/form-data; boundary=\"XyZ\""]
+    )
+    assert_eq(r.status, 200)
+    assert_eq(r.text(), "[[\"title\",\"hello\"],[\"a;b\",\"semi\"]]")
+    let parts = seen[0].multipart()
+    assert_eq(parts.len(), 3)
+    assert_eq(parts[0].name, "title")
+    assert_eq(parts[0].filename, none)
+    assert_eq(parts[0].content_type, none)
+    assert_eq(parts[0].text(), "hello")
+    assert_eq(parts[1].name, "a;b")
+    assert_eq(parts[2].name, "file")
+    assert_eq(parts[2].filename, "x.txt")
+    assert_eq(parts[2].content_type, "text/plain")
+    assert_eq(parts[2].header("CONTENT-TYPE"), "text/plain")
+    assert_eq(parts[2].body, bytes.from_vector([0, 255, 10]))
+    let bad = [
+        ["multipart/form-data", "--a\r\n\r\nx\r\n--a--", "a multipart body without a boundary"],
+        [
+            "multipart/form-data; boundary=a",
+            "--a\r\nContent-Disposition: form-data; name=x\r\n\r\nx",
+            "the multipart body doesn't end with its closing boundary"
+        ],
+        [
+            "multipart/form-data; boundary=a",
+            "--a\r\nContent-Disposition: form-data\r\n\r\nx\r\n--a--",
+            "a multipart part without a name"
+        ],
+        [
+            "multipart/form-data; boundary=a",
+            "--a\r\nContent-Disposition: attachment; name=x\r\n\r\nx\r\n--a--",
+            "a multipart part isn't form-data"
+        ],
+        [
+            "multipart/form-data; boundary=a",
+            "nothing",
+            "the multipart body doesn't contain its boundary"
+        ],
+        [
+            "multipart/form-data; boundary=a",
+            "--a\r\nNoColon\r\n\r\nx\r\n--a--",
+            "a malformed multipart header: NoColon"
+        ],
+        ["text/plain", "x", "the body isn't multipart/form-data (Content-Type is text/plain)"]
+    ]
+    for let case in bad {
+        let reply = http.post(
+            server.url("/parts"),
+            body: case[1],
+            headers: ["Content-Type": case[0]]
+        )
+        assert_eq(reply.status, 400, case[2])
+        assert_eq(reply.text(), case[2])
+    }
+    let plain = http.post(server.url("/"), body: "x", headers: ["Content-Type": "text/plain"])
+    assert_eq(plain.text(), "the body isn't a form (Content-Type is text/plain)")
+    let none_type = http.Request {
+        method: "POST",
+        target: "/",
+        path: "/",
+        query: none,
+        version: "HTTP/1.1",
+        headers: [],
+        body: "".to_bytes(),
+        peer_host: "h",
+        peer_port: 1,
+        tls: false
+    }
+    let e = assert_throws(fn() { none_type.multipart() })
+    assert_eq(e.kind, "bad_request")
+    assert_eq(e.description, "the body isn't multipart/form-data (Content-Type is none)")
+    assert_eq(e.message(), "POST /: the body isn't multipart/form-data (Content-Type is none)")
+    assert_eq(none_type.content_type(), "")
+}
+
+test "a handler is a plain function" {
+    let req = http.Request {
+        method: "GET",
+        target: "/x?a=1",
+        path: "/x",
+        query: "a=1",
+        version: "HTTP/1.1",
+        headers: [["Content-Type", "Application/JSON; charset=utf-8"]],
+        body: "[1]".to_bytes(),
+        peer_host: "h",
+        peer_port: 1,
+        tls: false
+    }
+    assert_eq(echo_path(req).body, "/x")
+    assert_eq(req.content_type(), "application/json")
+    assert_eq(req.json()[0], 1)
+    assert_eq(req.query_param("a"), "1")
+}
+
+test "shutdown" {
+    fn handle(req: http.Request) -> http.Reply {
+        if req.path == "/slow" { sleep_async(300) }
+        http.Reply.text("done")
+    }
+    let server = http.serve(0, handle)
+    let idle = connect(server)
+    defer idle.close()
+    idle.send_text(get("/fast"))
+    assert_eq(read_reply(idle).body, "done")
+    let busy = connect(server)
+    defer busy.close()
+    busy.send_text(get("/slow"))
+    sleep_async(100)
+    assert_eq(server.connections(), 2)
+    server.shutdown()
+    server.shutdown()
+    assert_eq(idle.recv(65536, 500).len(), 0)
+    let r = read_reply(busy)
+    assert_eq(r.status_line, "HTTP/1.1 200 OK")
+    assert_eq(r.header("connection"), "close")
+    # (a closed listener's port is released once its pending accept has
+    # noticed, within the natives' 50 ms poll slice)
+    let refused = assert_throws(fn() { socket.connect("127.0.0.1", server.port, 1000) })
+    assert_eq(refused.kind, "connection_refused")
+    server.wait()
+    server.wait()
+    assert_eq(server.connections(), 0)
+    let stuck = http.serve(0, fn(req: http.Request) -> http.Reply {
+        sleep_async(5000)
+        http.Reply.text("late")
+    })
+    let pending = detach http.get(stuck.url("/"))
+    sleep_async(100)
+    let start = time.monotonic()
+    stuck.shutdown(grace: 100)
+    stuck.wait()
+    assert(time.monotonic() - start < 2, "the grace period ends it")
+    assert(
+        try {
+            pending.await;
+            false
+        } catch { _: http.HttpError => { true } },
+        "the client fails"
+    )
+}
+
+test "concurrency" {
+    let server = http.serve(0, fn(req: http.Request) -> http.Reply {
+        sleep_async(300)
+        http.Reply.text(req.path)
+    })
+    defer server.close()
+    let start = time.monotonic()
+    let a = detach http.get(server.url("/a"))
+    let b = detach http.get(server.url("/b"))
+    assert_eq(a.await.text(), "/a")
+    assert_eq(b.await.text(), "/b")
+    let took = time.monotonic() - start
+    assert(took < 0.55, "took " + took)
+}
+
+test "max_connections" {
+    let server = http.serve(0, echo_path, max_connections: 1)
+    defer server.close()
+    let first = connect(server)
+    defer first.close()
+    first.send_text(get("/first"))
+    assert_eq(read_reply(first).body, "/first")
+    let second = connect(server)
+    defer second.close()
+    second.send_text(get("/second"))
+    let r = read_reply(second)
+    assert_eq(r.status_line, "HTTP/1.1 503 Service Unavailable")
+    assert_eq(r.body, "too many connections")
+    assert_eq(r.header("connection"), "close")
+    assert(closed(second), "refused connections close")
+    assert_eq(server.connections(), 1)
+}
+
+test "serve errors" {
+    let text: Unknown = "x"
+    let five: Unknown = 5
+    let cases = [
+        [fn() { http.serve(0, text) }, "http: the handler must be a function, got String"],
+        [
+            fn() { http.serve(0, echo_path, max_head: 0) },
+            "http: max_head must be a whole number of at least 1, got 0"
+        ],
+        [
+            fn() { http.serve(0, echo_path, max_body: 1.5) },
+            "http: max_body must be a whole number of at least 1, got 1.5"
+        ],
+        [
+            fn() { http.serve(0, echo_path, max_connections: text) },
+            "http: max_connections must be a whole number of at least 1, got String"
+        ],
+        [
+            fn() { http.serve(0, echo_path, read_timeout: 0 - 1) },
+            "http: read_timeout must be none or a whole number of at least 0, got -1"
+        ],
+        [
+            fn() { http.serve(0, echo_path, idle_timeout: text) },
+            "http: idle_timeout must be none or a whole number of at least 0, got String"
+        ],
+        [
+            fn() { http.serve(0, echo_path, tls: text) },
+            "http: tls must be a socket.TlsServerConfig (from socket.tls_server_config), got String"
+        ],
+        [
+            fn() { http.serve(0, echo_path, on_error: five) },
+            "http: on_error must be a function, got Number"
+        ]
+    ]
+    for let case in cases {
+        let e = assert_throws(case[0])
+        assert_eq(e.message, case[1])
+    }
+    let server = http.serve(0, echo_path, read_timeout: none, idle_timeout: none)
+    defer server.close()
+    let e = assert_throws(fn() { http.serve(server.port, echo_path) })
+    assert_eq(e.kind, "address_in_use")
+    assert_eq(http.get(server.url("/still")).text(), "/still")
+}
+
+test "printing and urls" {
+    let server = http.serve(0, echo_path)
+    defer server.close()
+    assert_eq(server.to_string(), "Server(http://127.0.0.1:" + server.port + ")")
+    assert_eq(server.url("/x"), "http://127.0.0.1:" + server.port + "/x")
+    assert_eq(server.tls, false)
+    let any = http.serve(0, echo_path, host: "0.0.0.0")
+    defer any.close()
+    assert_eq(any.url(), "http://127.0.0.1:" + any.port + "/")
+    assert_eq(http.Server { host: "::", port: 1, tls: true, state: none }.url(), "https://[::1]:1/")
+    assert_eq(
+        http.Server { host: "fe80::1", port: 2, tls: false, state: none }.url("/a"),
+        "http://[fe80::1]:2/a"
+    )
+    assert_eq(http.reason_phrase(404), "Not Found")
+    assert_eq(http.reason_phrase(413), "Content Too Large")
+    assert_eq(http.reason_phrase(599), "")
+    assert_eq(http.http_date(0), "Thu, 01 Jan 1970 00:00:00 GMT")
+    assert_eq(http.http_date(1791374400.75), "Wed, 07 Oct 2026 12:00:00 GMT")
+}

@@ -127,6 +127,9 @@ class RoundTripTests(unittest.TestCase):
                     "sockets.mh": 20,
                     # M39: 1.19 with std:http (socket.start_tls); M42: 1.20.
                     "http_client.mh": 20,
+                    # M42: std:http's server; 1.20 since std:socket declares
+                    # the server-TLS natives (M42 part B).
+                    "http_server.mh": 20,
                 }.get(name, 4)
                 self.assertEqual(data[:8], b"MAHC\x01\x00" + bytes([minor, 0]))
 

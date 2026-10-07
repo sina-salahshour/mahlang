@@ -1,0 +1,43 @@
+# std:http's server (M42): a handler function answers requests, and std:http's
+# client talks to it -- in one program, so it runs offline.
+
+import http from "std:http"
+
+fn handle(req: http.Request) -> http.Reply {
+    if req.path == "/" { return http.Reply.text("hello from mah") }
+    if req.path == "/greet" {
+        let name = req.query_param("name")
+        let who = if name == none { "stranger" } else { name }
+        return http.Reply.json(["greeting": "hi " + who])
+    }
+    if req.path == "/echo" & req.method == "POST" {
+        return http.Reply.json(["you_sent": req.form()])
+    }
+    if req.path == "/count" {
+        return http.Reply.stream(fn(w: http.BodyWriter) {
+            for let i in 1..4 { w.write("" + i + "\n") }
+        })
+    }
+    http.Reply.text("no route for " + req.path, status: 404)
+}
+
+# Serves, asks, and shuts down; a failure (a busy port, a refused
+# connection) is reported instead of stopping the program.
+fn demo() {
+    let server = http.serve(0, handle)
+    defer server.close()
+    let r = http.get(server.url("/"))
+    print(r.status, r.header("content-type"), r.text())
+    print(http.get(server.url("/greet?name=mah")).text())
+    print(http.post(server.url("/echo"), form: ["name": "mah", "n": "1"]).text())
+    let counted = http.get(server.url("/count"))
+    print(counted.header("transfer-encoding"), counted.text().lines())
+    let missing = http.get(server.url("/nope"))
+    print(missing.status, missing.text())
+    server.close()
+    print("stopped with", server.connections(), "connections")
+}
+
+try { demo() } catch {
+    e => { print("failed:", e.message()) }
+}

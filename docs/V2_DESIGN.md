@@ -3625,6 +3625,64 @@ node that resolved to it. Then:
       the `vm_diff.py` case `std_tls_url_http`, and `examples/http_client.mh`
       with a golden test.
 
+45. **M42 — the HTTP server and server TLS. ✅ Landed.**
+    `docs/STDLIB.md`'s `std:http` (Server) and `std:socket` (TLS servers);
+    bytecode 1.20 (two natives) in `docs/MAHC_FORMAT.md` §3/§4.4/§7; contract
+    in `docs/contracts/M42_http_server.md`, built by two coders in parallel
+    (part A, the server core in Mah; part B, server TLS natives).
+
+    - **Design**: the server is Mah, like the client: `http.serve` in
+      `mah/std/http.mh` over `std:socket`'s `listen`/`accept`, so both VMs
+      run identical server code and parity holds by construction. The
+      client and the server share private wire helpers (`read_line_within`
+      with a size budget and a whole-request deadline, `read_fields` with a
+      strict mode for requests, `read_chunked` with a body limit, header
+      lookups); the client's behavior didn't change.
+    - **Surface**: `serve(port, handler, host, tls, max_head, max_body,
+      read_timeout, idle_timeout, max_connections, backlog, on_error)` gives
+      a `Server` (`url`, `shutdown`, `wait`, `close`, `connections`). A
+      handler is `fn(Request) -> Reply`: `Request` (method, target, path,
+      query, version, headers, body, peer, tls; `header`, `content_type`,
+      `text`, `json`, `query_pairs`, `query_param`, `form`, `multipart` →
+      `Part`s) and `Reply` (`new`/`text`/`html`/`json`/`bytes`/`redirect`/
+      `empty`/`stream`, `set_header`/`add_header`), a streamed body being a
+      producer `fn(BodyWriter)`. Also `reason_phrase` and `http_date`.
+    - **Protocol**: HTTP/1.1 and 1.0, keep-alive and pipelining, chunked
+      request bodies, `Expect: 100-continue`, request smuggling defenses
+      (Transfer-Encoding with Content-Length, a final `chunked` only,
+      conflicting lengths, one Host, no line folding, token-checked names).
+      **Limits and statuses**: 414/431 for the head (`max_head`, 100
+      fields), 413 for the body (`max_body`), 408 for a request slower than
+      `read_timeout`, 503 over `max_connections`, a silent close after
+      `idle_timeout`. Protocol errors close the connection after the reply
+      and a short linger. A `bad_request` HttpError from the Request helpers
+      is a 400; other handler errors are a 500 unless `on_error` returns a
+      Reply.
+    - **Concurrency and shutdown**: the accept loop and every connection are
+      detached tasks that never fail; `shutdown(grace)` stops accepting,
+      closes idle connections, lets requests in flight finish with
+      `Connection: close` and force-closes the rest after `grace` ms;
+      `wait()` awaits a Promise settled once everything has stopped.
+    - **Server TLS** (`docs/contracts/M42_http_server.md` Part B), both VMs: `socket.
+      tls_server_config(cert_path, key_path)` loads a PEM chain and key once into the socket table
+      (Python: an `ssl.SSLContext(PROTOCOL_TLS_SERVER)`, TLS 1.2+; Rust: an
+      `Arc<rustls::ServerConfig>`, ring provider) and checks them, failing with kind `tls_config`;
+      `socket.start_tls_server(id, config, timeout)` runs the server handshake, after which
+      `send`/`recv` go through TLS exactly as for a client (Rust's `Conn` now holds a
+      `rustls::Connection`). No client certificates, no ALPN. std:socket wraps them as
+      `tls_server_config` (a `TlsServerConfig`) and `Socket.start_tls_server`.
+    - **Versioning**: MINOR 20; the two natives are 1.20. std:socket declares them, so every
+      std:socket and std:http program is 1.20. Test changes: MINOR pins 19 → 20, unsupported-minor
+      tests use 21, `sockets.mh`/`http_client.mh` expected minors 20.
+    - **Tests** (part A): `mah/std/http_server.test.mh` (both VMs: requests
+      and bodies, keep-alive, pipelining, HTTP/1.0, chunked uploads,
+      100-continue, every protocol error, limits, timeouts, handler errors
+      and `on_error`, replies, streams, multipart, shutdown, concurrency,
+      `max_connections`, argument errors), `tests/test_http_server.py`
+      (Python's `http.client`/`urllib`/raw sockets against a Mah server, the
+      checker, the minor), the `vm_diff.py` case `std_http_server`, and
+      `examples/http_server.mh` with a golden test.
+
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
 it** (`make test` must stay green) — see `docs/TESTING.md` for where
@@ -3636,20 +3694,20 @@ M1 was built and documented that way.
 
 ## Status
 
-M0 through M41c, M37 to M39 and M41s (and M21b, `mah format`) have all landed; each milestone's
+M0 through M41c, M37 to M39, M41s and M42 (and M21b, `mah format`) have all landed; each milestone's
 entry above says what changed and where it deliberately deviates from the
 design. The language has traits, generics, typed and checked errors, a
 static type checker, projects and `mah test`, async I/O with timers, and a
-`.mahc` bytecode format (currently 1.19) run by the reference Python VM
+`.mahc` bytecode format (currently 1.20) run by the reference Python VM
 and the native Rust VM in `runtime/`; the standard library (`std:math`,
 `std:json`, `std:csv`, `std:path`, `std:random`, `std:collections`,
 `std:regex`, `std:time`, `std:async`, `std:fs`, `std:process`, `std:reflect`,
-`std:bytes`, `std:socket`, `std:url`, `std:http`) and the built-in `Bytes` type (M37)
-are described in `docs/STDLIB.md`. Type values, `##` docs, spread calls and
+`std:bytes`, `std:socket`, `std:url`, `std:http`, whose server landed with M42)
+and the built-in `Bytes` type (M37) are described in `docs/STDLIB.md`. Type values, `##` docs, spread calls and
 reflection landed with M41a, decorators as metadata with M41b, and hooks,
 function-item impls and rest parameters with M41c (`docs/REFLECTION.md`). M41s made
 struct/enum/trait names module-scoped (a breaking change: export the types a
 module shares, write `lib.Point` to use one). What else is
-deferred and what comes next (the HTTP server, a web framework, packages
-from GitHub, multithreaded `detach`, and the rest) is in
-`docs/NEXT_PHASES.md`.
+deferred and what comes next (packages from GitHub, multithreaded
+`detach`, and the rest) is in `docs/NEXT_PHASES.md`; the web framework will
+live in a separate repository, built on `http.serve`.

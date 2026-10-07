@@ -429,6 +429,10 @@ Reading, in order (`head = Budget { left: max_head, limit: max_head }`):
    → 400 `more than one Host header`.
 6. Framing. `te` = every Transfer-Encoding value joined with `,`, split on `,`, trimmed,
    lowercased, empty items dropped; `cl` = every Content-Length value likewise (not lowercased).
+   "Present" below means the **header** is present, even with an empty value (review fix: an
+   ignored empty `Content-Length:` would read the body as the next request), so an empty
+   Content-Length is 400 `a bad Content-Length: ` and an empty Transfer-Encoding 400 `chunked
+   must be the last transfer coding`.
    - `te` and `cl` both present → 400 `both Transfer-Encoding and Content-Length`.
    - `te` present: HTTP/1.0 → 400 `Transfer-Encoding in an HTTP/1.0 request`; last item ≠
      `chunked` → 400 `chunked must be the last transfer coding`; more than one item → 501
