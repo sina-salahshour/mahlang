@@ -424,7 +424,14 @@ fn read_chunked(
             }
         }
         body.extend(read_exactly(conn, size, w))
-        let after = read_line_within(conn, w, chunk_line_budget(max_body))
+        let after = try { read_line_within(conn, w, chunk_line_budget(max_body)) } catch {
+            e: WireError => {
+                if e.status == 431 {
+                    throw bad_message(400, "a chunk isn't followed by a line end")
+                }
+                throw e
+            }
+        }
         if after == none { throw closed_mid_message() }
         if after != "" { throw bad_message(400, "a chunk isn't followed by a line end") }
     }
@@ -1556,25 +1563,29 @@ fn parse_request(
         if hosts.len() == 0 { throw bad_message(400, "a request without a Host header") }
         if hosts.len() > 1 { throw bad_message(400, "more than one Host header") }
     }
-    let te = tokens(find_headers(req.headers, "transfer-encoding"), true)
-    let cl = tokens(find_headers(req.headers, "content-length"), false)
+    # A Transfer-Encoding or Content-Length header counts even when its value
+    # is empty: ignoring it would read the body as the next request (request
+    # smuggling, if a proxy in front frames it differently).
+    let te_values = find_headers(req.headers, "transfer-encoding")
+    let cl_values = find_headers(req.headers, "content-length")
+    let te = tokens(te_values, true)
+    let cl = tokens(cl_values, false)
     let chunked = false
     let length = 0
-    if te.len() > 0 & cl.len() > 0 {
+    if te_values.len() > 0 & cl_values.len() > 0 {
         throw bad_message(400, "both Transfer-Encoding and Content-Length")
     }
-    if te.len() > 0 {
+    if te_values.len() > 0 {
         if http10 { throw bad_message(400, "Transfer-Encoding in an HTTP/1.0 request") }
-        if te[te.len() - 1] != "chunked" {
-            throw bad_message(400, "chunked must be the last transfer coding")
-        }
+        let last = if te.len() == 0 { "" } else { te[te.len() - 1] }
+        if last != "chunked" { throw bad_message(400, "chunked must be the last transfer coding") }
         if te.len() > 1 {
             throw bad_message(501, "only the chunked transfer coding is supported")
         }
         chunked = true
     }
-    if cl.len() > 0 {
-        let fine = true
+    if cl_values.len() > 0 {
+        let fine = cl.len() > 0
         for let item in cl {
             if !all_digits(item) | item != cl[0] { fine = false }
         }

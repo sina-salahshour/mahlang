@@ -328,6 +328,72 @@ test "protocol errors" {
     }
 }
 
+test "empty framing headers aren't ignored" {
+    # an empty Content-Length or Transfer-Encoding must not make the body
+    # look like the next request (request smuggling)
+    let server = http.serve(0, echo_path)
+    defer server.close()
+    let h = "Host: x\r\n"
+    let smuggled = "GET /smuggled HTTP/1.1\r\n" + h + "\r\n"
+    let cases = [
+        [
+            "POST / HTTP/1.1\r\n" + h + "Content-Length:\r\n\r\n" + smuggled,
+            "400 Bad Request",
+            "a bad Content-Length: "
+        ],
+        [
+            "POST / HTTP/1.1\r\n" + h + "Content-Length: ,\r\n\r\n" + smuggled,
+            "400 Bad Request",
+            "a bad Content-Length: "
+        ],
+        [
+            "POST / HTTP/1.1\r\n" + h + "Transfer-Encoding:\r\nContent-Length: 3\r\n\r\nabc",
+            "400 Bad Request",
+            "both Transfer-Encoding and Content-Length"
+        ],
+        [
+            "POST / HTTP/1.1\r\n" + h + "Transfer-Encoding: \r\n\r\n" + smuggled,
+            "400 Bad Request",
+            "chunked must be the last transfer coding"
+        ],
+        [
+            "POST / HTTP/1.1\r\n" + h + "Transfer-Encoding: chunked\r\n\r\n1\r\na" + "x".repeat(
+                5000
+            ) + "\r\n",
+            "400 Bad Request",
+            "a chunk isn't followed by a line end"
+        ]
+    ]
+    for let case in cases {
+        let c = connect(server)
+        defer c.close()
+        c.send_text(case[0])
+        let r = read_reply(c)
+        assert_eq(r.status_line, "HTTP/1.1 " + case[1], case[0])
+        assert_eq(r.body, case[2], case[0])
+        assert_eq(r.header("connection"), "close", case[0])
+        assert(closed(c), "closed after " + case[0])
+    }
+    # a runtime error in a handler (not a throw) is a 500 too, and the
+    # connection stays usable
+    let broken = http.serve(0, fn(req: http.Request) -> http.Reply {
+        if req.path == "/oops" {
+            let empty: Vector<String> = []
+            return http.Reply.text(empty.pop().unwrap())
+        }
+        http.Reply.text("fine")
+    })
+    defer broken.close()
+    let c = connect(broken)
+    defer c.close()
+    c.send_text(get("/oops"))
+    let r = read_reply(c)
+    assert_eq(r.status_line, "HTTP/1.1 500 Internal Server Error")
+    assert_eq(r.body, "Internal Server Error")
+    c.send_text(get("/"))
+    assert_eq(read_reply(c).body, "fine")
+}
+
 test "limits" {
     let small = http.serve(0, echo_path, max_head: 64, max_body: 10)
     defer small.close()
