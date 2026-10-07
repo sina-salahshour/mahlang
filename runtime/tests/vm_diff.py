@@ -822,6 +822,53 @@ for let p in probes {
     print(try { p() } catch { e: RuntimeError => { e.message() } })
 }
 """, b""),
+    # M42: TLS servers -- tls_server_config's file checks (no certificates
+    # here, so no handshake), start_tls_server on ids that aren't open, and
+    # every argument error.
+    ("std_tls_server", """
+import socket from "std:socket"
+import fs from "std:fs"
+let dir = fs.temp_dir()
+let cert = dir + "/cert.pem"
+let key = dir + "/key.pem"
+fs.write_text(cert, "-----BEGIN CERTIFICATE-----\\nAAAA\\n-----END CERTIFICATE-----\\n")
+fs.write_text(dir + "/empty.pem", "nothing\\n")
+fs.write_text(dir + "/enc.pem", "-----BEGIN ENCRYPTED PRIVATE KEY-----\\nAAAA\\n")
+fs.write_text(dir + "/rsa_enc.pem", "-----BEGIN RSA PRIVATE KEY-----\\nProc-Type: 4,ENCRYPTED\\nAAAA\\n")
+fs.write_text(key, "-----BEGIN PRIVATE KEY-----\\nAAAA\\n-----END PRIVATE KEY-----\\n")
+fn load(c: String, k: String) -> String {
+    try { socket.tls_server_config(dir + "/" + c, dir + "/" + k); "loaded" } catch {
+        e: socket.SocketError => { e.kind + " " + e.op + ": " + e.description + " @ " + e.address.replace_all(dir, "DIR") }
+    }
+}
+print(load("missing.pem", "key.pem"))
+print(load("cert.pem", "missing.pem"))
+print(load("empty.pem", "key.pem"))
+print(load("cert.pem", "enc.pem"))
+print(load("cert.pem", "rsa_enc.pem"))
+print(load("cert.pem", "cert.pem"))
+print(load("cert.pem", "key.pem"))
+let cfg = socket.TlsServerConfig { id: 12345, cert_path: "c", key_path: "k" }
+let sock = socket.Socket { id: 999, peer_host: "h", peer_port: 1, local_port: 1, buffer: "".to_bytes() }
+print(try { sock.start_tls_server(cfg, 1000) } catch { e: socket.SocketError => { e.kind + ": " + e.message() } })
+print(cfg, try { cfg.close() } catch { e: socket.SocketError => { e.kind } })
+let u: Unknown = "x"
+let n: Unknown = 1.5
+let probes = [
+    fn() { socket.tls_server_config(1, "k") },
+    fn() { socket.tls_server_config("c", 1) },
+    fn() { socket.Socket { id: u, peer_host: "h", peer_port: 1, local_port: 1, buffer: "".to_bytes() }.start_tls_server(cfg) },
+    fn() { sock.start_tls_server(socket.TlsServerConfig { id: u, cert_path: "c", key_path: "k" }) },
+    fn() { sock.start_tls_server(cfg, u) },
+    fn() { sock.start_tls_server(cfg, n) },
+    fn() { sock.start_tls_server(cfg, -1) },
+    fn() { socket.Socket { id: 1, peer_host: "h", peer_port: 1, local_port: 1, buffer: "x".to_bytes() }.start_tls_server(cfg) },
+]
+for let p in probes {
+    print(try { p() } catch { e: RuntimeError => { e.message() } })
+}
+fs.remove(dir, recursive: true)
+""", b""),
     # M39: socket.start_tls's errors, std:url and an std:http round trip on 127.0.0.1.
     ("std_tls_url_http", """
 import socket from "std:socket"

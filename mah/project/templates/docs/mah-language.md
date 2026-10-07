@@ -1095,8 +1095,11 @@ closing its socket or listener makes it fail with `"closed"`. **TLS**:
 and `s.start_tls(server_name, timeout = none)` upgrades a connected Socket (its
 `buffer` must be empty); the server's certificate must be valid for the name
 and trusted (the PEM file in the `SSL_CERT_FILE` environment variable, else
-the system's roots). TLS failures are kinds `"tls_certificate"` and `"tls"`. A
-program importing `std:socket` needs a 1.19 VM.
+the system's roots). TLS failures are kinds `"tls_certificate"` and `"tls"`.
+A TLS server loads its PEM certificate chain and unencrypted key once with
+`socket.tls_server_config(cert_path, key_path)` (kind `"tls_config"` when it
+can't) and runs `conn.start_tls_server(config, timeout = none)` on each
+accepted Socket. A program importing `std:socket` needs a 1.20 VM.
 
 ```mah
 import socket from "std:socket"

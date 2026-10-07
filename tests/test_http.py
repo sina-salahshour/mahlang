@@ -39,9 +39,13 @@ def _openssl(*args: str, cwd: str) -> None:
 
 
 def _make_ca(directory: str, name: str) -> None:
+    # The key usage keeps Python 3.13+'s default VERIFY_X509_STRICT happy
+    # ("CA cert does not include key usage extension").
     _openssl(
         "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2",
         "-keyout", f"{name}.key", "-out", f"{name}.pem", "-subj", f"/CN=Mah {name}",
+        "-addext", "basicConstraints=critical,CA:TRUE",
+        "-addext", "keyUsage=critical,keyCertSign,cRLSign",
         cwd=directory,
     )
 
@@ -240,11 +244,11 @@ class StartTlsArgumentTests(unittest.TestCase):
 
 class BytecodeTests(unittest.TestCase):
     def test_minor(self):
-        self.assertEqual(MINOR, 19)
+        self.assertEqual(MINOR, 20)
         self.assertEqual(NATIVE_ARITIES["socket.start_tls"], 3)
         self.assertEqual(NATIVE_SINCE_MINOR["socket.start_tls"], 19)
-        self.assertEqual(minor_of(HTTP + 'print(http.get)'), 19)
-        self.assertEqual(minor_of(SOCKET + 'print(socket.listen(0))'), 19)
+        self.assertEqual(minor_of(HTTP + 'print(http.get)'), 20)
+        self.assertEqual(minor_of(SOCKET + 'print(socket.listen(0))'), 20)
 
     def test_std_url_alone_needs_no_new_vm(self):
         self.assertLess(minor_of('import url from "std:url"\nprint(url.encode("a b"))'), 19)

@@ -3,6 +3,7 @@
 # connections on 127.0.0.1 (ports picked by the system).
 import "std:test"
 import socket from "./socket"
+import fs from "./fs"
 
 struct Pair { client: socket.Socket, conn: socket.Socket, server: socket.Listener }
 
@@ -361,5 +362,54 @@ test "Printable" {
     assert_eq("" + p.server, "Listener(127.0.0.1:" + p.server.port + ")")
     assert_eq("" + p.client, "Socket(127.0.0.1:" + p.server.port + ")")
     assert_eq("" + p.conn, "Socket(127.0.0.1:" + p.client.local_port + ")")
+    finish(p)
+}
+
+# M42: TLS servers. A real handshake needs certificates, which
+# tests/test_tls_server.py makes with openssl; here, the file checks.
+fn tls_config_error(cert: String, key: String) -> String {
+    let e = assert_throws(fn() { socket.tls_server_config(cert, key) })
+    match e {
+        socket.SocketError { kind, op, address, description } => {
+            kind + " " + op + " " + address + ": " + description
+        }
+        _ => { "not a SocketError: " + e.message() }
+    }
+}
+
+test "tls_server_config checks its files" {
+    let dir = fs.temp_dir()
+    let cert = dir + "/cert.pem"
+    let key = dir + "/key.pem"
+    fs.write_text(cert, "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n")
+    fs.write_text(key, "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n")
+    fs.write_text(dir + "/enc.pem", "-----BEGIN ENCRYPTED PRIVATE KEY-----\nAAAA\n")
+    assert_eq(
+        tls_config_error(dir + "/missing.pem", key),
+        "tls_config tls_server_config " + dir + "/missing.pem: can't read the certificate file"
+    )
+    assert_eq(
+        tls_config_error(key, key),
+        "tls_config tls_server_config " + key + ": no certificate in the certificate file"
+    )
+    assert_eq(
+        tls_config_error(cert, dir + "/enc.pem"),
+        "tls_config tls_server_config " + cert + ": the private key is encrypted"
+    )
+    assert_eq(
+        tls_config_error(cert, cert),
+        "tls_config tls_server_config " + cert + ": no private key in the key file"
+    )
+    fs.remove(dir, recursive: true)
+}
+
+test "start_tls_server on a closed socket" {
+    let p = pair()
+    let config = socket.TlsServerConfig { id: p.server.id, cert_path: "c", key_path: "k" }
+    p.conn.close()
+    assert_eq(
+        error_of(fn() { p.conn.start_tls_server(config, 1000) }),
+        "closed start_tls_server: the socket is closed"
+    )
     finish(p)
 }

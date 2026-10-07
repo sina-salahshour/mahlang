@@ -11,7 +11,8 @@ publish = false
 # std:regex's matcher (M32). No default features: Unicode tables only, no
 # SIMD/aho-corasick prefilters, to keep the binary small.
 regex = { version = "1.13", default-features = false, features = ["std", "unicode"] }
-# std:http's TLS (M39, socket.start_tls). The `ring` provider only: no
+# std:socket's TLS clients (M39, socket.start_tls) and servers (M42,
+# socket.tls_server_config/start_tls_server). The `ring` provider only: no
 # C/assembly toolchain beyond what `ring` builds itself, no aws-lc.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 # The trusted root certificates when SSL_CERT_FILE isn't set (Mozilla's set).

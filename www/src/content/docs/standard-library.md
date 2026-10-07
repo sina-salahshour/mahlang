@@ -619,7 +619,10 @@ server.close()
 `socket.connect_tls(host, port)` (or `sock.start_tls(name)` on a connected
 socket) encrypts the connection, verifying the server's certificate against
 the system's roots, or the PEM file the `SSL_CERT_FILE` environment variable
-names. Failures throw `socket.SocketError { kind, op, address, description }`.
+names. A server loads its certificate and key once with
+`socket.tls_server_config(cert, key)` and calls `conn.start_tls_server(config)`
+on each accepted socket. Failures throw `socket.SocketError { kind, op,
+address, description }`.
 
 ## `std:url`
 
