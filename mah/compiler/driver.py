@@ -19,6 +19,7 @@ from ..bytecode.encode import encode
 from ..bytecode.lower import line_col, lower
 from ..bytecode.program import Program
 from ..preprocessor import demangle_message, preprocess, source_label
+from ..project.package_paths import package_of_path
 from . import typecheck
 from .codegen import Codegen
 from .lexer import Lexer
@@ -80,6 +81,19 @@ def format_diagnostic(pp, diag) -> str:
     `type error: ` prefix -- for `mah check`, which prints its own
     `warning: `/`error: ` prefix per diagnostic."""
     return _format_located_messages(pp, [(diag.text(), diag.position)])
+
+
+def drop_package_diagnostics(pp, diagnostics: list) -> list:
+    """M43 (docs/PACKAGES.md): type diagnostics located in an installed
+    package's files are dropped, so a strict project can use a package
+    written loosely (the package's own `mah check` is for its author)."""
+    kept = []
+    for d in diagnostics:
+        position = getattr(d, "position", None)
+        if position is not None and package_of_path(pp.map_to_source(position)[0]) is not None:
+            continue
+        kept.append(d)
+    return kept
 
 
 TEST_SUFFIX = ".test.mh"
@@ -168,7 +182,7 @@ def compile_to_program(
 
     # M22: zero cost under "loose" -- the checker never runs at all.
     if check != "loose":
-        diagnostics = typecheck.check_program(program, resolver)
+        diagnostics = drop_package_diagnostics(pp, typecheck.check_program(program, resolver))
         # M26: a warning-only diagnostic (a `catch` arm for an error that's
         # never thrown) never fails a build.
         reportable = [d for d in typecheck.reportable(diagnostics, check) if not typecheck.is_warning(d, check)]
@@ -204,5 +218,5 @@ def type_check(*, path: str | None = None, text: str | None = None):
     Returns `(pp, diagnostics)`: `pp` (the `Preprocessed` result) is
     needed by the caller to locate each diagnostic (`format_diagnostic`)."""
     pp, program, resolver = _parse_and_resolve(path=path, text=text, test=is_test_file(path))
-    diagnostics = typecheck.check_program(program, resolver)
+    diagnostics = drop_package_diagnostics(pp, typecheck.check_program(program, resolver))
     return pp, diagnostics

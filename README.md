@@ -253,6 +253,7 @@ mah build              # writes every [[target]], e.g. build/my-app.mahc
 mah build --target release
 mah check              # runs the static type checker, at the project's [types] check level
 mah test               # runs every *.test.mh file (std:test; see docs/MAH_TEST.md)
+mah install            # fetches [dependencies] from GitHub into .mah/, pins them in mah-lock.toml
 ```
 
 `mah init` creates `mah-project.toml` (package name, version, entry point,
@@ -426,6 +427,8 @@ guide and changelog. The design docs in this repo:
 - `docs/STDLIB.md`: the standard library, module by module
 - `docs/REFLECTION.md`: type values, metadata, decorators, and hooks
 - `docs/MAH_TEST.md`: `std:test` and `mah test`
+- `docs/PACKAGES.md`: packages from GitHub, `pkg:` imports, `mah install`
+  and `mah-lock.toml`
 - `docs/FORMAT.md`: `mah format` and its whitespace-only guarantee
 - `docs/MAHC_FORMAT.md`: the portable `.mahc` bytecode format (normative)
 - `docs/RUST_VM.md`: the Rust runtime, `--vm rust`, self-contained

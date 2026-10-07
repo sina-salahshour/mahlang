@@ -80,3 +80,11 @@ print(square(3), m.answer)
 
 `import "std:math"` / `import math from "std:math"` import a module of the
 standard library the same way. See [Standard library](/docs/standard-library).
+
+## Packages
+
+Packages from GitHub repositories, declared in `mah-project.toml` and
+fetched by `mah install`, are imported the same two ways with the reserved
+`pkg:` prefix: `import json5 from "pkg:json5"` for the package's library
+file, `import "pkg:json5/src/extra.mh"` for any other file in it. See
+[Projects](/docs/projects#packages).

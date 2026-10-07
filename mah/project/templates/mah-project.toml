@@ -41,5 +41,9 @@ vm = "python"
 [types]
 check = "loose"
 
-# Third-party packages will be declared here. Not supported yet, so keep it empty.
+# Packages from GitHub, fetched by `mah install` into .mah/ (pinned in mah-lock.toml,
+# which you commit):
+#   json5 = { github = "owner/repo", tag = "v1.0.0" }    # or branch = "main", or rev = "<commit>"
+#   utils = { github = "owner/monorepo", branch = "main", path = "packages/utils" }
+# Import them as `import json5 from "pkg:json5"`.
 [dependencies]

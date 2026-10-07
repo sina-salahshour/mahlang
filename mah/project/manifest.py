@@ -7,7 +7,9 @@ build` in project mode (mah/cli/main.py). Parsing is stdlib-only
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 
@@ -15,13 +17,19 @@ from ..compiler import typecheck
 
 MANIFEST_NAME = "mah-project.toml"
 
-_PACKAGE_KEYS = {"name", "version", "entry"}
+_PACKAGE_KEYS = {"name", "version", "entry", "lib"}
 _TARGET_KEYS = {"name", "profile", "out", "self-contained"}
 _RUN_KEYS = {"vm"}
 _TYPES_KEYS = {"check"}
 _TOP_LEVEL_KEYS = {"package", "target", "run", "dependencies", "types"}
 _PROFILES = {"debug", "release"}
 VMS = ("python", "rust")
+
+# M43 (docs/PACKAGES.md): [dependencies] entries.
+_DEPENDENCY_KEYS = ("github", "tag", "branch", "rev", "path")
+_DEP_NAME_RE = re.compile(r"[a-z][a-z0-9_-]*")
+_GITHUB_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+")
+_REV_RE = re.compile(r"[0-9a-fA-F]{40}")
 
 
 class MahProjectError(Exception):
@@ -39,6 +47,114 @@ class Target:
     self_contained: bool = False
 
 
+@dataclass(frozen=True)
+class Dependency:
+    """M43: one `[dependencies]` entry (docs/PACKAGES.md)."""
+
+    name: str
+    github: str  # "owner/repo", as written
+    ref_kind: str  # "tag" | "branch" | "rev" | "default"
+    ref: str | None  # None iff ref_kind == "default"; rev lowercased
+    path: str  # "" = repository root
+
+    def spec(self) -> tuple:
+        """What "the same dependency" means everywhere (the name aside)."""
+        return (self.github, self.ref_kind, self.ref, self.path)
+
+    def describe(self) -> str:
+        if self.ref_kind == "default":
+            text = f"{self.github} default branch"
+        elif self.ref_kind == "rev":
+            text = f"{self.github} rev {self.ref[:7]}"
+        else:
+            text = f"{self.github} {self.ref_kind} {self.ref}"
+        if self.path:
+            text += f", path {self.path}"
+        return text
+
+
+def _toml_type_name(value) -> str:
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "float"
+    if isinstance(value, dict):
+        return "table"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, str):
+        return "string"
+    return "datetime"
+
+
+def _value_repr(value) -> str:
+    return json.dumps(value) if isinstance(value, str) else _toml_type_name(value)
+
+
+def parse_dependency(name: str, raw) -> Dependency:
+    """Validate one `[dependencies]` entry; raises `ValueError` with the
+    message (without the manifest-path prefix) on the first problem, in
+    the order of docs/PACKAGES.md's table."""
+    if not isinstance(name, str) or _DEP_NAME_RE.fullmatch(name) is None:
+        raise ValueError(
+            f"dependency name '{name}' must be lowercase letters, digits, '_' and '-', starting with a letter"
+        )
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"dependency '{name}' must be a table, like " + name + ' = { github = "owner/repo", tag = "v1.0" }'
+        )
+    for key in raw:
+        if key not in _DEPENDENCY_KEYS:
+            raise ValueError(f"unknown key 'dependencies.{name}.{key}'")
+    if "github" not in raw:
+        raise ValueError(f"dependency '{name}' needs github = \"owner/repo\"")
+    github = raw["github"]
+    if isinstance(github, str) and github.endswith(".git"):
+        raise ValueError(f"dependency '{name}': write github = \"owner/repo\" without \".git\"")
+    if (
+        not isinstance(github, str)
+        or _GITHUB_RE.fullmatch(github) is None
+        or github.split("/", 1)[1] in (".", "..")
+    ):
+        raise ValueError(f"dependency '{name}': github must be \"owner/repo\" (got {_value_repr(github)})")
+    if len([k for k in ("tag", "branch", "rev") if k in raw]) > 1:
+        raise ValueError(f"dependency '{name}': use only one of tag, branch and rev")
+    ref_kind, ref = "default", None
+    if "tag" in raw:
+        if not isinstance(raw["tag"], str) or not raw["tag"]:
+            raise ValueError(f"dependency '{name}': tag must be a non-empty string")
+        ref_kind, ref = "tag", raw["tag"]
+    if "branch" in raw:
+        if not isinstance(raw["branch"], str) or not raw["branch"]:
+            raise ValueError(f"dependency '{name}': branch must be a non-empty string")
+        ref_kind, ref = "branch", raw["branch"]
+    if "rev" in raw:
+        if not isinstance(raw["rev"], str) or _REV_RE.fullmatch(raw["rev"]) is None:
+            raise ValueError(f"dependency '{name}': rev must be a full 40-character commit hash")
+        ref_kind, ref = "rev", raw["rev"].lower()
+    path = ""
+    if "path" in raw:
+        raw_path = raw["path"]
+        bad = ValueError(
+            f"dependency '{name}': path must be a relative path inside the repository, "
+            f"like \"lib\" (got {_value_repr(raw_path)})"
+        )
+        if not isinstance(raw_path, str):
+            raise bad
+        path = raw_path[:-1] if raw_path.endswith("/") else raw_path
+        if (
+            not path
+            or path.startswith("/")
+            or "\\" in path
+            or ":" in path
+            or any(seg in ("", ".", "..") for seg in path.split("/"))
+        ):
+            raise bad
+    return Dependency(name=name, github=github, ref_kind=ref_kind, ref=ref, path=path)
+
+
 @dataclass
 class Project:
     root: str  # absolute directory containing the manifest
@@ -49,9 +165,13 @@ class Project:
     targets: list[Target] = field(default_factory=list)
     # which VM `mah run` uses unless `--vm` says otherwise ([run] vm)
     run_vm: str = "python"
+    # M43: name -> Dependency, in sorted name order (docs/PACKAGES.md)
     dependencies: dict = field(default_factory=dict)
     # static type-checking strictness ([types] check) -- see mah/compiler/typecheck.py
     type_check: str = typecheck.DEFAULT_CHECK_LEVEL
+    # M43: the library entry used when this project is installed as a
+    # package ([package] lib, default src/lib.mh), as an absolute path
+    lib: str = ""
 
 
 def find_manifest(start_dir: str) -> str | None:
@@ -109,6 +229,11 @@ def load_project(manifest_path: str) -> Project:
         fail("package.entry must be a string")
     entry_path = os.path.join(root, entry)
 
+    lib = package.get("lib", "src/lib.mh")
+    if not isinstance(lib, str):
+        fail("package.lib must be a string")
+    lib_path = os.path.join(root, lib)
+
     targets: list[Target] = []
     raw_targets = data.get("target")
     if raw_targets is not None:
@@ -161,8 +286,12 @@ def load_project(manifest_path: str) -> Project:
     dependencies = data.get("dependencies", {})
     if not isinstance(dependencies, dict):
         fail("dependencies must be a table")
-    if dependencies:
-        fail("third-party dependencies aren't supported yet; leave [dependencies] empty")
+    parsed_dependencies: dict[str, Dependency] = {}
+    for dep_name in sorted(dependencies):
+        try:
+            parsed_dependencies[dep_name] = parse_dependency(dep_name, dependencies[dep_name])
+        except ValueError as e:
+            fail(str(e))
 
     types_table = data.get("types", {})
     if not isinstance(types_table, dict):
@@ -182,8 +311,9 @@ def load_project(manifest_path: str) -> Project:
         entry=entry_path,
         targets=targets,
         run_vm=run_vm,
-        dependencies=dependencies,
+        dependencies=parsed_dependencies,
         type_check=type_check,
+        lib=lib_path,
     )
 
 

@@ -96,7 +96,7 @@ def _run_rust(case: _TestCase, vm: str, path: str, timeout: float | None) -> Non
 def _display_file(rel: str, file: str | None) -> str:
     if file is None:
         return rel
-    if file.startswith("std:") or file.startswith("<"):
+    if file.startswith("std:") or file.startswith("pkg:") or file.startswith("<"):
         return file
     return os.path.normpath(os.path.join(os.path.dirname(rel), file))
 

@@ -3683,6 +3683,60 @@ node that resolved to it. Then:
       checker, the minor), the `vm_diff.py` case `std_http_server`, and
       `examples/http_server.mh` with a golden test.
 
+46. **M43 — packages from GitHub repositories. ✅ Landed.**
+    `docs/NEXT_PHASES.md`'s "Packages from GitHub repositories"; the user and
+    implementer reference is `docs/PACKAGES.md`, the contract
+    `docs/contracts/M43_packages.md`.
+
+    - **Decisions**: `[dependencies]` entries name a GitHub repository
+      (`github = "owner/repo"`) with at most one of `tag`/`branch`/`rev`
+      (none: the default branch) and an optional `path` subdirectory as the
+      package root. Packages are imported with a reserved **`pkg:` prefix**
+      (`"pkg:NAME"` is the package's `[package] lib`, default `src/lib.mh`,
+      or `lib.mh` without a manifest; `"pkg:NAME/file.mh"` any file), which
+      can't collide with relative imports. They're installed
+      **project-locally** in `.mah/packages/<name>/` (exactly the package's
+      files, no `.git`), fetched with the **`git` CLI** (ls-remote, then a
+      shallow fetch of one commit; private repositories through git's own
+      credentials and `GITHUB_TOKEN`) and read from git objects, so
+      `.gitattributes` can't change the installed bytes. `mah-lock.toml`
+      pins each package's commit and a content hash (sha256 over relative
+      paths and bytes). Transitive dependencies install into one flat
+      namespace; a conflict is an error unless the root declares the name
+      (the root wins, with a note). Imports are scoped to declared
+      dependencies. Nothing installs automatically: a missing or stale
+      package is a compile error at the `pkg:` import, checked lazily (only
+      when a `pkg:` import is seen). Type diagnostics in package files are
+      dropped.
+    - **Files**: `mah/project/package_paths.py` (lexical path helpers, no
+      `mah` imports), `packages.py` (lock and installed state, hash,
+      `PackageContext`), `fetch.py` (git), `install.py` (`mah install
+      [DIR] [--frozen] [--update [NAME ...]]`); `manifest.py`
+      (`Dependency`, `parse_dependency`, `[package] lib`);
+      `mah/preprocessor.py` (`pkg:` resolution and errors, package-relative
+      import rules, `source_label` gives `pkg:NAME/REL`);
+      `mah/bytecode/lower.py` (DEBUG file names `pkg:NAME/REL`);
+      `mah/compiler/driver.py` (`drop_package_diagnostics`); the CLI;
+      `mah/lsp/analysis.py` (`pkg:` completion, rename refused for package
+      declarations, diagnostics filter); the project templates.
+    - **No bytecode change**: the preprocessor inlines package files like
+      any other import, so a `.mahc` is self-contained and both VMs run it
+      unchanged (no VM change, no new natives, MINOR unchanged). Errors in
+      package code are located `pkg:greet/src/lib.mh#L:C` on both VMs, since
+      each VM just prints the DEBUG string.
+    - **Test changes**: `tests/test_project.py`'s non-empty-dependencies test
+      now expects the "must be a table" message. Tests added:
+      `tests/test_packages.py` (manifest validation, lock text and reading,
+      the pinned hashes, path helpers, `git_env`, compile-time resolution
+      and every resolution error, runtime and compile locations, build and
+      `runc` without `.mah/`, strict projects, and `mah install` against
+      local bare repositories over `file://`: tags, annotated tags,
+      branches with `--update`, `rev`, default branch, `path`, `--frozen`,
+      offline runs, local edits, hash mismatch, pruning, fetch errors,
+      transitive dependencies, conflicts, symlinks) and
+      `tests/test_lsp_packages.py`; none needs the network, and the run
+      tests use the VM `MAH_TEST_VM` selects.
+
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
 it** (`make test` must stay green) — see `docs/TESTING.md` for where
@@ -3694,7 +3748,7 @@ M1 was built and documented that way.
 
 ## Status
 
-M0 through M41c, M37 to M39, M41s and M42 (and M21b, `mah format`) have all landed; each milestone's
+M0 through M41c, M37 to M39, M41s, M42 and M43 (and M21b, `mah format`) have all landed; each milestone's
 entry above says what changed and where it deliberately deviates from the
 design. The language has traits, generics, typed and checked errors, a
 static type checker, projects and `mah test`, async I/O with timers, and a
@@ -3707,7 +3761,9 @@ and the built-in `Bytes` type (M37) are described in `docs/STDLIB.md`. Type valu
 reflection landed with M41a, decorators as metadata with M41b, and hooks,
 function-item impls and rest parameters with M41c (`docs/REFLECTION.md`). M41s made
 struct/enum/trait names module-scoped (a breaking change: export the types a
-module shares, write `lib.Point` to use one). What else is
-deferred and what comes next (packages from GitHub, multithreaded
+module shares, write `lib.Point` to use one). Projects can use packages from
+GitHub repositories, imported as `pkg:NAME` and fetched and pinned by
+`mah install` (M43, `docs/PACKAGES.md`), and `std:http` serves HTTP and
+HTTPS (M42). What else is deferred and what comes next (multithreaded
 `detach`, and the rest) is in `docs/NEXT_PHASES.md`; the web framework will
 live in a separate repository, built on `http.serve`.
