@@ -121,6 +121,17 @@ class TlsServerTests(unittest.TestCase):
         _openssl("x509", "-req", "-in", "ec.csr", "-CA", "ca.pem", "-CAkey", "ca.key", "-CAcreateserial",
                  "-out", "ec.pem", "-days", "2", "-extfile", "ext.cnf", cwd=d)
         _openssl("genpkey", "-algorithm", "RSA", "-aes256", "-pass", "pass:x", "-out", "enc.key", cwd=d)
+        # review: `ecparam -genkey` without -noout writes an EC PARAMETERS
+        # block before the key; and one file holding both the chain and the
+        # key (a common layout), given as both paths
+        _openssl("ecparam", "-name", "prime256v1", "-genkey", "-out", "ecparams.key", cwd=d)
+        _openssl("req", "-new", "-key", "ecparams.key", "-out", "ecparams.csr", "-subj", "/CN=localhost", cwd=d)
+        _openssl("x509", "-req", "-in", "ecparams.csr", "-CA", "ca.pem", "-CAkey", "ca.key", "-CAcreateserial",
+                 "-out", "ecparams.pem", "-days", "2", "-extfile", "ext.cnf", cwd=d)
+        with open(os.path.join(d, "both.pem"), "w") as f:
+            for name in ("leaf.pem", "ca.pem", "leaf.key"):
+                with open(os.path.join(d, name)) as part:
+                    f.write(part.read())
         with open(os.path.join(d, "empty.pem"), "w") as f:
             f.write("no PEM blocks here\n")
         with open(os.path.join(d, "leaf.pem")) as f:
@@ -172,6 +183,20 @@ class TlsServerTests(unittest.TestCase):
                     f"tls_config: tls_server_config: {description}: {self.path(address)}",
                 )
 
+    def test_a_nul_in_a_path_is_unreadable(self):
+        # review: Python's open() raises ValueError (not OSError) for this,
+        # which used to kill the worker thread and hang the program.
+        nul = 'bytes.from_hex("00").to_text().unwrap()'
+        src = 'import bytes from "std:bytes"\n'
+        self.assertEqual(
+            error(src, f'socket.tls_server_config("cert" + {nul}, "key")'),
+            "tls_config: tls_server_config: can't read the certificate file: cert\x00",
+        )
+        self.assertEqual(
+            error(src, f'socket.tls_server_config({mah_string(self.path("leaf.pem"))}, "key" + {nul})'),
+            f"tls_config: tls_server_config: can't read the private key file: {self.path('leaf.pem')}",
+        )
+
     def test_a_config_prints_its_certificate_path(self):
         src = SOCKET + f"let cfg = {self.config('leaf.pem', 'leaf.key')}\nprint(cfg)\ncfg.close()\ncfg.close()\n"
         self.assertEqual(run_source(src), f"TlsServerConfig({self.path('leaf.pem')})\n")
@@ -206,6 +231,33 @@ class TlsServerTests(unittest.TestCase):
 
     def test_mah_server_mah_client_ecdsa(self):
         self.assertEqual(run_source(self.mah_echo("ec.pem", "ec.key")), "echo: hi there\ntwice: tls\n")
+
+    def test_one_file_with_chain_and_key(self):
+        self.assertEqual(run_source(self.mah_echo("both.pem", "both.pem")), "echo: hi there\ntwice: tls\n")
+
+    def test_an_ec_key_after_its_parameters(self):
+        self.assertEqual(run_source(self.mah_echo("ecparams.pem", "ecparams.key")), "echo: hi there\ntwice: tls\n")
+
+    def test_closing_the_socket_during_the_handshake(self):
+        # review: another task closes the connection while start_tls_server
+        # waits for a silent client
+        port = free_port()
+        mah = _MahInThread(SOCKET + (
+            f"let cfg = {self.config('leaf.pem', 'leaf.key')}\n"
+            f"let server = socket.listen({port})\n"
+            "let conn = server.accept(20000)\n"
+            "fn handshake() -> String {\n"
+            '    try { conn.start_tls_server(cfg, 10000); "done" } catch { e: socket.SocketError => { e.kind } }\n'
+            "}\n"
+            "let pending = detach handshake()\n"
+            "sleep_async(200)\n"
+            "conn.close()\n"
+            "print(pending.await)\n"
+            "server.close()\n"
+        ))
+        with connect_retrying(port):
+            out = mah.result()
+        self.assertEqual(out, "closed\n")
 
     # 3. Mah server, Python client ---------------------------------------------------
 

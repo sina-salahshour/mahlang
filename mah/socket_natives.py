@@ -487,6 +487,12 @@ def _handshake(ctx, sock_id, entry, tls, deadline):
             _wait(ctx, sock_id, entry, deadline)
         except ssl.SSLWantWriteError:
             _wait(ctx, sock_id, entry, deadline, want_write=True)
+        except (OSError, ValueError):
+            # closed under us between the wait and the handshake step (EBADF),
+            # like recv/send/accept
+            if ctx.io.sockets.get(sock_id) is not entry:
+                raise _Closed() from None
+            raise
 
 
 # -- M42: TLS servers -------------------------------------------------------------
@@ -524,12 +530,12 @@ def _tls_server_config(ctx, args):
         try:
             with open(cert_path, "rb") as f:
                 cert = f.read()
-        except OSError:
+        except (OSError, ValueError):  # ValueError: a NUL in the path
             raise _TlsConfigProblem(CANT_READ_CERT) from None
         try:
             with open(key_path, "rb") as f:
                 key = f.read()
-        except OSError:
+        except (OSError, ValueError):
             raise _TlsConfigProblem(CANT_READ_KEY) from None
         problem = _pem_problem(cert, key)
         if problem is not None:
