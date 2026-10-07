@@ -1048,6 +1048,77 @@ class InstallTests(_EnvTestCase):
         rc, out, err = _run_main(["install", root])
         self.assertEqual(rc, 0, err)
 
+    # review: a crafted repository whose tree has `..` entries (git refuses
+    # to commit them, but `git fetch` doesn't check what it receives) must
+    # not write outside the package: here it targets the root's src/main.mh.
+    def test_tree_path_escaping_the_package_is_refused(self):
+        self.greet()
+        work = os.path.join(self.gh.work, "acme", "greet")
+        git = self.gh.git
+        evil = subprocess.run(
+            ["git", "hash-object", "-w", "--stdin"], cwd=work, input=b'print("pwned")\n', capture_output=True
+        ).stdout.decode().strip()
+
+        def mktree(entries):
+            text = "".join(f"{mode} {kind} {oid}\t{name}\n" for mode, kind, oid, name in entries)
+            return subprocess.run(
+                ["git", "mktree"], cwd=work, input=text.encode(), capture_output=True
+            ).stdout.decode().strip()
+
+        tree = mktree([("040000", "tree", mktree([("100644", "blob", evil, "main.mh")]), "src")])
+        for _ in range(3):
+            tree = mktree([("040000", "tree", tree, "..")])
+        lib = git(work, "rev-parse", "HEAD:src/lib.mh")
+        top = mktree(
+            [("040000", "tree", tree, ".."), ("040000", "tree", mktree([("100644", "blob", lib, "lib.mh")]), "src")]
+        )
+        commit = git(work, "commit-tree", top, "-m", "evil")
+        git(work, "tag", "evil", commit)
+        git(work, "push", "-q", "origin", "evil")
+        root = project(self.tmp, 'greet = { github = "acme/greet", tag = "evil" }\n', self.MAIN)
+        rc, _out, err = self.install(root)
+        self.assertEqual(
+            (rc, err),
+            (1, f'error: package \'greet\': acme/greet has an unsafe file name "../../../../src/main.mh" at {commit[:7]}\n'),
+        )
+        self.assertEqual(_read(os.path.join(root, "src", "main.mh")), self.MAIN)
+        self.assertFalse(os.path.exists(os.path.join(root, "mah-lock.toml")))
+
+    # review: `mah install` run from a git hook has GIT_DIR (and often
+    # GIT_INDEX_FILE) set; git must still work in its own scratch repository
+    # and leave the user's repository alone.
+    def test_git_dir_in_the_environment_is_ignored(self):
+        sha = self.greet()
+        root = project(self.tmp, GREET_TOML, self.MAIN)
+        user_repo = os.path.join(self.tmp, "user-repo.git")
+        self.gh.git(self.tmp, "init", "-q", "--bare", user_repo)
+        os.environ["GIT_DIR"] = user_repo
+        os.environ["GIT_INDEX_FILE"] = os.path.join(user_repo, "index")
+        rc, out, err = self.install(root)
+        self.assertEqual(rc, 0, err)
+        self.assertIn(f"installed greet {sha[:7]}", out)
+        self.assertEqual(os.listdir(os.path.join(user_repo, "objects", "pack")), [])
+        self.assertNotIn("shallow", os.listdir(user_repo))
+        env = git_env("file:///x")
+        self.assertNotIn("GIT_DIR", env)
+        self.assertNotIn("GIT_INDEX_FILE", env)
+
+
+class ReviewResolutionTests(_EnvTestCase):
+    # review: a package's `[package] lib` can't point outside the package
+    # (the same rule as its relative imports).
+    def test_lib_outside_the_package_is_refused(self):
+        root = project(self.tmp, GREET_TOML, 'import g from "pkg:greet"\n')
+        files = {"mah-project.toml": '[package]\nname = "g"\nversion = "1"\nlib = "../../../src/main.mh"\n'}
+        fake_install(root, "greet", files, dep=GREET_DEP)
+        with self.assertRaises(SyntaxError) as cm:
+            compile_to_bytes(path=os.path.join(root, "src", "main.mh"))
+        self.assertEqual(
+            str(cm.exception),
+            "package 'greet' has an invalid mah-project.toml: package.lib must be a path inside the package"
+            " at position #1:15",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

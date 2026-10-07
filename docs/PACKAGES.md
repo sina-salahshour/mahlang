@@ -60,7 +60,9 @@ segment.
 `[package] lib` (new, optional, default `"src/lib.mh"`) names the file
 `pkg:NAME` imports when the project is used as a package. A package root
 without any `mah-project.toml` (a plain directory, typically chosen with
-`path`) has `lib.mh` as its library file and no dependencies. A package's
+`path`) has `lib.mh` as its library file and no dependencies. `lib` must
+stay inside the package (`package 'NAME' has an invalid mah-project.toml:
+package.lib must be a path inside the package`). A package's
 `entry`, `[[target]]`, `[run]` and `[types]` are ignored when it's used as a
 dependency.
 
@@ -192,7 +194,10 @@ Prefixed `package 'NAME': ` in the output:
 - `couldn't reach OWNER/REPO (URL): DETAIL`, `couldn't fetch OWNER/REPO (URL): DETAIL`
   (DETAIL is git's first error line)
 - `DESCRIBE doesn't point to a commit`, `DESCRIBE has no files`,
-  `'P' isn't a directory in OWNER/REPO at C7`, `OWNER/REPO has a file name that isn't UTF-8`
+  `'P' isn't a directory in OWNER/REPO at C7`, `OWNER/REPO has a file name that isn't UTF-8`,
+  `OWNER/REPO has an unsafe file name "REL" at C7` (a crafted tree with a `.`, `..`,
+  empty or `.git` path segment, or on Windows a `\` or `:` in one: it would be written
+  outside the package root; nothing is installed)
 - `content hash mismatch at C7: mah-lock.toml has EXPECTED, the fetched files hash to H;
   if the repository's history was rewritten, run `mah install --update NAME``
 - `mah install needs git to fetch packages, and git wasn't found on PATH`
@@ -292,6 +297,10 @@ commit into `.mah/tmp/`.
   `http.proxy`).
 - `GIT_TERMINAL_PROMPT=0` is always set, so a private repository without
   credentials fails instead of waiting for a password.
+- Variables that point git at a repository (`GIT_DIR`, `GIT_WORK_TREE`,
+  `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, ...) are removed from git's
+  environment, so `mah install` run from a git hook works in its own scratch
+  repository and never touches yours.
 
 ## Out of scope
 

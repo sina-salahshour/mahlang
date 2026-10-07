@@ -187,6 +187,8 @@ myapp/
   - If `<package_root>/mah-project.toml` exists, it's `load_project(...)`'s `.lib`. An
     invalid manifest gives `package 'NAME' has an invalid mah-project.toml: MSG`, where
     MSG is the `MahProjectError` text with its leading `"{manifest_path}: "` removed.
+    (review) A `lib` outside the package root gives `package 'NAME' has an invalid
+    mah-project.toml: package.lib must be a path inside the package`.
   - Otherwise it's `<package_root>/lib.mh`.
 - The package's `[[target]]`, `[run]` and `[types]` and its `entry` are ignored when it is
   used as a dependency.
@@ -470,7 +472,14 @@ Pinned values, which a test asserts:
      - mode `100644`/`100755` blobs are files;
      - mode `120000` (symlink) and `160000` (submodule) are **skipped**, and the relative
        path is recorded in `skipped`;
-     - any entry with a path component `.mah` is skipped silently.
+     - any entry with a path component `.mah` is skipped silently;
+     - (review) an entry whose relative path has a segment that is empty, `.`, `..` or
+       `.git` (any case), or on Windows contains `\` or `:`, fails the install with
+       `OWNER/REPO has an unsafe file name "REL" at C7` (`git fetch` doesn't verify
+       received trees, so a crafted repository could otherwise write outside the package).
+     `git_env` also removes the repository-location variables (`GIT_DIR`, `GIT_WORK_TREE`,
+     `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, ...), which a git hook running `mah install`
+     would otherwise point at the user's own repository.
   5. If no files remain: `DESCRIBE has no files` when `path` is empty, else `'P' isn't a
      directory in OWNER/REPO at C7` (`P` = path, `C7` = first 7 of the commit).
   6. `git -C ... cat-file --batch`, with stdin the blob OIDs joined by `\n` plus a final

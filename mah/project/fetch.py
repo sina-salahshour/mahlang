@@ -6,6 +6,7 @@ installed bytes and the content hash is the same on every machine."""
 from __future__ import annotations
 
 import base64
+import json
 import os
 import shutil
 import subprocess
@@ -23,11 +24,46 @@ def repo_url(github: str) -> str:
     return base.rstrip("/") + "/" + github + ".git"
 
 
+# Variables that point git at a particular repository (set, for example,
+# while a git hook runs `mah install`). Left in place, they'd make the
+# `git init`/`git -C SCRATCH ...` commands act on the user's own repository.
+_REPOSITORY_ENV = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+    "GIT_SHALLOW_FILE",
+    "GIT_GRAFT_FILE",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_PREFIX",
+)
+
+
+def _unsafe_path(rel: str) -> bool:
+    """A tree path that would be written outside the package root, or as a
+    `.git` directory inside it. Git refuses to commit these, but `git fetch`
+    doesn't verify the objects it receives by default, so a crafted
+    repository can still serve them."""
+    for seg in rel.split("/"):
+        if seg in ("", ".", "..") or seg.lower() == ".git":
+            return True
+        if os.name == "nt" and ("\\" in seg or ":" in seg):
+            return True
+    return False
+
+
 def git_env(url: str) -> dict:
     """The environment for git: never prompt, and send `GITHUB_TOKEN` (only
     to https://github.com/) through git's environment config, never on the
     command line."""
     env = dict(os.environ)
+    for key in _REPOSITORY_ENV:
+        env.pop(key, None)
     env["GIT_TERMINAL_PROMPT"] = "0"
     token = env.get("GITHUB_TOKEN")
     if token and url.startswith("https://github.com/"):
@@ -147,6 +183,8 @@ def fetch_files(dep: Dependency, commit: str, scratch_dir: str):
             rel = path[len(prefix):]
         else:
             rel = path
+        if _unsafe_path(rel):
+            raise PackageError(f"{dep.github} has an unsafe file name {json.dumps(rel)} at {c7}")
         if ".mah" in rel.split("/"):
             continue
         mode, otype, oid = meta.decode("ascii").split(" ")

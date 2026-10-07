@@ -885,7 +885,11 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
                         owner = package_of_path(fpath)
                         if owner is not None:
                             pkg_dir = os.path.join(owner[0], ".mah", "packages", owner[1])
-                            if os.path.commonpath([os.path.abspath(resolved), pkg_dir]) != pkg_dir:
+                            try:
+                                leaves = os.path.commonpath([os.path.abspath(resolved), pkg_dir]) != pkg_dir
+                            except ValueError:  # another drive on Windows
+                                leaves = True
+                            if leaves:
                                 pkg_error = (
                                     f"import '{literal}' leaves package '{owner[1]}'; "
                                     f'import other packages as "pkg:NAME"'

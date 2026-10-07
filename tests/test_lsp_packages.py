@@ -81,6 +81,9 @@ class LspPackageTests(unittest.TestCase):
         self.assertEqual(labels, ["src"])
         labels = sorted(i["label"] for i in self._labels('import x from "pkg:greet/src/'))
         self.assertEqual(labels, ["extra", "lib"])
+        # review: an invalid `pkg:` path never lists anything outside the package
+        for partial in ("pkg:greet/../", "pkg:greet/../../../", "pkg:greet/./src/"):
+            self.assertEqual(self._labels(f'import x from "{partial}'), [], partial)
 
     def test_completion_inside_a_package_file(self):
         self.install()

@@ -1106,6 +1106,8 @@ def _package_completions(text: str, path: Optional[str], partial: str, quote_off
     if name not in names:
         return []
     typed_dir, _sep, typed_prefix = rest.rpartition("/")
+    if typed_dir and any(seg in ("", ".", "..") or "\\" in seg for seg in typed_dir.split("/")):
+        return []  # not a valid `pkg:` path (4.1): never list outside the package
     search_dir = package_root(context.root, name)
     if typed_dir:
         search_dir = os.path.join(search_dir, *typed_dir.split("/"))

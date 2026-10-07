@@ -313,6 +313,19 @@ def library_entry(pkg_root: str, name: str | None = None) -> str:
     project = load_package_manifest(pkg_root, name)
     if project is None:
         return os.path.join(pkg_root, "lib.mh")
+    # `lib` must stay inside the package, like its relative imports must
+    # (docs/PACKAGES.md 4.3): `lib = "../../../src/main.mh"` would
+    # otherwise reach into the importing project, or anywhere on disk.
+    inside = os.path.abspath(pkg_root)
+    target = os.path.abspath(project.lib)
+    try:
+        escapes = os.path.commonpath([target, inside]) != inside or target == inside
+    except ValueError:  # a different drive on Windows
+        escapes = True
+    if escapes:
+        raise PackageError(
+            f"package '{name}' has an invalid mah-project.toml: package.lib must be a path inside the package"
+        )
     return project.lib
 
 
