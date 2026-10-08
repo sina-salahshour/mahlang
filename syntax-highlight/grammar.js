@@ -117,6 +117,7 @@ module.exports = grammar({
         $.import_stmt,
         $.export_stmt,
         $.let_stmt,
+        $.shared_let_stmt,
         $.struct_decl,
         $.enum_decl,
         $.trait_decl,
@@ -177,6 +178,8 @@ module.exports = grammar({
         "export",
         choice(
           $.let_stmt,
+          // M44: `export shared let NAME = ...`.
+          $.shared_let_stmt,
           $.fn_stmt,
           $.extern_fn_stmt,
           // M41s: types can be exported too.
@@ -225,6 +228,14 @@ module.exports = grammar({
         "=",
         field("value", $.expr),
       ),
+
+    // M44 (docs/contracts/M44_threads.md): `shared let NAME = value`, a
+    // variable every thread shares (top level only -- the real resolver
+    // enforces that). `shared` is contextual in the real parser (a keyword
+    // only right before `let`); here it is a keyword token, which only
+    // matters where an identifier named `shared` starts a statement
+    // (`let shared = 1` still parses: after `let` only a name is valid).
+    shared_let_stmt: ($) => seq("shared", $.let_stmt),
 
     // -- M21: type annotations (see docs/TYPES.md) ----------------------
     //
@@ -641,6 +652,7 @@ module.exports = grammar({
         $.some_expr,
         $.none_expr,
         $.detach_expr,
+        $.lock_expr,
         $.throw_expr,
         $.try_expr,
         $.sleep_async_call,
@@ -870,8 +882,43 @@ module.exports = grammar({
     // parser detaches a whole non-await postfix chain (`detach s.f` is
     // detach of `s.f`); this grammar stops at the first `.`, which only
     // affects the shape of the highlight tree, not the colors.
+    //
+    // M44: `detach(t) expr` runs `expr` on the thread `t`. The real parser
+    // decides by the token after `)` (same line, an operand-starting token);
+    // this grammar approximates that by recognising the thread form only
+    // when `(` immediately follows `detach` with no space (the canonical
+    // spelling `mah format` writes) and an expression follows the `)`.
     detach_expr: ($) =>
-      prec(PREC.POSTFIX + 1, seq("detach", field("operand", $.expr))),
+      prec(
+        PREC.POSTFIX + 1,
+        choice(
+          seq("detach", field("operand", $.expr)),
+          seq(
+            "detach",
+            token.immediate("("),
+            field("thread", $.expr),
+            ")",
+            field("operand", $.expr),
+          ),
+        ),
+      ),
+
+    // M44: `lock a, b { body }` -- the shared variables `a` and `b` belong
+    // to this task for the block. A target may be dotted (`lib.hits`, a
+    // shared variable another module exports). Like `shared`, `lock` is
+    // contextual in the real parser (a keyword only before a name on the
+    // same line); here it is a keyword token, so `let lock = 2` still
+    // parses but an expression starting with a variable named `lock`
+    // doesn't highlight cleanly.
+    lock_expr: ($) =>
+      seq(
+        "lock",
+        field("target", $._lock_target),
+        repeat(seq(",", field("target", $._lock_target))),
+        field("body", $.block),
+      ),
+
+    _lock_target: ($) => seq($.identifier, repeat(seq(".", $.identifier))),
 
     sleep_async_call: ($) => seq("sleep_async", "(", $.expr, ")"),
 

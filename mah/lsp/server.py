@@ -31,7 +31,7 @@ from urllib.parse import unquote, urlparse
 from . import analysis
 
 SERVER_NAME = "mah-lsp"
-SERVER_VERSION = "0.3.0"
+SERVER_VERSION = "0.4.0"
 
 
 def uri_to_path(uri: str) -> str | None:

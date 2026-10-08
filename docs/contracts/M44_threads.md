@@ -916,9 +916,10 @@ loop:
       return
     job = jobs.pop_front(); running += 1; add job.id to the running set
     vm_id = next_vm; vms[vm_id] = new VM record   # live from this instant (§6.10)
-  outcome = run_job(job, vm_id)        # outside the lock; teardown (§6.6) removes vms[vm_id]
+  outcome = run_job(job, vm_id)        # outside the lock; teardown (§6.6)
   with rt.lock:
     running -= 1; remove job.id from the running set
+    remove vms[vm_id]                  # only now (§6.6 step 3)
     post job(outcome) to job.reply     # ignored if that VM is gone
     check_quiescence()                 # §6.10
 ```

@@ -253,6 +253,44 @@ class DecoratorTests(unittest.TestCase):
         self.assertIn('    @decorator_0("value 0") param_0: Number,\n', formatted)
 
 
+class ThreadSyntaxTests(unittest.TestCase):
+    """M44 (docs/contracts/M44_threads.md §11.4): `detach(t)`, `shared let`, `lock`."""
+
+    def check(self, source: str, expected: str):
+        self.assertEqual(format_source(source), expected)
+        self.assertEqual(format_source(expected), expected)  # a second format is a no-op
+
+    def test_detach_thread_form_has_no_space_before_its_paren(self):
+        self.check("let p = detach (t)   f(x)\n", "let p = detach(t) f(x)\n")
+        self.check("let p = detach(t){ 1 }\n", "let p = detach(t) { 1 }\n")
+        self.check("let p = detach(t) f(x).await\n", "let p = detach(t) f(x).await\n")
+
+    def test_plain_detach_of_a_parenthesized_expression_is_unchanged(self):
+        self.check("let p = detach (a + b)\n", "let p = detach (a + b)\n")
+        self.check("let p = detach (a + b).await\n", "let p = detach (a + b).await\n")
+
+    def test_shared_let(self):
+        self.check("shared  let x=1\n", "shared let x = 1\n")
+        self.check("shared let v: Vector<Number> =[]\n", "shared let v: Vector<Number> = []\n")
+
+    def test_export_shared_let_is_unchanged(self):
+        self.check("export shared let x = 1\n", "export shared let x = 1\n")
+        self.check("export   shared let x=1\n", "export shared let x = 1\n")
+
+    def test_lock(self):
+        self.check("shared let a = 1\nshared let b = 2\nlock a,b{a=b}\n", "shared let a = 1\nshared let b = 2\nlock a, b { a = b }\n")
+        self.check("let n = lock a { a = a + 1; a }\n", "let n = lock a {\n    a = a + 1;\n    a\n}\n")
+
+    def test_a_multi_line_lock_body_indents_like_any_block(self):
+        self.check(
+            "fn f() {\nlock xs {\nxs.push(1)\nprint(xs)\n}\n}\n",
+            "fn f() {\n    lock xs {\n        xs.push(1)\n        print(xs)\n    }\n}\n",
+        )
+
+    def test_shared_and_lock_still_format_as_plain_identifiers(self):
+        self.check("let shared=1\nlet lock=2\nprint(shared+lock)\n", "let shared = 1\nlet lock = 2\nprint(shared + lock)\n")
+
+
 class CorpusTests(unittest.TestCase):
     def test_every_source_formats_verifies_and_is_idempotent(self):
         for name, source in _corpus():

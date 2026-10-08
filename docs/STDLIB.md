@@ -10,7 +10,8 @@ first module; **M29 landed the String methods** (Phase 1's first item);
 **M34 landed `std:time` and `std:async`** (Phase 2, with step 4's
 cancellable timers); **M35 landed `std:fs`** (with Phase 0 step 3,
 handles); **M36 landed `std:process`**; **M37 landed `Bytes`, `std:bytes` and `std:fs`'s binary I/O**; **M38 landed `std:socket`** (TCP, Phase 4's first module); **M41a landed `std:reflect`** and `json.decode`
-(see [`REFLECTION.md`](REFLECTION.md)). The rest is design. Agreed 2026-09-28. Depends on
+(see [`REFLECTION.md`](REFLECTION.md)); **M44 landed `std:thread`** (Phase 5, threads,
+shared variables and channels; [`contracts/M44_threads.md`](contracts/M44_threads.md)). The rest is design. Agreed 2026-09-28. Depends on
 [`ERRORS.md`](ERRORS.md) (every failure below is a thrown, typed error)
 and on the static checker in [`TYPES.md`](TYPES.md).
 
@@ -909,7 +910,8 @@ header helpers, chunked decoder). Client decisions:
   `http.serve(...).wait()`.
 - **Concurrency**: the accept loop and each connection are detached tasks,
   so connections are served concurrently whenever a handler waits (I/O,
-  `sleep_async`, `.await`); the scheduler stays single-threaded (M44).
+  `sleep_async`, `.await`); the scheduler stays single-threaded. To use
+  more cores, hand CPU-heavy work to a `std:thread` pool (M44).
 - **TLS**: `tls: socket.tls_server_config(cert_path, key_path)` (a PEM
   chain and key, loaded and checked once) serves HTTPS; each connection
   runs `start_tls_server` first, with `read_timeout` as its handshake
@@ -918,6 +920,161 @@ header helpers, chunked decoder). Client decisions:
   bodies, compression, Range, static files, cookie helpers, routing and
   middleware (the web framework, a separate repository, builds them on
   this API).
+
+## Phase 5: threads
+
+### `std:thread`
+
+✅ **Landed (M44: M44a threads and shared variables, M44b channels)**, in
+`mah/std/thread.mh`, designed in
+[`contracts/M44_threads.md`](contracts/M44_threads.md). Bytecode **1.21**: every
+program importing `std:thread`, declaring a `shared let` or using `lock` is
+1.21. Jobs run **in parallel on the Rust VM** and **concurrently on the Python
+VM** (real `threading.Thread`s, one at a time under the GIL); the results are
+the same.
+
+```mah
+import thread from "std:thread"
+
+fn checksum(data) {
+    let total = 0
+    for let x in data { total = (total * 31 + x) % 1000003 }
+    total
+}
+
+let worker = thread.spawn(name: "worker")
+let p = detach(worker) checksum([3, 1, 4])   # runs on `worker`, on a copy
+print(p.await)
+print(worker.run(checksum, [2, 7]).await)    # the same, for a function and arguments
+worker.join()
+```
+
+- **Threads are job queues.** `spawn(name = none, workers = 1, capacity =
+  none)` starts `workers` OS threads sharing one FIFO queue and returns a
+  `Thread { id, name, workers, capacity }` (printed `Thread(name)`; the name
+  defaults to `thread-ID`). `detach(t) expr` and `t.run(f, ...args)` queue a
+  job and return its Promise; with one worker, jobs run one at a time in the
+  order they were queued, with `n` at most `n` at a time. `capacity` limits
+  how many jobs may wait beyond the running ones: one more throws
+  `ThreadError` `full` (never blocks). `t.close(cancel = false)` stops taking
+  jobs (queueing then throws `closed`; with `cancel: true` the jobs not
+  started yet fail with `cancelled`; a running job is never interrupted),
+  `t.join()` closes and waits until every worker has finished (from one of
+  `t`'s own jobs it throws `deadlock`), `t.pending()` counts queued + running
+  jobs. Idle threads never keep the program alive; a queued or running job
+  does. `id()`/`name()` are the current thread's (`0`/`"main"` on the main
+  one), `cores()` how many threads the machine runs at once.
+- **`detach(t) expr`**: the thread form when the token after `)` starts an
+  operand on the **same line** (a name, number, string, `true`/`false`/
+  `none`/`some`, `fn`, `detach`, `sleep_async`, `if`, `match`, `for`,
+  `while`, `try`, `throw`, `!`, or `{`); the operand is always wrapped in a
+  closure, so even `detach(t) f(x)` evaluates `f` and `x` on the thread.
+  `detach (a + b)`, `detach (f)(x)`, `detach (v)[0]` and `detach (a) - b`
+  keep their old meaning. `detach(t)` followed by a statement (`print`,
+  `let`, `return`, ...) on the same line, or by a `{` on the next line, is a
+  compile error.
+- **A job is a small program run on copies**: the snapshot — the callee,
+  everything it captures, **every global**, the method table, decorators and
+  hooks, and the environment table — is copied when the job is queued, into
+  a fresh VM heap on the worker. Changing a global or a captured variable in
+  a job changes the job's copy only. The job ends when its root call has
+  finished and nothing it started is pending; its result, or its error, comes
+  back as a copy (a failed detached task nobody awaited fails the job).
+  Copies keep identity and cycles; functions are copied with their frames.
+  A Promise inside `t.run`'s arguments, a job's result or error, or a
+  channel message can't be copied (`not_sendable`); a Promise a job reaches
+  through a frame is copied by state (a pending one becomes a Promise that
+  fails with `foreign_promise` when awaited).
+- **Random numbers**: `std:random`'s generator state is a global, so every
+  job continues the submitter's sequence from the same point and identical
+  jobs draw **identical numbers**. Seed per job (`random.seed(thread.id() *
+  1000 + n)` at the top of the job) or pass a seed as an argument.
+- **Shared process resources**: file and socket handles are shared by every
+  thread (only the main VM closes the tables at the end); stdin has one
+  reader; `time.monotonic_ms` counts from program start everywhere; each job
+  gets a copy of the environment table; `process.exit(code)` in a job exits
+  the whole program (the first exit wins). `print` never tears a line:
+  each VM hands whole lines to the shared stdout.
+- **Shared variables** (`shared let NAME = value`, top level only, `export
+  shared let` too) live in one process-wide store outside every VM, as
+  copied plain data, and are never part of a snapshot. A read outside `lock`
+  returns a copy (of the committed value, or of this task's working value
+  while it holds the lock) and never waits; an assignment is atomic (it
+  takes the lock for the moment). `lock a, b { body }` acquires the
+  variables in order (waiting is a pending Promise: other tasks keep
+  running; FIFO; re-entrant per task), gives the body the working copies to
+  change in place, and writes them back when the block exits — normally, by
+  `return`/`break`/`continue`, or by a throw. A write-back of a value
+  holding a Promise is refused: `not_sendable` at the block's end, or
+  nothing when a throw is already leaving the block (that error wins). A
+  `lock` is an expression; its value is the body's.
+- **Compile errors** outside `lock NAME`: a method call on it or on a path
+  into it (`xs.push(1)`, also `xs.len()`), an assignment into it
+  (`xs[0] = 1`), `x = e` where `e` mentions `x`, plus `lock` on something
+  that isn't a shared variable, the same variable twice in one `lock`,
+  `shared let` below the top level, and redeclaring a shared variable in its
+  scope. A `shared let` whose type is `thread.Thread`/`Semaphore`/`Channel`
+  (or whose value is a direct `spawn`/`semaphore`/`channel` call) is a
+  **handle variable**: its own methods may be called anywhere.
+- **These act on a copy and change nothing shared**: `let s = xs;
+  s.push(1)`; `let m = shared_map; m[k] = v`; passing a shared variable to a
+  function that changes its parameter (`mutate(xs)`); changing the loop
+  variable of `for let item in xs` (`item.n = 1`). Inside `lock xs { }` all
+  of these work on the shared value itself. The checker warns about the last
+  two. **Read-compute-write needs `lock`**: `x = g()` where `g` reads `x`
+  loses updates made in between; write `lock x { x = g() }`. A shared read
+  happens at its place in left-to-right evaluation (`f(x, g())` passes the
+  `x` from before `g` ran), and every read outside `lock` copies the whole
+  value: read a big one once into a local, or work inside one `lock`.
+- **Deadlocks and waits that can never finish**: a lock wait, `.await` or
+  `join` that would close a cycle of waits through a lock, a job or a join
+  throws `deadlock` at once instead of waiting (`lock x { (detach(t) { x = 1
+  }).await }` is one). When every thread of the run is blocked on waits only
+  other threads could end (locks, semaphores, channels, joins, job replies),
+  the main thread's waits fail with `stuck`. A wait that only another
+  running thread could end (a server loop, a timer) keeps waiting.
+- **Semaphores**: `semaphore(permits)` returns a `Semaphore { id, permits
+  }` (printed `Semaphore(available/permits)`) with `acquire()` (waits,
+  FIFO), `try_acquire()`, `release()` (`over_release` when all permits are
+  free) and `available()`. Permits belong to nobody: release them with
+  `defer s.release()`; a permit held by a task its job abandons is lost.
+- **Channels (M44b)**: `channel(capacity = none)` returns a `Channel { id,
+  capacity }` (printed `Channel(id)`): `send(v)` copies `v` and waits while
+  the channel is full (capacity 0: until a receiver takes it), `recv()`
+  waits for the next message, `try_recv()` gives `some(message)` or `none`
+  at once, `close()` ends sending (queued messages stay receivable; waiting
+  senders and receivers of an empty channel fail with `closed`), `len()`,
+  `closed()`, and `for let m in ch { }` receives until closed and empty.
+- **No `Mutex` type**: a `shared let` plus `lock` is the mutex; no
+  `Condition`/`WaitGroup` (channels and `async.all` cover them).
+- **Unobserved failures**: a failed job Promise nobody awaited is reported
+  at exit like a failed detached task; with several, which one is reported
+  can differ from run to run.
+
+`ThreadError { kind, message }` is a prelude type (no import needed):
+
+| kind | when |
+|---|---|
+| `closed` | queueing on a closed Thread; `send` on a closed channel, `recv` on a closed empty one, a waiting send/recv when the channel closes |
+| `full` | queueing beyond `workers + capacity` jobs |
+| `cancelled` | a queued job dropped by `close(cancel: true)` |
+| `deadlock` | a lock wait, `.await` or `join` that would wait for itself; `join` from the thread's own job |
+| `not_sendable` | a Promise inside `t.run` arguments, a job result/error or a channel message; a shared variable written with a Promise inside |
+| `foreign_promise` | awaiting, in a job, a Promise that was still pending when it was copied |
+| `over_release` | `Semaphore.release` with every permit free |
+| `stuck` | a wait that can never finish because every thread is waiting; a job whose root waits on a Promise nothing will settle |
+
+Bad argument values throw `RuntimeError.ArgumentError` (`thread.spawn:
+workers must be a whole number from 1 up`, ...); `detach(x)` on something
+that isn't a Thread throws `RuntimeError.TypeMismatch` (`detach(...) needs a
+thread.Thread to run on, got T`), which the checker also reports when it
+knows `x`'s type. Natives: the 19 `thread.*` rows of
+[`MAHC_FORMAT.md`](MAHC_FORMAT.md) §4.4; the shared-variable opcodes are in
+§4.6 and the model in §6.11.
+
+Not yet: lock or acquire timeouts, `select` over several channels,
+interrupting a running job, thread-local storage, priorities, copying only
+the globals a job uses (see [`NEXT_PHASES.md`](NEXT_PHASES.md)).
 
 ## `std:test` and `mah test`
 

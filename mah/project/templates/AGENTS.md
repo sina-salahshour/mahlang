@@ -91,7 +91,8 @@ test with every change, and make sure `mah test` passes.
   way, as `"std:<name>"`: `std:math`, `std:path`, `std:json`, `std:csv`,
   `std:random`, `std:collections`, `std:regex`, `std:time`, `std:async`,
   `std:bytes` (the mutable `Bytes` type's helpers), `std:fs`, `std:process`, `std:socket` (TCP clients and servers, TLS clients), `std:url`, `std:http` (an HTTP/HTTPS client), `std:reflect` (types, `##` docs, decorators and their hooks at run time,
-  which `json.decode` uses to read JSON into your structs) and `std:test` for
+  which `json.decode` uses to read JSON into your structs), `std:thread` (threads,
+  `shared let` variables, `lock`, semaphores and channels) and `std:test` for
   tests (see `docs/mah-language.md`).
 - Packages from `[dependencies]` are imported as `"pkg:NAME"` (the
   package's library file) or `"pkg:NAME/path/to/file.mh"` (any file in it),

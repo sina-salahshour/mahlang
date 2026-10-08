@@ -47,7 +47,8 @@ name, and exits nonzero.
   them with spaces of the same length before parsing, so every other token
   keeps its position.
   Then it prints them back normalized: `import "lib.mh"`, `import m from
-  "lib"`, `export fn f...`, `export name`.
+  "lib"`, `export fn f...`, `export name`, `export shared let x = ...` (M44: only `export` is
+  blanked, like `export let`).
 - A file with a syntax error isn't formatted: "can't format FILE: <the
   parse error>", exit 1, other files still processed.
 
@@ -144,6 +145,8 @@ operator.
 | `{` after a head (`if c`, `fn f()`, `struct P`, `match x`) | one space before | `if x {` |
 | generic `<` `>` | no space inside or before `<` | `Vector<Number>` |
 | keywords | one space after (`let`, `fn`, `if`, `return`, `detach`, ...); `fn(` in a type or anonymous fn has none | `fn(x) { }` |
+| `detach(t)` (M44, the thread form) | no space between `detach` and `(`; one space after `)` | `detach(t) f(x)`, `detach(t) { 1 }` (plain `detach (a + b)` keeps its space) |
+| `shared let`, `lock a, b { }` (M44) | single spaces, like any keyword | `shared let n = 0`, `lock a, b { a = b }` |
 | `#` trailing comment | see Comments | |
 | any two tokens that would lex as something else when touching | one space | `100.. =>` (not `100..=>`) |
 

@@ -126,7 +126,29 @@ KEYWORD_DOCS = {
     "the caller), or a block, loop, `if`, `match`, etc. (run whole in the "
     "new task, seeing surrounding variables by reference; `return`/"
     "`break`/`continue` can't leave it). Use `.await` to get the value.\n\n"
-    "```mah\nlet p = detach fetch_thing()\nlet q = detach {\n\tsleep_async(10);\n\t2 + 3\n};\nprint(p.await, q.await)\n```",
+    "```mah\nlet p = detach fetch_thing()\nlet q = detach {\n\tsleep_async(10);\n\t2 + 3\n};\nprint(p.await, q.await)\n```\n\n"
+    "`detach(t) expr` (M44) runs `expr` on the `std:thread` thread `t` instead, "
+    "on a copy of every global and of what it captures, taken now; jobs queued "
+    "on one thread run in order. The operand must start on the same line as "
+    "`detach(t)`.\n\n"
+    "```mah\nimport thread from \"std:thread\"\nlet t = thread.spawn(name: \"worker\")\n"
+    "let r = detach(t) checksum(data)\nprint(r.await)\n```",
+    # M44 (docs/contracts/M44_threads.md): contextual, see
+    # `_is_thread_contextual_keyword`.
+    "shared": "`shared let NAME = value` (top level only) declares a variable every "
+    "thread shares. Reading it gives a copy; assigning it is atomic; to change it "
+    "in place (`push`, `x[k] = v`) or to read and write it together, use "
+    "`lock NAME { ... }`. Contextual -- still usable as an ordinary name "
+    "elsewhere.\n\n"
+    "```mah\nshared let hits = 0\nshared let seen: Vector<Number> = []\n```",
+    "lock": "`lock a, b { body }` gives this task the shared variables for the "
+    "block: other tasks and threads wait, the body changes them in place, and the "
+    "changes are written back when the block ends (also on `return`, `break` or a "
+    "throw). Re-entrant; waiting lets other tasks run; a wait that would deadlock "
+    "throws ThreadError. Its value is the body's value. Contextual -- still usable "
+    "as an ordinary name elsewhere.\n\n"
+    "```mah\nlock hits { hits = hits + 1 }\nlock seen { seen.push(n) }\n"
+    "let next = lock hits { hits = hits + 1; hits }\n```",
     "await": "Suspend the current execution until this `Promise` settles "
     "(`Promise.Settled { value }`), then yield `value`. Written as a "
     "postfix pseudo-field (`value.await`), not a prefix keyword. Only "
@@ -468,6 +490,24 @@ def _is_error_contextual_keyword(token: Token, tokens: list[Token]) -> bool:
     ):
         i -= 1
     return i >= 0 and tokens[i].type is TokenType.PAREN_CLOSE
+
+
+def _is_thread_contextual_keyword(token: Token, tokens: list[Token], text: str = "") -> bool:
+    """M44 (docs/contracts/M44_threads.md): `shared` and `lock` stay ordinary
+    `ID` tokens (`let lock = 2` keeps working), so hover recognizes them
+    positionally, like the real parser does: `shared` right before `let` on
+    the same line, `lock` right before a name on the same line."""
+    if token.type != TokenType.ID or token.literal not in ("shared", "lock"):
+        return False
+    pos = next((i for i, t in enumerate(tokens) if t.position == token.position), None)
+    if pos is None or pos + 1 >= len(tokens):
+        return False
+    nxt = tokens[pos + 1]
+    wanted = TokenType.LET if token.literal == "shared" else TokenType.ID
+    if nxt.type is not wanted:
+        return False
+    between = text[token.position + len(token.literal) : nxt.position] if text else ""
+    return "\n" not in between
 
 
 def _is_soft_keyword(token: Token, tokens: list[Token]) -> bool:
@@ -1358,7 +1398,13 @@ def _resolver_symbol_completion_item(symbol) -> dict:
     """Completion item for a `compiler/resolve.py` `Symbol` (variable/
     parameter/function binding) -- parallel to hover's kind labels."""
     kind = COMPLETION_FUNCTION if symbol.kind == "fn" else COMPLETION_VARIABLE
-    detail = {"let": "variable", "fn": "function", "param": "parameter", "binding": "binding"}.get(
+    detail = {
+        "let": "variable",
+        "shared": "shared variable",
+        "fn": "function",
+        "param": "parameter",
+        "binding": "binding",
+    }.get(
         symbol.kind, symbol.kind
     )
     return {"label": demangle_message(symbol.name), "kind": kind, "detail": detail}
@@ -1558,6 +1604,8 @@ def get_hover(text: str, line: int, character: int, path: Optional[str] = None) 
         value = f"**keyword** `{token.literal}`\n\n" + KEYWORD_DOCS.get(token.literal, "")
     elif token.type is TokenType.ID and _is_error_contextual_keyword(token, tokens):
         value = f"**keyword** `{token.literal}`\n\n" + KEYWORD_DOCS.get(token.literal, "")
+    elif token.type is TokenType.ID and _is_thread_contextual_keyword(token, tokens, text):
+        value = f"**keyword** `{token.literal}`\n\n" + KEYWORD_DOCS.get(token.literal, "")
     elif (
         token.type is TokenType.ID
         and token.literal in ("sin", "cos", "input")
@@ -1581,6 +1629,7 @@ def get_hover(text: str, line: int, character: int, path: Optional[str] = None) 
             pp, resolver, symbol = found
             kind_label = {
                 "let": "variable",
+                "shared": "shared variable",
                 "fn": "function",
                 "param": "parameter",
                 "binding": "binding",

@@ -109,6 +109,10 @@
           "named": true
         },
         {
+          "type": "shared_let_stmt",
+          "named": true
+        },
+        {
           "type": "struct_decl",
           "named": true
         },
@@ -412,6 +416,10 @@
           "named": true
         },
         {
+          "type": "shared_let_stmt",
+          "named": true
+        },
+        {
           "type": "struct_decl",
           "named": true
         },
@@ -433,6 +441,16 @@
       "operand": {
         "multiple": false,
         "required": true,
+        "types": [
+          {
+            "type": "expr",
+            "named": true
+          }
+        ]
+      },
+      "thread": {
+        "multiple": false,
+        "required": false,
         "types": [
           {
             "type": "expr",
@@ -729,6 +747,10 @@
           "named": true
         },
         {
+          "type": "shared_let_stmt",
+          "named": true
+        },
+        {
           "type": "struct_decl",
           "named": true
         },
@@ -797,6 +819,10 @@
         },
         {
           "type": "index_expr",
+          "named": true
+        },
+        {
+          "type": "lock_expr",
           "named": true
         },
         {
@@ -1568,6 +1594,36 @@
     }
   },
   {
+    "type": "lock_expr",
+    "named": true,
+    "fields": {
+      "body": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "block",
+            "named": true
+          }
+        ]
+      },
+      "target": {
+        "multiple": true,
+        "required": true,
+        "types": [
+          {
+            "type": ".",
+            "named": false
+          },
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "map_literal",
     "named": true,
     "fields": {},
@@ -1939,6 +1995,21 @@
     }
   },
   {
+    "type": "shared_let_stmt",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "let_stmt",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "sleep_async_call",
     "named": true,
     "fields": {},
@@ -2086,6 +2157,10 @@
         },
         {
           "type": "return_stmt",
+          "named": true
+        },
+        {
+          "type": "shared_let_stmt",
           "named": true
         },
         {
@@ -2844,6 +2919,10 @@
     "named": false
   },
   {
+    "type": "lock",
+    "named": false
+  },
+  {
     "type": "match",
     "named": false
   },
@@ -2865,6 +2944,10 @@
   },
   {
     "type": "return",
+    "named": false
+  },
+  {
+    "type": "shared",
     "named": false
   },
   {

@@ -1,4 +1,4 @@
-# The `.mahc` bytecode format (version 1.20)
+# The `.mahc` bytecode format (version 1.21)
 
 `mah build prog.mh` compiles a program (its entry file plus everything it
 imports) into a single `.mahc` file; `mah runc prog.mahc` runs one. This
@@ -103,6 +103,10 @@ sections   (id u8, length varuint, payload bytes(length))*   until end of file
   `socket.start_tls_server`. std:socket declares them, so every program
   importing `std:socket` (or `std:http`) is 1.20; `std:url` alone still
   needs no newer VM.
+  *(1.21)* It writes 21 when the file uses a `shared*` opcode (`sharedget`,
+  `sharedset`, `sharedlock`, `sharedunlock`: a program that declares a
+  `shared let` or uses `lock`) or lists a `thread.*` native (every program
+  importing `std:thread`).
 - **Required sections**, each present exactly once and in increasing id
   order: STRINGS (`0x01`), CONSTANTS (`0x02`), TYPES (`0x03`), NATIVES
   (`0x04`), FUNCTIONS (`0x05`), CODE (`0x06`), — in files with minor ≥ 1 —
@@ -291,6 +295,25 @@ Version 1.0 defines:
 | `socket.start_tls` | 3 | *(1.19)* `id, server_name, timeout` → `none` once a TLS client handshake on the open socket has finished; from then on `send`/`recv` on that id carry plaintext through TLS. See below |
 | `socket.tls_server_config` | 2 | *(1.20)* `cert_path, key_path` → `id` (a socket-table id of kind TLS config) once the PEM certificate chain and private key have been read, parsed and checked to match. See below |
 | `socket.start_tls_server` | 3 | *(1.20)* `id, config, timeout` → `none` once a TLS **server** handshake on the open socket `id`, with config `config`, has finished; from then on `send`/`recv`/`shutdown`/`close` behave as after `start_tls`. See below |
+| `thread.spawn` | 3 | *(1.21)* `name` (String or `none`), `workers`, `capacity` (Number or `none`) → `[id, name]`: starts a thread of `workers` OS threads sharing one FIFO job queue (§6.11); `name` `none` becomes `thread-ID` |
+| `thread.submit` | 3 | *(1.21)* a `Thread` struct, a function, a Vector of positional arguments → a pending Promise of the job (§6.11 "Queueing") |
+| `thread.close` | 2 | *(1.21)* `id, cancel` (Bool) → `none`: the thread takes no more jobs; with `cancel` true, every queued job fails with `cancelled`, in queue order. Idempotent |
+| `thread.join` | 1 | *(1.21)* `id` → a Promise of `none`, settled once every worker of the thread has exited (closes it first); throws `deadlock` when called from one of that thread's own jobs |
+| `thread.pending` | 1 | *(1.21)* `id` → queued + running jobs, now |
+| `thread.current` | 0 | *(1.21)* → `[0, "main"]` in the main VM, `[id, name]` of the job's thread in a job VM |
+| `thread.cores` | 0 | *(1.21)* → how many threads the machine runs at once (at least 1); not reproducible across machines |
+| `thread.semaphore_new` | 1 | *(1.21)* `permits` → a new semaphore id |
+| `thread.semaphore_acquire` | 1 | *(1.21)* `id` → a Promise of `none`, settled when a permit is taken (FIFO) |
+| `thread.semaphore_try_acquire` | 1 | *(1.21)* `id` → `true` (a permit taken) if one is free and nobody waits, else `false` |
+| `thread.semaphore_release` | 1 | *(1.21)* `id` → `none`; hands the permit to the first waiter, or frees it; throws `over_release` when every permit is free |
+| `thread.semaphore_available` | 1 | *(1.21)* `id` → free permits |
+| `thread.channel_new` | 1 | *(1.21)* `capacity` (Number or `none`) → a new channel id |
+| `thread.channel_send` | 2 | *(1.21)* `id, value` → a Promise of `none`; `value` is copied (strict, §6.11) first (throws `not_sendable`), then `closed` is thrown if the channel is closed |
+| `thread.channel_recv` | 1 | *(1.21)* `id` → a Promise of the next message (fails with `closed` once the channel is closed and empty) |
+| `thread.channel_try_recv` | 1 | *(1.21)* `id` → `some(message)` if one is queued or a sender waits, else `none` |
+| `thread.channel_close` | 1 | *(1.21)* `id` → `none`; idempotent |
+| `thread.channel_len` | 1 | *(1.21)* `id` → queued messages |
+| `thread.channel_closed` | 1 | *(1.21)* `id` → whether `close` was called |
 | `math.sin` | 1 | sine of a Number (radians); the result is computed in IEEE-754 double precision and converted to Number via its shortest round-trip decimal text |
 | `math.cos` | 1 | cosine, same rules |
 | `time.sleep_async` | 1 | returns a new pending Promise that the scheduler settles with `none` after the argument's number of milliseconds (§6.4) |
@@ -546,6 +569,39 @@ uses TLS), `connection_reset` (the client closed during the handshake),
 one: a client closing without a close notice is a normal end, and `shutdown`
 sends none.
 
+The `(1.21)` natives are `std:thread`'s (docs/STDLIB.md, M44); §6.11 is
+their model. Thread, semaphore and channel ids are three separate counters,
+each from 1 per run; the main thread's id is 0. A bad id (only reachable by a
+hand-built struct) is `RuntimeError.ArgumentError`, `thread: no such thread
+N` / `thread: no such semaphore N` / `thread: no such channel N`.
+`thread.submit` checks its first argument is a struct whose display type name
+is `Thread` with a Number field `id` (else `RuntimeError.TypeMismatch`,
+`detach(...) needs a thread.Thread to run on, got T`) and its second is a
+function (else `TypeMismatch`, `thread.run: f must be a function, got T`).
+Natives **throw** `ThreadError` values (the prelude struct `ThreadError {
+kind, message }`, §6.11) as ordinary thrown values, catchable at the call.
+
+- **Semaphores**: `acquire` takes a permit at once when one is free and
+  nobody waits (a settled Promise), else queues a waiter (a pending
+  Promise). `try_acquire` never waits. `release` passes the permit to the
+  first waiter if there is one, else frees it; with every permit free it
+  throws `over_release` (`release without a matching acquire (all N permits
+  are free)`). Permits have no owner.
+- **Channels**: `send` copies the value first (refusal: throw
+  `not_sendable` synchronously), then: closed → throw `closed` (`the channel
+  is closed`); a receiver waits → hand it the message (settled `none`); the
+  channel has room (`capacity` `none`, or fewer than `capacity` queued) →
+  queue it (settled `none`); else wait as a sender holding its message (a
+  pending Promise, settled with `none` when the message is queued or taken,
+  failed with `closed` if the channel closes first). `recv`: a queued
+  message → take the oldest (and move the first waiting sender's message
+  into the queue, settling that sender); else a waiting sender (capacity 0)
+  → take its message and settle it; else closed → a Promise failed with
+  `closed`; else wait as a receiver. `try_recv` is `recv`'s first two
+  branches without waiting, else `none`. `close` is idempotent: every
+  waiting receiver and sender fails with `closed` (a waiting sender's
+  message is dropped); queued messages stay receivable.
+
 The `(1.11)` natives are `std:time`'s clocks and the building blocks of
 `std:async`. A non-Promise argument to `time.cancel`, `promise.resolve`
 or `promise.fail` is a `RuntimeError.TypeMismatch`, `NAME: expected a
@@ -734,6 +790,10 @@ Opcodes (semantics in §6):
 | `0x46` | `deferabove` *(1.4)* | depth `A`, dest `A` |
 | `0x50` | `native` | fn `X`, args `A*`, dest `A?` |
 | `0x60` | `throw` *(1.4)* | value `A` |
+| `0x70` | `sharedget` *(1.21)* | index `N`, name `S`, mode `N`, dest `A` |
+| `0x71` | `sharedset` *(1.21)* | index `N`, name `S`, src `A` |
+| `0x72` | `sharedlock` *(1.21)* | index `N`, name `S`, dest `A` |
+| `0x73` | `sharedunlock` *(1.21)* | index `N`, name `S`, mode `N` |
 
 All other opcode values are reserved. Opcodes, operand kinds, and natives
 marked *(1.1)* **must not** appear in a file whose minor version is 0,
@@ -742,7 +802,19 @@ marked *(1.3)* not in one whose minor version is below 3, and those
 marked *(1.4)* not in one whose minor version is below 4, and those marked
 *(1.14)* not in one whose minor version is below 14, and those marked
 *(1.15)* not in one whose minor version is below 15, and those marked
-*(1.16)* not in one whose minor version is below 16.
+*(1.16)* not in one whose minor version is below 16, and those marked
+*(1.21)* not in one whose minor version is below 21 (`opcode 'NAME' at
+instruction I requires minor version >= 21, but this file's minor version is
+M`).
+
+The `shared*` opcodes *(1.21)* implement shared variables (§6.11). `index` is
+the shared variable's number (any varuint; a program numbers its shared
+variables from 0); `name` is its source name, used only in error messages.
+`sharedget`'s mode is 0 (a copy) or 1 (lexically locked: the working object
+itself); `sharedunlock`'s is 0 (release) or 1 (mark: a `lock` body is being
+left by a throw). Any other mode is refused at link time with
+`RuntimeError.Internal`, `bad mode M for 'OPCODE'`. `mah dis` prints the modes
+as `copy`/`locked` and `release`/`mark`.
 
 `decorate kind a b values` *(1.15)* stores the decorators of one target
 (docs/REFLECTION.md, M41b). `values` are the addresses holding the decorator
@@ -1136,7 +1208,11 @@ Single-threaded cooperative scheduling:
   finished *and* no scheduled work remains: *(1.10)* a detached `input`
   nobody awaits still keeps the program running until its line arrives. *(1.18)* So does
   a pending `socket.accept`, `socket.recv` or `socket.connect`, until it settles
-  (data, a connection, an error, its timeout, or its socket being closed). *(1.4)* Once it does, if any
+  (data, a connection, an error, its timeout, or its socket being closed). *(1.21)* So
+  does every runtime wait of §6.11: a queued or running job this VM submitted,
+  a lock, semaphore or channel wait, and a join (idle threads don't count); a
+  run in which those waits can never be satisfied ends them with `stuck`
+  instead of waiting forever (§6.11, "Quiescence"). *(1.4)* Once it does, if any
   detached task's Promise failed and was never observed, the program
   still stops with the uncaught-error report (§6.8) for the **first**
   such Promise, in fail order.
@@ -1528,6 +1604,164 @@ message
 ...the message, to the end...
 ```
 
+### 6.11 Threads, jobs and shared variables *(1.21)*
+
+The normative design is `docs/contracts/M44_threads.md` (§2–§6); this
+section condenses what a VM must do. Everything observable (output, exit
+codes, error kinds and messages) is the same on every VM.
+
+**The runtime.** One process-wide runtime per program run, shared by the
+main VM and every **job VM**, guarded by one mutex: the shared-variable
+store and its locks, the wait-for graph, the threads (pools), semaphores,
+channels, the live VMs (for quiescence), the shared file and socket tables,
+the single stdin reader and the shared stdout. A VM never touches another
+VM's heap: waking a waiter means posting a completion to that VM's done
+queue; the VM settles its own Promise on its own thread. Task ids are
+process-unique.
+
+**`ThreadError`.** A prelude struct `ThreadError { kind: String, message:
+String }` (with `impl Error`), built by the VM directly like `EndOfInput`;
+an uncaught one reports `Uncaught ThreadError: <message>`. Kinds and exact
+messages (`NAME`, `VAR`, `N` substituted):
+
+| kind | message |
+|---|---|
+| `closed` | `thread 'NAME' is closed` (queueing on a closed thread); `the channel is closed` |
+| `full` | `thread 'NAME' is full (N jobs queued or running)` (N = workers + capacity) |
+| `cancelled` | `thread 'NAME' was closed before this job started` |
+| `deadlock` | `deadlock: waiting for 'VAR' would never end` (a lock wait); `deadlock: this await would never end (it waits, through locks or threads, for itself)` (an await or join); `deadlock: a thread can't join itself` |
+| `stuck` | `the wait can never finish: every thread is waiting`; `the job never finished: it waits on a Promise nothing will settle` |
+| `not_sendable` | `a Promise can't be sent to another thread`; `shared variable 'VAR' can't hold a Promise` |
+| `foreign_promise` | `a Promise from another thread can't be awaited here (it was still pending when it was copied)` |
+| `over_release` | `release without a matching acquire (all N permits are free)` |
+
+**Copies.** Values cross VMs only as copies, made by an iterative walk that
+preserves identity and cycles within one copy (one memo for the whole
+snapshot). `none`, Bool, Number, String and Type values are immutable and
+shared; Vector, Map (same insertion order), Bytes, struct and enum values
+(same type, variant, `thrown_at` and backtrace) are new objects with copied
+contents; a closure is a new closure over the same FUNCTIONS index and
+identity whose defining frame is a copy; a frame copies its slots and its
+static parent. Three modes differ only for Promises: **strict** (arguments
+of `thread.submit`, job results and errors, channel messages, shared
+values) refuses any Promise (`not_sendable`), checked before the memo;
+**environment** (everything reached through a frame or closure) copies a
+Promise by state — Settled and Failed are copied, Pending becomes a Failed
+Promise whose error is `ThreadError foreign_promise`; every copied Promise
+is observed and has no waiters; **local** (a non-locked read of a shared
+variable the task holds, which stays in the same VM) keeps every Promise as
+the same object.
+
+**Queueing a job** (`thread.submit`; `detach(t) expr` compiles to it with
+the operand wrapped in a zero-parameter closure and no arguments), in
+order: validate the Thread and the function; bind the arguments to the
+function's parameters in the submitting VM (the same rules and errors as
+`call`); take the **snapshot** — the strict roots (the bound argument
+values) first, then the environment roots (the callee closure, so its
+frames and the **main frame: every global**; every user method-table entry
+whose target is a Mah closure; the decorator and hook tables; the
+function-item flag) and a copy of the process environment table; under the
+runtime lock, a closed thread throws `closed`, a thread with `capacity` not
+`none` and queued + running ≥ workers + capacity throws `full`, else the
+job joins the FIFO queue; return a pending Promise counted as this VM's
+pending work. Shared variables, other tasks, timers, I/O and defer stacks
+are not part of a snapshot.
+
+**Running a job.** Each worker takes the oldest queued job (with one
+worker, the next starts only after the previous finished) and runs it in a
+fresh job VM: the same program, a fresh heap with the snapshot restored,
+its own timers, I/O, done queue, pending map and failed-promise list. The
+root task calls the callee with the bound arguments; the job ends like a
+program: once the root has finished and nothing (timer, I/O, job, lock,
+semaphore, channel wait, join) is pending. Its outcome: the root failed →
+at once, the error (strict copy; a Promise inside it → `not_sendable`); the
+root never finished with nothing pending → `stuck`; a detached task failed
+unobserved → that error; else the root's value (strict copy; refusal →
+`not_sendable`). An unexpected host failure → `RuntimeError.Internal`. The
+reply settles or fails the job's Promise in the submitting VM through its
+done queue; a failed one is reported at that VM's end like an unobserved
+failed detached task when nobody observed it (with several, the order is
+the order the replies arrived). A job Promise already settled by hand drops
+the reply. **Teardown**: the job VM's line buffer is handed over; its waiters
+are removed from every lock, semaphore, channel and join list; then every
+lock it still owns passes to the next (other VM's) waiter **without
+write-back**; its wait-for
+edges are removed; a permit or message delivered to it too late is given
+back (a message to the front of its channel).
+
+**Shared variables.** The store maps a shared variable's index to a
+strict copy of its value (absent = `none`). Each task has `held`: index →
+(working value, depth, unwinding depth); a task running an implicit call
+for its caller (`to_string`, `Error.message`) shares its caller's id and
+`held`.
+- `sharedlock k name dest` (acquire; `dest ←` a Promise, which the code
+  awaits at once): if the task holds `k`, depth + 1 and a settled `none`;
+  if nobody holds it, the task becomes the owner with a working value = a
+  copy of the stored value, depth 1, settled `none`; if another task owns
+  it and the wait-for graph leads from that owner back to this task, a
+  Promise **failed** with `deadlock` (`waiting for 'VAR'`); else the task
+  queues as a waiter (FIFO, a pending Promise counted as pending work).
+  When the lock passes to a waiter, the waiter's VM receives a copy of the
+  stored value as its working value.
+- `sharedget k name mode dest`: mode 1 → the working value itself (the task
+  must hold `k`, else `RuntimeError.Internal` `sharedget without holding
+  the lock`); mode 0 → a local copy of the working value if the task holds
+  `k`, else a strict copy of the stored value. Never waits.
+- `sharedset k name src`: the task must hold `k` (else `Internal`
+  `sharedset without holding the lock`); replaces the working value. (A
+  plain assignment outside `lock` compiles to acquire, await, `sharedset`,
+  release.)
+- `sharedunlock k name 1` (mark): if the task holds `k`, record the current
+  depth as the unwinding depth.
+- `sharedunlock k name 0` (release): the task must hold `k` (else `Internal`
+  `sharedunlock without holding the lock`); depth − 1; at depth 0 the entry
+  is removed, the working value is strict-copied and written to the store,
+  and the lock passes directly to the first waiter (no barging). If the
+  copy is refused (a Promise inside), the store keeps its old value and,
+  unless the release is leaving by a throw (the unwinding depth equals the
+  depth being left), `ThreadError not_sendable` (`shared variable 'VAR'
+  can't hold a Promise`) is thrown after the lock is released.
+
+The compiler brackets a `lock a, b { body }` as: acquire `a`, defer its
+release, acquire `b`, defer its release, then the body inside its own
+handler region whose handler marks every target (mode 1) and re-throws.
+
+**Deadlocks.** The wait-for graph's nodes are tasks; edges: a task waiting
+for a lock → the lock's owner (strong); a task suspended on `await` of a
+Promise whose producer is known → that producer: a same-VM `detach` task
+(plain), a job's root task once it has started (strong), or every running
+job's root task of a joined thread (strong). Before a lock wait or an
+`await`/join suspension adds an edge, the VM checks (under the runtime
+lock) whether the graph leads back to the waiting task along a path that,
+with the new edge, contains a strong edge; if so the wait fails at once
+with `deadlock`. Await edges are tracked only once the run has used a lock
+or spawned a thread. Semaphores, channels, queued jobs and Promises without
+a producer are not edges.
+
+**Quiescence.** A VM is blocked when it waits for a completion with no
+timeout, has no timers, an empty done queue, and only runtime waits pending
+(no file, socket, process or stdin operation). When every live VM is
+blocked and no thread has a queued job a free worker is about to start
+(nor a closed pool whose idle workers are about to exit), the main VM is
+posted a `stuck` completion: every runtime wait it has fails, in creation
+order, with `ThreadError stuck` (`the wait can never finish: every thread
+is waiting`), and it continues. A wait only another running thread could
+end keeps waiting.
+
+**Shared process resources.** stdout is shared, and each VM keeps a line
+buffer: a write hands everything up to the last `\n` to the shared writer
+in one piece, and the rest is handed over at every flush point (before
+blocking or sleeping, before reading stdin, at a job's end before its
+reply, at program end, before an error report, in `process.exit`), so lines
+from different threads never tear. The file and socket tables are shared
+(only the main VM closes them at the end); stdin has one reader, lines
+handed out in request order; `time.monotonic_ms` counts from the run's
+start in every VM; `process.args()` is the same everywhere; `process.exit`
+in a job exits the whole process (the first exit wins).
+
+**Program end.** Unchanged (§6.4), with the wider pending rule; then a VM
+abandons any job VM still blocked and the process exits.
+
 ## 7. Versioning and extension rules
 
 - **Minor version** (backwards compatible for readers): new natives, new
@@ -1646,6 +1880,15 @@ message
   `start_tls_server` and `std:http`'s `serve(tls:)`; and nothing else. The
   encoder writes 20 for a file that lists them, which every program importing
   std:socket does.
+- **1.21** added threads (M44, docs/contracts/M44_threads.md): the four
+  shared-variable opcodes `sharedget`/`sharedset`/`sharedlock`/`sharedunlock`
+  (`0x70`–`0x73`, §4.6) and the 19 `thread.*` natives behind `std:thread`
+  (§4.4), with the model of §6.11 (job VMs, copies, the shared-variable store,
+  locks, deadlock and quiescence detection, `ThreadError`). No new section,
+  type or constant tag; the prelude gains the `ThreadError` struct. The
+  encoder writes 21 for a file that uses a `shared*` opcode or lists a
+  `thread.*` native: a program that declares a `shared let`, uses `lock` or
+  imports `std:thread`.
 - Planned growth, for orientation: error-set checking (the static
   checker's `throws` inference and "unhandled error" diagnostics -- M26),
   string utilities, filesystem, networking, and process natives.

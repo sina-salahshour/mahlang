@@ -279,7 +279,35 @@ its installed root.
 
 ## Optional multithreading for `detach`ed expressions
 
-Last on the current roadmap: let a `detach`ed expression run on another OS
-thread when asked (opt-in, since today's scheduler is single-threaded and
-values are shared by reference), which needs a decision on what may cross
-threads (copying, or freezing values) and how the Python VM approximates it.
+✅ Landed as M44 (M44a threads and shared variables, M44b channels, bytecode
+1.21) -- see docs/V2_DESIGN.md's M44a/M44b entries, the contract
+docs/contracts/M44_threads.md and the discussion paper
+docs/contracts/M44_threads_options.md. A `std:thread` Thread is a queue of
+jobs; `detach(t) expr` and `t.run(f, ...args)` run work on it, in an isolated
+VM, on a copy of every global and of what it captures, taken when the job is
+queued. `shared let` variables live outside every VM and change in place only
+inside `lock NAME { }`; `Semaphore` and `Channel` are process-wide.
+
+Deferred (follow-ups):
+
+- Copying only the globals a job uses (free-variable slicing), instead of the
+  whole main frame per job.
+- Lock and acquire timeouts; `select` over several channels; `Condition`,
+  `WaitGroup` and atomic counters without `lock`.
+- Deadlock detection through semaphores, channels and not-yet-started jobs,
+  and through cycles of plain same-VM awaits (today those are left to the
+  quiescence rule, which fires only once every thread is waiting), and
+  reporting *which* wait is hopeless while some other thread is still busy.
+- Interrupting a running job; thread-local storage; priorities.
+- Transferring a socket to a thread (handles are already shared).
+- A free-threaded CPython or subinterpreter backend for the Python VM, so jobs
+  run in parallel there too; a `MAH_THREADS=inline` debugging mode.
+- Giving back the semaphore permits of tasks a job abandons (permits are
+  owner-less; the docs say to release with `defer`).
+- Reporting several unobserved job failures in a deterministic order (today:
+  the order the replies arrived).
+- Cheaper shared reads (copy-on-write or immutable sharing of shared values);
+  every read outside `lock` copies the whole value.
+- A runtime test for a job Promise settled by hand (no exported std function
+  can settle another Promise today, so that path is reachable only from std
+  code).

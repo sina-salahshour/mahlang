@@ -682,6 +682,131 @@ let n = try answer.await.to_number() else 0   # .await throws EndOfInput / to_nu
 print(n + 1)
 ```
 
+- `detach(t) expr` (`t` a `std:thread` Thread) runs `expr` on another thread
+  instead; see Threads below. It is the thread form only when the operand
+  starts on the same line as `detach(t)` (a name, a call, a block, a literal,
+  `if`, ...; not `[`, `(` or `-`: write `detach(t) { [1, 2] }`).
+  `detach (a + b)` with nothing after it on the line is still the
+  same-thread form.
+
+## Threads
+
+`std:thread` runs code on other OS threads. A thread is a queue of jobs:
+`thread.spawn(...)` starts one, `detach(t) expr` or `t.run(f, ...args)` queue
+a job and give its Promise, and jobs queued on one thread run one at a time,
+in order (`workers: n` makes a pool that runs n at a time).
+
+```mah
+import thread from "std:thread"
+
+fn checksum(data) {
+    let total = 0
+    for let x in data { total = (total * 31 + x) % 1000003 }
+    total
+}
+
+let worker = thread.spawn(name: "worker")    # also workers: n, capacity: n
+let p = detach(worker) checksum([3, 1, 4])   # runs on `worker`
+let q = worker.run(checksum, [2, 7, 1])      # the same, for a function and arguments
+print(p.await, q.await)
+
+let names = ["ada"]
+let job = detach(worker) {
+    names.push(thread.name())                # changes the job's copy only
+    names.len()
+}
+print(job.await, names.len())                # 2 1
+worker.join()                                # close it and wait for its jobs
+```
+
+- A job runs on a **copy** of every global and of everything it captures,
+  taken when it is queued; changing them changes the copy. Its result (or
+  error, caught as usual with `try` around `.await`) comes back as a copy.
+  A Promise inside a value sent to a thread can't be sent (`ThreadError`
+  `not_sendable`); one a job reaches through a global that was still
+  pending when copied can't be awaited there (`foreign_promise`).
+- `std:random`'s state is a global too, so identical jobs draw identical
+  numbers: seed per job (`random.seed(thread.id() * 1000 + n)`) or pass a
+  seed as an argument.
+- File and socket handles are shared by every thread. `thread.id()` and
+  `thread.name()` name the current thread (`0`/`"main"` on the main one).
+- `t.close()` stops taking jobs (`close(cancel: true)` drops the queued
+  ones), `t.join()` closes and waits, `t.pending()` counts jobs.
+
+**Shared variables.** `shared let NAME = value` (top level only) declares a
+variable every thread shares. Reading it gives a copy; assigning it is
+atomic; to change it in place (`push`, `x[k] = v`) or to read and write it
+together, use `lock NAME { ... }`:
+
+```mah
+import thread from "std:thread"
+
+shared let hits = 0
+shared let log: Vector<String> = []
+
+fn visit(n) {
+    lock hits { hits = hits + 1 }
+    lock log { log.push("visit " + n) }
+}
+
+let pool = thread.spawn(workers: 4)
+let jobs = []
+for let n in 0..8 { jobs.push(pool.run(visit, n)) }
+for let j in jobs { j.await }
+let seen = log                               # a copy
+print(hits, seen.len())                      # 8 8
+let next = lock hits { hits = hits + 1; hits }   # a lock's value is its body's
+print(next)                                  # 9
+```
+
+- `lock a, b { body }` gives this task the shared variables for the block:
+  other tasks and threads wait, the body changes them in place, and the
+  changes are written back when the block ends (also on `return`, `break` or
+  a throw). Re-entrant; waiting lets other tasks run; a wait that would
+  deadlock throws `ThreadError` `deadlock`, and a wait nothing can ever end
+  (every thread waiting) throws `stuck`.
+- Compile errors outside `lock NAME`: a method call on it (`xs.push(1)`,
+  even `xs.len()`: read it into a local first), assigning into it
+  (`xs[0] = 1`), and `x = ... x ...`. A `shared let` holding a
+  `thread.channel()`/`semaphore()`/`spawn()` handle may call its methods
+  anywhere.
+- These act on a copy and change nothing shared: `let s = xs; s.push(1)`,
+  passing `xs` to a function that changes its parameter, changing the loop
+  variable of `for let item in xs` (the checker warns about the last two).
+  Inside `lock xs { }` they all work on the shared value. `x = g()` where `g`
+  reads `x` can lose updates: write `lock x { x = g() }`.
+- A shared read happens at its place in left-to-right evaluation, and every
+  read outside `lock` copies the whole value: read a big one once into a
+  local, or work inside one `lock`.
+
+**Semaphores and channels** are shared by every thread too:
+
+```mah
+import thread from "std:thread"
+
+let sem = thread.semaphore(2)                # at most 2 holders at once
+sem.acquire()                                # waits (other tasks keep running)
+print(sem.available(), sem.try_acquire())    # 1 true
+sem.release()
+sem.release()                                # or `defer sem.release()`
+
+let ch = thread.channel()                    # capacity: n bounds it (0: hand-over)
+let pool = thread.spawn()
+let producer = detach(pool) {
+    for let i in 1..=3 { ch.send(i * 10) }   # each message is copied
+    ch.close()
+}
+for let m in ch { print(m) }                 # 10 20 30, until closed and empty
+producer.await
+```
+
+`ThreadError { kind, message }` (a prelude type) is what threads, locks,
+semaphores and channels throw; `kind` is one of `"closed"`, `"full"`,
+`"cancelled"`, `"deadlock"`, `"not_sendable"`, `"foreign_promise"`,
+`"over_release"`, `"stuck"`. On the Rust VM jobs run in parallel; on the
+Python VM they run concurrently (one at a time under the GIL), with the
+same results.
+
 ## Type annotations
 
 Declarations can carry optional types. An unknown type name or a wrong
@@ -801,7 +926,8 @@ own type with such a name.
 Standard library modules are imported as `"std:<name>"`, the same two ways
 as a file: `std:math`, `std:path`, `std:json`, `std:csv`, `std:random`,
 `std:collections`, `std:regex`, `std:time`, `std:async`, `std:bytes`, `std:fs`,
-`std:process`, `std:socket`, `std:url`, `std:http`, `std:reflect` (and `std:test`, below).
+`std:process`, `std:socket`, `std:url`, `std:http`, `std:reflect`, `std:thread`
+(see Threads) (and `std:test`, below).
 
 ```mah
 import math from "std:math"
@@ -1542,5 +1668,7 @@ test "not ready yet" {
 - UDP, HTTP/2, WebSockets, spawning a process to stream from, and every other planned
   `std:` module besides `std:math`, `std:path`, `std:json`, `std:csv`,
   `std:random`, `std:collections`, `std:regex`, `std:time`, `std:async`,
-  `std:bytes`, `std:fs`, `std:process`, `std:socket`, `std:reflect` and `std:test`. A Bytes literal. Time zones (`std:time` is UTC only).
+  `std:bytes`, `std:fs`, `std:process`, `std:socket`, `std:reflect`, `std:thread` and `std:test`. A Bytes literal. Time zones (`std:time` is UTC only).
+- Lock timeouts, mutexes other than `shared` + `lock`, killing a running job,
+  `select` over channels.
 - `null`/`nil`/`undefined`: use `none`.
