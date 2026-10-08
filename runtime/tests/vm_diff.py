@@ -978,6 +978,422 @@ print(server.connections() >= 0)
 server.close()
 print(server.connections())
 """, b""),
+    # M44 (docs/contracts/M44_threads.md #12.2): threads, shared variables,
+    # locks, semaphores and channels. No case has more than one unobserved
+    # failing job (#2.3).
+    ("threads_basic", """
+import thread from "std:thread"
+let t = thread.spawn(name: "worker")
+fn square(n) { n * n }
+let p = detach(t) square(7)
+print(p.await)
+print(t.run(square, 9).await)
+print(t, t.name, t.workers, t.capacity)
+print(thread.id(), thread.name())
+print(detach(t) { [thread.id(), thread.name()] }.await)
+let u = thread.spawn()
+print(u.name, u.id)
+t.join()
+u.join()
+print(t.pending(), thread.cores() >= 1)
+# T2: globals are copied at queue time
+let t2 = thread.spawn()
+let t2_counter = 0
+let t2_items = [1, 2]
+let t2_p = detach(t2) {
+    t2_counter = t2_counter + 100
+    t2_items.push(3)
+    [t2_counter, t2_items.len()]
+}
+t2_counter = 5
+print(t2_p.await)
+print(t2_counter, t2_items)
+# T3: identity and cycles
+struct Node { value: Number, next: Unknown }
+let t3 = thread.spawn()
+let t3_a = Node { value: 1, next: none }
+let t3_b = Node { value: 2, next: t3_a }
+t3_a.next = t3_b
+let t3_pair = [t3_a, t3_a]
+let t3_r = t3.run(fn(v) {
+    v[0].value = 10
+    [v[1].value, v[0].next.next.value, v[0].next.value]
+}, t3_pair)
+print(t3_r.await, t3_a.value)
+# T4: closures copy their frames
+let t4 = thread.spawn()
+fn make_counter() {
+    let n = 0
+    fn() {
+        n = n + 1
+        n
+    }
+}
+let t4_c = make_counter()
+t4_c()
+print(t4.run(fn() {
+    t4_c()
+    t4_c()
+}).await, t4_c())
+# T5: methods and Printable travel with the snapshot
+let t5 = thread.spawn()
+struct P { x: Number }
+impl P {
+    fn double(self) { self.x * 2 }
+}
+impl Printable for P {
+    fn to_string(self) { "P(" + self.x + ")" }
+}
+print(t5.run(fn(p) { p.double() }, P { x: 4 }).await)
+print(detach(t5) { "got " + P { x: 1 } }.await)
+""", b""),
+    ("threads_errors", """
+import thread from "std:thread"
+let t = thread.spawn()
+struct Oops { why: String }
+impl Error for Oops {
+    fn message(self) { "oops: " + self.why }
+}
+let q = detach(t) { throw Oops { why: "late" } }
+try { q.await } catch {
+    e: Oops => { print("caught", e.why, e.message()) }
+}
+let pr = detach sleep_async(1)
+try { t.run(fn(x) { x }, [pr]) } catch {
+    e: ThreadError => { print(e.kind) }
+}
+let g = detach sleep_async(1)
+print(detach(t) {
+    try {
+        g.await
+        "awaited"
+    } catch {
+        e: ThreadError => { e.kind }
+    }
+}.await)
+let done = detach { 42 }
+print(detach(t) { done.await + 1 }.await)
+let bad = detach(t) { [detach { 1 }] }
+try { bad.await } catch {
+    e: ThreadError => { print(e.kind, e.message) }
+}
+""", b""),
+    ("threads_shared", """
+import thread from "std:thread"
+shared let n = 0
+shared let xs = []
+fn bump() {
+    lock n {
+        n = n + 1
+        n
+    }
+}
+print(lock n {
+    bump()
+    bump()
+})
+print(n)
+lock xs { xs.push("a") }
+let mine = xs
+lock xs { xs.push("b") }
+print(xs, mine)
+let t = thread.spawn()
+print(detach(t) {
+    lock xs { xs.push("c") }
+    lock xs { xs.len() }
+}.await)
+print(xs)
+xs = ["reset"]
+print(t.run(fn() { xs }).await)
+try {
+    lock xs {
+        xs.push("d")
+        throw RuntimeError.ArgumentError { message: "stop" }
+    }
+} catch {
+    e => { print("caught", e.message()) }
+}
+print(xs)
+shared let slot = none
+try { slot = [detach { 1 }] } catch {
+    e: ThreadError => { print(e.kind, e.message, slot) }
+}
+""", b""),
+    ("threads_pool", """
+import thread from "std:thread"
+shared let total = 0
+shared let log = []
+let pool = thread.spawn(name: "pool", workers: 4)
+fn work(n) {
+    for let i in 0..100 {
+        lock total { total = total + 1 }
+    }
+    lock log { log.push(n) }
+    n * 2
+}
+let jobs = []
+for let n in 0..8 { jobs.push(pool.run(work, n)) }
+let doubled = 0
+for let j in jobs { doubled = doubled + j.await }
+let snapshot = log
+let sum = 0
+for let n in snapshot { sum = sum + n }
+print(total, snapshot.len(), sum, doubled)
+pool.join()
+""", b""),
+    ("threads_deadlock", """
+shared let a = 0
+shared let b = 0
+let p1 = detach {
+    lock a {
+        sleep_async(20)
+        lock b { "p1 got both" }
+    }
+}
+let p2 = detach {
+    lock b {
+        sleep_async(60)
+        try {
+            lock a { "p2 got both" }
+        } catch {
+            e: ThreadError => { e.kind + " | " + e.message }
+        }
+    }
+}
+print(p1.await)
+print(p2.await)
+""", b""),
+    ("threads_semaphore", """
+import thread from "std:thread"
+let s = thread.semaphore(1)
+print(s.try_acquire(), s.try_acquire(), s.available())
+s.release()
+print(s.available(), s)
+try { s.release() } catch {
+    e: ThreadError => { print(e.kind, e.message) }
+}
+let gate = thread.semaphore(2)
+shared let inside = 0
+shared let most = 0
+fn job(n) {
+    gate.acquire()
+    defer gate.release()
+    lock inside, most {
+        inside = inside + 1
+        if inside > most { most = inside }
+    }
+    sleep_async(20)
+    lock inside { inside = inside - 1 }
+    n
+}
+let pool = thread.spawn(workers: 4)
+let ps = []
+for let n in 0..6 { ps.push(pool.run(job, n)) }
+let total = 0
+for let p in ps { total = total + p.await }
+print(most <= 2, most >= 1, inside, total, gate.available())
+pool.join()
+""", b""),
+    ("threads_channels", """
+import thread from "std:thread"
+let c1 = thread.channel(capacity: 1)
+c1.send("a")
+print(c1.len())
+let blocked = detach c1.send("b")
+print(c1.recv(), c1.recv())
+blocked.await
+c1.close()
+print(c1.try_recv(), c1.closed(), c1.len())
+try { c1.send("x") } catch {
+    e: ThreadError => { print(e.kind, e.message) }
+}
+try { c1.recv() } catch {
+    e: ThreadError => { print(e.kind) }
+}
+let tasks = thread.channel()
+let results = thread.channel()
+let workers = thread.spawn(name: "workers", workers: 3)
+fn worker() {
+    let sum = 0
+    for let job in tasks { sum = sum + job }
+    results.send(sum)
+}
+for let i in 0..3 { workers.run(worker) }
+for let n in 1..=10 { tasks.send(n) }
+tasks.close()
+let total = 0
+for let i in 0..3 { total = total + results.recv() }
+print(total)
+let r = thread.channel(capacity: 0)
+let receiver = detach r.recv()
+r.send("hand-off")
+print(receiver.await, r.try_recv())
+workers.join()
+""", b""),
+    ("threads_close", """
+import thread from "std:thread"
+let solo = thread.spawn(name: "solo", capacity: 1)
+let started = thread.channel()
+let gate = thread.channel()
+let first = detach(solo) {
+    started.send(1)
+    gate.recv()
+}
+started.recv()
+let second = detach(solo) { "second" }
+try { detach(solo) { "third" } } catch {
+    e: ThreadError => { print(e.kind, e.message) }
+}
+print(solo.pending())
+solo.close(cancel: true)
+try { second.await } catch {
+    e: ThreadError => { print(e.kind, e.message) }
+}
+try { solo.run(fn() { 1 }) } catch {
+    e: ThreadError => { print(e.kind, e.message) }
+}
+gate.send("go")
+print(first.await)
+solo.join()
+print(solo.pending())
+let me = thread.spawn(name: "me")
+print(detach(me) {
+    try {
+        me.join()
+        "joined"
+    } catch {
+        e: ThreadError => { e.message }
+    }
+}.await)
+me.join()
+""", b""),
+    ("threads_exit", """
+import thread from "std:thread"
+import process from "std:process"
+let t = thread.spawn()
+print("before")
+let p = detach(t) { process.exit(3) }
+p.await
+print("never")
+""", b""),
+    ("threads_keepalive", """
+import thread from "std:thread"
+let t = thread.spawn()
+detach(t) {
+    sleep_async(100)
+    print("late")
+}
+print("main done")
+""", b""),
+    ("threads_uncaught", """
+import thread from "std:thread"
+let t = thread.spawn()
+let p = detach(t) { throw RuntimeError.ArgumentError { message: "bad" } }
+""", b""),
+    ("threads_implicit", """
+shared let n = 0
+struct P { x: Number }
+impl Printable for P {
+    fn to_string(self) {
+        lock n { n = n + 1 }
+        "P(" + self.x + ", n=" + n + ")"
+    }
+}
+lock n {
+    n = 10
+    print(P { x: 1 })
+}
+print(n)
+""", b""),
+    ("threads_reads", """
+shared let xs = [1]
+fn count_with(v) {
+    let s = xs
+    s.push(v)
+    s.len()
+}
+print(count_with(2), xs)
+print(lock xs {
+    xs.push(5)
+    [count_with(9), xs.len()]
+}, xs)
+""", b""),
+    ("threads_writeback", """
+shared let slot = []
+struct Boom { why: String }
+impl Error for Boom {
+    fn message(self) { "boom: " + self.why }
+}
+try {
+    lock slot {
+        slot.push(detach { 1 })
+        throw Boom { why: "first" }
+    }
+} catch {
+    e: Boom => { print("caught", e.message()) }
+    e: ThreadError => { print("wrong", e.kind) }
+}
+print(slot)
+try {
+    lock slot { slot.push(detach { 2 }) }
+} catch {
+    e: ThreadError => { print(e.kind) }
+}
+print(slot)
+""", b""),
+    ("threads_await_deadlock", """
+shared let x = 0
+let p = none
+try {
+    lock x {
+        p = detach { x = 1 }
+        p.await
+    }
+} catch {
+    e: ThreadError => { print(e.kind, "|", e.message) }
+}
+p.await
+print(x)
+""", b""),
+    ("threads_await_deadlock_job", """
+import thread from "std:thread"
+shared let x = 0
+let t = thread.spawn()
+try {
+    lock x { detach(t) { x = 1 }.await }
+} catch {
+    e: ThreadError => { print(e.kind) }
+}
+t.join()
+print("joined")
+""", b""),
+    ("threads_stuck", """
+import thread from "std:thread"
+let ch = thread.channel()
+try { ch.recv() } catch {
+    e: ThreadError => { print(e.kind, "|", e.message) }
+}
+let t = thread.spawn()
+let p = detach(t) { ch.recv() }
+try { p.await } catch {
+    e: ThreadError => { print(e.kind) }
+}
+let s = thread.semaphore(1)
+s.acquire()
+try { s.acquire() } catch {
+    e: ThreadError => { print(e.kind) }
+}
+print("end")
+""", b""),
+    ("threads_handles", """
+import thread from "std:thread"
+shared let jobs = thread.channel()
+shared let gate: thread.Semaphore = thread.semaphore(1)
+jobs.send(1)
+gate.acquire()
+print(jobs.recv(), gate.available(), jobs.len())
+gate.release()
+""", b""),
     ("std_csv", """
 import csv from "std:csv"
 print(csv.parse("a,\\"b,c\\"\\r\\n\\n\\"q\\"\\"x\\",\\n"), csv.parse_records("n,v\\nx,1\\n"))

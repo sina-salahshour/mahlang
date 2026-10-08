@@ -3,20 +3,23 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BinaryHeap, HashMap};
-use std::io::{self, Read, Stdin, Stdout, Write};
+use std::io::{self, Read, Stdin, Write};
 use std::rc::Rc;
+use std::sync::mpsc::{Receiver, Sender};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::decimal::Decimal;
-use crate::decode::{Addr, BinOp, HandlerEntry};
+use crate::decode::{Addr, BinOp, HandlerEntry, Program};
 
 use super::error::{ErrorKind, RResult, RuntimeError};
 use super::link::{LinkedInstr, LinkedProgram, TypeInfo, TypeKind};
 use super::methods::{self, call_native_method, NativeMethodKind};
 use super::natives;
+use super::thread::{self as threads, NotSendable, Payload, Snapshot, ThreadRuntime};
 use super::value::{
     self, display_name, is_number, map_key, truthy, type_name_of, values_equal, BuiltinTypeNames, ClosureData, Continuation,
-    EnumData, FrameRef, MapData, PromiseData, StructData, TaskRef, Value,
+    EnumData, FrameRef, MapData, Producer, PromiseData, StructData, TaskRef, Value,
 };
 
 /// M25 (docs/MAHC_FORMAT.md #6.3): `matchtype` -- any variant matches, for
@@ -527,7 +530,9 @@ pub struct Vm<'p> {
     return_register: Value,
     timers: BinaryHeap<TimerEntry>,
     timer_seq: u64,
-    stdout: io::BufWriter<Stdout>,
+    /// M44 (docs/contracts/M44_threads.md #6.3): this VM's line buffer --
+    /// only whole lines reach the run's shared stdout, except at flush points.
+    line: Vec<u8>,
     stdin: Stdin,
     to_string_name: Rc<str>,
     /// M25: identifies the main task for `drive`'s "is this task the main
@@ -542,8 +547,22 @@ pub struct Vm<'p> {
     pub regex_cache: HashMap<Rc<str>, regex::Regex>,
     /// M33 (docs/MAHC_FORMAT.md #6.4): blocking operations in flight.
     io: IoHub,
-    /// M34: when this VM started, for `time.monotonic_ms`.
+    /// M34: when the run started, for `time.monotonic_ms` (M44: shared by
+    /// every VM of the run).
     started: Instant,
+    /// M44 (docs/contracts/M44_threads.md #6.1): the run's thread runtime,
+    /// this VM's id (the main VM is 0), and `[id, name]` of the thread it runs
+    /// on (`(0, "main")` in the main VM).
+    pub(super) rt: Arc<ThreadRuntime>,
+    pub(super) vm_id: u64,
+    pub(super) thread_info: (u64, Rc<str>),
+    /// M44: this VM's runtime waits (lock, semaphore, channel, join, job
+    /// reply) by pending id, in creation order -- the *internal* pending
+    /// entries (#6.1).
+    waits: BTreeMap<u64, Wait>,
+    /// M44: the tasks this VM is stepping, innermost last (an implicit-call
+    /// sub-task takes its identity from the top, #5.2).
+    stepping: Vec<TaskRef>,
     /// M36 (std:process): the program's arguments, its environment table
     /// (a snapshot taken at start; sorted by name), and whether this is a
     /// `mah test` run (where `exit` fails the test instead).
@@ -559,44 +578,73 @@ pub struct Vm<'p> {
 /// reader thread, so lines are handed out in the order `input` asked.
 /// Mirrors `code_interpreter.py`'s `_IoHub`.
 struct IoHub {
-    done_tx: std::sync::mpsc::Sender<(u64, Completion)>,
-    done_rx: std::sync::mpsc::Receiver<(u64, Completion)>,
+    done_tx: Sender<(u64, Completion)>,
+    done_rx: Receiver<(u64, Completion)>,
     pending: HashMap<u64, Rc<RefCell<PromiseData>>>,
     next_id: u64,
-    stdin_requests: Option<std::sync::mpsc::Sender<u64>>,
-    /// M35 (std:fs): open files by id -- the VM's handle table. Shared with
-    /// the workers, since an `fs.open` job adds its file itself.
+    /// M35 (std:fs): open files by id -- the run's handle table (M44: shared
+    /// by every VM of the run). Shared with the workers, since an `fs.open`
+    /// job adds its file itself.
     pub files: super::fs::FileTable,
-    /// M38 (std:socket): open sockets and listeners by id.
+    /// M38 (std:socket): open sockets and listeners by id (M44: the run's).
     pub sockets: super::socket::SocketTable,
+    /// M44: only the main VM's hub closes the shared tables.
+    owns_tables: bool,
 }
 
-/// M38: every open socket is closed when the VM finishes.
+/// M38: every open socket is closed when the program finishes.
 impl Drop for IoHub {
     fn drop(&mut self) {
-        self.sockets.close_all();
+        if self.owns_tables {
+            self.sockets.close_all();
+        }
     }
 }
 
 /// What a worker reports: a line of standard input (`None` at its end), or
 /// a job's result as plain data (M35), turned into Mah values on the VM's
-/// own thread.
+/// own thread. M44 (docs/contracts/M44_threads.md #6.2): the thread
+/// runtime's completions.
 pub enum Completion {
     Line(Option<String>),
     Value(super::fs::IoValue),
+    /// A job's reply (including `cancelled`).
+    Job(Result<Payload, Payload>),
+    /// Joins, send acknowledgements, channel-closed failures.
+    Settle(Result<Payload, Payload>),
+    /// A lock granted, with the store's value.
+    Lock(Arc<Payload>),
+    /// A semaphore permit, by semaphore id.
+    Sem(u64),
+    /// A channel message, by channel id.
+    Recv(u64, Payload),
+    /// #6.10: every VM of the run is blocked.
+    Stuck,
 }
 
+/// M44: one runtime wait of this VM (an *internal* pending entry, #6.1).
+pub enum Wait {
+    Lock { task: TaskRef, index: u64 },
+    Sem,
+    Recv,
+    Send,
+    Join,
+    Job,
+}
+
+type Done = (Sender<(u64, Completion)>, Receiver<(u64, Completion)>);
+
 impl IoHub {
-    fn new() -> IoHub {
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
+    fn new(rt: &ThreadRuntime, owns_tables: bool, done: Done) -> IoHub {
+        let (done_tx, done_rx) = done;
         IoHub {
             done_tx,
             done_rx,
             pending: HashMap::new(),
             next_id: 0,
-            stdin_requests: None,
-            files: super::fs::FileTable::default(),
-            sockets: super::socket::SocketTable::default(),
+            files: rt.files.clone(),
+            sockets: rt.sockets.clone(),
+            owns_tables,
         }
     }
 
@@ -611,49 +659,35 @@ impl IoHub {
         });
     }
 
-    fn read_line(&mut self, promise: Rc<RefCell<PromiseData>>) {
+    fn read_line(&mut self, rt: &ThreadRuntime, promise: Rc<RefCell<PromiseData>>) {
         let id = self.next_id;
         self.next_id += 1;
         self.pending.insert(id, promise);
-        let requests = self.stdin_requests.get_or_insert_with(|| {
-            let (tx, rx) = std::sync::mpsc::channel::<u64>();
-            let done = self.done_tx.clone();
-            std::thread::spawn(move || stdin_worker(rx, done));
-            tx
-        });
-        let _ = requests.send(id);
-    }
-}
-
-fn stdin_worker(requests: std::sync::mpsc::Receiver<u64>, done: std::sync::mpsc::Sender<(u64, Completion)>) {
-    use std::io::BufRead;
-    // Ends when the VM (the only sender) is dropped.
-    while let Ok(id) = requests.recv() {
-        let mut line = String::new();
-        let got = match io::stdin().lock().read_line(&mut line) {
-            Ok(0) | Err(_) => None,
-            Ok(_) => {
-                if line.ends_with('\n') {
-                    line.pop();
-                    if line.ends_with('\r') {
-                        line.pop();
-                    }
-                }
-                Some(line)
-            }
-        };
-        if done.send((id, Completion::Line(got))).is_err() {
-            return;
-        }
+        rt.request_line(id, self.done_tx.clone());
     }
 }
 
 impl<'p> Vm<'p> {
+    /// M44 (docs/contracts/M44_threads.md #6.3): append to this VM's line
+    /// buffer; whole lines go to the shared stdout in one write.
     pub fn write_stdout(&mut self, s: &str) {
-        let _ = self.stdout.write_all(s.as_bytes());
+        self.line.extend_from_slice(s.as_bytes());
+        if s.as_bytes().contains(&b'\n') {
+            let pos = self.line.iter().rposition(|&b| b == b'\n').expect("just appended one");
+            let mut out = self.rt.stdout();
+            let _ = out.write_all(&self.line[..=pos]);
+            drop(out);
+            self.line.drain(..=pos);
+        }
     }
+    /// A flush point: hand over everything left, then flush the shared stdout.
     pub fn flush_stdout(&mut self) {
-        let _ = self.stdout.flush();
+        let mut out = self.rt.stdout();
+        if !self.line.is_empty() {
+            let _ = out.write_all(&self.line);
+            self.line.clear();
+        }
+        let _ = out.flush();
     }
     pub fn read_stdin_char(&self) -> Option<char> {
         read_stdin_char(&self.stdin)
@@ -666,7 +700,15 @@ impl<'p> Vm<'p> {
     /// M36: `process.exit` -- flush stdout and end the program at once
     /// (pending defers, tasks, timers and I/O are abandoned). In a test run
     /// the test fails instead, reported as `main.rs`'s `load_and_test` does.
+    ///
+    /// M44: the first exit of the run wins (`super::claim_exit`); a later
+    /// one, from any thread, never returns.
     pub fn exit_program(&mut self, code: i32) -> ! {
+        if !super::claim_exit() {
+            loop {
+                std::thread::park();
+            }
+        }
         self.flush_stdout();
         if self.test_mode {
             let outcome = TestOutcome::new("failed", format!("the test called exit({code})"));
@@ -701,7 +743,112 @@ impl<'p> Vm<'p> {
     /// M33: settle `promise` with the next line of standard input (or fail
     /// it with EndOfInput), from the scheduler, later.
     pub fn read_line(&mut self, promise: Rc<RefCell<PromiseData>>) {
-        self.io.read_line(promise);
+        self.io.read_line(&self.rt, promise);
+    }
+
+    // -- M44: runtime waits, copies, jobs (docs/contracts/M44_threads.md) ----
+
+    /// A fresh pending id (registered later with `add_wait`).
+    pub(super) fn alloc_id(&mut self) -> u64 {
+        let id = self.io.next_id;
+        self.io.next_id += 1;
+        id
+    }
+
+    /// Register an internal pending entry: it keeps the VM alive until its
+    /// completion arrives (or it fails with `stuck`).
+    pub(super) fn add_wait(&mut self, id: u64, promise: Rc<RefCell<PromiseData>>, wait: Wait) {
+        self.io.pending.insert(id, promise);
+        self.waits.insert(id, wait);
+    }
+
+    /// A copied value, built in this VM's heap.
+    pub(super) fn materialize(&self, p: &Payload) -> Value {
+        threads::materialize(&self.linked.functions, p)
+    }
+
+    /// docs/contracts/M44_threads.md #2.3 steps 2-3: bind the arguments
+    /// here, then copy what the job needs (#4.1).
+    pub(super) fn make_job(
+        &mut self,
+        closure: &Rc<ClosureData>,
+        values: Vec<Value>,
+    ) -> RResult<Result<Snapshot, NotSendable>> {
+        let label = match &closure.func.name {
+            Some(n) => format!("'{n}'"),
+            None => "function".to_string(),
+        };
+        let bound = bind_params(
+            closure.func.param_count,
+            closure.func.params.as_deref(),
+            values,
+            Vec::new(),
+            &label,
+            closure.func.rest,
+        )?;
+        let mut methods: Vec<(String, String, Option<String>, Value, bool)> = Vec::new();
+        for ((tn, mn), entry) in &self.method_table {
+            if let Some((Callable::Closure(c), is_method)) = &entry.inherent {
+                methods.push((tn.to_string(), mn.to_string(), None, Value::Function(c.clone()), *is_method));
+            }
+            for (t, (target, is_method)) in &entry.traits {
+                if let Callable::Closure(c) = target {
+                    methods.push((
+                        tn.to_string(),
+                        mn.to_string(),
+                        Some(t.to_string()),
+                        Value::Function(c.clone()),
+                        *is_method,
+                    ));
+                }
+            }
+        }
+        let decorators: Vec<((u64, usize, usize), Value)> =
+            self.decorators.iter().map(|(k, v)| (*k, v.clone())).collect();
+        let hook_types: Vec<(String, Value)> = self.hook_types.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
+        let hook_params: Vec<((usize, usize), Value)> = self.hook_params.iter().map(|(k, v)| (*k, v.clone())).collect();
+        let callee = Value::Function(closure.clone());
+        let mut roots: Vec<(&Value, bool)> = bound.iter().map(|v| (v, true)).collect();
+        roots.push((&callee, false));
+        roots.extend(methods.iter().map(|m| (&m.3, false)));
+        roots.extend(decorators.iter().map(|(_, v)| (v, false)));
+        roots.extend(hook_types.iter().map(|(_, v)| (v, false)));
+        roots.extend(hook_params.iter().map(|(_, v)| (v, false)));
+        let (graph, copies) = match threads::copy_out(&roots) {
+            Ok(r) => r,
+            Err(e) => return Ok(Err(e)),
+        };
+        let n = bound.len();
+        let mut it = copies.into_iter();
+        let args: Vec<_> = it.by_ref().take(n).collect();
+        let callee = it.next().expect("the callee was copied");
+        let methods = methods.into_iter().map(|(a, b, c, _, e)| (a, b, c, it.next().expect("copied"), e)).collect();
+        let decorators = decorators.into_iter().map(|(k, _)| (k, it.next().expect("copied"))).collect();
+        let hook_types = hook_types.into_iter().map(|(k, _)| (k, it.next().expect("copied"))).collect();
+        let hook_params = hook_params.into_iter().map(|(k, _)| (k, it.next().expect("copied"))).collect();
+        Ok(Ok(Snapshot {
+            graph,
+            callee,
+            args,
+            methods,
+            decorators,
+            hook_types,
+            hook_params,
+            fn_items: self.fn_items,
+            env: self.env.clone(),
+        }))
+    }
+
+    /// Remove `task`'s await edge from the wait-for graph (it resumed).
+    fn clear_await(&mut self, task: &TaskRef) {
+        let (edge, id) = {
+            let t = task.borrow();
+            (t.awaits_edge, t.id)
+        };
+        if edge {
+            self.rt.clear_await(id);
+            task.borrow_mut().awaits_edge = false;
+        }
     }
 
     pub fn schedule_timer(&mut self, delay_seconds: f64, promise: Rc<RefCell<PromiseData>>) {
@@ -1206,6 +1353,17 @@ impl<'p> Vm<'p> {
             }
         }
         let sub_task = value::new_task(closure.func.entry, frame, None);
+        if let Some(top) = self.stepping.last() {
+            // M44: an implicit runtime call belongs to its caller's task (the
+            // same identity and held locks, docs/contracts/M44_threads.md #5.2).
+            let (id, held) = {
+                let t = top.borrow();
+                (t.id, t.held.clone())
+            };
+            let mut st = sub_task.borrow_mut();
+            st.id = id;
+            st.held = held;
+        }
         match self.step_task(&sub_task, None)? {
             StepControl::Done(v) => Ok(v),
             StepControl::Suspended => Err(RuntimeError::new(format!(
@@ -1245,6 +1403,8 @@ impl<'p> Vm<'p> {
         }
         let promise = PromiseData::new_pending();
         let new_task = value::new_task(closure.func.entry, new_frame, Some(promise.clone()));
+        // M44: the wait-for graph's await edge
+        promise.borrow_mut().producer = Some(Producer::Task(new_task.borrow().id));
         self.drive(new_task, None)?;
         Ok(promise)
     }
@@ -1256,6 +1416,7 @@ impl<'p> Vm<'p> {
         p.borrow_mut().settled = Some(value.clone());
         let callbacks = std::mem::take(&mut p.borrow_mut().callbacks);
         for cb in callbacks {
+            self.clear_await(&cb.task);
             let frame = cb.task.borrow().current_frame.clone();
             value::write_addr(&frame, cb.dest, value.clone())?;
             cb.task.borrow_mut().pc = cb.resume_pc;
@@ -1275,6 +1436,7 @@ impl<'p> Vm<'p> {
         p.borrow_mut().failed = Some(error.clone());
         let callbacks = std::mem::take(&mut p.borrow_mut().callbacks);
         for cb in callbacks {
+            self.clear_await(&cb.task);
             let resume_pc = cb.resume_pc;
             self.drive(cb.task.clone(), Some((error.clone(), resume_pc - 1)))?;
         }
@@ -1324,6 +1486,13 @@ impl<'p> Vm<'p> {
     /// own return stack runs out with no handler found does this return
     /// `StepControl::Failed` rather than looping again.
     fn step_task(&mut self, task: &TaskRef, pending: Option<(Value, usize)>) -> RResult<StepControl> {
+        self.stepping.push(task.clone());
+        let result = self.step_task_inner(task, pending);
+        self.stepping.pop();
+        result
+    }
+
+    fn step_task_inner(&mut self, task: &TaskRef, pending: Option<(Value, usize)>) -> RResult<StepControl> {
         if let Some((value, pc)) = pending {
             if !self.unwind(task, value.clone(), pc)? {
                 return Ok(StepControl::Failed(value));
@@ -1356,8 +1525,66 @@ impl<'p> Vm<'p> {
     }
 
     fn settle_io(&mut self, (id, completion): (u64, Completion)) -> RResult<()> {
+        if let Completion::Stuck = completion {
+            // docs/contracts/M44_threads.md #6.10: fail every internal wait
+            let ids: Vec<u64> = self.waits.keys().copied().collect();
+            self.rt.take_stuck(self.vm_id, &ids);
+            let mut promises = Vec::with_capacity(ids.len());
+            for id in ids {
+                self.waits.remove(&id);
+                if let Some(p) = self.io.pending.remove(&id) {
+                    promises.push(p);
+                }
+            }
+            for p in promises {
+                self.fail_promise(&p, threads::thread_error("stuck", threads::STUCK_MESSAGE))?;
+            }
+            return Ok(());
+        }
         let Some(promise) = self.io.pending.remove(&id) else { return Ok(()) };
+        let wait = self.waits.remove(&id);
         match completion {
+            Completion::Stuck => Ok(()),
+            Completion::Job(outcome) => {
+                if !promise.borrow().is_pending() {
+                    return Ok(()); // settled early by hand
+                }
+                match outcome {
+                    Ok(v) => {
+                        let v = self.materialize(&v);
+                        self.resolve_promise(&promise, v)
+                    }
+                    Err(e) => {
+                        let e = self.materialize(&e);
+                        self.fail_promise(&promise, e)?;
+                        self.failed_promises.push(promise);
+                        Ok(())
+                    }
+                }
+            }
+            Completion::Settle(outcome) => match outcome {
+                Ok(v) => {
+                    let v = self.materialize(&v);
+                    self.resolve_promise(&promise, v)
+                }
+                Err(e) => {
+                    let e = self.materialize(&e);
+                    self.fail_promise(&promise, e)
+                }
+            },
+            Completion::Lock(stored) => {
+                if let Some(Wait::Lock { task, index }) = wait {
+                    let v = self.materialize(&stored);
+                    let held = task.borrow().held.clone();
+                    held.borrow_mut().push(value::Held { index, value: v, depth: 1, unwinding: 0 });
+                }
+                self.resolve_promise(&promise, Value::None)
+            }
+            Completion::Sem(_) => self.resolve_promise(&promise, Value::None),
+            Completion::Recv(_, message) => {
+                let v = self.materialize(&message);
+                self.resolve_promise(&promise, v)
+            }
             Completion::Value(v) => self.resolve_promise(&promise, v.into_value()),
             Completion::Line(Some(text)) => self.resolve_promise(&promise, Value::Str(Rc::from(text.as_str()))),
             Completion::Line(None) => {
@@ -1389,7 +1616,18 @@ impl<'p> Vm<'p> {
                 let wait = t.wake.saturating_duration_since(Instant::now());
                 self.io.done_rx.recv_timeout(wait).ok()
             }
-            None => self.io.done_rx.recv().ok(),
+            None => {
+                // M44 (docs/contracts/M44_threads.md #6.10): about to block
+                // with only runtime waits pending -- maybe every VM is.
+                if !self.waits.is_empty() {
+                    let all_internal = self.io.pending.len() == self.waits.len();
+                    if let Some(item) = self.rt.about_to_block(self.vm_id, all_internal, &self.io.done_rx) {
+                        self.settle_io(item)?;
+                        return Ok(true);
+                    }
+                }
+                self.io.done_rx.recv().ok()
+            }
         };
         match got {
             Some(item) => {
@@ -1735,6 +1973,18 @@ impl<'p> Vm<'p> {
                     // in the enclosing `step_task` is exactly that.
                     (None, Some(e)) => return Err(RuntimeError::thrown_value(e)),
                     (None, None) => {
+                        let producer = p.borrow().producer;
+                        if let Some(producer) = producer {
+                            if self.rt.tracking.load(std::sync::atomic::Ordering::SeqCst) {
+                                // M44 (docs/contracts/M44_threads.md #6.4): a
+                                // deadlock throws here; else the edge is recorded.
+                                let task_id = task.borrow().id;
+                                if !self.rt.await_check(self.vm_id, task_id, producer) {
+                                    return threads::throw_thread_error("deadlock", threads::AWAIT_DEADLOCK_MESSAGE);
+                                }
+                                task.borrow_mut().awaits_edge = true;
+                            }
+                        }
                         let resume_pc = task.borrow().pc;
                         p.borrow_mut().callbacks.push(Continuation { task: task.clone(), dest: *dest, resume_pc });
                         return Ok(Some(StepControl::Suspended));
@@ -1894,6 +2144,25 @@ impl<'p> Vm<'p> {
                 match dest {
                     Some(d) => wr!(*d, r),
                     None => self.return_register = r,
+                }
+            }
+            // M44 (1.21, docs/contracts/M44_threads.md #6.4): shared variables.
+            LinkedInstr::SharedGet { index, locked, dest, .. } => {
+                let v = threads::get(self, task, *index, *locked)?;
+                wr!(*dest, v);
+            }
+            LinkedInstr::SharedSet { index, src, .. } => {
+                threads::set(task, *index, rd(*src)?)?;
+            }
+            LinkedInstr::SharedLock { index, name, dest } => {
+                let p = threads::acquire(self, task, *index, name)?;
+                wr!(*dest, p);
+            }
+            LinkedInstr::SharedUnlock { index, name, mark } => {
+                if *mark {
+                    threads::mark(task, *index);
+                } else {
+                    threads::release(self, task, *index, name)?;
                 }
             }
         }
@@ -2098,31 +2367,34 @@ impl<'a> Vm<'a> {
     }
 }
 
-pub fn execute(linked: &LinkedProgram, args: &[String]) -> RResult<()> {
-    run(linked, None, args).map(|_| ())
+pub fn execute(program: Arc<Program>, linked: &LinkedProgram, args: &[String]) -> RResult<()> {
+    run(program, linked, None, args).map(|_| ())
 }
 
 /// M28: run the test in main-frame slot `slot` after the file's own
 /// top-level code (docs/MAHC_FORMAT.md #6.10).
-pub fn execute_test(linked: &LinkedProgram, slot: usize) -> RResult<TestOutcome> {
-    match run(linked, Some(slot), &[]) {
+pub fn execute_test(program: Arc<Program>, linked: &LinkedProgram, slot: usize) -> RResult<TestOutcome> {
+    match run(program, linked, Some(slot), &[]) {
         Ok(outcome) => Ok(outcome.expect("a test run always has an outcome")),
         // The file's own top-level code failed before the test ran.
         Err(e) => Ok(TestOutcome::new("failed", e.message)),
     }
 }
 
-fn run(linked: &LinkedProgram, test_slot: Option<usize>, args: &[String]) -> RResult<Option<TestOutcome>> {
+/// M44: the one constructor of a VM -- the main VM (`run`) and every job VM
+/// (`run_job`).
+fn new_vm<'p>(
+    linked: &'p LinkedProgram,
+    rt: Arc<ThreadRuntime>,
+    vm_id: u64,
+    thread_info: (u64, Rc<str>),
+    io: IoHub,
+    env: BTreeMap<String, String>,
+    main_task: TaskRef,
+) -> Vm<'p> {
     let names = BuiltinTypeNames::new();
     let method_table = build_initial_method_table(&names);
-    if linked.functions.is_empty() {
-        return Err(RuntimeError::new("FUNCTIONS section must declare at least one function"));
-    }
-    let main_fn = &linked.functions[0];
-    let main_frame = value::new_frame(main_fn.slot_count, None);
-    let main_promise = PromiseData::new_pending();
-    let main_task = value::new_task(main_fn.entry, main_frame.clone(), Some(main_promise.clone()));
-    let mut vm = Vm {
+    Vm {
         linked,
         code: &linked.code,
         types: &linked.types,
@@ -2137,50 +2409,207 @@ fn run(linked: &LinkedProgram, test_slot: Option<usize>, args: &[String]) -> RRe
         return_register: Value::None,
         timers: BinaryHeap::new(),
         timer_seq: 0,
-        stdout: io::BufWriter::new(io::stdout()),
+        line: Vec::new(),
         stdin: io::stdin(),
         to_string_name: Rc::from("to_string"),
-        main_task: main_task.clone(),
+        main_task,
         failed_promises: Vec::new(),
         regex_cache: HashMap::new(),
-        io: IoHub::new(),
-        started: Instant::now(),
-        args: args.to_vec(),
-        env: super::process::snapshot_environment(),
-        test_mode: test_slot.is_some(),
-    };
-    vm.drive(main_task, None)?;
-
-    loop {
-        // M33: the program ends once the main task has finished and no
-        // timer or I/O operation is pending (docs/MAHC_FORMAT.md #6.4).
-        let settled = main_promise.borrow().settled.is_some();
-        if settled && vm.timers.is_empty() && vm.io.pending.is_empty() {
-            break;
-        }
-        if !vm.next_event()? {
-            break;
-        }
+        io,
+        started: rt.started,
+        args: rt.args.clone(),
+        env,
+        test_mode: rt.test_mode,
+        rt,
+        vm_id,
+        thread_info,
+        waits: BTreeMap::new(),
+        stepping: Vec::new(),
     }
+}
 
-    // M25 (docs/MAHC_FORMAT.md #4.6): once the program would otherwise end
-    // normally, report the FIRST never-observed failed detached-task
-    // Promise (in fail order) as an uncaught error, if there is one.
-    for p in &vm.failed_promises {
-        let observed = p.borrow().observed;
-        if !observed {
-            let error = p.borrow().failed.clone().expect("recorded in failed_promises, so it must be Failed");
-            let report = vm.uncaught_report(&error);
-            let mut err = RuntimeError::new(report);
-            err.located = true;
-            return Err(err);
-        }
+fn run(
+    program: Arc<Program>,
+    linked: &LinkedProgram,
+    test_slot: Option<usize>,
+    args: &[String],
+) -> RResult<Option<TestOutcome>> {
+    if linked.functions.is_empty() {
+        return Err(RuntimeError::new("FUNCTIONS section must declare at least one function"));
     }
-
-    let outcome = match test_slot {
-        Some(slot) => Some(vm.run_test(&main_frame, slot)?),
-        None => None,
-    };
+    let rt = Arc::new(ThreadRuntime::new(program, args, test_slot.is_some()));
+    let done = std::sync::mpsc::channel();
+    // The main VM is live for the whole run (docs/contracts/M44_threads.md #6.10).
+    rt.register_vm(0, done.0.clone());
+    let io = IoHub::new(&rt, true, done);
+    let main_fn = &linked.functions[0];
+    let main_frame = value::new_frame(main_fn.slot_count, None);
+    let main_promise = PromiseData::new_pending();
+    let main_task = value::new_task(main_fn.entry, main_frame.clone(), Some(main_promise.clone()));
+    let env = super::process::snapshot_environment();
+    let mut vm = new_vm(linked, rt, 0, (0, Rc::from("main")), io, env, main_task.clone());
+    let result = vm.run_main(main_task, &main_promise, &main_frame, test_slot);
+    // M44: the shared stdout is no longer dropped with the VM -- flush it on
+    // every way out, before an error reaches stderr.
     vm.flush_stdout();
-    Ok(outcome)
+    result
+}
+
+impl<'p> Vm<'p> {
+    fn run_main(
+        &mut self,
+        main_task: TaskRef,
+        main_promise: &Rc<RefCell<PromiseData>>,
+        main_frame: &FrameRef,
+        test_slot: Option<usize>,
+    ) -> RResult<Option<TestOutcome>> {
+        self.drive(main_task, None)?;
+
+        loop {
+            // M33: the program ends once the main task has finished and no
+            // timer or I/O operation is pending (docs/MAHC_FORMAT.md #6.4).
+            // M44: nor any runtime wait or job reply.
+            let settled = main_promise.borrow().settled.is_some();
+            if settled && self.timers.is_empty() && self.io.pending.is_empty() {
+                break;
+            }
+            if !self.next_event()? {
+                break;
+            }
+        }
+
+        // M25 (docs/MAHC_FORMAT.md #4.6): once the program would otherwise end
+        // normally, report the FIRST never-observed failed detached-task
+        // Promise (in fail order) as an uncaught error, if there is one.
+        let failed = self.failed_promises.clone();
+        for p in &failed {
+            let observed = p.borrow().observed;
+            if !observed {
+                let error = p.borrow().failed.clone().expect("recorded in failed_promises, so it must be Failed");
+                let report = self.uncaught_report(&error);
+                let mut err = RuntimeError::new(report);
+                err.located = true;
+                return Err(err);
+            }
+        }
+
+        match test_slot {
+            Some(slot) => Ok(Some(self.run_test(main_frame, slot)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// docs/contracts/M44_threads.md #6.5: drive the job's root task, then
+    /// its event loop. `Some(outcome)` when the root failed (the job ends at
+    /// once); `None` when nothing more can happen.
+    fn job_loop(&mut self, root: TaskRef, root_promise: &Rc<RefCell<PromiseData>>) -> RResult<Option<Value>> {
+        self.drive(root, None)?;
+        loop {
+            let (failed, settled) = {
+                let p = root_promise.borrow();
+                (p.failed.clone(), p.settled.is_some())
+            };
+            if let Some(error) = failed {
+                root_promise.borrow_mut().observed = true;
+                return Ok(Some(error));
+            }
+            if settled && self.timers.is_empty() && self.io.pending.is_empty() {
+                return Ok(None);
+            }
+            if !self.next_event()? {
+                return Ok(None);
+            }
+        }
+    }
+
+    /// The job's outcome once its loop ended (#6.5), before the copy back.
+    fn job_outcome(&mut self, root_promise: &Rc<RefCell<PromiseData>>) -> Result<Value, Value> {
+        let (pending, settled) = {
+            let p = root_promise.borrow();
+            (p.is_pending(), p.settled.clone())
+        };
+        if pending {
+            return Err(threads::thread_error("stuck", threads::JOB_STUCK_MESSAGE));
+        }
+        for p in &self.failed_promises {
+            let observed = p.borrow().observed;
+            if !observed {
+                p.borrow_mut().observed = true;
+                return Err(p.borrow().failed.clone().expect("a failed Promise"));
+            }
+        }
+        Ok(settled.unwrap_or(Value::None))
+    }
+}
+
+/// docs/contracts/M44_threads.md #6.5: run one job in a fresh job VM on the
+/// calling (worker) thread. Returns its outcome as a copy, and the VM's done
+/// queue (for the teardown, #6.6).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn run_job(
+    rt: &Arc<ThreadRuntime>,
+    linked: &LinkedProgram,
+    thread: (u64, &str),
+    job_id: u64,
+    snapshot: Snapshot,
+    vm_id: u64,
+    done: Done,
+) -> (Result<Payload, Payload>, Receiver<(u64, Completion)>) {
+    let io = IoHub::new(rt, false, done);
+    // The VM's "main task" is never run: a root failure fails the root
+    // Promise instead of being fatal.
+    let dummy = value::new_task(0, value::new_frame(0, None), None);
+    let mut vm = new_vm(linked, rt.clone(), vm_id, (thread.0, Rc::from(thread.1)), io, snapshot.env.clone(), dummy);
+    let outcome = vm.run_job_body(job_id, snapshot);
+    vm.flush_stdout(); // a job's output precedes the settling of its Promise
+    let (_tx, empty) = std::sync::mpsc::channel();
+    let rx = std::mem::replace(&mut vm.io.done_rx, empty);
+    (outcome, rx)
+}
+
+impl<'p> Vm<'p> {
+    fn run_job_body(&mut self, job_id: u64, snapshot: Snapshot) -> Result<Payload, Payload> {
+        let m = threads::copy_in(&self.linked.functions, &snapshot.graph);
+        for (tn, mn, trait_, closure, is_method) in &snapshot.methods {
+            let Value::Function(c) = m.value(closure) else { continue };
+            let entry =
+                self.method_table.entry((Rc::from(tn.as_str()), Rc::from(mn.as_str()))).or_insert_with(MethodEntry::empty);
+            match trait_ {
+                None => entry.inherent = Some((Callable::Closure(c), *is_method)),
+                Some(t) => {
+                    entry.traits.insert(Rc::from(t.as_str()), (Callable::Closure(c), *is_method));
+                }
+            }
+        }
+        self.fn_items = snapshot.fn_items;
+        self.decorators = snapshot.decorators.iter().map(|(k, v)| (*k, m.value(v))).collect();
+        self.hook_types = snapshot.hook_types.iter().map(|(k, v)| (Rc::from(k.as_str()), m.value(v))).collect();
+        self.hook_params = snapshot.hook_params.iter().map(|(k, v)| (*k, m.value(v))).collect();
+        let Value::Function(callee) = m.value(&snapshot.callee) else {
+            return Err(Payload::internal("a job's callee is not a function"));
+        };
+        let frame = value::new_frame(callee.func.slot_count, Some(callee.defining_frame.clone()));
+        {
+            let mut fb = frame.borrow_mut();
+            for (i, v) in snapshot.args.iter().enumerate() {
+                if i < fb.slots.len() {
+                    fb.slots[i] = m.value(v);
+                }
+            }
+        }
+        drop(m);
+        let root_promise = PromiseData::new_pending();
+        let root = value::new_task(callee.func.entry, frame, Some(root_promise.clone()));
+        self.rt.set_job_root(job_id, root.borrow().id);
+        let outcome = match self.job_loop(root, &root_promise) {
+            Err(e) => return Err(Payload::internal(&e.message)),
+            Ok(Some(error)) => Err(error),
+            Ok(None) => self.job_outcome(&root_promise),
+        };
+        let not_sendable = || Payload::thread_error("not_sendable", threads::NOT_SENDABLE_MESSAGE);
+        match outcome {
+            Ok(v) => threads::payload_of(&v).map_err(|_| not_sendable()),
+            Err(e) => Err(threads::payload_of(&e).unwrap_or_else(|_| not_sendable())),
+        }
+    }
 }

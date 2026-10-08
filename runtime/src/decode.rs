@@ -15,7 +15,7 @@ use std::fmt;
 
 pub const MAGIC: &[u8; 4] = b"MAHC";
 pub const MAJOR: u16 = 1;
-pub const MINOR: u16 = 20;
+pub const MINOR: u16 = 21;
 
 const SEC_STRINGS: u8 = 0x01;
 const SEC_CONSTANTS: u8 = 0x02;
@@ -312,6 +312,15 @@ pub enum RawInstr {
     /// M41c (1.16): `dest` <- the WrapParam hooks stored for parameter `param`
     /// of function `func` (or `none`)
     ParamHooks { func: usize, param: usize, dest: Addr },
+    /// M44 (1.21): read shared variable `index` (`mode` 1 = the lexically
+    /// locked working object itself, 0 = a copy); `name` is its source name
+    SharedGet { index: u64, name: usize, mode: u64, dest: Addr },
+    /// M44 (1.21): replace the working value of a shared variable the task holds
+    SharedSet { index: u64, name: usize, src: Addr },
+    /// M44 (1.21): acquire a shared variable's lock; `dest` <- a Promise
+    SharedLock { index: u64, name: usize, dest: Addr },
+    /// M44 (1.21): `mode` 0 release, 1 mark (a `lock` body left by a throw)
+    SharedUnlock { index: u64, name: usize, mode: u64 },
     Defmethod { closure: Addr, type_name: usize, trait_: Option<usize>, name: usize, is_method: bool },
     Detach { callee: Addr, args: Vec<Addr>, dest: Addr },
     DetachKw { callee: Addr, args: Vec<Addr>, kwnames: Vec<usize>, dest: Addr },
@@ -388,6 +397,12 @@ pub struct Program {
     /// M41a (docs/MAHC_FORMAT.md #4.10): the optional META section.
     pub meta: Option<Meta>,
 }
+
+// M44: a decoded Program is shared (`Arc`) by every worker thread of a run.
+const _: fn() = || {
+    fn f<T: Send + Sync>() {}
+    f::<Program>();
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TestEntry {
@@ -992,6 +1007,10 @@ fn opcode_info(op: u8) -> Option<(&'static str, Option<u16>)> {
         0x46 => ("deferabove", Some(4)),
         0x50 => ("native", None),
         0x60 => ("throw", Some(4)),
+        0x70 => ("sharedget", Some(21)),
+        0x71 => ("sharedset", Some(21)),
+        0x72 => ("sharedlock", Some(21)),
+        0x73 => ("sharedunlock", Some(21)),
         _ => return None,
     })
 }
@@ -1024,6 +1043,11 @@ fn native_since_minor(name: &str) -> Option<u16> {
         | "socket.shutdown" | "socket.close" => Some(18),
         "socket.start_tls" => Some(19),
         "socket.tls_server_config" | "socket.start_tls_server" => Some(20),
+        "thread.spawn" | "thread.submit" | "thread.close" | "thread.join" | "thread.pending" | "thread.current"
+        | "thread.cores" | "thread.semaphore_new" | "thread.semaphore_acquire" | "thread.semaphore_try_acquire"
+        | "thread.semaphore_release" | "thread.semaphore_available" | "thread.channel_new"
+        | "thread.channel_send" | "thread.channel_recv" | "thread.channel_try_recv" | "thread.channel_close"
+        | "thread.channel_len" | "thread.channel_closed" => Some(21),
         _ => None,
     }
 }
@@ -1151,6 +1175,31 @@ fn decode_one_instr(name: &str, pr: &mut Reader, ctx: &CodeCtx, _i: u64) -> FRes
             let b = pr.varuint()? as usize;
             let values = decode_addr_list(pr)?;
             RawInstr::Decorate { kind, a, b, values }
+        }
+        "sharedget" => {
+            let index = pr.varuint()?;
+            let name = decode_s(pr, ctx)?;
+            let mode = pr.varuint()?;
+            let dest = decode_addr(pr)?;
+            RawInstr::SharedGet { index, name, mode, dest }
+        }
+        "sharedset" => {
+            let index = pr.varuint()?;
+            let name = decode_s(pr, ctx)?;
+            let src = decode_addr(pr)?;
+            RawInstr::SharedSet { index, name, src }
+        }
+        "sharedlock" => {
+            let index = pr.varuint()?;
+            let name = decode_s(pr, ctx)?;
+            let dest = decode_addr(pr)?;
+            RawInstr::SharedLock { index, name, dest }
+        }
+        "sharedunlock" => {
+            let index = pr.varuint()?;
+            let name = decode_s(pr, ctx)?;
+            let mode = pr.varuint()?;
+            RawInstr::SharedUnlock { index, name, mode }
         }
         "paramhooks" => {
             let func = pr.varuint()? as usize;
@@ -2053,6 +2102,25 @@ mod tests {
     }
 
     #[test]
+    fn decodes_the_shared_variable_opcodes() {
+        // M44 (1.21): sharedget 3 "a" mode 1 -> (0,0); sharedset 3 "a" <- (0,0);
+        // sharedlock 3 "a" -> (0,1); sharedunlock 3 "a" mode 0; halt
+        let code = [5, 0x70, 3, 0, 1, 0, 0, 0x71, 3, 0, 0, 0, 0x72, 3, 0, 0, 1, 0x73, 3, 0, 0, 0x00];
+        let program = decode(&file_with_params(21, &[0], &code)).expect("should decode");
+        assert_eq!(program.code[0], RawInstr::SharedGet { index: 3, name: 0, mode: 1, dest: (0, 0) });
+        assert_eq!(program.code[1], RawInstr::SharedSet { index: 3, name: 0, src: (0, 0) });
+        assert_eq!(program.code[2], RawInstr::SharedLock { index: 3, name: 0, dest: (0, 1) });
+        assert_eq!(program.code[3], RawInstr::SharedUnlock { index: 3, name: 0, mode: 0 });
+        let e = decode(&file_with_params(20, &[0], &code)).unwrap_err();
+        assert_eq!(
+            e.0,
+            "opcode 'sharedget' at instruction 0 requires minor version >= 21, but this file's minor version is 20"
+        );
+        assert_eq!(native_since_minor("thread.submit"), Some(21));
+        assert_eq!(native_since_minor("thread.channel_closed"), Some(21));
+    }
+
+    #[test]
     fn decodes_a_meta_section() {
         // one function without metadata, no user types
         let mut data = minimal_file(14);
@@ -2132,7 +2200,7 @@ mod tests {
         // M27: the current maximum is 5; the file has no sections at all,
         // so there are no natives to name.
         assert_eq!(e.0, format!("unsupported minor version 99 (this VM supports up to minor version {MINOR})"));
-        assert_eq!(MINOR, 20);
+        assert_eq!(MINOR, 21);
     }
 
     #[test]

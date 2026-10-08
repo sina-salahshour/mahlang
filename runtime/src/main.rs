@@ -7,12 +7,9 @@ use mah_vm::bundle;
 use mah_vm::decode;
 use mah_vm::vm::{self, VmError};
 
-/// Nested nearly as deep as `code_interpreter.py`'s Python call stack can
-/// get (every Mah call frame is a few nested Rust calls: `step_task` ->
-/// `exec_one` -> `enter_closure`/`invoke_sync`/`spawn_detached` ->
-/// `step_task` again for a detached/`to_string` call). 1 GiB keeps
-/// realistic recursive Mah programs from overflowing the native stack.
-const STACK_SIZE: usize = 1 << 30;
+/// The VM thread's native stack: `vm::VM_STACK_SIZE` (shared with every
+/// std:thread worker, M44).
+const STACK_SIZE: usize = vm::VM_STACK_SIZE;
 
 fn usage() -> ! {
     eprintln!("usage: mah-vm --version | mah-vm run <path> [args...] | mah-vm test <path> <index>");
@@ -119,5 +116,6 @@ fn main() {
         .expect("failed to spawn the VM thread")
         .join()
         .expect("the VM thread panicked");
-    std::process::exit(code);
+    // M44: the first exit of the run wins (a job's `process.exit` may race this one).
+    vm::exit_process(code);
 }

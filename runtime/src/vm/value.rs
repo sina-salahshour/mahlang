@@ -177,11 +177,33 @@ pub struct PromiseData {
     /// Promises nobody ever looked at.
     pub observed: bool,
     pub callbacks: Vec<Continuation>,
+    /// M44 (docs/contracts/M44_threads.md #6.4): who settles this Promise,
+    /// for deadlock detection.
+    pub producer: Option<Producer>,
+}
+
+/// M44: the producer of a Promise -- a same-VM detached task, a job, or the
+/// joins of a thread (an edge of the wait-for graph).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Producer {
+    Task(u64),
+    Job(u64),
+    Join(u64),
 }
 
 impl PromiseData {
     pub fn new_pending() -> Rc<RefCell<PromiseData>> {
-        Rc::new(RefCell::new(PromiseData { settled: None, failed: None, observed: false, callbacks: Vec::new() }))
+        Rc::new(RefCell::new(PromiseData {
+            settled: None,
+            failed: None,
+            observed: false,
+            callbacks: Vec::new(),
+            producer: None,
+        }))
+    }
+
+    pub fn is_pending(&self) -> bool {
+        self.settled.is_none() && self.failed.is_none()
     }
 }
 
@@ -195,9 +217,27 @@ pub struct Task {
     pub return_stack: Vec<(usize, FrameRef)>,
     pub defer_stack: Vec<Vec<Value>>,
     pub watching_promise: Option<Rc<RefCell<PromiseData>>>,
+    /// M44 (docs/contracts/M44_threads.md #6.1): a process-unique id, the
+    /// shared variables this task holds (shared by reference with an
+    /// implicit-call sub-task, #5.2), and whether it recorded an await edge.
+    pub id: u64,
+    pub held: Rc<RefCell<Vec<Held>>>,
+    pub awaits_edge: bool,
+}
+
+/// M44: one shared variable a task holds: its working value, the lock's
+/// re-entrancy depth, and `unwinding` (0, or the depth a throw is leaving).
+pub struct Held {
+    pub index: u64,
+    pub value: Value,
+    pub depth: u32,
+    pub unwinding: u32,
 }
 
 pub type TaskRef = Rc<RefCell<Task>>;
+
+/// M44: task ids are unique across every VM of the process.
+static NEXT_TASK_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 pub fn new_task(pc: usize, frame: FrameRef, watching_promise: Option<Rc<RefCell<PromiseData>>>) -> TaskRef {
     Rc::new(RefCell::new(Task {
@@ -206,6 +246,9 @@ pub fn new_task(pc: usize, frame: FrameRef, watching_promise: Option<Rc<RefCell<
         return_stack: Vec::new(),
         defer_stack: Vec::new(),
         watching_promise,
+        id: NEXT_TASK_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        held: Rc::new(RefCell::new(Vec::new())),
+        awaits_edge: false,
     }))
 }
 

@@ -64,6 +64,46 @@ pub struct Decimal {
     coeff: Coeff,
 }
 
+/// M44: a `Decimal` as plain data that can cross threads (`Decimal` holds an
+/// `Rc`, so it isn't `Send`). `to_send`/`from_send` are exact: the value is
+/// already canonical, so no re-canonicalization is needed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SendDecimal {
+    neg: bool,
+    exp: i64,
+    coeff: SendCoeff,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SendCoeff {
+    Small(u64),
+    Big(BigUint),
+}
+
+impl Decimal {
+    pub fn to_send(&self) -> SendDecimal {
+        SendDecimal {
+            neg: self.neg,
+            exp: self.exp,
+            coeff: match &self.coeff {
+                Coeff::Small(v) => SendCoeff::Small(*v),
+                Coeff::Big(b) => SendCoeff::Big((**b).clone()),
+            },
+        }
+    }
+
+    pub fn from_send(d: SendDecimal) -> Decimal {
+        Decimal {
+            neg: d.neg,
+            exp: d.exp,
+            coeff: match d.coeff {
+                SendCoeff::Small(v) => Coeff::Small(v),
+                SendCoeff::Big(b) => Coeff::Big(Rc::new(b)),
+            },
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // small helpers
 // ---------------------------------------------------------------------------

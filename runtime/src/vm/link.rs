@@ -127,6 +127,26 @@ pub enum NativeFn {
     /// M42 (1.20): TLS servers.
     SocketTlsServerConfig,
     SocketStartTlsServer,
+    /// M44 (1.21): std:thread (runtime/src/vm/thread.rs).
+    ThreadSpawn,
+    ThreadSubmit,
+    ThreadClose,
+    ThreadJoin,
+    ThreadPending,
+    ThreadCurrent,
+    ThreadCores,
+    SemaphoreNew,
+    SemaphoreAcquire,
+    SemaphoreTryAcquire,
+    SemaphoreRelease,
+    SemaphoreAvailable,
+    ChannelNew,
+    ChannelSend,
+    ChannelRecv,
+    ChannelTryRecv,
+    ChannelClose,
+    ChannelLen,
+    ChannelClosed,
 }
 
 /// Whether this VM implements a native of that name (any arity) -- for
@@ -230,6 +250,25 @@ fn native_by_name(name: &str) -> Option<(u64, NativeFn)> {
         "socket.start_tls" => Some((3, NativeFn::SocketStartTls)),
         "socket.tls_server_config" => Some((2, NativeFn::SocketTlsServerConfig)),
         "socket.start_tls_server" => Some((3, NativeFn::SocketStartTlsServer)),
+        "thread.spawn" => Some((3, NativeFn::ThreadSpawn)),
+        "thread.submit" => Some((3, NativeFn::ThreadSubmit)),
+        "thread.close" => Some((2, NativeFn::ThreadClose)),
+        "thread.join" => Some((1, NativeFn::ThreadJoin)),
+        "thread.pending" => Some((1, NativeFn::ThreadPending)),
+        "thread.current" => Some((0, NativeFn::ThreadCurrent)),
+        "thread.cores" => Some((0, NativeFn::ThreadCores)),
+        "thread.semaphore_new" => Some((1, NativeFn::SemaphoreNew)),
+        "thread.semaphore_acquire" => Some((1, NativeFn::SemaphoreAcquire)),
+        "thread.semaphore_try_acquire" => Some((1, NativeFn::SemaphoreTryAcquire)),
+        "thread.semaphore_release" => Some((1, NativeFn::SemaphoreRelease)),
+        "thread.semaphore_available" => Some((1, NativeFn::SemaphoreAvailable)),
+        "thread.channel_new" => Some((1, NativeFn::ChannelNew)),
+        "thread.channel_send" => Some((2, NativeFn::ChannelSend)),
+        "thread.channel_recv" => Some((1, NativeFn::ChannelRecv)),
+        "thread.channel_try_recv" => Some((1, NativeFn::ChannelTryRecv)),
+        "thread.channel_close" => Some((1, NativeFn::ChannelClose)),
+        "thread.channel_len" => Some((1, NativeFn::ChannelLen)),
+        "thread.channel_closed" => Some((1, NativeFn::ChannelClosed)),
         _ => None,
     }
 }
@@ -330,6 +369,14 @@ pub enum LinkedInstr {
     /// M25 (1.4)
     Throw { value: Addr },
     Native { native: NativeFn, args: Vec<Addr>, dest: Option<Addr> },
+    /// M44 (1.21, docs/contracts/M44_threads.md #6.4): shared variables
+    /// (`name`, the source name, is for messages; reads and sets have none).
+    #[allow(dead_code)]
+    SharedGet { index: u64, name: Rc<str>, locked: bool, dest: Addr },
+    #[allow(dead_code)]
+    SharedSet { index: u64, name: Rc<str>, src: Addr },
+    SharedLock { index: u64, name: Rc<str>, dest: Addr },
+    SharedUnlock { index: u64, name: Rc<str>, mark: bool },
 }
 
 pub struct LinkedProgram {
@@ -576,7 +623,34 @@ fn link_instr(
         RawInstr::Native { native, args, dest } => {
             LinkedInstr::Native { native: natives[*native], args: args.clone(), dest: *dest }
         }
+        RawInstr::SharedGet { index, name, mode, dest } => {
+            LinkedInstr::SharedGet { index: *index, name: s(*name), locked: *mode == 1, dest: *dest }
+        }
+        RawInstr::SharedSet { index, name, src } => LinkedInstr::SharedSet { index: *index, name: s(*name), src: *src },
+        RawInstr::SharedLock { index, name, dest } => {
+            LinkedInstr::SharedLock { index: *index, name: s(*name), dest: *dest }
+        }
+        RawInstr::SharedUnlock { index, name, mode } => {
+            LinkedInstr::SharedUnlock { index: *index, name: s(*name), mark: *mode == 1 }
+        }
     }
+}
+
+/// M44 (docs/contracts/M44_threads.md #7.1): linking refuses a
+/// `sharedget`/`sharedunlock` mode other than 0 or 1 -- a runtime error
+/// (`RuntimeError.Internal`), like the Python VM's `_link`.
+pub fn check_modes(program: &Program) -> Result<(), super::error::RuntimeError> {
+    for instr in &program.code {
+        let (mode, op) = match instr {
+            RawInstr::SharedGet { mode, .. } => (*mode, "sharedget"),
+            RawInstr::SharedUnlock { mode, .. } => (*mode, "sharedunlock"),
+            _ => continue,
+        };
+        if mode > 1 {
+            return Err(super::error::RuntimeError::new(format!("bad mode {mode} for '{op}'")));
+        }
+    }
+    Ok(())
 }
 
 pub fn link(program: &Program) -> decode::FResult<LinkedProgram> {
