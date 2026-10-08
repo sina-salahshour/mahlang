@@ -43,7 +43,10 @@ const KEYWORDS = new Set([
 	// M27: contextual, only before `fn` (std modules); never a name in docs.
 	'extern',
 	// M28: contextual, only before a test block's name; never a name in docs.
-	'test'
+	'test',
+	// M44: contextual (`shared let`, `lock NAME { }`); never a name in docs.
+	'shared',
+	'lock'
 ]);
 
 // Constant-like keywords get their own token class.
@@ -74,7 +77,8 @@ const BUILTIN_TYPES = new Set([
 	'Iterable',
 	'Iterator',
 	'Error',
-	'RuntimeError'
+	'RuntimeError',
+	'ThreadError'
 ]);
 
 function escapeHtml(s: string): string {

@@ -5,7 +5,8 @@ section: Language
 ---
 
 Mah's async is single-threaded and cooperative. Calls are synchronous
-unless you `detach` them.
+unless you `detach` them. To run work on other threads, see
+[Threads](#threads) below and [std:thread](/std/thread).
 
 ```mah
 fn fetch(n) { sleep_async(100); n * 2 }   # a bare sleep_async just waits
@@ -76,3 +77,34 @@ print("you typed", n)
 
 A detached `input` keeps the program running until its line arrives, even
 if nothing ever `.await`s it.
+
+## Threads
+
+`detach(t) expr`, with `t` a thread from [std:thread](/std/thread), runs
+`expr` on that thread instead of as a task here. It is still a Promise you
+`.await`; jobs given to one thread run one at a time, in order:
+
+```mah
+import thread from "std:thread"
+
+fn fib(n) {
+    if n < 2 { return n }
+    fib(n - 1) + fib(n - 2)
+}
+
+let worker = thread.spawn(name: "worker")
+let a = detach(worker) fib(20)         # runs on `worker`
+let b = detach(worker) { fib(15) + 1 } # queued behind it
+print(a.await, b.await)                # 6765 611
+worker.join()
+```
+
+The job runs on a **copy** of every global and of what it captures, taken
+when it's queued, so it can't change your variables (it changes its copy);
+its result comes back as a copy. To share state between threads, use
+`shared let` variables with `lock`, semaphores or channels: see
+[std:thread](/std/thread).
+
+It's the thread form only when the operand starts on the same line as
+`detach(t)`. `detach (a + b)` with nothing after the `)` is still the
+ordinary, same-thread `detach`.

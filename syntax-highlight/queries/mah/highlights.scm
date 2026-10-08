@@ -28,6 +28,8 @@
 "from" @keyword
 "defer" @keyword
 "detach" @keyword
+"shared" @keyword
+"lock" @keyword
 "throw" @keyword
 "try" @keyword
 "catch" @keyword

@@ -34,8 +34,8 @@ written bare (`Set`). They are module-scoped, so your own `struct Field` or
 
 So far there are `std:math`, `std:path`, `std:json`, `std:csv`,
 `std:random`, `std:collections`, `std:regex`, `std:time`, `std:async`,
-`std:fs`, `std:process`, `std:bytes`, `std:socket`, `std:url`, `std:http`
-and `std:reflect` (and `std:test`, see [Testing](/docs/testing)).
+`std:fs`, `std:process`, `std:bytes`, `std:socket`, `std:url`, `std:http`,
+`std:reflect` and `std:thread` (and `std:test`, see [Testing](/docs/testing)).
 See [the reference](/std) for each one. The rest of the plan (an HTTP
 server, then a web framework) is in
 `docs/STDLIB.md` and `docs/NEXT_PHASES.md` in the repository.
@@ -623,6 +623,35 @@ names. A server loads its certificate and key once with
 `socket.tls_server_config(cert, key)` and calls `conn.start_tls_server(config)`
 on each accepted socket. Failures throw `socket.SocketError { kind, op,
 address, description }`.
+
+## `std:thread`
+
+*Full guide: [std:thread](/std/thread).*
+
+Run jobs on other threads. A thread is a queue of jobs; `detach(t) expr`
+and `t.run(f, ...args)` give Promises. A job works on a copy of every global
+and of what it captures; `shared let` variables, changed in place inside
+`lock`, are shared by every thread, and so are semaphores and channels.
+
+```mah
+import thread from "std:thread"
+
+shared let total = 0
+
+fn add(n) {
+    lock total { total = total + n }
+}
+
+let pool = thread.spawn(workers: 4)
+let jobs = []
+for let n in 1..=10 { jobs.push(pool.run(add, n)) }
+for let j in jobs { j.await }
+print(total)                                   # 55
+pool.join()
+```
+
+Failures throw `ThreadError { kind, message }` (`"closed"`, `"deadlock"`,
+`"stuck"`, ...).
 
 ## `std:url`
 

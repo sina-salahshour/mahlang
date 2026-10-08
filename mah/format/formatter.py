@@ -188,7 +188,18 @@ def _blank_module_syntax(text: str, toks: list):
                 and i + 2 < n
                 and toks[i + 2].type is TokenType.FN
             )
-            if following in (TokenType.FN, TokenType.LET, TokenType.STRUCT, TokenType.ENUM, TokenType.TRAIT) or is_extern:  # M27: `export extern fn`
+            # M44: `export shared let` blanks `export` only, like `export let`.
+            is_shared = (
+                following is TokenType.ID
+                and toks[i + 1].text == "shared"
+                and i + 2 < n
+                and toks[i + 2].type is TokenType.LET
+            )
+            if (
+                following in (TokenType.FN, TokenType.LET, TokenType.STRUCT, TokenType.ENUM, TokenType.TRAIT)
+                or is_extern  # M27: `export extern fn`
+                or is_shared
+            ):
                 blank(i, i)
                 starts.add(i)
             elif following is TokenType.ID:

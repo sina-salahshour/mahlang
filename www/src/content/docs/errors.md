@@ -81,6 +81,30 @@ Both print `Division by zero`. Every variant carries a `message`.
 - An error nothing catches stops the program with `Uncaught` and its
   message, located at the `throw` (a detached task's failed Promise that
   nobody awaited is reported when the program ends).
+- A job on another thread ([std:thread](/std/thread)) that throws fails its
+  Promise with a **copy** of the error, so `try { p.await } catch { e:
+  MyError => ... }` works across threads.
+
+## `ThreadError`
+
+Threads, `shared` variables, `lock`, semaphores and channels throw the
+built-in `ThreadError { kind, message }`. Its `kind` is one of `"closed"`,
+`"full"`, `"cancelled"`, `"deadlock"` (a lock or `.await` that would wait
+for itself), `"stuck"` (every thread is waiting, so the wait can never
+finish), `"not_sendable"` (a Promise sent to another thread),
+`"foreign_promise"` and `"over_release"`:
+
+```mah
+import thread from "std:thread"
+
+let t = thread.spawn()
+t.close()
+print(try { t.run(fn() { 1 }) } catch { e: ThreadError => { e.kind } })   # closed
+```
+
+A `lock` block left by a throw still writes its changes back; if that fails,
+the original error keeps going. Since `ThreadError` is a built-in name, a
+type of your own can't be called `ThreadError` any more.
 
 ## What the checker knows
 

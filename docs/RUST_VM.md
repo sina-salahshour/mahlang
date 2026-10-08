@@ -56,7 +56,7 @@ that fails with "unsupported minor version" when run.
 | file | what |
 |---|---|
 | `runtime/src/decode.rs` | port of `mah/bytecode/decode.py`, same validation and messages |
-| `runtime/src/vm/` | port of `mah/code_interpreter.py` (`exec.rs`: the step loop, scheduler and I/O hub; `link.rs`; `value.rs`) + `mah/natives.py` (`natives.rs`), `mah/string_methods.py` (`methods.rs`), `mah/fs_natives.py` (`fs.rs`, std:fs's natives and the open-file table) `mah/bytes_methods.py` (`bytes.rs`, the `Bytes` methods and `std:bytes`'s natives), `mah/process_natives.py` (`process.rs`, std:process's natives), `mah/socket_natives.py` (`socket.rs`, std:socket's natives and the socket table) and `mah/reflect_natives.py` (`reflect.rs`, std:reflect's natives; the META section is parsed in `decode.rs`) |
+| `runtime/src/vm/` | port of `mah/code_interpreter.py` (`exec.rs`: the step loop, scheduler and I/O hub; `link.rs`; `value.rs`) + `mah/natives.py` (`natives.rs`), `mah/string_methods.py` (`methods.rs`), `mah/fs_natives.py` (`fs.rs`, std:fs's natives and the open-file table) `mah/bytes_methods.py` (`bytes.rs`, the `Bytes` methods and `std:bytes`'s natives), `mah/process_natives.py` (`process.rs`, std:process's natives), `mah/socket_natives.py` (`socket.rs`, std:socket's natives and the socket table) `mah/reflect_natives.py` (`reflect.rs`, std:reflect's natives; the META section is parsed in `decode.rs`) and `mah/thread_runtime.py` + `mah/thread_natives.py` (`thread.rs`, M44: the thread runtime, copies and std:thread's natives) |
 | `runtime/src/decimal.rs`, `bigint.rs` | Mah's `Number` (below) |
 | `runtime/src/bundle.rs` | reads self-contained bundles (below) |
 | `runtime/src/main.rs` | the `mah-vm` command |
@@ -136,6 +136,50 @@ runtime: rust mah-vm 0.1.0 (x86_64-linux), self-contained, 612344 bytes
 
 (or `runtime: none (plain bytecode, runs on an installed mah)`), then
 the usual disassembly of the bytecode part.
+
+## Threads
+
+M44 (docs/contracts/M44_threads.md, docs/MAHC_FORMAT.md §6.11) runs jobs on
+real OS threads, so on this VM they run **in parallel** (the Python VM has
+the same semantics under the GIL). The design keeps every Mah heap
+single-threaded: values are `Rc`/`RefCell` and never cross threads; only
+plain copies do.
+
+- **`ThreadRuntime`** (`runtime/src/vm/thread.rs`), one per run behind an
+  `Arc` and shared by the main VM and every job VM: one `Mutex<RtState>`
+  (the shared-variable store and its locks, the wait-for graph, pools,
+  semaphores, channels, live VMs and the quiescence count) with the pools'
+  `Condvar`s on that same mutex; the shared stdout (`Arc<Mutex<BufWriter<
+  Stdout>>>`); the shared file and socket tables; the one stdin reader; the
+  run's start instant (`time.monotonic_ms` counts from it everywhere); the
+  `Arc<Program>`, the arguments and the test mode. Nothing blocks while
+  holding the mutex; waking a waiter sends a `Completion` into its VM's
+  done channel, and that VM settles its own Promise.
+- **`SendGraph`**: the copy format that crosses threads, a new type rather
+  than an extension of `fs::IoValue` (which has no identity, cycles or
+  closures; fs and socket jobs keep using it). `copy_out` walks a value
+  iteratively with a memo keyed by `Rc` pointer, so shared objects and
+  cycles survive, and refuses Promises in strict mode before the memo;
+  `copy_in` rebuilds it in the receiving VM in three passes (shells,
+  closures over the receiver's linked functions, fields). Numbers cross as
+  `SendDecimal`, because `Decimal` holds an `Rc`. A job's `Snapshot` is a
+  `SendGraph` of the callee, its arguments, the user method table,
+  decorators and hooks, plus the environment table.
+- **Workers** are `std::thread`s named `mah-NAME-I`, with the same stack
+  size as the main VM thread (`VM_STACK_SIZE`, 1 GiB of reserved virtual
+  memory), so a recursion depth that works on the main thread works in a
+  job. Each worker links the program once and reuses that `LinkedProgram`
+  for every job; a job runs in a fresh `Vm` (its own heap, timers, `IoHub`
+  and done channel) under `catch_unwind`, so a panic fails only that job,
+  with `RuntimeError.Internal`.
+- **Output**: each `Vm` collects stdout in its own line buffer and hands
+  whole lines to the shared writer, so lines from different threads never
+  tear; every exit path of `run` flushes. Every way the process ends goes
+  through `exit_process` (first exit wins, behind an `AtomicBool`), so a
+  `process.exit` from a job and the main thread's own end never race.
+- **Shared tables**: only the main VM's `IoHub` owns the file and socket
+  tables and closes them when it ends; a handle closed by one thread is
+  closed for all.
 
 ## Testing
 

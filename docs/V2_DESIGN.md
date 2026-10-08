@@ -3737,6 +3737,145 @@ node that resolved to it. Then:
       `tests/test_lsp_packages.py`; none needs the network, and the run
       tests use the VM `MAH_TEST_VM` selects.
 
+47. **M44a — threads and shared variables. ✅ Landed.**
+    `docs/NEXT_PHASES.md`'s "Optional multithreading"; the discussion paper
+    is `docs/contracts/M44_threads_options.md`, the contract (normative, with
+    every exact message) `docs/contracts/M44_threads.md`; the user reference
+    is `docs/STDLIB.md`'s `std:thread` and `docs/MAHC_FORMAT.md` §6.11.
+
+    - **Decisions** (the user's, binding): **an isolated VM per job** (option
+      A): a job runs in a fresh VM heap on an OS thread, on a deep copy of
+      everything it can reach — the callee, its captured frames, **every
+      global** (the whole main frame), the method table, decorators and hooks
+      — taken **when the job is queued**, per job, synchronously in the
+      submitter (so a job sees exactly the state at the line that queued it,
+      and the submitter's heap is never touched by another thread). Its
+      result or error comes back as a copy and settles the Promise through
+      the same done-queue path an fs job uses; there is no shared Mah heap
+      and no `Rc` → `Arc` migration. **Threads are long-lived job queues**:
+      `thread.spawn(name:, workers:, capacity:)` gives a `Thread` backed by
+      `workers` OS threads sharing one FIFO queue (one worker: jobs run one at
+      a time, in order). Jobs are queued with **`detach(t) expr`** (any
+      expression, always closure-wrapped, so even `f(x)`'s arguments are
+      evaluated on the thread) or **`t.run(f, ...args)`** (arguments bound in
+      the submitter); plain `detach` is unchanged. Captured mutable variables
+      are **silently copied**. File and socket handles are **shared** (one
+      table each per run). The Python VM uses real `threading.Thread`s (no
+      speedup under the GIL, identical semantics).
+    - **Shared variables**: `shared let NAME = value` (top level only, `export
+      shared let` too) stores the value, as copied plain data, in one
+      process-wide store outside every VM; shared variables have no frame
+      slot, so they are never part of a snapshot. A read outside `lock` gives
+      a copy (never waits, "read committed"); an assignment is atomic (lock,
+      set, release); `lock a, b { body }` checks the variables out to the
+      **task** (re-entrant, FIFO, waiting is a pending Promise so other tasks
+      keep running), lets the body change them in place, and writes them back
+      when the block exits, also by `return`/`break`/`continue` or a throw
+      (the release is a `defer`). Only a read written lexically inside the
+      `lock` sees the working object itself; every other read is a copy (of
+      the holder's working value when the task holds the lock), so a helper
+      behaves the same whatever its caller holds. **The copy trap**
+      (`shared let v = []; v.push(1)`): in-place mutation through the name
+      outside `lock` is a **compile error** (E1 method calls, E2 assignments
+      into it, E3 `x = ... x ...`), with method calls on **handle
+      variables** (`shared let ch = thread.channel()`) exempt; passing one to
+      a mutating function or changing a loop variable bound from it are
+      checker **warnings** (W2/W3); `x = g()` where `g` reads `x` is
+      documented. Implicit runtime calls (`to_string`, `Error.message`) run
+      as their caller's task. A write-back refused because the value holds a
+      Promise throws `not_sendable`, except while a throw is leaving the
+      block (the error in flight wins).
+    - **Deadlocks and stuck runs**: a wait-for graph (lock → owner, await →
+      a same-VM detached task, a started job's root or a joined thread's
+      running jobs) makes a lock wait, `.await` or `join` that would close a
+      cycle through a lock, job or join edge throw `ThreadError deadlock` at
+      once; a run in which **every** VM is blocked on runtime waits fails the
+      main VM's waits with `stuck` (quiescence). **`ThreadError { kind,
+      message }`** lives in the prelude (kinds `closed`, `full`, `cancelled`,
+      `deadlock`, `not_sendable`, `foreign_promise`, `over_release`,
+      `stuck`). `Semaphore` (counting, owner-less) is the only extra
+      primitive: no `Mutex` type (`shared` + `lock` is the mutex), no
+      `Condition`/`WaitGroup`.
+    - **Shared process resources**: one stdout fed whole lines by a per-VM
+      line buffer (so `print` from several threads never tears a line), one
+      stdin reader, shared file/socket tables closed only by the main VM, the
+      environment table copied per job, `time.monotonic_ms` from program
+      start, `std:random`'s state copied with the globals (identical jobs
+      draw identical numbers: seed per job — documented prominently), and
+      `process.exit` from a job exits the program (first exit wins).
+    - **Files**: `mah/compiler/{ast_nodes,parser,resolve,codegen,typecheck}.py`
+      (`LetStmt.shared`, `LockExpr`/`LockAcquire`/`LockRelease`,
+      `DetachExpr.thread`; the §3.1 `detach(t)` rule; the shared-variable
+      index and E1–E7; the four opcodes and the `lock` handler region;
+      `detach(...) needs a thread.Thread` and W1–W3); `mah/preprocessor.py`
+      (`export shared let`, prelude triggers, `std_prefix`);
+      `mah/bytecode/{format,lower,disasm}.py`; `mah/thread_runtime.py` (the
+      process-wide runtime, copies, locks, pools, quiescence) and
+      `mah/thread_natives.py` (new); `mah/code_interpreter.py`,
+      `mah/runtime_values.py`, `mah/natives.py`, `mah/process_natives.py`;
+      `mah/std/thread.mh` (new) and the prelude's `ThreadError`; the Rust VM
+      (`runtime/src/vm/thread.rs` and friends, `docs/RUST_VM.md` "Threads");
+      the tree-sitter and VS Code grammars, `mah/lsp/analysis.py`
+      (`shared`/`lock` hover and completion, `shared variable` hover),
+      `mah/format/formatter.py` (`detach(t)`, `export shared let`).
+    - **Bytecode 1.21** (one MINOR for M44a and M44b): opcodes `sharedget`,
+      `sharedset`, `sharedlock`, `sharedunlock` (`0x70`–`0x73`) and 19
+      `thread.*` natives; no new section, type or constant tag. A program
+      that declares a `shared let`, uses `lock` or imports `std:thread` is
+      1.21. Test changes: MINOR pins 20 → 21 (`test_decorators`,
+      `test_hooks`, `test_http`, `test_reflection`, `test_socket`,
+      `test_tls_server`), unsupported-minor tests use 22, `threads.mh`'s
+      expected minor is 21, `test_http_server`'s minor assertion pinned to 20
+      (std:http programs stay 1.20), prelude-trigger tests gained
+      `ThreadError`. Tests added: `tests/test_threads.py` (T1–T25: copies,
+      errors, shared counters, pools, deadlocks, semaphores, channels,
+      close/join, `process.exit` from a job, keep-alive, uncaught job errors,
+      implicit calls, read kinds, write-back, await deadlocks, `stuck`,
+      handle variables), `mah/std/thread.test.mh`, parser/checker/bytecode
+      tests, `tests/test_lsp_threads.py`, formatter goldens,
+      `examples/threads.mh` with a golden test, and the `threads_*`
+      `vm_diff.py` cases.
+    - **Judgment calls** (contract §15): the `detach(t)` rule (thread form iff
+      the token after `)` starts an operand on the same line; `(`, `[`, `-`
+      excluded); the thread form always closure-wraps; `t.run` is the
+      function form and `spawn` takes no function; snapshot at queue time per
+      job; a job is a small program (it drains its own timers and waits, and
+      an unobserved failed sub-task fails it); Promises reached through
+      frames are copied by state (pending → `foreign_promise`) while Promises
+      in sent values are refused; compile errors rather than proxies for
+      in-place mutation; checkout/write-back locks with write-back on throws;
+      deadlock detection only through lock, job and join edges, the rest left
+      to quiescence; `ThreadError` in the prelude rather than new
+      `RuntimeError` variants (those would change the TYPES layout);
+      `capacity` throws `full` instead of blocking (`detach` can't suspend
+      mid-expression); Rust workers use the main VM thread's 1 GiB virtual
+      stack; no `MAH_THREADS=inline` mode. Deviations found while building:
+      the quiescence rule also treats a **closed** pool whose idle workers
+      are about to exit as still starting (otherwise `t.join()` reported
+      `stuck` before the workers had settled their joiners); a `!` operand
+      after `detach(t)` parses as a unary expression; `process.exit` flushes
+      the VM's line buffer and, in the main VM, goes through the first-exit
+      guard too.
+    - **M44 compatibility notes**: `detach (x) expr` with another expression
+      on the same line after `)` is now the thread form (it was two
+      statements); `detach(t)` followed by a statement on the same line, and
+      `detach (name)` followed by `{` on the next line, are compile errors;
+      `ThreadError` is a new prelude name, so a program declaring its own
+      `ThreadError` type gets the "built-in name" error.
+
+48. **M44b — channels. ✅ Landed** (with M44a, in bytecode 1.21).
+    Option C of the discussion paper: message passing between long-lived
+    workers. `thread.channel(capacity = none)` gives a `Channel` (a plain
+    struct naming a process-wide channel, so it copies freely into jobs):
+    `send` copies its message (strict: a Promise inside is `not_sendable`)
+    and waits while the channel is full (capacity 0: until a receiver takes
+    it); `recv` waits for the next message; `try_recv` never waits; `close`
+    ends sending (queued messages stay receivable, waiting senders and
+    receivers of an empty channel fail with `closed`); `len`, `closed`, and
+    `for let m in ch { }` receives until closed and empty. Waits are pending
+    Promises, so other tasks keep running, and count for quiescence. Deferred:
+    `select` over several channels.
+
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
 it** (`make test` must stay green) — see `docs/TESTING.md` for where
@@ -3748,15 +3887,16 @@ M1 was built and documented that way.
 
 ## Status
 
-M0 through M41c, M37 to M39, M41s, M42 and M43 (and M21b, `mah format`) have all landed; each milestone's
+M0 through M41c, M37 to M39, M41s, M42, M43 and M44a/M44b (and M21b, `mah format`) have all landed; each milestone's
 entry above says what changed and where it deliberately deviates from the
 design. The language has traits, generics, typed and checked errors, a
 static type checker, projects and `mah test`, async I/O with timers, and a
-`.mahc` bytecode format (currently 1.20) run by the reference Python VM
+`.mahc` bytecode format (currently 1.21) run by the reference Python VM
 and the native Rust VM in `runtime/`; the standard library (`std:math`,
 `std:json`, `std:csv`, `std:path`, `std:random`, `std:collections`,
 `std:regex`, `std:time`, `std:async`, `std:fs`, `std:process`, `std:reflect`,
-`std:bytes`, `std:socket`, `std:url`, `std:http`, whose server landed with M42)
+`std:bytes`, `std:socket`, `std:url`, `std:http`, whose server landed with M42,
+`std:thread`)
 and the built-in `Bytes` type (M37) are described in `docs/STDLIB.md`. Type values, `##` docs, spread calls and
 reflection landed with M41a, decorators as metadata with M41b, and hooks,
 function-item impls and rest parameters with M41c (`docs/REFLECTION.md`). M41s made
@@ -3764,6 +3904,7 @@ struct/enum/trait names module-scoped (a breaking change: export the types a
 module shares, write `lib.Point` to use one). Projects can use packages from
 GitHub repositories, imported as `pkg:NAME` and fetched and pinned by
 `mah install` (M43, `docs/PACKAGES.md`), and `std:http` serves HTTP and
-HTTPS (M42). What else is deferred and what comes next (multithreaded
-`detach`, and the rest) is in `docs/NEXT_PHASES.md`; the web framework will
+HTTPS (M42). Threads (`std:thread`, `detach(t)`, `shared`/`lock`, channels)
+landed with M44 (`docs/contracts/M44_threads.md`). What else is deferred and
+what comes next is in `docs/NEXT_PHASES.md`; the web framework will
 live in a separate repository, built on `http.serve`.
