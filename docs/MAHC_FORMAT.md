@@ -1682,9 +1682,10 @@ reply settles or fails the job's Promise in the submitting VM through its
 done queue; a failed one is reported at that VM's end like an unobserved
 failed detached task when nobody observed it (with several, the order is
 the order the replies arrived). A job Promise already settled by hand drops
-the reply. **Teardown**: the job VM's line buffer is handed over; every lock
-it still owns passes to the next waiter **without write-back**; its waiters
-are removed from every lock, semaphore, channel and join list; its wait-for
+the reply. **Teardown**: the job VM's line buffer is handed over; its waiters
+are removed from every lock, semaphore, channel and join list; then every
+lock it still owns passes to the next (other VM's) waiter **without
+write-back**; its wait-for
 edges are removed; a permit or message delivered to it too late is given
 back (a message to the front of its channel).
 

@@ -916,9 +916,10 @@ loop:
       return
     job = jobs.pop_front(); running += 1; add job.id to the running set
     vm_id = next_vm; vms[vm_id] = new VM record   # live from this instant (§6.10)
-  outcome = run_job(job, vm_id)        # outside the lock; teardown (§6.6) removes vms[vm_id]
+  outcome = run_job(job, vm_id)        # outside the lock; teardown (§6.6)
   with rt.lock:
     running -= 1; remove job.id from the running set
+    remove vms[vm_id]                  # only now (§6.6 step 3)
     post job(outcome) to job.reply     # ignored if that VM is gone
     check_quiescence()                 # §6.10
 ```
@@ -951,11 +952,15 @@ with the host's text.
 ### 6.6 Teardown of a job VM (`forget_vm`)
 
 After the job loop, before replying: hand over the VM's line buffer (§6.3); then, under `rt.lock`:
-1. every lock whose owner's vm id is this VM: `grant_next` **without writing back**;
-2. remove this VM's waiters from every lock (and their `waiting_on`), semaphore, channel (receivers
+1. remove this VM's waiters from every lock (and their `waiting_on`), semaphore, channel (receivers
    and senders; a waiting sender's message is dropped) and pool joiner list;
-3. remove every `awaiting` entry of this VM's tasks, the job's `job_roots` entry, and the VM's
-   record in `vms` (decrementing `blocked_count` if it was flagged blocked).
+2. every lock whose owner's vm id is this VM: `grant_next` **without writing back** (after step 1,
+   so the lock can never be granted to another waiting task of this same, dying VM — review fix);
+3. remove every `awaiting` entry of this VM's tasks and the job's `job_roots` entry; clear the VM's
+   `blocked` flag (decrementing `blocked_count` if it was set). The VM's record stays in `vms`
+   until the worker's next `rt.lock` hold, which removes it right before posting the job's reply
+   (review fix: removed here, a quiescence check another thread runs in between would count every
+   remaining VM as blocked and fail the wait for this very reply with `stuck`).
 
 Then (outside the lock) drain this VM's done queue without blocking: a `sem` completion → give the
 permit back (`semaphore release` logic, without the over-release check); a `recv` completion → put

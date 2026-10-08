@@ -502,6 +502,33 @@ gate.release()
 """
         self.assertEqual(run_source(src), "1 0 0\n")
 
+    def test_t26_an_abandoned_job_never_keeps_a_lock(self):
+        # Review fix (#6.6): the job's root fails while one of its tasks holds
+        # `x` and another of its tasks waits for it. Teardown must drop the
+        # job's own waiters before releasing its locks; else `x` is granted
+        # to the dead job's waiting task and nobody can ever lock it again
+        # (the main VM's `lock x` failed with `stuck`).
+        src = THREAD + """shared let x = 0
+fn job() {
+    detach {
+        lock x {
+            x = 1
+            sleep_async(200)
+        }
+    }
+    detach { lock x { x = 2 } }
+    throw RuntimeError.ArgumentError { message: "boom" }
+}
+let t = thread.spawn()
+try { t.run(job).await } catch {
+    e: RuntimeError => { print("job failed:", e.message()) }
+}
+lock x { x = x + 10 }
+print(x)
+t.join()
+"""
+        self.assertEqual(run_source(src), "job failed: boom\n10\n")
+
 
 def _run_compiled(src: str):
     """Compile `src` to a temporary .mahc and run it in a subprocess on the
@@ -705,6 +732,43 @@ class WaitForGraphTests(unittest.TestCase):
         rt = self.rt
         rt.awaiting[20] = ("task", 10)
         self.assertFalse(rt.cycle_from(rt.producer_edges(("task", 20)), 10, False))
+
+
+class QuiescenceWindowTests(unittest.TestCase):
+    """Review fix (#6.5/#6.10): a finished job VM stays live until its worker
+    posts the reply, so a quiescence check another thread runs between the
+    job's teardown and that post can't fail the main VM's wait for the reply
+    with `stuck`."""
+
+    def test_a_torn_down_job_vm_counts_until_its_reply_is_posted(self):
+        import queue
+
+        from mah.thread_runtime import ThreadRuntime, VmThreads
+
+        class _Io:
+            def __init__(self):
+                self.done = queue.Queue()
+                self.pending = 0
+
+        rt = ThreadRuntime(None)
+        main = VmThreads(rt, 0, _Io(), None)
+        rt.vms[0] = main
+        job_vm = VmThreads(rt, 1, _Io(), object())
+        rt.vms[1] = job_vm
+        # the main VM waits only for the job's reply: blocked
+        main.add_wait(object(), "job", 1)
+        rt.about_to_block(main)
+        self.assertTrue(main.done.empty())
+        # the job ends: teardown, then (before the worker posts the reply)
+        # another thread runs the quiescence check
+        rt.forget_vm(job_vm)
+        with rt.lock:
+            rt.check_quiescence()
+        self.assertTrue(main.done.empty(), "stuck was posted while the job's reply was on its way")
+        with rt.lock:
+            rt.finish_vm(job_vm)
+            rt.post(main, (None, "job", (True, None)))
+        self.assertEqual(main.done.get_nowait()[1], "job")
 
 
 if __name__ == "__main__":

@@ -885,14 +885,17 @@ class ThreadRuntime:
 
     def forget_vm(self, vt) -> None:
         with self.lock:
-            for k, state in self.locks.items():
-                if state.owner is not None and state.owner[1] is vt:
-                    self.grant_next(k)
+            # This VM's lock waiters go first: else releasing a lock this VM
+            # owns could grant it to another of its own waiting tasks, and
+            # the lock would stay owned by a VM that no longer exists.
             for state in self.locks.values():
                 for w in list(state.waiters):
                     if w[1] is vt:
                         state.waiters.remove(w)
                         self.waiting_on.pop(w[0], None)
+            for k, state in self.locks.items():
+                if state.owner is not None and state.owner[1] is vt:
+                    self.grant_next(k)
             for sem in self.semaphores.values():
                 sem.waiters = collections.deque(w for w in sem.waiters if w[0] is not vt)
             for ch in self.channels.values():
@@ -905,7 +908,12 @@ class ThreadRuntime:
             vt.edge_tasks.clear()
             if vt.job_id is not None:
                 self.job_roots.pop(vt.job_id, None)
-            if self.vms.pop(vt.vm_id, None) is not None and vt.blocked:
+            # The VM stays in `vms` (live, not blocked) until its worker
+            # posts the job's reply (`finish_vm`): were it removed here, a
+            # quiescence check run in between by another thread would see
+            # every remaining VM blocked and fail a wait (this job's reply
+            # among them) with `stuck` although the reply is on its way.
+            if vt.blocked:
                 vt.blocked = False
                 self.blocked_count -= 1
         # Completions that arrived for this VM: give permits and messages back.
@@ -932,6 +940,13 @@ class ThreadRuntime:
             # anything else (a lock granted to this VM was released above,
             # a job reply, a settle) is dropped
         vt.dead = True
+
+    def finish_vm(self, vt) -> None:
+        """The worker's last step for a job VM (`self.lock` held, right
+        before the reply is posted): the VM leaves `vms`."""
+        if self.vms.pop(vt.vm_id, None) is not None and vt.blocked:
+            vt.blocked = False
+            self.blocked_count -= 1
 
     # -- exit and shutdown -------------------------------------------------------
 
@@ -1028,6 +1043,7 @@ def _worker(rt: ThreadRuntime, pool: Pool) -> None:
         with rt.lock:
             pool.running -= 1
             pool.running_set.discard(job.id)
+            rt.finish_vm(vt)
             if outcome is not None and not rt.stopped:
                 rt.post(job.reply, (job.promise, "job", outcome))
             rt.check_quiescence()
