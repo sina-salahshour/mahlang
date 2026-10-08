@@ -28,7 +28,9 @@ from .ast_nodes import (
     Call,
     ContinueStmt,
     DeferStmt,
+    AtomicExpr,
     DetachExpr,
+    RetryExpr,
     EnumDecl,
     EnumLit,
     EnumPat,
@@ -44,9 +46,6 @@ from .ast_nodes import (
     IfStmt,
     ImplDecl,
     LetStmt,
-    LockAcquire,
-    LockExpr,
-    LockRelease,
     MatchArm,
     MatchStmt,
     MethodCall,
@@ -248,6 +247,9 @@ class Parser:
         # temporarily restored to True inside `(...)`/call-argument
         # positions where the ambiguity can't occur.
         self._struct_literal_allowed = True
+        # M45: how many `atomic { }` bodies enclose the current token in the
+        # same function (reset to 0 in every function body).
+        self._atomic_depth = 0
         # M6: syntax errors collected during parsing instead of raised --
         # `(message, position)` per error, in the order encountered. Kept
         # separate from `Resolver`'s errors on purpose (resolve stays
@@ -404,7 +406,8 @@ class Parser:
                         SleepAsyncExpr,
                         FieldAccess,
                         MethodCall,
-                        LockExpr,
+                        AtomicExpr,
+                        RetryExpr,
                     ),
                 ) or (
                     # M25: only the catch form (`try { } catch { }`) is
@@ -491,7 +494,7 @@ class Parser:
                     self.advance()
         return stmts, tail
 
-    # -- M44: `shared let` / `lock` (contextual words) ----------------------
+    # -- M44/M45: `shared let`, `atomic`, `retry` (contextual words) ----------
 
     def _next_on_same_line(self, tok: Token, nxt: Token) -> bool:
         start = tok.position + len(tok.literal)
@@ -504,51 +507,70 @@ class Parser:
         nxt = self.lexer.peek_token()
         return nxt.type is TokenType.LET and self._next_on_same_line(tok, nxt)
 
-    def _at_lock(self, tok: Token) -> bool:
-        """`tok` is the current token: an ID `lock` followed by an ID on the
-        same line starts a `lock` expression."""
-        if tok.literal != "lock":
+    def _at_atomic(self, tok: Token) -> bool:
+        """M45 (docs/contracts/M45_atomic.md #2.2): `tok` (the current ID
+        token) is the keyword `atomic` iff struct literals are allowed here,
+        a `{` follows on the same line, and what follows the `{` is neither
+        `}` nor `ID :` (those stay a struct literal of a struct `atomic`)."""
+        if tok.literal != "atomic" or not self._struct_literal_allowed:
+            return False
+        t1, t2, t3 = self.lexer.peek_tokens(3)
+        if t1.type is not TokenType.BRACE_OPEN or not self._next_on_same_line(tok, t1):
+            return False
+        if t2.type is TokenType.BRACE_CLOSE:
+            return False
+        if t2.type is TokenType.ID and t3.type is TokenType.COLON:
+            return False
+        return True
+
+    def _parse_atomic(self, tok: Token):
+        """`atomic { body }`: the body becomes a zero-parameter closure
+        (`FnExpr.atomic`), called at once by the transaction code."""
+        self.advance()  # `atomic`
+        saved = self._atomic_depth
+        self._atomic_depth = saved + 1
+        try:
+            body = self.parse_block()
+        finally:
+            self._atomic_depth = saved
+        closure = FnExpr(
+            name=None,
+            params=[],
+            body=body,
+            position=tok.position,
+            name_position=None,
+            param_positions=[],
+            atomic=True,
+        )
+        return self._parse_postfix_from(AtomicExpr(closure=closure, position=tok.position))
+
+    _RETRY_FOLLOW = frozenset(
+        {
+            TokenType.BRACE_CLOSE,
+            TokenType.SEMICOLON,
+            TokenType.COMMA,
+            TokenType.PAREN_CLOSE,
+            TokenType.BRACKET_CLOSE,
+            TokenType.EOF,
+        }
+    )
+
+    def _at_retry(self, tok: Token) -> bool:
+        """M45 #2.3: `retry` is the keyword only inside an atomic body, when
+        what follows it can't continue an expression on its line."""
+        if tok.literal != "retry" or self._atomic_depth <= 0:
             return False
         nxt = self.lexer.peek_token()
-        return nxt.type is TokenType.ID and self._next_on_same_line(tok, nxt)
+        return nxt.type in self._RETRY_FOLLOW or not self._next_on_same_line(tok, nxt)
 
-    def _parse_lock(self, lock_tok: Token) -> LockExpr:
-        """M44: `lock a, b.c { body }` -- desugared into a block that, per
-        target in order, acquires it and defers its release; the user's
-        body is the block's tail (docs/contracts/M44_threads.md #8.3)."""
-        targets = []
-        while True:
-            name_tok = self.expect(TokenType.ID)
-            target = Ident(name=name_tok.literal, position=name_tok.position)
-            text = name_tok.literal
-            while self.current.type is TokenType.DOT:
-                self.advance()
-                field_tok = self.expect(TokenType.ID)
-                target = FieldAccess(obj=target, field=field_tok.literal, position=field_tok.position)
-                text += "." + field_tok.literal
-            targets.append((target, text, name_tok.position))
-            if self.current.type is not TokenType.COMMA:
-                break
-            self.advance()
-        body = self.parse_block()
-        stmts = []
-        for _target, text, position in targets:
-            stmts.append(ExprStmt(value=LockAcquire(name=text, position=position), position=position))
-            release = FnExpr(
-                name=None,
-                params=[],
-                body=Block(
-                    stmts=[ExprStmt(value=LockRelease(name=text, position=position), position=position)],
-                    position=position,
-                    tail=None,
-                ),
-                position=lock_tok.position,
-                name_position=None,
-                param_positions=[],
-            )
-            stmts.append(DeferStmt(closure_expr=release, position=lock_tok.position))
-        block = Block(stmts=stmts, tail=body, position=lock_tok.position)
-        return LockExpr(targets=[t for t, _text, _pos in targets], block=block, position=lock_tok.position)
+    def _parse_fn_body(self) -> Block:
+        """A function's body block: never inside an enclosing atomic body."""
+        saved = self._atomic_depth
+        self._atomic_depth = 0
+        try:
+            return self.parse_block()
+        finally:
+            self._atomic_depth = saved
 
     # -- M41b: decorators --------------------------------------------------
 
@@ -1547,7 +1569,7 @@ class Parser:
             self.advance()
             return_type = self._parse_type()
         throws = self._parse_throws_clause()
-        body = self.parse_block()
+        body = self._parse_fn_body()
         return FnExpr(
             name=name,
             params=params,
@@ -1586,7 +1608,7 @@ class Parser:
         parameterless function, so it can `return`, `.await` and throw."""
         test_tok = self.advance()  # `test`
         name_tok = self.advance()  # STRING
-        body = self.parse_block()
+        body = self._parse_fn_body()
         fn = FnExpr(
             name=None,
             params=[],
@@ -1755,7 +1777,7 @@ class Parser:
             return_type = self._parse_type()
         throws = self._parse_throws_clause()
         if self.current.type is TokenType.BRACE_OPEN:
-            body = self.parse_block()
+            body = self._parse_fn_body()
             fn = FnExpr(
                 name=name_tok.literal,
                 params=params,
@@ -1989,9 +2011,11 @@ class Parser:
             return self._parse_postfix_from(self._parse_bracket_literal())
 
         if tok.type is TokenType.ID:
-            if self._at_lock(tok):
+            if self._at_atomic(tok):
+                return self._parse_atomic(tok)
+            if self._at_retry(tok):
                 self.advance()
-                return self._parse_lock(tok)
+                return RetryExpr(position=tok.position)
             self.advance()
             if self.current.type is TokenType.PAREN_OPEN:
                 args, kwargs = self._parse_paren_args()

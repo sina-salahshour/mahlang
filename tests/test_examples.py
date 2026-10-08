@@ -323,11 +323,11 @@ class ExampleTests(unittest.TestCase):
         )
 
     def test_threads(self):
-        # M44: jobs on other threads, shared variables, locks and channels
+        # M44/M45: jobs on other threads, shared variables, atomic blocks and channels
         self.assertEqual(
             run_file(example_path("threads.mh")),
             "fib(18) = 2584\n144 on worker\nhello from worker / hello\nhits: 400 seen: 8 sum: 28\n"
-            "sum of squares: 55\ncaught: bad input\ndone\n",
+            "sum of squares: 55\nwaited for: go\ncaught: bad input\ndone\n",
         )
 
 

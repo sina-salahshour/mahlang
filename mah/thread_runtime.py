@@ -1,6 +1,9 @@
 """M44 (docs/contracts/M44_threads.md): the process-wide thread runtime of
-the Python VM -- jobs on other threads, shared variables and their locks,
-semaphores, channels, the wait-for graph and the quiescence rule.
+the Python VM -- jobs on other threads, shared variables, semaphores,
+channels, the wait-for graph and the quiescence rule. M45
+(docs/contracts/M45_atomic.md): the shared variables' store with versions,
+`atomic { }` transactions (TL2-style validation under the one runtime
+mutex), `retry` waits and the exclusivity token.
 
 Every VM of a run (the main VM and one per running job) has its own heap;
 nothing of one VM's heap is ever touched by another thread. Values cross
@@ -26,6 +29,8 @@ from decimal import Decimal
 
 from .runtime_values import (
     NONE_VALUE,
+    Tx,
+    TxEntry,
     BytesValue,
     Closure,
     EnumInstance,
@@ -59,7 +64,50 @@ FOREIGN_PROMISE_MESSAGE = (
 )
 STUCK_MESSAGE = "the wait can never finish: every thread is waiting"
 JOB_STUCK_MESSAGE = "the job never finished: it waits on a Promise nothing will settle"
-AWAIT_DEADLOCK_MESSAGE = "deadlock: this await would never end (it waits, through locks or threads, for itself)"
+AWAIT_DEADLOCK_MESSAGE = "deadlock: this await would never end (it waits, through threads, for itself)"
+
+# -- M45: transactions (docs/contracts/M45_atomic.md #5, #6) ------------------
+
+# A transaction that failed this many attempts runs its next one exclusive.
+ATOMIC_ATTEMPTS = 8
+RETRY_NO_READS_MESSAGE = "retry can never wake up: this transaction read no shared variable"
+# The natives a task in a transaction may not call (#5.2) -- exactly the
+# Rust VM's `ATOMIC_REFUSED_NATIVES` (runtime/src/vm/thread.rs).
+ATOMIC_REFUSED_NATIVES: frozenset = frozenset(
+    {
+        "io.print", "io.write", "io.input", "io.read_line",
+        "time.sleep_async", "time.cancel",
+        "promise.resolve", "promise.fail",
+        "fs.read_text", "fs.write_text", "fs.append_text", "fs.info", "fs.list_dir", "fs.mkdir", "fs.remove",
+        "fs.rename", "fs.copy", "fs.temp_dir", "fs.open", "fs.read_line", "fs.read_all", "fs.write", "fs.close",
+        "fs.read_bytes", "fs.write_bytes", "fs.append_bytes", "fs.file_read_bytes", "fs.file_write_bytes",
+        "process.exit", "process.run", "process.env_set", "process.env_remove",
+        "socket.connect", "socket.listen", "socket.accept", "socket.send", "socket.recv", "socket.shutdown",
+        "socket.close", "socket.start_tls", "socket.tls_server_config", "socket.start_tls_server",
+        "thread.spawn", "thread.submit", "thread.close", "thread.join", "thread.semaphore_acquire",
+        "thread.semaphore_try_acquire", "thread.semaphore_release", "thread.channel_send", "thread.channel_recv",
+        "thread.channel_try_recv", "thread.channel_close",
+    }
+)
+# Debug counters for tests (never visible to Mah programs).
+TX_STATS = {"conflicts": 0, "exclusive": 0}
+
+
+def in_atomic(name: str) -> MahThrow:
+    return MahThrow(
+        thread_error("in_atomic", f"'{name}' can't run inside 'atomic {{ }}': its body may run more than once")
+    )
+
+
+class TxRestart(BaseException):
+    """Abandon the current attempt of the task's transaction: `kind`
+    "conflict" (run it again) or "retry" (wait for a change first). A
+    BaseException, so no `except Exception` swallows it on its way to the
+    owner's step loop."""
+
+    def __init__(self, kind: str):
+        super().__init__(kind)
+        self.kind = kind
 
 
 def _settled(value=NONE_VALUE) -> PromiseInstance:
@@ -198,6 +246,79 @@ def copy_value(value, strict: bool = True, local: bool = False):
     return copy_values([(value, strict)], local=local)[0]
 
 
+def _is_num(v) -> bool:
+    return isinstance(v, (Decimal, int, float)) and not isinstance(v, bool)
+
+
+def same_copy(a, b) -> bool:
+    """M45 #6.6: whether two strict copies are the same value graph (decides
+    whether an exposed, unassigned working value changed). Closures and
+    frames never count as the same."""
+    left: dict = {}
+    right: dict = {}
+    stack = [(a, b)]
+    while stack:
+        x, y = stack.pop()
+        if x is NONE_VALUE or x is None or y is NONE_VALUE or y is None:
+            if not ((x is NONE_VALUE or x is None) and (y is NONE_VALUE or y is None)):
+                return False
+            continue
+        if isinstance(x, bool) or isinstance(y, bool):
+            if not (isinstance(x, bool) and isinstance(y, bool) and x == y):
+                return False
+            continue
+        if _is_num(x) or _is_num(y):
+            if not (_is_num(x) and _is_num(y) and x == y):
+                return False
+            continue
+        if isinstance(x, str) or isinstance(y, str):
+            if not (isinstance(x, str) and isinstance(y, str) and x == y):
+                return False
+            continue
+        if isinstance(x, TypeValue) or isinstance(y, TypeValue):
+            if not (isinstance(x, TypeValue) and isinstance(y, TypeValue) and x.kind == y.kind and x.index == y.index):
+                return False
+            continue
+        if isinstance(x, _Absent) or isinstance(y, _Absent):
+            if not (isinstance(x, _Absent) and isinstance(y, _Absent)):
+                return False
+            continue
+        if type(x) is not type(y):
+            return False
+        if not isinstance(x, (VectorValue, MapValue, BytesValue, StructInstance, EnumInstance)):
+            return False  # a Closure, Frame (or anything else): conservatively changed
+        paired_x = left.get(id(x))
+        paired_y = right.get(id(y))
+        if paired_x is not None or paired_y is not None:
+            if paired_x == id(y) and paired_y == id(x):
+                continue
+            return False
+        left[id(x)] = id(y)
+        right[id(y)] = id(x)
+        if isinstance(x, VectorValue):
+            if len(x.items) != len(y.items):
+                return False
+            stack.extend(zip(x.items, y.items))
+        elif isinstance(x, MapValue):
+            if len(x.entries) != len(y.entries) or list(x.entries) != list(y.entries):
+                return False
+            for (kx, vx), (ky, vy) in zip(x.entries.values(), y.entries.values()):
+                stack.append((kx, ky))
+                stack.append((vx, vy))
+        elif isinstance(x, BytesValue):
+            if bytes(x.data) != bytes(y.data):
+                return False
+        else:
+            if x.type_name != y.type_name:
+                return False
+            if isinstance(x, EnumInstance) and x.variant != y.variant:
+                return False
+            if list(x.fields) != list(y.fields):
+                return False
+            stack.extend(zip(x.fields.values(), y.fields.values()))
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Runtime records
 # ---------------------------------------------------------------------------
@@ -248,14 +369,6 @@ class Pool:
         self.alive = 0
         self.joiners: list = []  # (vt, promise)
         self.cv = threading.Condition(rt.lock)
-
-
-class _LockState:
-    __slots__ = ("owner", "waiters")
-
-    def __init__(self):
-        self.owner = None  # (task id, vt)
-        self.waiters: collections.deque = collections.deque()  # (task id, vt, promise)
 
 
 class _Semaphore:
@@ -367,13 +480,16 @@ class VmThreads:
         self.blocked = False
         self.internal = 0
         # id(promise) -> (promise, kind, info), in creation order: this VM's
-        # runtime waits (kind "lock" | "sem" | "recv" | "send" | "join" | "job").
+        # runtime waits (kind "retry" | "sem" | "recv" | "send" | "join" | "job").
         self.waits: dict = {}
         self.out = LineBuffer(self)
         # the job this VM runs (None in the main VM), and the tasks with an
         # await edge recorded in the wait-for graph
         self.job_id = None
         self.edge_tasks: set = set()
+        # M45: called while blocked in an exclusivity wait (set by the VM:
+        # test deadline, exit requests, abandonment).
+        self.wait_check = lambda: None
 
     # -- pending entries --------------------------------------------------
 
@@ -389,37 +505,128 @@ class VmThreads:
             self.internal -= 1
         return entry
 
-    # -- shared variables (docs/contracts/M44_threads.md #6.4) --------------
+    # -- shared variables and transactions (docs/contracts/M45_atomic.md #6.3)
 
-    def get(self, task, k: int, mode: int):
-        held = task.held.get(k)
-        if mode == 1:
-            if held is None:
-                raise MahRuntimeError("sharedget without holding the lock", kind="Internal")
-            return held[0]
-        if held is not None:
-            return copy_value(held[0], local=True)
+    def get(self, task, k: int, name: str, mode: int):
+        tx = task.tx
         rt = self.rt
-        with rt.lock:
-            stored = rt.shared.get(k, NONE_VALUE)
-        return copy_value(stored, local=True)
-
-    def set(self, task, k: int, value) -> None:
-        held = task.held.get(k)
-        if held is None:
-            raise MahRuntimeError("sharedset without holding the lock", kind="Internal")
-        held[0] = value
-
-    def lock(self, task, k: int, name: str) -> PromiseInstance:
-        return self.rt.acquire(self, task, k, name)
-
-    def unlock(self, task, k: int, name: str, mode: int) -> None:
+        if tx is None:
+            if mode == 1:
+                raise MahRuntimeError("sharedget in working mode outside a transaction", kind="Internal")
+            value, _version = rt.read_shared(k)
+            return copy_value(value, local=True)
+        entry = tx.entries.get(k)
+        if entry is None:
+            value, version = rt.read_shared(k)
+            if version > tx.rv:
+                raise TxRestart("conflict")
+            tx.reads[k] = version
+            entry = tx.entries[k] = TxEntry(name, value, copy_value(value, local=True))
         if mode == 1:
-            held = task.held.get(k)
-            if held is not None:
-                held[2] = held[1]
+            entry.exposed = True
+            return entry.working
+        return copy_value(entry.working, local=True)
+
+    def set(self, task, k: int, name: str, value) -> None:
+        tx = task.tx
+        if tx is not None:
+            working = copy_value(value, local=True)
+            entry = tx.entries.get(k)
+            if entry is None:
+                tx.entries[k] = TxEntry(name, None, working, assigned=True)
+            else:
+                entry.working = working
+                entry.assigned = True
             return
-        self.rt.release(task, k, name)
+        try:
+            stored = copy_value(value, strict=True)
+        except NotSendable:
+            raise MahThrow(thread_error("not_sendable", f"shared variable '{name}' can't hold a Promise")) from None
+        self.rt.write_shared(self, k, stored)
+
+    def _start(self, task, tx) -> None:
+        """`tx_start`, guarded: any error but a restart ends the transaction."""
+        try:
+            self.rt.tx_start(self, tx)
+        except TxRestart:
+            raise
+        except BaseException:
+            self.rt.end_attempt(tx)
+            task.tx = None
+            raise
+
+    def begin(self, task, pc: int) -> None:
+        tx = task.tx
+        if tx is None:
+            tx = Tx(task, task.implicit, (pc, task.current_frame, len(task.return_stack), len(task.defer_stack)))
+            task.tx = tx
+            self._start(task, tx)
+        elif tx.depth > 0:
+            tx.depth += 1
+        else:
+            tx.depth = 1
+            if tx.attempts >= ATOMIC_ATTEMPTS:
+                tx.irrevocable = True
+            self._start(task, tx)
+
+    def end(self, task) -> None:
+        tx = task.tx
+        if tx is None:
+            raise MahRuntimeError("atomicend outside a transaction", kind="Internal")
+        if tx.depth > 1:
+            tx.depth -= 1
+            return
+        rt = self.rt
+        try:
+            publish = []
+            refused = None
+            for k, entry in tx.entries.items():
+                if not (entry.assigned or entry.exposed):
+                    continue
+                try:
+                    stored = copy_value(entry.working, strict=True)
+                except NotSendable:
+                    refused = entry.name
+                    break
+                if not entry.assigned and same_copy(stored, entry.base):
+                    continue
+                publish.append((k, stored))
+            if refused is not None:
+                rt.end_attempt(tx)
+                task.tx = None
+                raise MahThrow(thread_error("not_sendable", f"shared variable '{refused}' can't hold a Promise"))
+            if not rt.tx_commit(self, tx, publish):
+                raise TxRestart("conflict")
+            task.tx = None
+        except TxRestart:
+            raise
+        except BaseException:
+            rt.end_attempt(tx)
+            if task.tx is tx:
+                task.tx = None
+            raise
+
+    def abort(self, task) -> None:
+        tx = task.tx
+        if tx is None:
+            raise MahRuntimeError("atomicabort outside a transaction", kind="Internal")
+        if tx.depth > 1:
+            tx.depth -= 1
+            return
+        self.rt.end_attempt(tx)
+        task.tx = None
+
+    def retry(self, task) -> None:
+        tx = task.tx
+        if tx is None:
+            raise MahRuntimeError("retry outside a transaction", kind="Internal")
+        if tx.implicit is not None:
+            raise MahRuntimeError(
+                f"'{tx.implicit}' cannot suspend (it used 'retry') when called implicitly by the runtime"
+            )
+        if not tx.reads:
+            raise MahThrow(thread_error("stuck", RETRY_NO_READS_MESSAGE))
+        raise TxRestart("retry")
 
     def poll(self) -> None:
         rt = self.rt
@@ -445,9 +652,17 @@ class ThreadRuntime:
         self.args = list(args)
         self.lock = threading.Lock()
         self.stdout_lock = threading.Lock()
+        # M45 (#6.1): index -> (stored strict copy, version); the version
+        # clock; retry waits (key = id(promise)) and the indices they watch;
+        # the exclusivity token.
         self.shared: dict = {}
-        self.locks: dict = {}
-        self.waiting_on: dict = {}
+        self.clock = 0
+        self.watchers: dict = {}
+        self.retry_waits: dict = {}
+        self.excl_owner = None  # (tx serial, vm id)
+        self.excl_queue: collections.deque = collections.deque()
+        self.commits_waiting = 0
+        self.excl_cv = threading.Condition(self.lock)
         self.awaiting: dict = {}
         self.job_roots: dict = {}
         self.tracking = False
@@ -499,11 +714,6 @@ class ThreadRuntime:
 
     def _out_edges(self, node) -> list:
         edges = []
-        k = self.waiting_on.get(node)
-        if k is not None:
-            state = self.locks.get(k)
-            if state is not None and state.owner is not None:
-                edges.append((state.owner[0], True))
         producer = self.awaiting.get(node)
         if producer is not None:
             edges.extend(self.producer_edges(producer))
@@ -528,9 +738,6 @@ class ThreadRuntime:
                 stack.append((nxt, has_strong or s))
         return False
 
-    def cycle(self, start, target, strong: bool = True) -> bool:
-        return self.cycle_from([(start, False)], target, strong)
-
     def await_check(self, vt, task, promise) -> None:
         """Called (only when tracking) before `task` suspends on `promise`:
         a deadlock throws in the task; else the await edge is recorded."""
@@ -538,6 +745,13 @@ class ThreadRuntime:
         with self.lock:
             strong = producer[0] != "task"
             if self.cycle_from(self.producer_edges(producer), task.id, strong):
+                if producer[0] == "join":
+                    # M45: std:thread's `join` awaits its Promise at once and
+                    # drops it, so a join that fails here can never be
+                    # awaited again: drop its waiter and pending entry, or
+                    # it would keep this VM (and its job) alive forever.
+                    self._remove_waiter(promise)
+                    vt.take_wait(promise)
                 raise MahThrow(thread_error("deadlock", AWAIT_DEADLOCK_MESSAGE))
             self.awaiting[task.id] = producer
             vt.edge_tasks.add(task.id)
@@ -549,64 +763,136 @@ class ThreadRuntime:
             vt.edge_tasks.discard(task.id)
         task.awaits_edge = False
 
-    # -- locks (#6.4) ---------------------------------------------------------
+    # -- shared variables and transactions (docs/contracts/M45_atomic.md #6) --
 
-    def acquire(self, vt, task, k: int, name: str) -> PromiseInstance:
-        held = task.held.get(k)
-        if held is not None:
-            held[1] += 1
-            return _settled()
+    def read_shared(self, k: int):
         with self.lock:
-            self.tracking = True
-            state = self.locks.get(k)
-            if state is None:
-                state = self.locks[k] = _LockState()
-            if state.owner is None:
-                state.owner = (task.id, vt)
-                task.held[k] = [copy_value(self.shared.get(k, NONE_VALUE), local=True), 1, 0]
-                return _settled()
-            if self.cycle(state.owner[0], task.id, True):
-                return _failed(thread_error("deadlock", f"deadlock: waiting for '{name}' would never end"))
+            return self.shared.get(k, (NONE_VALUE, 0))
+
+    def write_shared(self, vt, k: int, stored) -> None:
+        """A plain assignment outside a transaction (`stored` is a strict
+        copy): a new version, waking `retry` waiters of `k`."""
+        with self.lock:
+            self._wait_no_excl(vt, None)
+            self.clock += 1
+            self.shared[k] = (stored, self.clock)
+            self._wake_watchers([k])
+
+    def tx_start(self, vt, tx) -> None:
+        with self.lock:
+            if tx.irrevocable:
+                self._acquire_excl(vt, tx.serial)
+                TX_STATS["exclusive"] += 1
+            tx.rv = self.clock
+
+    def tx_commit(self, vt, tx, publish: list) -> bool:
+        with self.lock:
+            if publish:
+                self._wait_no_excl(vt, tx.serial)
+                if not self._reads_valid(tx.reads):
+                    return False
+                self.clock += 1
+                for k, stored in publish:
+                    self.shared[k] = (stored, self.clock)
+                self._wake_watchers([k for k, _stored in publish])
+            self._release_excl(tx.serial)
+            return True
+
+    def end_attempt(self, tx) -> None:
+        with self.lock:
+            self._release_excl(tx.serial)
+
+    def count_conflict(self) -> None:
+        with self.lock:
+            TX_STATS["conflicts"] += 1
+
+    def retry_wait(self, vt, reads: dict):
+        """A pending Promise settled when a variable of `reads` gets another
+        version -- or None when one already has."""
+        with self.lock:
+            if not self._reads_valid(reads):
+                return None
             promise = PromiseInstance()
-            state.waiters.append((task.id, vt, promise))
-            self.waiting_on[task.id] = k
-            vt.add_wait(promise, "lock", (task, k))
+            keys = list(reads)
+            key = id(promise)
+            vt.add_wait(promise, "retry", keys)
+            self.retry_waits[key] = (vt, promise, keys)
+            for k in keys:
+                self.watchers.setdefault(k, set()).add(key)
             return promise
 
-    def release(self, task, k: int, name: str) -> None:
-        entry = task.held.get(k)
-        if entry is None:
-            raise MahRuntimeError("sharedunlock without holding the lock", kind="Internal")
-        leaving_by_throw = entry[2] == entry[1]
-        if leaving_by_throw:
-            entry[2] = 0
-        entry[1] -= 1
-        if entry[1] > 0:
-            return
-        del task.held[k]
-        refused = False
-        try:
-            value = copy_value(entry[0], strict=True)
-        except NotSendable:
-            refused = True
-        with self.lock:
-            if not refused:
-                self.shared[k] = value
-            self.grant_next(k)
-        if refused and not leaving_by_throw:
-            raise MahThrow(thread_error("not_sendable", f"shared variable '{name}' can't hold a Promise"))
+    def _reads_valid(self, reads: dict) -> bool:
+        shared = self.shared
+        for k, version in reads.items():
+            entry = shared.get(k)
+            if (entry[1] if entry is not None else 0) != version:
+                return False
+        return True
 
-    def grant_next(self, k: int) -> None:
-        state = self.locks.get(k)
-        if state is None:
+    def _wake_watchers(self, keys) -> None:
+        for k in keys:
+            for key in self.watchers.pop(k, ()):
+                entry = self.retry_waits.pop(key, None)
+                if entry is None:
+                    continue
+                vt, promise, indices = entry
+                for other in indices:
+                    if other != k:
+                        watching = self.watchers.get(other)
+                        if watching is not None:
+                            watching.discard(key)
+                self.post(vt, (promise, "settle", (True, NONE_VALUE)))
+
+    def _drop_retry_wait(self, key) -> None:
+        entry = self.retry_waits.pop(key, None)
+        if entry is None:
             return
-        state.owner = None
-        while state.waiters:
-            task_id, vt, promise = state.waiters.popleft()
-            self.waiting_on.pop(task_id, None)
-            state.owner = (task_id, vt)
-            self.post(vt, (promise, "lock", (k, copy_value(self.shared.get(k, NONE_VALUE), local=True))))
+        for k in entry[2]:
+            watching = self.watchers.get(k)
+            if watching is not None:
+                watching.discard(key)
+                if not watching:
+                    del self.watchers[k]
+
+    def _excl_wait(self, vt) -> None:
+        self.excl_cv.wait(0.05)
+        vt.wait_check()
+
+    def _acquire_excl(self, vt, serial) -> None:
+        """Become the one exclusive transaction (#6.9): FIFO among the
+        waiting ones, after the commits already waiting have gone through."""
+        self.excl_queue.append(serial)
+        try:
+            while not (self.excl_owner is None and self.excl_queue[0] == serial and self.commits_waiting == 0):
+                self._excl_wait(vt)
+        except BaseException:
+            try:
+                self.excl_queue.remove(serial)
+            except ValueError:
+                pass
+            self.excl_cv.notify_all()
+            raise
+        self.excl_queue.popleft()
+        self.excl_owner = (serial, vt.vm_id)
+
+    def _wait_no_excl(self, vt, serial) -> None:
+        """Wait while another transaction is exclusive (a commit of `serial`,
+        or a plain write when `serial` is None)."""
+        if self.excl_owner is None or self.excl_owner[0] == serial:
             return
+        self.commits_waiting += 1
+        try:
+            while self.excl_owner is not None and self.excl_owner[0] != serial:
+                self._excl_wait(vt)
+        finally:
+            self.commits_waiting -= 1
+            if self.commits_waiting == 0:
+                self.excl_cv.notify_all()
+
+    def _release_excl(self, serial) -> None:
+        if self.excl_owner is not None and self.excl_owner[0] == serial:
+            self.excl_owner = None
+            self.excl_cv.notify_all()
 
     # -- pools (#2.3, #6.5) ----------------------------------------------------
 
@@ -836,11 +1122,7 @@ class ThreadRuntime:
 
     def _remove_waiter(self, promise) -> None:
         """Drop `promise`'s runtime waiter, wherever it is (`self.lock` held)."""
-        for state in self.locks.values():
-            for w in list(state.waiters):
-                if w[2] is promise:
-                    state.waiters.remove(w)
-                    self.waiting_on.pop(w[0], None)
+        self._drop_retry_wait(id(promise))
         for sem in self.semaphores.values():
             for w in list(sem.waiters):
                 if w[1] is promise:
@@ -889,16 +1171,11 @@ class ThreadRuntime:
 
     def forget_vm(self, vt) -> None:
         with self.lock:
-            # this VM's waiters go first, so a lock it owns never passes to
-            # another of its own (dying) tasks (#6.6)
-            for state in self.locks.values():
-                for w in list(state.waiters):
-                    if w[1] is vt:
-                        state.waiters.remove(w)
-                        self.waiting_on.pop(w[0], None)
-            for k, state in self.locks.items():
-                if state.owner is not None and state.owner[1] is vt:
-                    self.grant_next(k)
+            # M45 (#6.8): this VM's retry waits and its exclusivity token
+            for key in [key for key, entry in self.retry_waits.items() if entry[0] is vt]:
+                self._drop_retry_wait(key)
+            if self.excl_owner is not None and self.excl_owner[1] == vt.vm_id:
+                self._release_excl(self.excl_owner[0])
             for sem in self.semaphores.values():
                 sem.waiters = collections.deque(w for w in sem.waiters if w[0] is not vt)
             for ch in self.channels.values():
@@ -936,8 +1213,7 @@ class ThreadRuntime:
                             self.post(r_vt, (r_promise, "recv", (cid, message)))
                         else:
                             ch.queue.appendleft(message)
-            # anything else (a lock granted to this VM was released above,
-            # a job reply, a settle) is dropped
+            # anything else (a job reply, a settle) is dropped
         vt.dead = True
 
     # -- exit and shutdown -------------------------------------------------------
@@ -1047,14 +1323,19 @@ def _worker(rt: ThreadRuntime, pool: Pool) -> None:
 
 
 __all__ = [
+    "ATOMIC_ATTEMPTS",
+    "ATOMIC_REFUSED_NATIVES",
     "Abandoned",
     "HandleTables",
     "Job",
     "LineBuffer",
     "NotSendable",
     "ThreadRuntime",
+    "TxRestart",
     "VmThreads",
     "copy_value",
     "copy_values",
+    "in_atomic",
+    "same_copy",
     "thread_error",
 ]

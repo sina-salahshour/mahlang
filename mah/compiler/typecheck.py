@@ -41,9 +41,8 @@ import dataclasses
 from dataclasses import dataclass
 
 from .ast_nodes import (
-    LockAcquire,
-    LockExpr,
-    LockRelease,
+    AtomicExpr,
+    RetryExpr,
     TestDecl,
     NativeCall,
     AssignStmt,
@@ -1449,10 +1448,12 @@ class Checker:
                         "operand on the same line as 'detach(t)', or write 'detach(t) { ... }'",
                     )
             return TCon("Promise", [inner], node)
-        if isinstance(expr, LockExpr):
-            return self._check_block(expr.block, hint)
-        if isinstance(expr, (LockAcquire, LockRelease)):
-            return NONE
+        if isinstance(expr, AtomicExpr):
+            # M45: the body is checked inline, as a plain block (never as a
+            # lambda: it declares nothing and its throws are the caller's).
+            return self._check_block(expr.closure.body, hint)
+        if isinstance(expr, RetryExpr):
+            return NEVER
         if isinstance(expr, FnExpr):
             sig, _ = self._check_fn(expr, hint)
             return sig
@@ -1958,22 +1959,22 @@ class Checker:
         return t.name in self.structs or t.name in self.enums
 
     def _warn_shared_args(self, args: list) -> None:
-        """W2: a shared variable passed directly to a call outside its lock."""
+        """W2: a shared variable passed directly to a call outside `atomic { }`."""
         for arg in args:
-            if isinstance(arg, Ident) and arg.shared_index is not None and not arg.shared_locked:
+            if isinstance(arg, Ident) and arg.shared_index is not None and not arg.shared_atomic:
                 if self._copied_shared_type(self._ident_type(arg)):
                     name = arg.shared_name
                     self._warn(
                         arg.position,
                         f"shared variable '{name}' is passed as a copy: changes the callee makes to it are "
-                        f"lost; to change it, call inside 'lock {name} {{ ... }}'",
+                        f"lost; to change it, call inside 'atomic {{ ... }}'",
                     )
 
     def _warn_shared_loop(self, expr: ForStmt) -> None:
         """W3: assigning into the loop variable of a loop over a shared
-        variable (outside its lock)."""
+        variable (outside `atomic { }`)."""
         iterable = expr.iterable
-        if not (isinstance(iterable, Ident) and iterable.shared_index is not None and not iterable.shared_locked):
+        if not (isinstance(iterable, Ident) and iterable.shared_index is not None and not iterable.shared_atomic):
             return
         item = self._sym(expr.value_position)
         if item is None:
@@ -1985,7 +1986,7 @@ class Checker:
             if isinstance(n, (list, tuple)):
                 stack.extend(n)
                 continue
-            if isinstance(n, FnExpr):
+            if isinstance(n, FnExpr) and not n.atomic:
                 continue
             if isinstance(n, AssignStmt) and isinstance(n.target, (FieldAccess, Index)):
                 root = n.target
@@ -2004,7 +2005,7 @@ class Checker:
             self._warn(
                 found,
                 f"'{expr.value_name}' is a copy of an element of shared variable '{name}': assigning into it "
-                f"changes nothing shared; loop inside 'lock {name} {{ ... }}'",
+                f"changes nothing shared; loop inside 'atomic {{ ... }}'",
             )
 
     def _check_for(self, expr: ForStmt, used: bool):

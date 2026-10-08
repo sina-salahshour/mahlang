@@ -335,7 +335,8 @@ class Task:
     watching."""
 
     __slots__ = (
-        "pc", "current_frame", "return_stack", "defer_stack", "watching_promise", "id", "held", "awaits_edge"
+        "pc", "current_frame", "return_stack", "defer_stack", "watching_promise", "id", "awaits_edge", "tx",
+        "implicit",
     )
 
     def __init__(self, pc, current_frame, watching_promise=None):
@@ -344,13 +345,54 @@ class Task:
         self.return_stack = []   # list[tuple[int, Frame]]
         self.defer_stack = []    # list[list[Closure]]
         self.watching_promise = watching_promise
-        # M44 (docs/contracts/M44_threads.md #6.1): a process-unique id, the
-        # shared variables this task holds (index -> [working value, depth,
-        # unwinding]; an implicit-call sub-task shares its caller's dict),
-        # and whether it recorded an await edge in the wait-for graph.
+        # M44 (docs/contracts/M44_threads.md #6.1): a process-unique id and
+        # whether it recorded an await edge in the wait-for graph. M45
+        # (docs/contracts/M45_atomic.md #6.2): the transaction it runs in
+        # (`Tx`; an implicit-call sub-task shares its caller's), and the
+        # label (`"to_string"`/`"message"`) of an implicit runtime call's
+        # sub-task.
         self.id = next(_TASK_IDS)
-        self.held = {}
         self.awaits_edge = False
+        self.tx = None
+        self.implicit = None
+
+
+_TX_SERIALS = itertools.count(1)
+
+
+class Tx:
+    """M45 (docs/contracts/M45_atomic.md #6.2): one `atomic { }`
+    transaction. `reads`: index -> version; `entries`: index -> TxEntry,
+    both in first-access order; `restart`: (pc of the outermost
+    `atomicbegin`, the frame there, return-stack length, defer-stack
+    length)."""
+
+    __slots__ = ("serial", "owner", "implicit", "depth", "rv", "reads", "entries", "attempts", "irrevocable", "restart")
+
+    def __init__(self, owner, implicit, restart):
+        self.serial = next(_TX_SERIALS)
+        self.owner = owner
+        self.implicit = implicit
+        self.depth = 1
+        self.rv = 0
+        self.reads: dict = {}
+        self.entries: dict = {}
+        self.attempts = 0
+        self.irrevocable = False
+        self.restart = restart
+
+
+class TxEntry:
+    """A transaction's working copy of one shared variable."""
+
+    __slots__ = ("name", "base", "working", "assigned", "exposed")
+
+    def __init__(self, name, base, working, assigned=False, exposed=False):
+        self.name = name
+        self.base = base
+        self.working = working
+        self.assigned = assigned
+        self.exposed = exposed
 
 
 # Mah's `none` -- a single shared singleton, not reallocated per use (see

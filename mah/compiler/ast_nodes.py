@@ -86,10 +86,14 @@ for the `defmethod`/`callmethod` opcodes they compile to).
 M44 (docs/contracts/M44_threads.md): `detach(t) expr` -- `DetachExpr` gains
 `thread` (the thread expression; `None` for today's same-thread form),
 `thread_position` and `paren_head`; `shared let` is a `LetStmt` with
-`shared=True`; `lock a, b { body }` is a `LockExpr` whose `block` is the
-desugared block (`LockAcquire` per target, each followed by a `defer` of its
-`LockRelease`, with the user's body as the tail). Shared-variable `Ident`s
-carry the resolver's `shared_index`/`shared_name`/`shared_locked`.
+`shared=True`. Shared-variable `Ident`s carry the resolver's
+`shared_index`/`shared_name`/`shared_atomic`.
+
+M45 (docs/contracts/M45_atomic.md): `atomic { body }` is an `AtomicExpr`
+whose `closure` is a zero-parameter `FnExpr` with `atomic=True` (the body
+runs as a called closure, so a rerun gets fresh locals; every pass but the
+resolver's scopes and codegen treats it as a plain block); `retry` (the
+contextual keyword, only inside an atomic body) is a `RetryExpr`.
 
 Every node carries `position` (a source offset into the *combined*,
 preprocessed text) so error messages can point mah.py at a `file:line:col`
@@ -184,11 +188,11 @@ class Ident:
     type_value: Optional[tuple] = field(default=None, repr=False)
     # M44: set by Resolver when this names a `shared let` variable -- its
     # index in the process-wide store, its demangled source name, and
-    # whether it is written lexically inside a `lock` on it (`address`
+    # whether it is written lexically inside an `atomic { }` (M45; `address`
     # stays None).
     shared_index: Optional[int] = field(default=None, repr=False)
     shared_name: Optional[str] = field(default=None, repr=False)
-    shared_locked: bool = field(default=False, repr=False)
+    shared_atomic: bool = field(default=False, repr=False)
 
 
 @dataclass
@@ -571,6 +575,9 @@ class FnExpr:
     # non-call `detach` operand (`detach { ... }`), so codegen can reject
     # `return`/`break`/`continue` that would escape it with a clear error.
     detached: bool = field(default=False, repr=False)
+    # M45: True for the closure the parser synthesizes around an
+    # `atomic { }` body (docs/contracts/M45_atomic.md #2.2).
+    atomic: bool = field(default=False, repr=False)
     # M21 (syntax only -- see docs/TYPES.md): `fn NAME<type_params>(...)`'s
     # generic parameter list -- list[TypeParam], `[]` when there's no
     # `<...>`. Ignored by everything past the resolver's name validation.
@@ -980,32 +987,20 @@ class TypePat:
     address: Optional[int] = field(default=None, repr=False)
 
 
-# -- M44: lock ------------------------------------------------------------
+# -- M45: atomic / retry ---------------------------------------------------
 
 
 @dataclass
-class LockExpr:
-    """`lock a, b { body }` -- `targets` are the parsed target nodes (an
-    `Ident`, or a `FieldAccess` chain before preprocessing); `block` is the
-    desugared block: per target a `LockAcquire` statement then a `defer` of
-    its `LockRelease`, with the user's body as the block's tail."""
+class AtomicExpr:
+    """`atomic { body }` -- `closure` is the body as a zero-parameter
+    `FnExpr` with `atomic=True` (docs/contracts/M45_atomic.md #2.2)."""
 
-    targets: list
-    block: Block
-    position: int  # the `lock` token
+    closure: "FnExpr"
+    position: int  # the `atomic` token
 
 
 @dataclass
-class LockAcquire:
-    name: str  # the target as written (`a`, or `lib.hits` if dotted)
+class RetryExpr:
+    """`retry` inside an atomic body -- an expression of type Never."""
+
     position: int
-    shared_index: Optional[int] = field(default=None, repr=False)
-    shared_name: Optional[str] = field(default=None, repr=False)
-
-
-@dataclass
-class LockRelease:
-    name: str
-    position: int
-    shared_index: Optional[int] = field(default=None, repr=False)
-    shared_name: Optional[str] = field(default=None, repr=False)

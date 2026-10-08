@@ -243,9 +243,11 @@ def _uses_prelude(token_lists: list) -> bool:
                 return True
         for i in range(len(tokens) - 1):
             a, b = tokens[i], tokens[i + 1]
-            # M44: `shared let` and `lock NAME` can throw the prelude's
-            # `ThreadError` ("deadlock", "not_sendable").
-            if a.kind == "id" and b.kind == "id" and ((a.value == "shared" and b.value == "let") or a.value == "lock"):
+            # M44/M45: `shared let` and `atomic {` can throw the prelude's
+            # `ThreadError` ("not_sendable", "in_atomic", "stuck").
+            if a.kind == "id" and b.kind == "id" and a.value == "shared" and b.value == "let":
+                return True
+            if a.kind == "id" and a.value == "atomic" and b.kind == "punct" and b.value == "{":
                 return True
             if a.kind == "dot" and b.kind == "dot" and b.start == a.end:
                 return True
@@ -471,6 +473,101 @@ def _is_shared_let(tokens: list, k: int) -> bool:
         and tokens[k + 1].kind == "id"
         and tokens[k + 1].value == "let"
     )
+
+
+# M45 (docs/contracts/M45_atomic.md #8.1): which `atomic`/`retry` tokens the
+# parser reads as the contextual keywords -- never rewritten into a
+# module-level binding of the same spelling.
+_HEAD_WORDS = ("if", "elif", "while", "for", "match")
+# An `atomic` right after one of these is a declared/type name, never parsed
+# as an expression by the parser.
+_ATOMIC_NOT_AFTER = ("struct", "enum", "impl", "trait", "for", "fn", "throws")
+_RETRY_FOLLOW = ("}", ";", ",", ")", "]")
+
+
+def _contextual_keywords(source: str, tokens: list) -> tuple:
+    """`(atomic token indices, retry token indices)`: a token-level mirror
+    of the parser's #2.2/#2.3 rules -- condition heads (no struct literals,
+    so no `atomic {`), the atomic-body regions (a stack of flags parallel to
+    the brace depth; a function body or a test block resets it)."""
+    count = len(tokens)
+    atomic_idx: set = set()
+    retry_idx: set = set()
+
+    def same_line(a: int, b: int) -> bool:
+        return "\n" not in source[tokens[a].end : tokens[b].start]
+
+    def punct(k: int, ch: str) -> bool:
+        return 0 <= k < count and tokens[k].kind == "punct" and tokens[k].value == ch
+
+    paren = 0  # paren/bracket depth
+    heads: list = []  # paren depths of the open condition heads
+    fn_pending: list = []  # paren depths of `fn`s whose body `{` hasn't come yet
+    flags: list = []  # one per open `{`: inside an atomic body?
+    next_brace_atomic = False
+    for i, tok in enumerate(tokens):
+        prev_dot = i > 0 and tokens[i - 1].kind == "dot"
+        if tok.kind == "id" and not prev_dot:
+            if tok.value in _HEAD_WORDS:
+                heads.append(paren)
+            elif tok.value == "fn":
+                fn_pending.append(paren)
+            elif tok.value == "atomic":
+                prev_word = tokens[i - 1].value if i > 0 and tokens[i - 1].kind == "id" else None
+                in_head = bool(heads) and heads[-1] == paren
+                arrow = punct(i - 1, ">") and punct(i - 2, "-")
+                if (
+                    not in_head
+                    and prev_word not in _ATOMIC_NOT_AFTER
+                    and not arrow
+                    and punct(i + 1, "{")
+                    and same_line(i, i + 1)
+                    and i + 2 < count
+                    and not punct(i + 2, "}")
+                    and not (tokens[i + 2].kind == "id" and punct(i + 3, ":"))
+                ):
+                    atomic_idx.add(i)
+                    next_brace_atomic = True
+            elif tok.value == "retry" and flags and flags[-1]:
+                if i + 1 >= count or (
+                    tokens[i + 1].kind == "punct" and tokens[i + 1].value in _RETRY_FOLLOW
+                ) or not same_line(i, i + 1):
+                    retry_idx.add(i)
+            continue
+        if tok.kind != "punct":
+            continue
+        ch = tok.value
+        if ch in "([":
+            paren += 1
+        elif ch in ")]":
+            paren = max(0, paren - 1)
+            heads = [h for h in heads if h <= paren]
+            fn_pending = [f for f in fn_pending if f <= paren]
+        elif ch == "{":
+            if heads and heads[-1] == paren:
+                heads.pop()  # the head ends at its block's `{`
+            if next_brace_atomic:
+                flag = True
+                next_brace_atomic = False
+            elif fn_pending and fn_pending[-1] == paren:
+                flag = False
+                fn_pending = [f for f in fn_pending if f != paren]
+            elif i >= 2 and tokens[i - 1].kind == "string" and tokens[i - 2].kind == "id" and tokens[i - 2].value == "test":
+                flag = False
+            else:
+                flag = flags[-1] if flags else False
+            flags.append(flag)
+        elif ch == "}":
+            if flags:
+                flags.pop()
+            fn_pending = [f for f in fn_pending if f < paren]
+        elif ch == ";" or (ch == "=" and not punct(i + 1, ">") and not punct(i - 1, "=")):
+            fn_pending = [f for f in fn_pending if f < paren]
+        elif ch == ">" and punct(i - 1, "=") and tokens[i - 1].end == tok.start:
+            # `=>` ends a match guard (`pattern if cond =>`)
+            if heads and heads[-1] == paren:
+                heads.pop()
+    return atomic_idx, retry_idx
 
 
 def _is_punct(tokens: list, k: int, ch: str) -> bool:
@@ -834,6 +931,8 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
         program_tokens.append(tokens)
 
         info = analyze_module(tokens)
+        # M45: the contextual keywords are never rewritten (#8.1).
+        atomic_kw, retry_kw = _contextual_keywords(source, tokens)
         exports[fpath] = info.exported
         top_levels[fpath] = info.top_level
         idx = module_index[fpath]
@@ -1112,6 +1211,16 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
 
             prev_is_variant_decl_name = i in variant_names
 
+            if i in retry_kw and tok.value in name_rewrite and i not in shadowed:
+                # M45 E6b: the keyword `retry` while a module-level `retry`
+                # (or a flat import of one) is visible -- reported here, as
+                # the resolver only sees that binding by its mangled name.
+                e6b = "'retry' here is the keyword (it ends this 'atomic { }' run); rename the variable 'retry'"
+                if is_entry:
+                    errors.append((e6b, tok.start, len(tok.value)))
+                elif root is not None:
+                    errors.append((f"{e6b} (in '{source_label(fpath)}')", root.offset, root.length))
+
             if (
                 tok.kind == "id"
                 and tok.value in name_rewrite
@@ -1119,6 +1228,8 @@ def preprocess(path: Optional[str], text: Optional[str] = None) -> Preprocessed:
                 and not prev_is_method_decl_name
                 and not prev_is_variant_decl_name
                 and i not in shadowed
+                and i not in atomic_kw
+                and i not in retry_kw
             ):
                 emit_gap(tok.start)
                 emit(name_rewrite[tok.value], fpath, tok.start, len(tok.value), root)

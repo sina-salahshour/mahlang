@@ -1,5 +1,6 @@
 """M44 (docs/contracts/M44_threads.md #12.1): threads (`std:thread`,
-`detach(t)`), shared variables and `lock`, semaphores and channels.
+`detach(t)`), shared variables, semaphores and channels; M45
+(docs/contracts/M45_atomic.md #12.1): `atomic { }` transactions and `retry`.
 
 Every program runs through tests/support.py, so `make test-rust` runs them
 on the Rust VM too. The compile-error tests and the wait-for graph tests are
@@ -141,61 +142,59 @@ try { bad.await } catch {
             "not_sendable a Promise can't be sent to another thread\n",
         )
 
-    def test_t7_shared_variables_and_lock(self):
+    def test_t7_shared_variables_and_atomic(self):
         src = THREAD + """shared let n = 0
 shared let xs = []
 fn bump() {
-    lock n {
+    atomic {
         n = n + 1
         n
     }
 }
-print(lock n {
+print(atomic {
     bump()
     bump()
 })
 print(n)
-lock xs { xs.push("a") }
+atomic { xs.push("a") }
 let mine = xs
-lock xs { xs.push("b") }
+atomic { xs.push("b") }
 print(xs, mine)
 let t = thread.spawn()
 print(detach(t) {
-    lock xs { xs.push("c") }
-    lock xs { xs.len() }
+    atomic { xs.push("c") }
+    atomic { xs.len() }
 }.await)
 print(xs)
 xs = ["reset"]
 print(t.run(fn() { xs }).await)
-try {
-    lock xs {
-        xs.push("d")
-        throw RuntimeError.ArgumentError { message: "stop" }
-    }
-} catch {
-    e => { print("caught", e.message()) }
-}
-print(xs)
 shared let slot = none
 try { slot = [detach { 1 }] } catch {
     e: ThreadError => { print(e.kind, e.message, slot) }
 }
+let p2 = detach { 2 }
+try { atomic { slot = [p2] } } catch {
+    e: ThreadError => { print(e.kind, e.message, slot) }
+}
+t.join()
 """
         self.assertEqual(
             run_source(src),
-            "2\n2\n[a, b] [a]\n3\n[a, b, c]\n[reset]\ncaught stop\n[reset, d]\n"
+            "2\n2\n[a, b] [a]\n3\n[a, b, c]\n[reset]\n"
+            "not_sendable shared variable 'slot' can't hold a Promise none\n"
             "not_sendable shared variable 'slot' can't hold a Promise none\n",
         )
 
     def test_t8_pool_and_shared_counters(self):
+        # the lost-update test: 4 workers incrementing one counter
         src = THREAD + """shared let total = 0
 shared let log = []
 let pool = thread.spawn(name: "pool", workers: 4)
 fn work(n) {
     for let i in 0..100 {
-        lock total { total = total + 1 }
+        atomic { total = total + 1 }
     }
-    lock log { log.push(n) }
+    atomic { log.push(n) }
     n * 2
 }
 let jobs = []
@@ -209,30 +208,6 @@ print(total, snapshot.len(), sum, doubled)
 pool.join()
 """
         self.assertEqual(run_source(src), "800 8 28 56\n")
-
-    def test_t9_deadlock_detection(self):
-        src = """shared let a = 0
-shared let b = 0
-let p1 = detach {
-    lock a {
-        sleep_async(20)
-        lock b { "p1 got both" }
-    }
-}
-let p2 = detach {
-    lock b {
-        sleep_async(60)
-        try {
-            lock a { "p2 got both" }
-        } catch {
-            e: ThreadError => { e.kind + " | " + e.message }
-        }
-    }
-}
-print(p1.await)
-print(p2.await)
-"""
-        self.assertEqual(run_source(src), "p1 got both\ndeadlock | deadlock: waiting for 'a' would never end\n")
 
     def test_t10_semaphores(self):
         src = THREAD + """let s = thread.semaphore(1)
@@ -248,12 +223,12 @@ shared let most = 0
 fn job(n) {
     gate.acquire()
     defer gate.release()
-    lock inside, most {
+    atomic {
         inside = inside + 1
         if inside > most { most = inside }
     }
     sleep_async(20)
-    lock inside { inside = inside - 1 }
+    atomic { inside = inside - 1 }
     n
 }
 let pool = thread.spawn(workers: 4)
@@ -355,20 +330,71 @@ me.join()
     def test_t13_modules(self):
         with tempfile.TemporaryDirectory() as td:
             with open(os.path.join(td, "lib.mh"), "w", encoding="utf-8") as f:
-                f.write("export shared let hits = 0\nexport fn hit() {\n    lock hits { hits = hits + 1 }\n}\n")
+                f.write("export shared let hits = 0\nexport fn hit() {\n    atomic { hits = hits + 1 }\n}\n")
             main = os.path.join(td, "main.mh")
             with open(main, "w", encoding="utf-8") as f:
                 f.write(
                     'import lib from "lib.mh"\n' + THREAD + "let t = thread.spawn()\nlib.hit()\n"
-                    "t.run(lib.hit).await\nlock lib.hits { lib.hits = lib.hits + 1 }\nprint(lib.hits)\n"
+                    "t.run(lib.hit).await\natomic { lib.hits = lib.hits + 1 }\nprint(lib.hits)\n"
                 )
             self.assertEqual(run_file(main), "3\n")
 
+    def _run_modules(self, lib: str, main: str) -> str:
+        with tempfile.TemporaryDirectory() as td:
+            with open(os.path.join(td, "lib.mh"), "w", encoding="utf-8") as f:
+                f.write(lib)
+            path = os.path.join(td, "main.mh")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(main)
+            return run_file(path)
+
+    def test_t13b_modules_keep_contextual_keywords(self):
+        # the module's `atomic {` is the keyword although it declares `struct
+        # atomic`; `atomic { v: 1 }` stays its struct literal; `retry(k)`
+        # calls its function
+        lib = (
+            "struct atomic { v: Number }\nexport fn retry(n) { n + 1 }\nexport shared let k = 0\n"
+            "export fn both() {\n    let s = atomic { v: 1 }\n    atomic {\n        k = retry(k)\n"
+            "        k + s.v\n    }\n}\n"
+        )
+        self.assertEqual(
+            self._run_modules(lib, 'import lib from "lib.mh"\nprint(lib.both(), lib.both(), lib.k)\n'), "2 3 2\n"
+        )
+        # `retry` in a module really retries
+        lib = "export shared let k = 0\nexport fn wait_k() {\n    atomic {\n        if k == 0 { retry }\n        k\n    }\n}\n"
+        self.assertEqual(
+            self._run_modules(lib, 'import lib from "lib.mh"\nlet p = detach { lib.wait_k() }\nlib.k = 4\nprint(p.await)\n'),
+            "4\n",
+        )
+        # the keyword is never rewritten into a reference to `lib`'s `retry`
+        lib = (
+            "export fn retry(n) { n }\nexport shared let k = 0\nexport fn f() {\n    atomic {\n"
+            "        if k == 0 { retry }\n        k\n    }\n}\n"
+        )
+        with tempfile.TemporaryDirectory() as td:
+            with open(os.path.join(td, "lib.mh"), "w", encoding="utf-8") as f:
+                f.write(lib)
+            path = os.path.join(td, "main.mh")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write('import "lib.mh"\nprint(f())\n')
+            with self.assertRaises(Exception) as cm:
+                compile_source(path=path)
+        self.assertIn(
+            "'retry' here is the keyword (it ends this 'atomic { }' run); rename the variable 'retry'",
+            str(cm.exception),
+        )
+
     def test_t14_contextual_words_stay_identifiers(self):
         self.assertEqual(
-            run_source("let shared = [1]\nlet lock = 2\nfn f(lock) { lock + 1 }\nprint(shared, lock, f(lock))"),
-            "[1] 2 3\n",
+            run_source(
+                "let shared = [1]\nlet atomic = 2\nlet retry = 3\nfn f(atomic) { atomic + 1 }\nfn g() {\n"
+                "    let retry = 5\n    retry\n}\nprint(shared, atomic, retry, f(atomic), g())"
+            ),
+            "[1] 2 3 3 5\n",
         )
+        self.assertEqual(run_source("struct atomic { v: Number }\nlet a = atomic { v: 1 }\nprint(a.v)"), "1\n")
+        self.assertEqual(run_source('let atomic = true\nif atomic { print("cond") }'), "cond\n")
+        self.assertEqual(run_source("shared let n = 1\nlet retry = 1\nprint(atomic { retry + n })"), "2\n")
         self.assertEqual(run_source("print(detach (1 + 2).await)"), "3\n")
 
     def test_t15_print_never_tears(self):
@@ -382,24 +408,25 @@ pool.join()
         out = run_source(src)
         self.assertEqual(sorted(out.splitlines()), sorted(f"line {n}-{i}" for n in range(4) for i in range(25)))
 
-    def test_t19_implicit_calls_share_their_callers_task(self):
+    def test_t19_implicit_calls_share_their_callers_transaction(self):
         src = """shared let n = 0
 struct P { x: Number }
 impl Printable for P {
     fn to_string(self) {
-        lock n { n = n + 1 }
+        atomic { n = n + 1 }
         "P(" + self.x + ", n=" + n + ")"
     }
 }
-lock n {
+let s = atomic {
     n = 10
-    print(P { x: 1 })
+    "" + P { x: 1 }
 }
-print(n)
+print(s, n)
+print(P { x: 2 })
 """
-        self.assertEqual(run_source(src), "P(1, n=11)\n11\n")
+        self.assertEqual(run_source(src), "P(1, n=11) 11\nP(2, n=12)\n")
 
-    def test_t20_only_lexically_locked_reads_alias(self):
+    def test_t20_only_lexical_reads_alias(self):
         src = """shared let xs = [1]
 fn count_with(v) {
     let s = xs
@@ -407,69 +434,335 @@ fn count_with(v) {
     s.len()
 }
 print(count_with(2), xs)
-print(lock xs {
+print(atomic {
     xs.push(5)
     [count_with(9), xs.len()]
 }, xs)
 """
         self.assertEqual(run_source(src), "2 [1]\n[3, 2] [1, 5]\n")
 
-    def test_t21_failed_write_back_never_replaces_the_error(self):
-        src = """shared let slot = []
-struct Boom { why: String }
-impl Error for Boom {
-    fn message(self) { "boom: " + self.why }
+    # -- M45 (docs/contracts/M45_atomic.md #12.1) ---------------------------
+
+    def test_a1_nested_atomic_composes(self):
+        src = """shared let a = 0
+shared let b = 0
+fn move(n) {
+    atomic {
+        a = a - n
+        b = b + n
+    }
 }
+fn move_twice(n) {
+    atomic {
+        move(n)
+        move(n)
+        [a, b]
+    }
+}
+print(move_twice(5), a, b)
+let r = atomic {
+    a = 100
+    try {
+        atomic {
+            b = 100
+            throw RuntimeError.ArgumentError { message: "inner" }
+        }
+    } catch {
+        e => { "caught " + e.message() }
+    }
+}
+print(r, a, b)
+"""
+        self.assertEqual(run_source(src), "[-10, 10] -10 10\ncaught inner 100 100\n")
+
+    def test_a2_a_throw_publishes_nothing(self):
+        src = """shared let xs = [1]
+shared let n = 0
 try {
-    lock slot {
-        slot.push(detach { 1 })
-        throw Boom { why: "first" }
+    atomic {
+        xs.push(2)
+        n = 5
+        throw RuntimeError.ArgumentError { message: "stop" }
     }
 } catch {
-    e: Boom => { print("caught", e.message()) }
-    e: ThreadError => { print("wrong", e.kind) }
+    e => { print("caught", e.message()) }
 }
-print(slot)
+print(xs, n)
+shared let slot = []
+let p = detach { 1 }
 try {
-    lock slot { slot.push(detach { 2 }) }
-} catch {
-    e: ThreadError => { print(e.kind) }
-}
-print(slot)
-"""
-        self.assertEqual(run_source(src), "caught boom: first\n[]\nnot_sendable\n[]\n")
-
-    def test_t22_await_cycle_through_a_lock(self):
-        src = """shared let x = 0
-let p = none
-try {
-    lock x {
-        p = detach { x = 1 }
-        p.await
+    atomic {
+        n = 7
+        slot.push(p)
     }
 } catch {
     e: ThreadError => { print(e.kind, "|", e.message) }
 }
-p.await
-print(x)
+print(slot, n)
 """
         self.assertEqual(
             run_source(src),
-            "deadlock | deadlock: this await would never end (it waits, through locks or threads, for itself)\n1\n",
+            "caught stop\n[1] 0\nnot_sendable | shared variable 'slot' can't hold a Promise\n[] 0\n",
         )
 
-    def test_t23_await_cycle_across_threads(self):
-        src = THREAD + """shared let x = 0
-let t = thread.spawn()
-try {
-    lock x { detach(t) { x = 1 }.await }
-} catch {
-    e: ThreadError => { print(e.kind) }
+    def test_a3_retry_waits_for_a_change(self):
+        src = """shared let box = ""
+let waiter = detach {
+    atomic {
+        if box == "" { retry }
+        box
+    }
 }
-t.join()
-print("joined")
+box = "filled"
+print(waiter.await)
 """
-        self.assertEqual(run_source(src), "deadlock\njoined\n")
+        self.assertEqual(run_source(src), "filled\n")
+
+    def test_a4_retry_as_a_blocking_queue(self):
+        src = THREAD + """shared let queue = []
+fn take() {
+    atomic {
+        if queue.len() == 0 { retry }
+        queue.pop_start()
+    }
+}
+fn put(v) {
+    atomic { queue.push(v) }
+}
+let t = thread.spawn(name: "consumer")
+let got = t.run(fn() {
+    let out = []
+    for let i in 0..5 { out.push(take()) }
+    out
+})
+for let i in 1..=5 { put(i * 10) }
+print(got.await)
+t.join()
+"""
+        self.assertEqual(run_source(src), "[10, 20, 30, 40, 50]\n")
+
+    def test_a5_hopeless_retry_is_stuck(self):
+        src = """shared let flag = false
+try {
+    atomic {
+        if !flag { retry }
+        1
+    }
+} catch {
+    e: ThreadError => { print(e.kind, "|", e.message) }
+}
+try { atomic { retry } } catch {
+    e: ThreadError => { print(e.kind, "|", e.message) }
+}
+print("end")
+"""
+        self.assertEqual(
+            run_source(src),
+            "stuck | the wait can never finish: every thread is waiting\n"
+            "stuck | retry can never wake up: this transaction read no shared variable\nend\n",
+        )
+
+    def test_a6_side_effects_throw_in_atomic(self):
+        src = THREAD + """fn say(s) { print(s) }
+fn nap() { sleep_async(1) }
+fn wait_for(p) { p.await }
+fn spawn_one() { detach { 1 } }
+let ch = thread.channel()
+fn post(v) { ch.send(v) }
+let done = detach { 1 }
+let tries = [fn() { say("hi") }, fn() { nap() }, fn() { wait_for(done) }, fn() { spawn_one() }, fn() { post(1) }]
+for let f in tries {
+    try {
+        atomic { f() }
+    } catch {
+        e: ThreadError => { print(e.kind, "|", e.message) }
+    }
+}
+print(ch.len())
+"""
+        line = "in_atomic | '{}' can't run inside 'atomic {{ }}': its body may run more than once\n"
+        expected = "".join(
+            line.format(x) for x in ("io.write", "time.sleep_async", ".await", "detach", "thread.channel_send")
+        )
+        self.assertEqual(run_source(src), expected + "0\n")
+
+    def test_a8_bank_transfers_keep_the_total(self):
+        src = THREAD + """shared let accounts = [100, 100, 100, 100]
+fn transfer(from, to, amount) {
+    atomic {
+        accounts[from] = accounts[from] - amount
+        accounts[to] = accounts[to] + amount
+    }
+}
+fn worker(seed) {
+    let bad = 0
+    for let i in 0..200 {
+        transfer((seed + i) % 4, (seed + i * 3 + 1) % 4, 1 + i % 7)
+        let total = atomic {
+            let s = 0
+            for let a in accounts { s = s + a }
+            s
+        }
+        if total != 400 { bad = bad + 1 }
+    }
+    bad
+}
+let pool = thread.spawn(workers: 4)
+let jobs = []
+for let s in 0..4 { jobs.push(pool.run(worker, s)) }
+let bad = 0
+for let j in jobs { bad = bad + j.await }
+let final = accounts
+let sum = 0
+for let a in final { sum = sum + a }
+print(bad, sum, final.len())
+pool.join()
+"""
+        self.assertEqual(run_source(src), "0 400 4\n")
+
+    def _python_vm(self) -> bool:
+        return os.environ.get("MAH_TEST_VM") != "rust"
+
+    def test_a9_exclusive_mode_ends_starvation(self):
+        from mah.thread_runtime import TX_STATS
+
+        src = THREAD + """shared let hot = 0
+shared let stop = false
+fn hammer() {
+    let n = 0
+    while !stop {
+        atomic { hot = hot + 1 }
+        n = n + 1
+    }
+    n
+}
+fn slow() {
+    while hot < 50 { }
+    atomic {
+        let seen = hot
+        let s = 0
+        for let i in 0..20000 { s = s + i }
+        hot = seen + 1000000
+        s
+    }
+}
+let pool = thread.spawn(name: "hammers", workers: 3)
+let hs = []
+for let i in 0..3 { hs.push(pool.run(hammer)) }
+let t = thread.spawn(name: "slow")
+let s = t.run(slow).await
+stop = true
+let total = 0
+for let h in hs { total = total + h.await }
+print(s, hot - total)
+pool.join()
+t.join()
+"""
+        TX_STATS["conflicts"] = 0
+        TX_STATS["exclusive"] = 0
+        self.assertEqual(run_source(src), "199990000 1000000\n")
+        if self._python_vm():
+            self.assertGreaterEqual(TX_STATS["exclusive"], 1)
+
+    def test_a10_a_join_cycle_is_a_deadlock(self):
+        src = THREAD + """let t1 = thread.spawn(name: "a")
+let t2 = thread.spawn(name: "b")
+let go = thread.channel()
+fn join_other(other) {
+    go.recv()
+    try {
+        other.join()
+        "joined"
+    } catch {
+        e: ThreadError => { e.message }
+    }
+}
+let pa = t1.run(join_other, t2)
+let pb = t2.run(join_other, t1)
+go.send(1)
+go.send(2)
+let ra = pa.await
+let rb = pb.await
+let msg = "deadlock: this await would never end (it waits, through threads, for itself)"
+print(ra == "joined" | rb == "joined", ra == msg | rb == msg)
+"""
+        self.assertEqual(run_source(src), "true true\n")
+
+    def test_a11_a_failed_job_drops_its_retry_waits(self):
+        src = THREAD + """shared let k = 0
+let t = thread.spawn()
+let p = detach(t) {
+    detach {
+        atomic {
+            if k == 0 { retry }
+            k
+        }
+    }
+    sleep_async(10)
+    throw RuntimeError.ArgumentError { message: "boom" }
+}
+try { p.await } catch {
+    e => { print("failed") }
+}
+k = 1
+print(k)
+t.join()
+"""
+        self.assertEqual(run_source(src), "failed\n1\n")
+
+    def test_a12_assigning_a_working_value_copies(self):
+        src = """shared let xs = [1]
+shared let ys = []
+print(atomic {
+    ys = xs
+    ys.push(2)
+    xs.len()
+}, xs, ys)
+let v = [1]
+atomic {
+    xs = v
+    xs.push(3)
+}
+print(v, xs)
+"""
+        self.assertEqual(run_source(src), "1 [1] [1, 2]\n[1] [1, 3]\n")
+
+    def test_a13_a_rerun_never_changes_what_it_assigned_from(self):
+        from mah.thread_runtime import TX_STATS
+
+        src = THREAD + """shared let xs = [0]
+shared let ys = []
+shared let stop = false
+fn hammer() {
+    let n = 0
+    while !stop {
+        n = n + 1
+        xs = [n]
+    }
+    n
+}
+let t = thread.spawn(name: "hammer")
+let h = t.run(hammer)
+while xs[0] == 0 { }
+let v = [1]
+let r = atomic {
+    let seen = xs
+    ys = v
+    ys.push(0)
+    let i = 0
+    while i < 20000 { i = i + 1 }
+    seen.len()
+}
+stop = true
+h.await
+print(r, v, ys)
+t.join()
+"""
+        TX_STATS["conflicts"] = 0
+        TX_STATS["exclusive"] = 0
+        self.assertEqual(run_source(src), "1 [1] [1, 0]\n")
+        if self._python_vm():
+            self.assertGreaterEqual(TX_STATS["conflicts"], 1)
 
     def test_t24_quiescence(self):
         src = THREAD + """let ch = thread.channel()
@@ -492,7 +785,7 @@ print("end")
             run_source(src), "stuck | the wait can never finish: every thread is waiting\nstuck\nstuck\nend\n"
         )
 
-    def test_t25_handle_variables_need_no_lock(self):
+    def test_t25_handle_variables_need_no_atomic(self):
         src = THREAD + """shared let jobs = thread.channel()
 shared let gate: thread.Semaphore = thread.semaphore(1)
 jobs.send(1)
@@ -535,56 +828,6 @@ for let i in 0..1000 {
 print(stuck, total)
 """
         self.assertEqual(run_source(src), "0 499500\n")
-
-    def test_t27_a_failed_jobs_locks_never_pass_to_its_own_tasks(self):
-        # Review fix (#6.6): the teardown granted a lock the dying job VM
-        # owned to another task of that same VM, whose grant was then
-        # dropped -- the lock was never free again (main got `stuck`).
-        src = THREAD + """shared let k = 0
-let t = thread.spawn()
-let p = detach(t) {
-    detach {
-        lock k { sleep_async(50) }
-    }
-    detach {
-        lock k { k = 1 }
-    }
-    sleep_async(10)
-    throw RuntimeError.ArgumentError { message: "boom" }
-}
-try { p.await } catch {
-    e => { print("failed") }
-}
-lock k { print(k) }
-"""
-        self.assertEqual(run_source(src), "failed\n0\n")
-
-    def test_t28_an_abandoned_job_never_keeps_a_lock(self):
-        # Review fix (#6.6): the job's root fails while one of its tasks holds
-        # `x` and another of its tasks waits for it. Teardown must drop the
-        # job's own waiters before releasing its locks; else `x` is granted
-        # to the dead job's waiting task and nobody can ever lock it again
-        # (the main VM's `lock x` failed with `stuck`).
-        src = THREAD + """shared let x = 0
-fn job() {
-    detach {
-        lock x {
-            x = 1
-            sleep_async(200)
-        }
-    }
-    detach { lock x { x = 2 } }
-    throw RuntimeError.ArgumentError { message: "boom" }
-}
-let t = thread.spawn()
-try { t.run(job).await } catch {
-    e: RuntimeError => { print("job failed:", e.message()) }
-}
-lock x { x = x + 10 }
-print(x)
-t.join()
-"""
-        self.assertEqual(run_source(src), "job failed: boom\n10\n")
 
 
 def _run_compiled(src: str):
@@ -663,20 +906,35 @@ def _compiles(src: str) -> None:
 class SharedCompileErrorTests(unittest.TestCase):
     def e1(self, name: str) -> str:
         return (
-            f"Method call on shared variable '{name}' outside 'lock {name} {{ }}': it would act on a copy; "
-            f"write 'lock {name} {{ ... }}'"
+            f"Method call on shared variable '{name}' outside 'atomic {{ }}': it would act on a copy; "
+            "wrap it in 'atomic { ... }'"
         )
 
     def e2(self, name: str) -> str:
         return (
-            f"Assignment into shared variable '{name}' outside 'lock {name} {{ }}': it would change a copy; "
-            f"write 'lock {name} {{ ... }}'"
+            f"Assignment into shared variable '{name}' outside 'atomic {{ }}': it would change a copy; "
+            "wrap it in 'atomic { ... }'"
         )
 
     def e3(self, name: str) -> str:
         return (
-            f"'{name} = ...' reads shared variable '{name}' outside 'lock {name} {{ }}': another thread can "
-            f"change it in between; write 'lock {name} {{ ... }}'"
+            f"'{name} = ...' reads shared variable '{name}' outside 'atomic {{ }}': another thread can "
+            "change it in between; wrap it in 'atomic { ... }'"
+        )
+
+    def e4(self, what: str) -> str:
+        return f"'{what}' can't be used inside 'atomic {{ }}': its body may run more than once"
+
+    E6 = "'retry' is only allowed inside 'atomic { }'"
+    E6B = "'retry' here is the keyword (it ends this 'atomic { }' run); rename the variable 'retry'"
+
+    def e8(self, keyword: str) -> str:
+        return f"'{keyword}' can't leave an 'atomic {{ }}' block"
+
+    def e9(self, name: str) -> str:
+        return (
+            f"'{name}' is declared outside 'atomic {{ }}', and changing it there isn't undone when the block "
+            "runs again; return what you need as the block's value"
         )
 
     def test_e1_method_call(self):
@@ -706,14 +964,23 @@ class SharedCompileErrorTests(unittest.TestCase):
             self.e1("c"), _compile_error_path(THREAD + "shared let c = thread.channel()\nc.id.to_string()")
         )
 
+    def test_nested_closures_and_defer_inside_atomic(self):
+        self.assertIn(self.e1("v"), _compile_error("shared let v = []\natomic { let f = fn() { v.push(1) } }"))
+        compile_source(text="shared let v = []\natomic { defer v.push(1) }")
+
     def test_e4(self):
-        self.assertIn(
-            "'lock' takes shared variables, and 'm' is not one", _compile_error("let m = 0\nlock m { }")
-        )
-        self.assertIn(
-            "'lock' takes shared variables, and 'p.a' is not one",
-            _compile_error("struct S { a: Number }\nlet p = S { a: 1 }\nlock p.a { }"),
-        )
+        for src, what in (
+            ("let p = detach { 1 }\natomic { p.await }", ".await"),
+            ("atomic { sleep_async(1) }", "sleep_async"),
+            ("atomic { print(1) }", "print"),
+            ("atomic { detach { 1 } }", "detach"),
+            ("let t = 1\natomic { detach(t) { 1 } }", "detach"),
+            ('atomic { input("? ") }', "input"),
+        ):
+            with self.subTest(src=src):
+                self.assertIn(self.e4(what), _compile_error(src))
+        compile_source(text="atomic { let f = fn(p) { p.await } }")
+        compile_source(text="fn input(x) { x }\natomic { input(1) }")
 
     def test_e5(self):
         self.assertIn(
@@ -722,7 +989,20 @@ class SharedCompileErrorTests(unittest.TestCase):
         )
 
     def test_e6(self):
-        self.assertIn("'a' is locked twice in one 'lock'", _compile_error("shared let a = 0\nlock a, a { }"))
+        for src in ("retry", "fn f() {\n    retry\n}", "atomic { let f = fn() { retry } }"):
+            with self.subTest(src=src):
+                self.assertIn(self.E6, _compile_error(src))
+        compile_source(text="let retry = 1\nprint(retry)")
+
+    def test_e6b(self):
+        for src in (
+            "let retry = 1\natomic {\n    let y = retry\n}",
+            "fn g(x) { x }\nfn f(retry) {\n    atomic { g(retry) }\n}",
+            "fn retry() { 1 }\natomic { [retry] }",
+        ):
+            with self.subTest(src=src):
+                self.assertIn(self.E6B, _compile_error(src))
+        compile_source(text="let retry = 1\nshared let n = 0\natomic { n = retry + n }")
 
     def test_e7(self):
         self.assertIn(
@@ -730,10 +1010,32 @@ class SharedCompileErrorTests(unittest.TestCase):
             _compile_error("shared let a = 0\nlet a = 1"),
         )
 
-    def test_nested_closures_and_detach_inside_a_lock(self):
-        self.assertIn(self.e1("v"), _compile_error("shared let v = []\nlock v { let f = fn() { v.push(1) } }"))
-        self.assertIn(self.e1("v"), _compile_error("shared let v = []\nlock v { detach { v.push(1) } }"))
-        compile_source(text="shared let v = []\nlock v { defer v.push(1) }")
+    def test_e8(self):
+        for src, keyword in (
+            ("fn f() {\n    atomic { return 1 }\n}", "return"),
+            ("while true {\n    atomic { break }\n}", "break"),
+            ("for let i in 0..3 {\n    atomic { continue }\n}", "continue"),
+        ):
+            with self.subTest(src=src):
+                self.assertIn(self.e8(keyword), _compile_error(src))
+        compile_source(text="atomic {\n    for let i in 0..3 { break }\n}")
+
+    def test_e9(self):
+        for src, name in (
+            ("let count = 0\natomic { count = count + 1 }", "count"),
+            ("let v = [1]\natomic { v[0] = 2 }", "v"),
+            ("fn f(x) {\n    atomic { x = 1 }\n}", "x"),
+            ("struct S { n: Number }\nimpl S {\n    fn bump(self) {\n        atomic { self.n = 1 }\n    }\n}", "self"),
+        ):
+            with self.subTest(src=src):
+                self.assertIn(self.e9(name), _compile_error(src))
+        for src in (
+            "atomic {\n    let c = 0\n    c = c + 1\n    c\n}",
+            "atomic {\n    let c = 0\n    atomic { c = 1 }\n    c\n}",
+            "let g = 0\natomic { let f = fn() { g = 1 } }",
+        ):
+            with self.subTest(src=src):
+                compile_source(text=src)
 
     def test_return_inside_a_threaded_detach(self):
         self.assertIn(
@@ -744,51 +1046,228 @@ class SharedCompileErrorTests(unittest.TestCase):
 
 class WaitForGraphTests(unittest.TestCase):
     def setUp(self):
-        from mah.thread_runtime import Pool, ThreadRuntime, _LockState
+        from mah.thread_runtime import Pool, ThreadRuntime
 
         self.rt = ThreadRuntime(None)
-        self._LockState = _LockState
         self.Pool = Pool
 
-    def own(self, k, task):
-        state = self.rt.locks.setdefault(k, self._LockState())
-        state.owner = (task, None)
-
-    def test_lock_lock(self):
+    def test_join_cycle(self):
         rt = self.rt
-        self.own(1, 10)
-        self.own(2, 20)
-        rt.waiting_on[20] = 1  # 20 waits for 10's lock
-        self.assertTrue(rt.cycle(20, 10))  # 10 asking for 20's lock closes it
+        p1 = self.Pool(rt, 1, "a", 1, None)
+        p2 = self.Pool(rt, 2, "b", 1, None)
+        rt.threads[1] = p1
+        rt.threads[2] = p2
+        p1.running_set.add(7)
+        rt.job_roots[7] = 40
+        p2.running_set.add(8)
+        rt.job_roots[8] = 50
+        rt.awaiting[40] = ("join", 2)
+        self.assertTrue(rt.cycle_from(rt.producer_edges(("join", 1)), 50, True))
 
-    def test_await_task_then_lock_back(self):
+    def test_a_job_not_started_yet(self):
         rt = self.rt
-        self.own(1, 10)
-        rt.waiting_on[20] = 1
-        self.assertTrue(rt.cycle_from(rt.producer_edges(("task", 20)), 10, False))
-
-    def test_await_job_whose_root_waits_on_my_lock(self):
-        rt = self.rt
-        self.own(1, 10)
-        rt.waiting_on[30] = 1
-        self.assertFalse(rt.cycle_from(rt.producer_edges(("job", 5)), 10, True))  # not started
+        rt.awaiting[30] = ("job", 6)
+        rt.job_roots[6] = 10
+        self.assertFalse(rt.cycle_from(rt.producer_edges(("job", 5)), 10, True))
         rt.job_roots[5] = 30
         self.assertTrue(rt.cycle_from(rt.producer_edges(("job", 5)), 10, True))
-
-    def test_join(self):
-        rt = self.rt
-        pool = self.Pool(rt, 1, "p", 1, None)
-        rt.threads[1] = pool
-        pool.running_set.add(7)
-        rt.job_roots[7] = 40
-        self.own(1, 10)
-        rt.waiting_on[40] = 1
-        self.assertTrue(rt.cycle_from(rt.producer_edges(("join", 1)), 10, True))
 
     def test_plain_await_cycle_is_not_reported(self):
         rt = self.rt
         rt.awaiting[20] = ("task", 10)
         self.assertFalse(rt.cycle_from(rt.producer_edges(("task", 20)), 10, False))
+
+
+class _Io:
+    def __init__(self):
+        import queue
+
+        self.done = queue.Queue()
+        self.pending = 0
+
+
+class AtomicRuntimeTests(unittest.TestCase):
+    """M45 (docs/contracts/M45_atomic.md #6): the runtime's transaction
+    helpers, driven by hand."""
+
+    def setUp(self):
+        from mah.thread_runtime import ThreadRuntime, VmThreads
+
+        self.rt = ThreadRuntime(None)
+        self.vt = VmThreads(self.rt, 0, _Io(), None)
+        self.rt.vms[0] = self.vt
+        self.vt2 = VmThreads(self.rt, 1, _Io(), None)
+        self.rt.vms[1] = self.vt2
+
+    def tx(self):
+        from mah.runtime_values import Tx
+
+        return Tx(None, None, None)
+
+    def test_1_validation(self):
+        from decimal import Decimal
+
+        rt, vt = self.rt, self.vt
+        rt.write_shared(vt, 0, Decimal(1))
+        tx = self.tx()
+        rt.tx_start(vt, tx)
+        self.assertEqual(tx.rv, 1)
+        tx.reads[0] = 1
+        rt.write_shared(vt, 0, Decimal(2))
+        self.assertFalse(rt.tx_commit(vt, tx, [(0, Decimal(5))]))
+        self.assertEqual(rt.read_shared(0), (Decimal(2), 2))
+        tx2 = self.tx()
+        rt.tx_start(vt, tx2)
+        tx2.reads[0] = 2
+        self.assertTrue(rt.tx_commit(vt, tx2, [(0, Decimal(5))]))
+        self.assertEqual(rt.read_shared(0), (Decimal(5), 3))
+
+    def test_2_read_only(self):
+        from decimal import Decimal
+
+        rt, vt = self.rt, self.vt
+        rt.write_shared(vt, 0, Decimal(1))
+        tx = self.tx()
+        rt.tx_start(vt, tx)
+        tx.reads[0] = 1
+        rt.write_shared(vt, 0, Decimal(2))
+        clock = rt.clock
+        self.assertTrue(rt.tx_commit(vt, tx, []))
+        self.assertEqual(rt.clock, clock)
+
+    def test_3_retry_wake_ups(self):
+        from decimal import Decimal
+
+        from mah.runtime_values import NONE_VALUE, PromiseInstance
+
+        rt, vt = self.rt, self.vt
+        rt.write_shared(vt, 0, Decimal(1))
+        rt.write_shared(vt, 1, Decimal(1))
+        p = rt.retry_wait(vt, {0: rt.read_shared(0)[1]})
+        self.assertIsInstance(p, PromiseInstance)
+        self.assertEqual(p.variant, "Pending")
+        rt.write_shared(vt, 1, Decimal(2))
+        self.assertTrue(vt.done.empty())
+        rt.write_shared(vt, 0, Decimal(2))
+        self.assertEqual(vt.done.get_nowait(), (p, "settle", (True, NONE_VALUE)))
+        self.assertIsNone(rt.retry_wait(vt, {0: 1}))
+
+    def test_4_exclusivity_blocks_writers(self):
+        import threading
+        import time
+        from decimal import Decimal
+
+        rt, vt = self.rt, self.vt
+        tx = self.tx()
+        tx.irrevocable = True
+        rt.tx_start(vt, tx)
+        writer = threading.Thread(target=rt.write_shared, args=(self.vt2, 0, Decimal(9)))
+        writer.start()
+        time.sleep(0.2)
+        self.assertEqual(rt.read_shared(0)[1], 0)
+        self.assertTrue(writer.is_alive())
+        rt.end_attempt(tx)
+        writer.join(timeout=5)
+        self.assertFalse(writer.is_alive())
+        self.assertEqual(rt.read_shared(0)[0], Decimal(9))
+
+    def test_5_one_exclusive_at_a_time(self):
+        import threading
+        import time
+
+        rt, vt = self.rt, self.vt
+        tx1 = self.tx()
+        tx1.irrevocable = True
+        rt.tx_start(vt, tx1)
+        tx2 = self.tx()
+        tx2.irrevocable = True
+        starter = threading.Thread(target=rt.tx_start, args=(self.vt2, tx2))
+        starter.start()
+        time.sleep(0.2)
+        self.assertTrue(starter.is_alive())
+        self.assertEqual(rt.excl_owner[0], tx1.serial)
+        rt.end_attempt(tx1)
+        starter.join(timeout=5)
+        self.assertFalse(starter.is_alive())
+        self.assertEqual(rt.excl_owner[0], tx2.serial)
+        rt.end_attempt(tx2)
+
+    def _task_in(self, attempts, implicit=None):
+        from mah.runtime_values import Task, Tx
+
+        task = Task(pc=0, current_frame=None)
+        tx = Tx(task, implicit, (0, None, 0, 0))
+        tx.depth = 0
+        tx.attempts = attempts
+        task.tx = tx
+        return task, tx
+
+    def test_6_the_ninth_attempt_is_exclusive(self):
+        from mah.thread_runtime import ATOMIC_ATTEMPTS
+
+        rt, vt = self.rt, self.vt
+        task, tx = self._task_in(ATOMIC_ATTEMPTS)
+        vt.begin(task, 0)
+        self.assertTrue(tx.irrevocable)
+        self.assertEqual(tx.depth, 1)
+        self.assertEqual(rt.excl_owner, (tx.serial, 0))
+        vt.end(task)
+        self.assertIsNone(rt.excl_owner)
+        self.assertIsNone(task.tx)
+        task, tx = self._task_in(ATOMIC_ATTEMPTS - 1)
+        vt.begin(task, 0)
+        self.assertFalse(tx.irrevocable)
+        self.assertIsNone(rt.excl_owner)
+        vt.end(task)
+        task, tx = self._task_in(ATOMIC_ATTEMPTS, implicit="to_string")
+        vt.begin(task, 0)
+        self.assertTrue(tx.irrevocable)
+        self.assertEqual(rt.excl_owner, (tx.serial, 0))
+        vt.end(task)
+        self.assertIsNone(rt.excl_owner)
+
+    def test_7_guards_release_on_error(self):
+        from mah.code_interpreter import _Timeout
+        from mah.thread_runtime import ATOMIC_ATTEMPTS
+
+        rt, vt = self.rt, self.vt
+        tx2 = self.tx()
+        tx2.irrevocable = True
+        rt.tx_start(self.vt2, tx2)
+        task, _tx = self._task_in(ATOMIC_ATTEMPTS)
+
+        def boom():
+            raise _Timeout()
+
+        vt.wait_check = boom
+        with self.assertRaises(_Timeout):
+            vt.begin(task, 0)
+        self.assertIsNone(task.tx)
+        self.assertEqual(len(rt.excl_queue), 0)
+        rt.end_attempt(tx2)
+        self.assertIsNone(rt.excl_owner)
+
+
+class RefusedNativesParityTests(unittest.TestCase):
+    def test_the_list(self):
+        import re
+
+        import mah.natives
+        from mah.thread_runtime import ATOMIC_REFUSED_NATIVES
+
+        self.assertEqual(len(ATOMIC_REFUSED_NATIVES), 53)
+        self.assertLessEqual(ATOMIC_REFUSED_NATIVES, set(mah.natives.NATIVES))
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        path = os.path.join(root, "runtime", "src", "vm", "thread.rs")
+        if not os.path.exists(path):
+            self.skipTest("no Rust tree")
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        start = text.find("pub const ATOMIC_REFUSED_NATIVES")
+        if start < 0:
+            self.skipTest("the Rust VM has no ATOMIC_REFUSED_NATIVES yet (M45 Part 2)")
+        end = text.index("];", start)
+        self.assertEqual(set(re.findall(r'"([^"]+)"', text[start:end])), set(ATOMIC_REFUSED_NATIVES))
 
 
 class QuiescenceWindowTests(unittest.TestCase):

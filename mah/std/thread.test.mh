@@ -16,16 +16,18 @@ impl Error for Oops {
 
 fn square(n: Number) -> Number { n * n }
 
+fn emit(s: String) { print(s) }
+
 fn bump(times: Number) {
     for let i in 0..times {
-        lock counter { counter = counter + 1 }
+        atomic { counter = counter + 1 }
     }
 }
 
 fn add_twice(v: Unknown) {
-    lock items {
+    atomic {
         items.push(v)
-        lock items { items.push(v) }
+        atomic { items.push(v) }
     }
 }
 
@@ -130,23 +132,41 @@ test "a shared counter with 4 workers" {
     pool.join()
 }
 
-test "lock is re-entrant" {
+test "atomic blocks nest" {
     add_twice("x")
     let now = items
     assert_eq(now.join(","), "x,x")
 }
 
-test "write-back on throw" {
+test "a throw inside atomic publishes nothing" {
     try {
-        lock items {
-            items.push("kept")
+        atomic {
+            items.push("lost")
             throw Oops { why: "stop" }
         }
     } catch {
         _ => { }
     }
     let now = items
-    assert_eq(now.join(","), "kept")
+    assert_eq(now.len(), 0)
+}
+
+test "retry waits for a change" {
+    let t = thread.spawn()
+    let p = detach(t) {
+        atomic {
+            if counter == 0 { retry }
+            counter
+        }
+    }
+    counter = 7
+    assert_eq(p.await, 7)
+    t.join()
+}
+
+test "side effects throw in_atomic" {
+    let e = assert_throws(fn() { atomic { emit("x") } })
+    assert_eq(e.kind, "in_atomic")
 }
 
 test "semaphores" {

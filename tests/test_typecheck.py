@@ -916,8 +916,9 @@ class ThreadTypeTests(_Base):
             3,
         )
 
-    def test_lock_has_its_body_type(self):
-        self.assertTypes("shared let n = 0\nlet v = lock n { n + 1 }", v="Number")
+    def test_atomic_has_its_body_type(self):
+        self.assertTypes("shared let n = 0\nlet v = atomic { n + 1 }", v="Number")
+        self.assertTypes("shared let n = 0\nlet w = atomic {\n    if n > 0 { n } else { retry }\n}", w="Number")
 
     def test_w1(self):
         src = self.THREAD + "let t = thread.spawn()\ndetach(t)\nprint(1)"
@@ -927,19 +928,19 @@ class ThreadTypeTests(_Base):
     def test_w2(self):
         message = (
             "shared variable 'xs' is passed as a copy: changes the callee makes to it are lost; to change it, "
-            "call inside 'lock xs { ... }'"
+            "call inside 'atomic { ... }'"
         )
         self.assertIn((message, 3), self.warnings("shared let xs = [1]\nfn f(v) { v.push(2) }\nf(xs)"))
-        self.assertEqual(self.warnings("shared let xs = [1]\nfn f(v) { v.push(2) }\nlock xs { f(xs) }"), [])
+        self.assertEqual(self.warnings("shared let xs = [1]\nfn f(v) { v.push(2) }\natomic { f(xs) }"), [])
 
     def test_w3(self):
         message = (
             "'s' is a copy of an element of shared variable 'ss': assigning into it changes nothing shared; "
-            "loop inside 'lock ss { ... }'"
+            "loop inside 'atomic { ... }'"
         )
         src = "struct S { n: Number }\nshared let ss = [S { n: 1 }]\nfor let s in ss { s.n = 2 }"
         self.assertIn((message, 3), self.warnings(src))
-        locked = "struct S { n: Number }\nshared let ss = [S { n: 1 }]\nlock ss {\n    for let s in ss { s.n = 2 }\n}"
+        locked = "struct S { n: Number }\nshared let ss = [S { n: 1 }]\natomic {\n    for let s in ss { s.n = 2 }\n}"
         self.assertEqual(self.warnings(locked), [])
 
     def test_no_warning_for_plain_values(self):

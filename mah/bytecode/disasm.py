@@ -111,7 +111,7 @@ class _Renderer:
 def _instr_line(r: _Renderer, i: int, instr) -> str:
     op = instr.op
     a = instr.args
-    if op == "halt" or op == "matchfail" or op == "deferpush" or op == "deferscopepop":
+    if op in ("halt", "matchfail", "deferpush", "deferscopepop", "atomicbegin", "atomicend", "atomicabort", "retry"):
         rendered = ""
     elif op == "move":
         rendered = f"src={_addr(a[0])} dest={_addr(a[1])}"
@@ -219,15 +219,10 @@ def _instr_line(r: _Renderer, i: int, instr) -> str:
     elif op == "throw":
         rendered = f"value={_addr(a[0])}"
     elif op == "sharedget":  # M44 (1.21)
-        mode = {0: "copy", 1: "locked"}.get(a[2], str(a[2]))
+        mode = {0: "copy", 1: "working"}.get(a[2], str(a[2]))
         rendered = f"index={a[0]} name={r.s(a[1])} mode={mode} dest={_addr(a[3])}"
     elif op == "sharedset":
         rendered = f"index={a[0]} name={r.s(a[1])} src={_addr(a[2])}"
-    elif op == "sharedlock":
-        rendered = f"index={a[0]} name={r.s(a[1])} dest={_addr(a[2])}"
-    elif op == "sharedunlock":
-        mode = {0: "release", 1: "mark"}.get(a[2], str(a[2]))
-        rendered = f"index={a[0]} name={r.s(a[1])} mode={mode}"
     elif op == "native":
         native = r.p.natives[a[0]]
         rendered = f"fn={r.s(native.name)} args={_addr_list(a[1])} dest={_addr(a[2])}"

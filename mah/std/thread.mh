@@ -10,9 +10,10 @@
 #
 # A job sees a copy of every global and of everything it captures, taken when
 # it is queued; changing them changes the copy. Its result (or error) comes
-# back as a copy too. Share state with `shared let` variables and `lock`, with
-# a Semaphore, or with channels. A thread runs its jobs one at a time, in the
-# order they were queued; `workers: n` makes a pool that runs n at a time.
+# back as a copy too. Share state with `shared let` variables changed inside
+# `atomic { }`, with a Semaphore, or with channels. A thread runs its jobs one
+# at a time, in the order they were queued; `workers: n` makes a pool that runs
+# n at a time.
 
 extern fn type_name(value: Unknown) -> String = "value.type_name"
 extern fn native_spawn(name: Unknown, workers: Number, capacity: Unknown) -> Vector<

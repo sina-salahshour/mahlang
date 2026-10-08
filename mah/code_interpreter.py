@@ -367,6 +367,9 @@ def _validate_natives(native_refs: list, strings: list) -> list:
     return linked
 
 
+from .thread_runtime import ATOMIC_REFUSED_NATIVES, TxRestart, in_atomic  # noqa: E402 -- M45
+
+
 def _link_instr(instr, strings: list, constants: list, types: list, natives: list, functions: list):
     op = instr.op
     a = instr.args
@@ -520,8 +523,9 @@ def _link_instr(instr, strings: list, constants: list, types: list, natives: lis
         return ("throw", a[0])
     if op == "native":
         native_idx, args, dest = a
-        _name, _arity, impl = natives[native_idx]
-        return ("native", impl, args, dest)
+        name, _arity, impl = natives[native_idx]
+        # M45: the natives a transaction may not call (precomputed here)
+        return ("native", impl, args, dest, name if name in ATOMIC_REFUSED_NATIVES else None)
     # M44 (1.21): shared variables (docs/MAHC_FORMAT.md #4.6).
     if op == "sharedget":
         index, name_idx, mode, dest = a
@@ -529,12 +533,9 @@ def _link_instr(instr, strings: list, constants: list, types: list, natives: lis
         return ("sharedget", index, strings[name_idx], mode, dest)
     if op == "sharedset":
         return ("sharedset", a[0], strings[a[1]], a[2])
-    if op == "sharedlock":
-        return ("sharedlock", a[0], strings[a[1]], a[2])
-    if op == "sharedunlock":
-        index, name_idx, mode = a
-        _check_mode(mode, op)
-        return ("sharedunlock", index, strings[name_idx], mode)
+    # M45 (1.21, redefined): transactions.
+    if op in ("atomicbegin", "atomicend", "atomicabort", "retry"):
+        return (op,)
     raise AssertionError(f"unknown linked opcode {op!r}")
 
 
@@ -1177,6 +1178,15 @@ def _execute_with(
 
     rt = threads.rt
     code = linked.code
+
+    def wait_check() -> None:
+        # M45: run while blocked in an exclusivity wait (#6.9)
+        if deadline is not None and time.monotonic() > deadline:
+            raise _Timeout()
+        if rt.active:
+            threads.poll()
+
+    threads.wait_check = wait_check
     locate = _locate_factory(linked.debug)
     return_register = NONE_VALUE
     timers: list = []  # heap of (wake_time, seq, promise)
@@ -1435,10 +1445,12 @@ def _execute_with(
             frame.slots[i] = v
         sub_task = Task(pc=closure.code_address, current_frame=frame)
         if stepping:
-            # M44: an implicit runtime call belongs to its caller's task (the
-            # same identity and held locks, docs/contracts/M44_threads.md #5.2).
+            # M44/M45: an implicit runtime call belongs to its caller's task
+            # (the same identity and transaction, docs/contracts/M45_atomic.md
+            # #6.2).
             sub_task.id = stepping[-1].id
-            sub_task.held = stepping[-1].held
+            sub_task.tx = stepping[-1].tx
+        sub_task.implicit = label
         status, value = step_task(sub_task)
         if status == "suspended":
             raise MahRuntimeError(
@@ -1530,11 +1542,6 @@ def _execute_with(
                 promise.resolve(value)
             else:
                 promise.fail(value)
-        elif what == "lock":
-            k, value = payload
-            task, _k = entry[2]
-            task.held[k] = [value, 1, 0]
-            promise.resolve(NONE_VALUE)
         elif what == "sem":
             promise.resolve(NONE_VALUE)
         elif what == "recv":
@@ -1762,9 +1769,50 @@ def _execute_with(
         main task: fatal; a detached task: fail its Promise)."""
         stepping.append(task)
         try:
-            return _step_task(task, pending)
+            result = _step_task(task, pending)
         finally:
             stepping.pop()
+        tx = task.tx
+        if tx is not None and tx.owner is task and result[0] != "suspended":
+            # M45 safety net (#6.3): a task never ends inside its transaction
+            rt.end_attempt(tx)
+            task.tx = None
+        return result
+
+    def restart_tx(task: Task, kind: str):
+        """M45 #6.4: abandon the attempt of `task`'s transaction -- back to
+        its outermost `atomicbegin`; a `retry` then waits for a change of
+        what the attempt read. None: keep stepping; else the step result."""
+        tx = task.tx
+        pc, frame, rs, ds = tx.restart
+        task.pc = pc
+        task.current_frame = frame
+        del task.return_stack[rs:]
+        del task.defer_stack[ds:]
+        rt.end_attempt(tx)
+        if kind == "conflict":
+            rt.count_conflict()
+            tx.attempts += 1
+            tx.depth = 0
+            tx.reads = {}
+            tx.entries = {}
+            tx.irrevocable = False
+            return None
+        reads = tx.reads
+        task.tx = None
+        promise = rt.retry_wait(threads, reads)
+        if promise is None:
+            return None
+
+        def _resume(ok, value, task=task, pc=pc):
+            if ok:
+                task.pc = pc
+                drive(task)
+            else:
+                drive(task, pending=(value, pc))
+
+        promise.callbacks.append(_resume)
+        return "suspended", None
 
     def _step_task(task: Task, pending=None):
         nonlocal return_register
@@ -1785,6 +1833,15 @@ def _execute_with(
             task.pc = current_pc + 1
             try:
                 result = _exec(task, instr)
+            except TxRestart as signal:
+                # M45: a conflict or `retry` -- only the transaction's owner
+                # restarts it; an implicit call's sub-task passes it up.
+                if task.tx is None or task.tx.owner is not task:
+                    raise
+                outcome = restart_tx(task, signal.kind)
+                if outcome is not None:
+                    return outcome
+                continue
             except MahThrow as thrown:
                 if not unwind(task, thrown.value, current_pc):
                     return "failed", thrown.value
@@ -1914,6 +1971,8 @@ def _execute_with(
             case ("retval", dest):
                 _write(frame, dest, return_register)
             case ("detach", callee_addr, arg_addrs, dest):
+                if task.tx is not None:
+                    raise in_atomic("detach")
                 closure = _read(frame, callee_addr)
                 if not isinstance(closure, Closure):
                     raise MahRuntimeError(f"Tried to detach a non-function value ({type_name_of(closure)})", kind="TypeMismatch")
@@ -1922,6 +1981,8 @@ def _execute_with(
                 bound = _bind_params(closure.param_count, closure.params, values, [], label, closure.rest)
                 _write(frame, dest, spawn_detached(closure, bound))
             case ("detachkw", callee_addr, arg_addrs, kwnames, dest):
+                if task.tx is not None:
+                    raise in_atomic("detach")
                 closure = _read(frame, callee_addr)
                 if not isinstance(closure, Closure):
                     raise MahRuntimeError(f"Tried to detach a non-function value ({type_name_of(closure)})", kind="TypeMismatch")
@@ -1932,6 +1993,8 @@ def _execute_with(
                 bound = _bind_params(closure.param_count, closure.params, values, kwargs, label, closure.rest)
                 _write(frame, dest, spawn_detached(closure, bound))
             case ("await", promise_addr, dest):
+                if task.tx is not None:
+                    raise in_atomic(".await")
                 value = _read(frame, promise_addr)
                 if not isinstance(value, PromiseInstance):
                     raise MahRuntimeError(f"'.await' used on a non-Promise value ({type_name_of(value)})", kind="TypeMismatch")
@@ -2084,6 +2147,8 @@ def _execute_with(
                 else:
                     return_register = _call_native(fn, bound)
             case ("detachmethod", recv_addr, name, arg_addrs, trait, dest):
+                if task.tx is not None:
+                    raise in_atomic("detach")
                 recv = _read(frame, recv_addr)
                 fn, include_self = find_method(recv, name, trait)
                 values = [_read(frame, a) for a in arg_addrs]
@@ -2095,6 +2160,8 @@ def _execute_with(
                     promise.resolve(_call_native(fn, bound))
                 _write(frame, dest, promise)
             case ("detachmethodkw", recv_addr, name, arg_addrs, kwnames, trait, dest):
+                if task.tx is not None:
+                    raise in_atomic("detach")
                 recv = _read(frame, recv_addr)
                 fn, include_self = find_method(recv, name, trait)
                 npos = len(arg_addrs) - len(kwnames)
@@ -2107,15 +2174,21 @@ def _execute_with(
                     promise = PromiseInstance()
                     promise.resolve(_call_native(fn, bound))
                 _write(frame, dest, promise)
-            case ("sharedget", k, _name, mode, dest):
-                _write(frame, dest, threads.get(task, k, mode))
-            case ("sharedset", k, _name, src):
-                threads.set(task, k, _read(frame, src))
-            case ("sharedlock", k, name, dest):
-                _write(frame, dest, threads.lock(task, k, name))
-            case ("sharedunlock", k, name, mode):
-                threads.unlock(task, k, name, mode)
-            case ("native", impl, arg_addrs, dest):
+            case ("sharedget", k, name, mode, dest):
+                _write(frame, dest, threads.get(task, k, name, mode))
+            case ("sharedset", k, name, src):
+                threads.set(task, k, name, _read(frame, src))
+            case ("atomicbegin",):
+                threads.begin(task, task.pc - 1)
+            case ("atomicend",):
+                threads.end(task)
+            case ("atomicabort",):
+                threads.abort(task)
+            case ("retry",):
+                threads.retry(task)
+            case ("native", impl, arg_addrs, dest, atomic_name):
+                if atomic_name is not None and task.tx is not None:
+                    raise in_atomic(atomic_name)
                 args = [_read(frame, a) for a in arg_addrs]
                 result = impl(ctx, args)
                 if dest is not None:

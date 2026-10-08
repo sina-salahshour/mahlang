@@ -497,11 +497,9 @@ class _Lowerer:
             return Instr("sharedget", (index, self.intern_str(a2), mode, a3))
         if op == "sharedset":
             return Instr("sharedset", (a1, self.intern_str(a2), a3))
-        if op == "sharedlock":
-            return Instr("sharedlock", (a1, self.intern_str(a2), a3))
-        if op == "sharedunlock":
-            index, mode = a1
-            return Instr("sharedunlock", (index, self.intern_str(a2), mode))
+        # M45: transactions (`atomic { }`, `retry`) -- no operands.
+        if op in ("atomicbegin", "atomicend", "atomicabort", "retry"):
+            return Instr(op, ())
         raise AssertionError(f"unhandled IR op {op!r}")
 
     # -- META (docs/MAHC_FORMAT.md #4.10) -------------------------------------

@@ -240,6 +240,14 @@ class Lexer:
         self.position = saved_position
         return tok
 
+    def peek_tokens(self, n: int) -> list:
+        """M45: the next `n` tokens after the current one, without consuming
+        them (like `peek_token`)."""
+        saved_position = self.position
+        toks = [self.get_next_token() for _ in range(n)]
+        self.position = saved_position
+        return toks
+
     def get_next_token(self) -> Token:
         self._skip_trivia()
         text = self.input_str

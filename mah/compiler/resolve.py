@@ -187,9 +187,8 @@ import re
 import dataclasses
 
 from .ast_nodes import (
-    LockAcquire,
-    LockExpr,
-    LockRelease,
+    AtomicExpr,
+    RetryExpr,
     TestDecl,
     NativeCall,
     AssignStmt,
@@ -299,7 +298,8 @@ class Symbol:
         self.name = name
         # M44: a `shared let` variable's index in the process-wide store
         # (kind "shared"), and whether it holds a std:thread handle (a
-        # Thread/Semaphore/Channel struct: method calls on it need no lock).
+        # Thread/Semaphore/Channel struct: method calls on it need no
+        # `atomic { }`).
         self.shared_index = None
         self.handle = False
         # M41b: a top-level `let` variable (not a `fn` declaration) -- what a
@@ -660,14 +660,17 @@ class Resolver:
         # method body.
         self._fn_type_param_stack: list = []
         # M44: `shared let` variables -- how many so far, their demangled
-        # names by index (for the LSP) and symbols by index, and the stack of
-        # the shared indices held lexically (by an enclosing `lock` in the
-        # same function; a nested `fn`/`detach` closure starts empty, a
-        # `defer` closure keeps the enclosing set).
+        # names by index (for the LSP) and symbols by index.
         self._shared_count = 0
         self.shared_names: list = []
         self._shared_symbols: list = []
-        self._held_locks: list = [frozenset()]
+        # M45 (docs/contracts/M45_atomic.md #8.5): whether the code being
+        # resolved is lexically inside an `atomic { }` body (same function; a
+        # `defer` closure keeps it, a nested `fn`/`detach` closure doesn't),
+        # and the frame depth of the outermost such body in the current
+        # function chain (None outside).
+        self._in_atomic: list = [False]
+        self._atomic_frames: list = [None]
 
     # -- name table helpers ----------------------------------------------
 
@@ -714,7 +717,14 @@ class Resolver:
                 if symbol.top_level_let and self._decorator_module is not None:
                     self._check_decorator_variable(name, position)
                 return frame_level, slot
+        if name == "retry":
+            # M45 E6: an undefined `retry` is the keyword written outside atomic
+            raise NameError(f"'retry' is only allowed inside 'atomic {{ }}' at position {position}")
         raise NameError(f"Undefined variable '{name}' at position {position}")
+
+    def _visible(self, name: str) -> bool:
+        """Whether a binding `name` is in scope (nothing recorded)."""
+        return any(name in scope for scope in self.scopes)
 
     # -- M41b: decorators -------------------------------------------------
 
@@ -753,25 +763,17 @@ class Resolver:
     def _bind_ident(self, ident: Ident):
         """Look `ident` up (recording the reference; the usual NameError when
         undefined). M44: a shared variable gets `shared_index`/`shared_name`/
-        `shared_locked` instead of an address. Returns its Symbol."""
+        `shared_atomic` instead of an address. Returns its Symbol."""
         frame_level, slot = self._lookup(ident.name, ident.position)
         symbol = self.position_index[ident.position]
         if symbol.shared_index is not None:
             ident.address = None
             ident.shared_index = symbol.shared_index
             ident.shared_name = display_name(symbol.name)
-            ident.shared_locked = symbol.shared_index in self._held_locks[-1]
+            ident.shared_atomic = self._in_atomic[-1]
             return symbol
         ident.address = (self.frame_stack[-1].depth - frame_level.depth, slot)
         return symbol
-
-    def _lookup_shared_quietly(self, name: str):
-        """M44: the Symbol `name` names, without recording a reference
-        (`lock`'s synthesized acquire/release)."""
-        for scope in reversed(self.scopes):
-            if name in scope:
-                return scope[name][2]
-        return None
 
     @staticmethod
     def _dotted_text(node) -> str:
@@ -787,12 +789,8 @@ class Resolver:
             node = node.obj
         return node
 
-    def _shared_unheld(self, node) -> bool:
-        return (
-            isinstance(node, Ident)
-            and node.shared_index is not None
-            and node.shared_index not in self._held_locks[-1]
-        )
+    def _shared_outside_atomic(self, node) -> bool:
+        return isinstance(node, Ident) and node.shared_index is not None and not self._in_atomic[-1]
 
     @staticmethod
     def _mentions_shared(node, index: int) -> bool:
@@ -813,17 +811,17 @@ class Resolver:
 
     def _check_shared_method_call(self, expr: MethodCall) -> None:
         """M44 E1: a method call on a shared variable (or a chain rooted at
-        one) outside a lock on it -- unless it's a handle variable itself."""
+        one) outside `atomic { }` -- unless it's a handle variable itself."""
         root = self._chain_root(expr.obj)
-        if not self._shared_unheld(root):
+        if not self._shared_outside_atomic(root):
             return
         symbol = self._shared_symbols[root.shared_index]
         if symbol.handle and root is expr.obj:
             return
         name = root.shared_name
         raise Exception(
-            f"Method call on shared variable '{name}' outside 'lock {name} {{ }}': it would act on a copy; "
-            f"write 'lock {name} {{ ... }}' at position {root.position}"
+            f"Method call on shared variable '{name}' outside 'atomic {{ }}': it would act on a copy; "
+            f"wrap it in 'atomic {{ ... }}' at position {root.position}"
         )
 
     def _is_handle_let(self, stmt: LetStmt) -> bool:
@@ -853,36 +851,22 @@ class Resolver:
         self._shared_symbols.append(symbol)
         stmt.shared_index = symbol.shared_index
 
-    def _resolve_lock(self, expr: LockExpr) -> None:
-        indices = []
-        for target in expr.targets:
-            text = self._dotted_text(target)
-            if not isinstance(target, Ident):
-                raise Exception(f"'lock' takes shared variables, and '{text}' is not one at position {target.position}")
-            symbol = self._bind_ident(target)
-            if symbol.shared_index is None:
-                raise Exception(
-                    f"'lock' takes shared variables, and '{display_name(text)}' is not one at position {target.position}"
-                )
-            if symbol.shared_index in indices:
-                raise Exception(
-                    f"'{target.shared_name}' is locked twice in one 'lock' at position {target.position}"
-                )
-            indices.append(symbol.shared_index)
-        self._held_locks.append(self._held_locks[-1] | frozenset(indices))
-        try:
-            self.resolve_expr(expr.block)
-        finally:
-            self._held_locks.pop()
-
-    def _resolve_lock_step(self, expr) -> None:
-        symbol = self._lookup_shared_quietly(expr.name)
-        if symbol is None or symbol.shared_index is None:
+    def _resolve_retry(self, expr: RetryExpr) -> None:
+        if not self._in_atomic[-1]:
+            raise NameError(f"'retry' is only allowed inside 'atomic {{ }}' at position {expr.position}")
+        if self._visible("retry"):
             raise Exception(
-                f"'lock' takes shared variables, and '{display_name(expr.name)}' is not one at position {expr.position}"
+                "'retry' here is the keyword (it ends this 'atomic { }' run); rename the variable 'retry' "
+                f"at position {expr.position}"
             )
-        expr.shared_index = symbol.shared_index
-        expr.shared_name = display_name(symbol.name)
+
+    def _atomic_side_effect(self, what: str, position: int) -> None:
+        """M45 E4: `.await`/`sleep_async`/`print`/`input`/`detach` lexically
+        inside `atomic { }`."""
+        if self._in_atomic[-1]:
+            raise Exception(
+                f"'{what}' can't be used inside 'atomic {{ }}': its body may run more than once at position {position}"
+            )
 
     def _resolve_ident_address(self, name: str, position: int) -> tuple:
         frame_level, slot = self._lookup(name, position)
@@ -1598,25 +1582,39 @@ class Resolver:
                     f"{stmt.target.field}' at position {stmt.position}"
                 )
             self.resolve_expr(stmt.value)
-            # M44: assignments to / into shared variables (E2, E3).
+            # M44/M45: assignments to / into shared variables outside atomic
+            # (E2, E3).
             target = stmt.target
             if isinstance(target, Ident) and target.shared_index is not None:
-                if target.shared_index not in self._held_locks[-1] and self._mentions_shared(
-                    stmt.value, target.shared_index
-                ):
+                if not self._in_atomic[-1] and self._mentions_shared(stmt.value, target.shared_index):
                     name = target.shared_name
                     raise Exception(
-                        f"'{name} = ...' reads shared variable '{name}' outside 'lock {name} {{ }}': another thread "
-                        f"can change it in between; write 'lock {name} {{ ... }}' at position {stmt.position}"
+                        f"'{name} = ...' reads shared variable '{name}' outside 'atomic {{ }}': another thread "
+                        f"can change it in between; wrap it in 'atomic {{ ... }}' at position {stmt.position}"
                     )
             elif isinstance(target, (FieldAccess, Index)):
                 root = self._chain_root(target)
-                if self._shared_unheld(root):
+                if self._shared_outside_atomic(root):
                     name = root.shared_name
                     raise Exception(
-                        f"Assignment into shared variable '{name}' outside 'lock {name} {{ }}': it would change a "
-                        f"copy; write 'lock {name} {{ ... }}' at position {stmt.position}"
+                        f"Assignment into shared variable '{name}' outside 'atomic {{ }}': it would change a "
+                        f"copy; wrap it in 'atomic {{ ... }}' at position {stmt.position}"
                     )
+            # M45 E9: a non-shared variable declared outside the atomic body.
+            root = self._chain_root(target)
+            af = self._atomic_frames[-1]
+            if (
+                af is not None
+                and isinstance(root, Ident)
+                and root.shared_index is None
+                and root.address is not None
+                and self.frame_stack[-1].depth - root.address[0] < af
+            ):
+                raise Exception(
+                    f"'{display_name(root.name)}' is declared outside 'atomic {{ }}', and changing it there isn't "
+                    f"undone when the block runs again; return what you need as the block's value at position "
+                    f"{stmt.position}"
+                )
             if isinstance(stmt.target, Ident):
                 # M13: a variable reassigned to something of a different
                 # (or unknown) type loses its type hint -- conservative, see
@@ -1627,6 +1625,7 @@ class Resolver:
         elif isinstance(stmt, ExprStmt):
             self.resolve_expr(stmt.value)
         elif isinstance(stmt, PrintStmt):
+            self._atomic_side_effect("print", stmt.position)
             for arg in stmt.args:
                 self.resolve_expr(arg)
             # M16: `sep`/`end` keyword-only options -- expressions, resolved
@@ -1694,9 +1693,9 @@ class Resolver:
             # level and correct by-reference capture of enclosing
             # variables for free, with zero new resolve logic. See
             # docs/V2_DESIGN.md's M9 milestone.
-            # M44: a deferred block runs before an enclosing `lock` releases,
-            # so it keeps the locks held lexically around it.
-            self._resolve_fn_expr(stmt.closure_expr, keep_locks=True)
+            # M45: a deferred block runs before the enclosing function
+            # returns, so it stays inside an enclosing `atomic { }`.
+            self._resolve_fn_expr(stmt.closure_expr, keep_atomic=True)
         elif isinstance(stmt, TestDecl):
             # M28 (docs/MAH_TEST.md): a hidden global slot for the test's
             # closure -- no name to declare, so nothing can refer to it.
@@ -1841,7 +1840,7 @@ class Resolver:
             self._resolve_decorators(decorators)
 
     def _resolve_fn_expr(
-        self, fn: FnExpr, allow_self: bool = False, defer_decorators: bool = False, keep_locks: bool = False
+        self, fn: FnExpr, allow_self: bool = False, defer_decorators: bool = False, keep_atomic: bool = False
     ) -> None:
         if defer_decorators:
             self._pending_decorators.append(fn)
@@ -1864,11 +1863,21 @@ class Resolver:
         for texpr in fn.throws or []:
             self._pending_type_exprs.append((texpr, full_scope, inside))
         self._fn_type_param_stack.append(full_scope)
-        self._held_locks.append(self._held_locks[-1] if keep_locks else frozenset())
+        if fn.atomic:
+            self._in_atomic.append(True)
+            top = self._atomic_frames[-1]
+            self._atomic_frames.append(top if top is not None else self.frame_stack[-1].depth + 1)
+        elif keep_atomic:
+            self._in_atomic.append(self._in_atomic[-1])
+            self._atomic_frames.append(self._atomic_frames[-1])
+        else:
+            self._in_atomic.append(False)
+            self._atomic_frames.append(None)
         try:
             self._resolve_fn_expr_body(fn, allow_self)
         finally:
-            self._held_locks.pop()
+            self._in_atomic.pop()
+            self._atomic_frames.pop()
             self._fn_type_param_stack.pop()
 
     def _resolve_fn_expr_body(self, fn: FnExpr, allow_self: bool) -> None:
@@ -2344,6 +2353,8 @@ class Resolver:
                 except NameError:
                     # M27: nothing binds `sin`/`cos`/`input` here -- the built-in.
                     self._resolve_builtin_call(expr)
+                    if expr.builtin == "input":
+                        self._atomic_side_effect("input", expr.position)
                     return
             else:
                 self.resolve_expr(expr.callee)
@@ -2352,6 +2363,7 @@ class Resolver:
             self._resolve_kwargs(expr.kwargs)
             return
         if isinstance(expr, DetachExpr):
+            self._atomic_side_effect("detach", expr.position)
             call = expr.call
             if isinstance(call, (Call, MethodCall)) and (
                 any(isinstance(a, SpreadArg) for a in call.args) or any(n is None for n, _v, _p in call.kwargs)
@@ -2362,13 +2374,14 @@ class Resolver:
             self.resolve_expr(expr.call)
             return
         if isinstance(expr, SleepAsyncExpr):
+            self._atomic_side_effect("sleep_async", expr.position)
             self.resolve_expr(expr.arg)
             return
-        if isinstance(expr, LockExpr):
-            self._resolve_lock(expr)
+        if isinstance(expr, AtomicExpr):
+            self._resolve_fn_expr(expr.closure)
             return
-        if isinstance(expr, (LockAcquire, LockRelease)):
-            self._resolve_lock_step(expr)
+        if isinstance(expr, RetryExpr):
+            self._resolve_retry(expr)
             return
         if isinstance(expr, FnExpr):
             self._resolve_fn_expr(expr)
@@ -2431,6 +2444,8 @@ class Resolver:
                 self.field_position_index[fpos] = ("variant_field", expr.type_name, expr.variant, fname)
             return
         if isinstance(expr, FieldAccess):
+            if expr.field == "await":
+                self._atomic_side_effect(".await", expr.position)
             if isinstance(expr.obj, Ident):
                 if expr.obj.name == "Self":
                     # M12: `Self.Empty` (bare unit-variant construction) --

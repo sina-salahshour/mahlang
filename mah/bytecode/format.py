@@ -89,9 +89,11 @@ TLS server's certificate and key loaded into the socket table, and
 `socket.start_tls_server`, a TLS server handshake on an accepted socket;
 behind std:socket and std:http's `serve(tls:)`) -- docs/MAHC_FORMAT.md #4.4.
 
-M44 bumps MINOR to 21: the shared-variable opcodes `sharedget`/`sharedset`/
-`sharedlock`/`sharedunlock` and the `thread.*` natives behind std:thread
-(docs/MAHC_FORMAT.md #4.4/#4.6/#6.11).
+M44 bumps MINOR to 21: the shared-variable opcodes `sharedget`/`sharedset`,
+the transaction opcodes `atomicbegin`/`atomicend`/`atomicabort`/`retry` (M45
+redefined the unreleased 1.21, replacing `lock`'s `sharedlock`/`sharedunlock`)
+and the `thread.*` natives behind std:thread (docs/MAHC_FORMAT.md
+#4.4/#4.6/#6.11).
 """
 
 from __future__ import annotations
@@ -524,8 +526,12 @@ OPCODES: dict[str, tuple[int, tuple[str, ...]]] = {
     # M44 (1.21): shared variables -- index, name (for messages), [mode,] address.
     "sharedget": (0x70, ("N", "S", "N", "A")),
     "sharedset": (0x71, ("N", "S", "A")),
-    "sharedlock": (0x72, ("N", "S", "A")),
-    "sharedunlock": (0x73, ("N", "S", "N")),
+    # 0x72/0x73: unassigned (M44's `sharedlock`/`sharedunlock` in unreleased builds).
+    # M45 (1.21, redefined): transactions (`atomic { }`, `retry`).
+    "atomicbegin": (0x74, ()),
+    "atomicend": (0x75, ()),
+    "atomicabort": (0x76, ()),
+    "retry": (0x77, ()),
 }
 
 OPCODES_BY_CODE: dict[int, tuple[str, tuple[str, ...]]] = {
@@ -559,6 +565,8 @@ OPCODE_SINCE_MINOR: dict[str, int] = {
     "paramhooks": 16,
     "sharedget": 21,
     "sharedset": 21,
-    "sharedlock": 21,
-    "sharedunlock": 21,
+    "atomicbegin": 21,
+    "atomicend": 21,
+    "atomicabort": 21,
+    "retry": 21,
 }

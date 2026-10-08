@@ -766,26 +766,80 @@ class ThreadSyntaxTests(unittest.TestCase):
         self.assertFalse(node.shared)
         self.assertEqual(node.name, "shared")
 
-    def test_lock(self):
-        from mah.compiler.ast_nodes import DeferStmt, LockAcquire, LockExpr
+    # -- M45 (docs/contracts/M45_atomic.md #2) ---------------------------------
 
-        node = self.first("lock a, b { a }")
-        self.assertIsInstance(node, LockExpr)
-        self.assertEqual([t.name for t in node.targets], ["a", "b"])
-        stmts = node.block.stmts
-        self.assertEqual(len(stmts), 4)
-        self.assertIsInstance(stmts[0].value, LockAcquire)
-        self.assertEqual(stmts[0].value.name, "a")
-        self.assertIsInstance(stmts[1], DeferStmt)
-        self.assertIsInstance(stmts[2].value, LockAcquire)
-        self.assertEqual(stmts[2].value.name, "b")
-        self.assertIsInstance(stmts[3], DeferStmt)
-        self.assertEqual(node.block.tail.tail, Ident(name="a", position=12))
+    def test_atomic(self):
+        from mah.compiler.ast_nodes import AtomicExpr, FnExpr as _Fn, NumberLit
 
-    def test_lock_as_a_name(self):
-        program = self.parse("let lock = 2\nprint(lock)")
+        node = self.first("atomic { 1 }")
+        self.assertIsInstance(node, AtomicExpr)
+        self.assertIsInstance(node.closure, _Fn)
+        self.assertTrue(node.closure.atomic)
+        self.assertEqual(node.closure.params, [])
+        self.assertIsInstance(node.closure.body.tail, NumberLit)
+        self.assertEqual(node.closure.body.tail.value, 1)
+
+    def test_atomic_as_a_name(self):
+        from mah.compiler.ast_nodes import IfStmt, StructLit
+
+        program = self.parse("let atomic = 2\nprint(atomic)")
         self.assertIsInstance(program[0], LetStmt)
         self.assertIsInstance(program[1], PrintStmt)
+        node = self.first("atomic + 1")
+        self.assertIsInstance(node, Binary)
+        self.assertEqual(node.lhs, Ident(name="atomic", position=0))
+        for src in ("atomic { x: 1 }", "atomic { }", "atomic\n{ x: 1 }"):
+            with self.subTest(src=src):
+                node = self.first(src)
+                self.assertIsInstance(node, StructLit)
+                self.assertEqual(node.type_name, "atomic")
+        node = self.first("if atomic { 1 }")
+        self.assertIsInstance(node, IfStmt)
+        self.assertEqual(node.cond, Ident(name="atomic", position=3))
+        _program, parser = _parse_with_parser("let atomic = 1\natomic\n{ 1 }")
+        self.assertTrue(parser.errors)
+        self.assertIn("Invalid syntax", parser.errors[0][0])
+
+    def test_retry(self):
+        from mah.compiler.ast_nodes import NumberLit, RetryExpr
+
+        node = self.first("atomic { if c { retry } }")
+        if_node = node.closure.body.tail
+        self.assertIsInstance(if_node.then.tail, RetryExpr)
+        node = self.first("atomic {\n    retry\n    1\n}")
+        body = node.closure.body
+        self.assertEqual(len(body.stmts), 1)
+        self.assertIsInstance(body.stmts[0], ExprStmt)
+        self.assertIsInstance(body.stmts[0].value, RetryExpr)
+        self.assertIsInstance(body.tail, NumberLit)
+        node = self.first("atomic { retry + 1 }")
+        self.assertIsInstance(node.closure.body.tail, Binary)
+        self.assertEqual(node.closure.body.tail.lhs.name, "retry")
+        node = self.first("atomic { let f = fn() { retry } }")
+        lam = node.closure.body.stmts[0].value
+        self.assertEqual(lam.body.tail, Ident(name="retry", position=lam.body.tail.position))
+        node = self.parse("fn g() { retry }")[0]
+        self.assertIsInstance(node.value.body.tail, Ident)
+
+    def test_atomic_takes_a_postfix_chain(self):
+        from mah.compiler.ast_nodes import AtomicExpr, MethodCall
+
+        node = self.first("atomic { xs }.len()")
+        self.assertIsInstance(node, MethodCall)
+        self.assertIsInstance(node.obj, AtomicExpr)
+
+    def test_every_function_body_resets_the_atomic_depth(self):
+        node = self.first("atomic { let f = fn() {\n    retry\n} }")
+        lam = node.closure.body.stmts[0].value
+        self.assertIsInstance(lam.body.tail, Ident)
+        program = self.parse(
+            "atomic { 1 }\nstruct S { n: Number }\nimpl S {\n    fn m(self) {\n        retry\n    }\n}"
+        )
+        method = program[2].methods[0]
+        self.assertIsInstance(method.fn.body.tail, Ident)
+        program, parser = Parser(Lexer('atomic { 1 }\ntest "t" {\n    retry\n}'), allow_tests=True), None
+        program = program.parse_program()
+        self.assertIsInstance(program[1].fn.body.tail, Ident)
 
 
 if __name__ == "__main__":

@@ -167,22 +167,29 @@ def _minimal_program(code, *, natives=None, functions=None, strings=None, consta
 
 
 class SharedOpcodeTests(unittest.TestCase):
-    """M44 (1.21): the shared-variable opcodes and std:thread's natives."""
+    """M44/M45 (1.21): the shared-variable and transaction opcodes and
+    std:thread's natives."""
 
     def test_shared_program_is_minor_21_and_disassembles(self):
         from mah.bytecode.disasm import disassemble
 
-        data = compile_bytes(text="shared let x = 1\nlock x { x = 2 }\nprint(x)")
+        data = compile_bytes(text="shared let x = 1\natomic { x = x + 1 }\nprint(x)")
         self.assertEqual(data[6], 21)
         text = disassemble(decode(data))
-        for op in ("sharedlock", "sharedset", "sharedunlock", "sharedget"):
+        for op in ("sharedset", "sharedget", "atomicbegin", "atomicend", "atomicabort"):
             self.assertIn(op, text)
         self.assertIn('name="x"', text)
+        self.assertIn("mode=working", text)
+        self.assertIn("mode=copy", text)
+        text = disassemble(decode(compile_bytes(text="shared let x = 0\natomic {\n    if x == 0 { retry }\n}")))
+        self.assertIn("retry", text)
 
     def test_shared_opcodes_need_minor_21(self):
-        data = bytearray(compile_bytes(text="shared let x = 1\nlock x { x = 2 }"))
+        data = bytearray(compile_bytes(text="shared let x = 1\natomic { x = x + 2 }"))
         program = decode(bytes(data))
-        first = next(i for i, instr in enumerate(program.code) if instr.op.startswith("shared"))
+        first = next(
+            i for i, instr in enumerate(program.code) if instr.op.startswith(("shared", "atomic"))
+        )
         name = program.code[first].op
         data[6] = 20
         with self.assertRaises(MahcFormatError) as cm:
@@ -191,6 +198,18 @@ class SharedOpcodeTests(unittest.TestCase):
             f"opcode '{name}' at instruction {first} requires minor version >= 21, but this file's minor version is 20",
             str(cm.exception),
         )
+
+    def test_the_removed_lock_opcodes_are_unassigned(self):
+        # M45: 0x72/0x73 (M44's unreleased sharedlock/sharedunlock) are unknown
+        program = _minimal_program([Instr("atomicbegin", ()), Instr("halt", ())])
+        program.minor = 21
+        data = bytearray(encode(program))
+        self.assertEqual(decode(bytes(data)).code[0].op, "atomicbegin")
+        at = data.index(bytes([2, 0x74, 0x00]))  # CODE: count 2, atomicbegin, halt
+        data[at + 1] = 0x72
+        with self.assertRaises(MahcFormatError) as cm:
+            decode(bytes(data))
+        self.assertIn("unknown opcode 0x72 at instruction 0", str(cm.exception))
 
     def test_std_thread_is_minor_21(self):
         data = compile_bytes(text='import thread from "std:thread"\nprint(thread.cores() > 0)')
