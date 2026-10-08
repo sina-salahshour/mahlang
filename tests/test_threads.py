@@ -502,6 +502,63 @@ gate.release()
 """
         self.assertEqual(run_source(src), "1 0 0\n")
 
+    def test_t26_a_job_that_just_ended_is_never_stuck(self):
+        # Review fix (#6.10 `finishing`): between a job VM's teardown and its
+        # reply, the job is neither a live VM nor a pending start; a VM that
+        # blocked in that window (here: main, awaiting that reply) used to
+        # get a false `stuck`. The Rust VM hit it in about a third of runs.
+        src = THREAD + """let ch = thread.channel()
+let t1 = thread.spawn(name: "a")
+let t2 = thread.spawn(name: "b")
+fn spin(n) {
+    let s = 0
+    for let k in 0..n { s = s + k }
+    s
+}
+let stuck = 0
+let total = 0
+for let i in 0..1000 {
+    let w = i % 40
+    let b = detach(t2) {
+        spin(w)
+        ch.recv()
+    }
+    let a = detach(t1) spin(20)
+    try { a.await } catch {
+        e: ThreadError => { stuck = stuck + 1 }
+    }
+    ch.send(i)
+    try { total = total + b.await } catch {
+        e: ThreadError => { stuck = stuck + 1 }
+    }
+}
+print(stuck, total)
+"""
+        self.assertEqual(run_source(src), "0 499500\n")
+
+    def test_t27_a_failed_jobs_locks_never_pass_to_its_own_tasks(self):
+        # Review fix (#6.6): the teardown granted a lock the dying job VM
+        # owned to another task of that same VM, whose grant was then
+        # dropped -- the lock was never free again (main got `stuck`).
+        src = THREAD + """shared let k = 0
+let t = thread.spawn()
+let p = detach(t) {
+    detach {
+        lock k { sleep_async(50) }
+    }
+    detach {
+        lock k { k = 1 }
+    }
+    sleep_async(10)
+    throw RuntimeError.ArgumentError { message: "boom" }
+}
+try { p.await } catch {
+    e => { print("failed") }
+}
+lock k { print(k) }
+"""
+        self.assertEqual(run_source(src), "failed\n0\n")
+
 
 def _run_compiled(src: str):
     """Compile `src` to a temporary .mahc and run it in a subprocess on the

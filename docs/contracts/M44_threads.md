@@ -951,9 +951,11 @@ with the host's text.
 ### 6.6 Teardown of a job VM (`forget_vm`)
 
 After the job loop, before replying: hand over the VM's line buffer (§6.3); then, under `rt.lock`:
-1. every lock whose owner's vm id is this VM: `grant_next` **without writing back**;
-2. remove this VM's waiters from every lock (and their `waiting_on`), semaphore, channel (receivers
+1. remove this VM's waiters from every lock (and their `waiting_on`), semaphore, channel (receivers
    and senders; a waiting sender's message is dropped) and pool joiner list;
+2. every lock whose owner's vm id is this VM: `grant_next` **without writing back** (after step 1,
+   so the lock never passes to another task of this dying VM -- review fix: granting first could
+   hand it to such a waiter, whose grant was then dropped with the VM and the lock never freed);
 3. remove every `awaiting` entry of this VM's tasks, the job's `job_roots` entry, and the VM's
    record in `vms` (decrementing `blocked_count` if it was flagged blocked).
 
@@ -1012,7 +1014,8 @@ timers**, and its done queue is empty. Such a VM can only be woken by another VM
 `check_quiescence()` (with `rt.lock` held):
 ```
 live     = len(vms)                                   # main + every job VM alive
-starting = any pool p with p.jobs non-empty and p.running < p.alive
+starting = finishing non-empty                        # a job VM torn down, reply not posted yet
+           or any pool p with (p.jobs non-empty or p.closed) and p.running < p.alive
 if blocked_count == live and not starting:
     post stuck to the main VM                          # vm 0 is always in `vms` and blocked here
 ```
@@ -1027,6 +1030,12 @@ Where it runs:
    clears the flag (§6.1); a VM never clears its own flag except in `forget_vm`.
 2. **A job VM ends** (in the worker, after `running -= 1`, under the same `rt.lock` hold), and
    **a worker exits**.
+
+`finishing` (review fix): `forget_vm` removes a job VM from `vms` before the worker posts the
+job's reply, so for that moment the job is neither a live VM nor a pending start. Without it, a VM
+blocking in that window (typically the main VM awaiting that very reply) saw `blocked_count ==
+live` and got a false `stuck`. `forget_vm` adds the job id to `rt.finishing`; the worker removes it
+under the `rt.lock` hold that posts the reply.
 
 The main VM handles `stuck` (§6.2) like this: under `rt.lock`, for each of its internal pending
 entries, in creation order: remove the waiter from the runtime (lock waiters and `waiting_on`,

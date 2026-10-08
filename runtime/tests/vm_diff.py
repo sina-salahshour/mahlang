@@ -1394,6 +1394,25 @@ gate.acquire()
 print(jobs.recv(), gate.available(), jobs.len())
 gate.release()
 """, b""),
+    ("threads_teardown_lock", """
+import thread from "std:thread"
+shared let k = 0
+let t = thread.spawn()
+let p = detach(t) {
+    detach {
+        lock k { sleep_async(50) }
+    }
+    detach {
+        lock k { k = 1 }
+    }
+    sleep_async(10)
+    throw RuntimeError.ArgumentError { message: "boom" }
+}
+try { p.await } catch {
+    e => { print("failed") }
+}
+lock k { print(k) }
+""", b""),
     ("std_csv", """
 import csv from "std:csv"
 print(csv.parse("a,\\"b,c\\"\\r\\n\\n\\"q\\"\\"x\\",\\n"), csv.parse_records("n,v\\nx,1\\n"))

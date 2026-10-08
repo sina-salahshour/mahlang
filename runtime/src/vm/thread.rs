@@ -784,6 +784,9 @@ pub struct RtState {
     next_channel: u64,
     vms: HashMap<u64, VmRecord>,
     blocked_count: usize,
+    /// Jobs whose VM is torn down but whose reply isn't posted yet: they
+    /// still settle a Promise, so the run isn't stuck (#6.10).
+    finishing: HashSet<u64>,
 }
 
 impl Default for LockState {
@@ -922,15 +925,6 @@ impl ThreadRuntime {
     pub fn forget_vm(&self, vm_id: u64, job_id: Option<u64>, rx: Option<&Receiver<(u64, Completion)>>) {
         {
             let mut st = self.lock();
-            let owned: Vec<u64> = st
-                .locks
-                .iter()
-                .filter(|(_, l)| matches!(l.owner, Some((_, v)) if v == vm_id))
-                .map(|(k, _)| *k)
-                .collect();
-            for k in owned {
-                st.grant_next(k);
-            }
             let RtState { locks, waiting_on, semaphores, channels, threads, awaiting, .. } = &mut *st;
             for l in locks.values_mut() {
                 l.waiters.retain(|&(task, vm, _)| {
@@ -953,8 +947,20 @@ impl ThreadRuntime {
                 p.joiners.retain(|&(vm, _)| vm != vm_id);
             }
             awaiting.retain(|_, (_, vm)| *vm != vm_id);
+            // After this VM's waiters are gone, so a lock it owns never
+            // passes to another of its own (dying) tasks (#6.6).
+            let owned: Vec<u64> = st
+                .locks
+                .iter()
+                .filter(|(_, l)| matches!(l.owner, Some((_, v)) if v == vm_id))
+                .map(|(k, _)| *k)
+                .collect();
+            for k in owned {
+                st.grant_next(k);
+            }
             if let Some(j) = job_id {
                 st.job_roots.remove(&j);
+                st.finishing.insert(j);
             }
             if let Some(rec) = st.vms.remove(&vm_id) {
                 if rec.blocked {
@@ -1099,9 +1105,10 @@ impl RtState {
     fn check_quiescence(&mut self) {
         let live = self.vms.len();
         // A worker that has a job to start, or (closed pool) is about to exit
-        // and settle its joiners, can still make progress.
-        let starting =
-            self.threads.values().any(|p| (!p.jobs.is_empty() || p.closed) && p.running < p.alive);
+        // and settle its joiners, can still make progress -- and so can one
+        // whose job VM is gone but whose reply isn't posted yet.
+        let starting = !self.finishing.is_empty()
+            || self.threads.values().any(|p| (!p.jobs.is_empty() || p.closed) && p.running < p.alive);
         if live > 0 && self.blocked_count == live && !starting && self.vms.contains_key(&0) {
             self.post(0, NO_ENTRY, Completion::Stuck);
         }
@@ -1252,6 +1259,7 @@ fn worker(rt: Arc<ThreadRuntime>, pool_id: u64, cv: Arc<Condvar>) {
             pool.running -= 1;
             pool.running_set.remove(&id);
         }
+        st.finishing.remove(&id);
         st.post(reply_vm, reply_id, Completion::Job(outcome));
         st.check_quiescence();
     }
@@ -1362,11 +1370,22 @@ pub fn spawn(vm: &mut Vm, args: &[Value]) -> RResult<Value> {
     for i in 0..workers {
         let rt = rt.clone();
         let cv = cv.clone();
-        std::thread::Builder::new()
+        let started = std::thread::Builder::new()
             .name(format!("mah-{name}-{i}"))
             .stack_size(super::VM_STACK_SIZE)
-            .spawn(move || worker(rt, id, cv))
-            .map_err(|e| RuntimeError::new(format!("thread.spawn: could not start a thread: {e}")))?;
+            .spawn(move || worker(rt, id, cv));
+        if let Err(e) = started {
+            // The workers that never started are not alive: close the pool
+            // so the ones that did exit (and a join can't wait forever).
+            let mut st = vm.rt.lock();
+            if let Some(pool) = st.threads.get_mut(&id) {
+                pool.alive -= workers - i;
+                pool.closed = true;
+                pool.cv.notify_all();
+            }
+            st.check_quiescence();
+            return Err(RuntimeError::new(format!("thread.spawn: could not start a thread: {e}")));
+        }
     }
     Ok(Value::Vector(Rc::new(RefCell::new(vec![num(id), Value::Str(Rc::from(name.as_str()))]))))
 }

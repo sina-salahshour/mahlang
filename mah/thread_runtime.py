@@ -460,6 +460,9 @@ class ThreadRuntime:
         self.next_channel = 1
         self.vms: dict = {}
         self.blocked_count = 0
+        # jobs whose VM is torn down but whose reply isn't posted yet: they
+        # still settle a Promise, so the run isn't stuck (#6.10)
+        self.finishing: set = set()
         self.tables = HandleTables()
         self.stdin = _StdinReader()
         self.started = time.monotonic()
@@ -874,8 +877,9 @@ class ThreadRuntime:
     def check_quiescence(self) -> None:
         live = len(self.vms)
         # A worker that has a job to start, or (closed pool) is about to
-        # exit and settle its joiners, can still make progress.
-        starting = any(
+        # exit and settle its joiners, can still make progress -- and so
+        # can one whose job VM is gone but whose reply isn't posted yet.
+        starting = self.finishing or any(
             (p.jobs or p.closed) and p.running < p.alive for p in self.threads.values()
         )
         if live and self.blocked_count == live and not starting:
@@ -885,14 +889,16 @@ class ThreadRuntime:
 
     def forget_vm(self, vt) -> None:
         with self.lock:
-            for k, state in self.locks.items():
-                if state.owner is not None and state.owner[1] is vt:
-                    self.grant_next(k)
+            # this VM's waiters go first, so a lock it owns never passes to
+            # another of its own (dying) tasks (#6.6)
             for state in self.locks.values():
                 for w in list(state.waiters):
                     if w[1] is vt:
                         state.waiters.remove(w)
                         self.waiting_on.pop(w[0], None)
+            for k, state in self.locks.items():
+                if state.owner is not None and state.owner[1] is vt:
+                    self.grant_next(k)
             for sem in self.semaphores.values():
                 sem.waiters = collections.deque(w for w in sem.waiters if w[0] is not vt)
             for ch in self.channels.values():
@@ -905,6 +911,7 @@ class ThreadRuntime:
             vt.edge_tasks.clear()
             if vt.job_id is not None:
                 self.job_roots.pop(vt.job_id, None)
+                self.finishing.add(vt.job_id)
             if self.vms.pop(vt.vm_id, None) is not None and vt.blocked:
                 vt.blocked = False
                 self.blocked_count -= 1
@@ -1028,6 +1035,7 @@ def _worker(rt: ThreadRuntime, pool: Pool) -> None:
         with rt.lock:
             pool.running -= 1
             pool.running_set.discard(job.id)
+            rt.finishing.discard(job.id)
             if outcome is not None and not rt.stopped:
                 rt.post(job.reply, (job.promise, "job", outcome))
             rt.check_quiescence()
