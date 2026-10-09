@@ -293,6 +293,14 @@ process-wide.
 
 Deferred (follow-ups):
 
+- First-class shared cells, `thread.ref(value)`: a shared value made at run
+  time and passed around (to functions, into jobs, inside structs), read and
+  changed only inside `atomic { }` like a `shared let`. Today shared state is
+  top-level `shared let` only, because a top-level name is the one identity
+  every thread (each running its own copy of the program) agrees on and the
+  compiler can see every use; a ref's identity would travel with the value
+  instead, so copying a ref into a job must keep it pointing at the same
+  cell.
 - Copying only the globals a job uses (free-variable slicing), instead of the
   whole main frame per job.
 - Acquire timeouts; `select` over several channels; `WaitGroup`.

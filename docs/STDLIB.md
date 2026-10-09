@@ -1087,6 +1087,55 @@ worker.join()
   sees `ready` change (and, if the transaction is running exclusively, it
   holds up every other thread's commits). A plain read outside `atomic`
   (`while !stop { ... }`) does see changes.
+- **Why in-place changes and `x = f(x)` outside `atomic` are compile
+  errors.** A shared variable's value lives outside every thread; outside a
+  transaction a read gives a copy, so `xs.push(1)` would change a temporary
+  copy and be silently lost. `count = count + 1` reads and then writes, and
+  another thread can write in between, losing an increment:
+
+  ```text
+  thread A: reads count (5)    thread B: reads count (5)
+  thread A: writes 6           thread B: writes 6        # should be 7
+  ```
+
+  Inside `atomic { count = count + 1 }`, B's commit sees that `count`
+  changed after B read it and runs B's body again on 6. Honest limit: only
+  the obvious form, the read and the write in one statement, is caught;
+  `let y = count` ⏎ `count = y + 1` compiles and has the same race.
+- **Why `.await`/`detach` are compile errors and I/O, sleeps, thread jobs,
+  channels and semaphores throw `in_atomic` inside `atomic`.** A transaction
+  can run more than once or be thrown away. Its shared-variable changes are
+  private copies, safe to undo; effects on the outside world are not: a
+  `print` twice, an HTTP request or a file write twice, a channel message
+  from an attempt that never counted, a `recv` consuming a message the rerun
+  then loses, a semaphore permit never given back, a `detach`ed task
+  escaping the transaction. Waiting widens the conflict window and, in
+  exclusive mode, would hold up every other thread's commits — if the wait
+  needs one of them, a deadlock is back. `retry` is the safe way to wait (it
+  ends the attempt first). The compiler refuses what it can see; calls hide
+  effects (`fn log(m) { print(m) }` called in the block), so the runtime
+  checks too. Haskell enforces the same rule with its type system (no IO in
+  STM), Clojure with `io!`. The pattern is *decide inside, act outside*:
+
+  ```mah
+  shared let stock = 3
+  let sold = atomic {
+      if stock > 0 {
+          stock = stock - 1
+          true
+      } else {
+          false
+      }
+  }
+  if sold { print("sold one") }    # once, after the commit
+  ```
+- **Why `shared let` is top level only.** Every thread runs its own copy of
+  the program, and locals exist per call and are copied into jobs; a
+  top-level `shared let` has one identity every thread agrees on, the
+  compiler sees every use of it (so it can enforce the rules above), and its
+  store entry lives as long as the program. First-class shared cells
+  (`thread.ref`, made at run time and passed around as values) are planned
+  as a follow-up ([`NEXT_PHASES.md`](NEXT_PHASES.md)).
 - **Waits that can never end** fail with `ThreadError` `stuck` once every
   thread is waiting (on semaphores, channels, joins, job replies — including
   a `retry` nobody can wake); `.await`/`join` cycles through threads fail
@@ -1133,7 +1182,8 @@ knows `x`'s type. Natives: the 19 `thread.*` rows of
 [`MAHC_FORMAT.md`](MAHC_FORMAT.md) §4.4; the shared-variable opcodes are in
 §4.6 (with the transaction opcodes) and the model in §6.11.
 
-Not yet: `or_else` (choosing between transactions), acquire timeouts,
+Not yet: `or_else` (choosing between transactions), first-class shared
+cells (`thread.ref`), acquire timeouts,
 `select` over several channels,
 interrupting a running job, thread-local storage, priorities, copying only
 the globals a job uses (see [`NEXT_PHASES.md`](NEXT_PHASES.md)).

@@ -854,6 +854,62 @@ worker.join()
   `retry` nobody can wake — throws `ThreadError` `stuck`; an `.await`/`join`
   cycle through threads throws `deadlock`.
 
+**Why these rules.**
+
+- *In-place changes and `x = f(x)` need `atomic`.* A shared variable's value
+  lives outside every thread, and outside a transaction a read gives a copy:
+  `xs.push(1)` would change a temporary copy and the push would be silently
+  lost, so it's a compile error. `count = count + 1` reads, then writes, and
+  another thread can write in between — two threads adding one each can
+  lose an increment:
+
+  ```text
+  thread A: reads count (5)    thread B: reads count (5)
+  thread A: writes 6           thread B: writes 6        # should be 7
+  ```
+
+  Inside `atomic { count = count + 1 }`, B's commit sees that `count` changed
+  after B read it, throws the attempt away and runs it again on 6. The
+  compiler only catches the read and the write in one statement: `let y =
+  count` and then `count = y + 1` compiles and has the same race. Rule: **to
+  change a shared value based on itself, or in place, do it inside
+  `atomic { }`.**
+- *No I/O, waiting or new tasks inside `atomic`.* The body can run more than
+  once, or be thrown away. Its shared-variable changes are private copies, so
+  undoing them is safe; effects on the outside world are not: a `print`
+  would print twice, an HTTP request or file write would happen twice, a
+  channel message from an attempt that never counted would still arrive, a
+  `recv` would take a message the rerun then doesn't get, a semaphore permit
+  would never be given back, a `detach`ed task would escape. Waiting
+  (`.await`, sleeps) widens the window for conflicts, and in exclusive mode
+  it would hold up every other thread's commits — if what it waits for needs
+  one of them, that's a deadlock. `retry` is the safe way to wait. The
+  compiler rejects what it can see; a call can hide an effect (`fn log(m) {
+  print(m) }` called in the block), so the runtime throws `ThreadError`
+  `in_atomic` too. (Haskell enforces the same rule with its type system,
+  Clojure with `io!`.) Decide inside, act outside:
+
+```mah
+shared let stock = 3
+
+let sold = atomic {
+    if stock > 0 {
+        stock = stock - 1
+        true
+    } else {
+        false
+    }
+}
+if sold { print("sold one") }                # runs once, after the commit
+```
+
+- *`shared let` is top level only.* Every thread runs its own copy of the
+  program, and locals exist per call and are copied into jobs. A top-level
+  `shared let` has one identity every thread agrees on, the compiler can see
+  every use of it (so it can enforce these rules), and its value lives as
+  long as the program. First-class shared cells (`thread.ref`), made at run
+  time and passed around, are planned as a follow-up.
+
 **Semaphores and channels** are shared by every thread too:
 
 ```mah

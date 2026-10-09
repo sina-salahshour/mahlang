@@ -1,14 +1,15 @@
 ---
 title: "v0.4.0: threads, shared variables and channels"
 date: 2026-10-08
-description: "std:thread runs jobs on other OS threads with detach(t) and t.run, on copies of what they use; shared let variables and lock share state safely; semaphores and channels; deadlocks are reported instead of hanging. Also since 0.3.0: an HTTP server and packages from GitHub."
+description: "std:thread runs jobs on other OS threads with detach(t) and t.run, on copies of what they use; shared let variables and atomic blocks share state safely; semaphores and channels; waits that can never end are reported instead of hanging. Also since 0.3.0: an HTTP server and packages from GitHub."
 tags: [changelog]
 version: "0.4.0"
 ---
 
-This release (milestone M44) lets a Mah program use more than one core. A
+This release (milestones M44 and M45) lets a Mah program use more than one core. A
 new module, `std:thread`, runs jobs on other OS threads; `shared let`
-variables and the `lock` block share state between them without data races;
+variables and `atomic { }` blocks (software transactional memory) share state
+between them without data races;
 semaphores and channels coordinate them. Programs that use any of it need
 bytecode **1.21** (`mah build` marks each program with the lowest version it
 needs, as before); everything else is unchanged.
@@ -70,11 +71,12 @@ so it's copied too, and **identical jobs draw identical numbers**. Seed each
 job differently (`random.seed(thread.id() * 1000 + n)`) or pass a seed as an
 argument.
 
-## Shared variables and `lock`
+## Shared variables and `atomic`
 
 To share state, declare it `shared`. A shared variable lives outside every
-thread; reading it gives a copy, assigning it is atomic, and changing it in
-place — or reading and writing it together — happens inside `lock`:
+thread: reading it gives a copy and never waits, and assigning it is atomic.
+Changing it in place — or reading and writing it together — happens inside an
+`atomic { }` block:
 
 ```mah
 import thread from "std:thread"
@@ -84,9 +86,9 @@ shared let seen = []
 
 fn visit(n) {
     for let i in 0..50 {
-        lock hits { hits = hits + 1 }
+        atomic { hits = hits + 1 }
     }
-    lock seen { seen.push(n) }
+    atomic { seen.push(n) }
 }
 
 let pool = thread.spawn(name: "pool", workers: 4)
@@ -98,25 +100,144 @@ print("hits:", hits, "seen:", snapshot.len())  # hits: 400 seen: 8
 pool.join()
 ```
 
-`lock a, b { ... }` gives the current task those variables for the block;
-everyone else waits (and waiting lets the thread's other tasks run). The
-changes are written back when the block ends, also on `return`, `break` or a
-throw. Locks are re-entrant and served in order.
+`atomic { body }` is **software transactional memory**, the model of
+Haskell's STM and Clojure's `dosync`. The body reads a consistent snapshot of
+the shared variables and changes private working copies of them. When it
+ends, the runtime checks that nothing it read was changed by another thread
+in the meantime, and publishes all its changes at once; no thread ever sees
+half of them. If something it read did change, the working copies are thrown
+away and the body **runs again** from the start, on the new values. There
+are no locks to take, so there's no lock order to get wrong:
 
-The obvious trap — `shared let v = []` then `v.push(1)`, which would push
-onto a copy and lose it — is a **compile error**: outside `lock v`, method
-calls on `v`, assignments into it and `v = ... v ...` are refused, with a
-message that says to use `lock`. The indirect versions the compiler can't
-see for sure (passing `v` to a function that changes its parameter, changing
-the loop variable of `for let item in v`) are checker warnings.
+```mah
+shared let checking = 100
+shared let savings = 50
 
-## Deadlocks are errors, not hangs
+fn transfer(amount) {
+    atomic {
+        if checking < amount { throw RuntimeError.ArgumentError { message: "not enough" } }
+        checking = checking - amount
+        savings = savings + amount
+    }
+}
 
-A lock wait, `.await` or `join` that would wait for itself — say
-`lock x { (detach(t) { x = 1 }).await }`, where the job needs the lock the
-awaiting task holds — throws `ThreadError` with kind `"deadlock"` at once.
-And when every thread is waiting for something only another thread could do,
-those waits fail with `"stuck"` instead of hanging forever.
+transfer(30)
+let both = atomic { [checking, savings] }      # both from one snapshot
+print(both[0] + both[1])                       # 150, whatever other threads do
+```
+
+A throw out of `atomic` publishes nothing. Its value is the body's value. An
+`atomic` inside another one — written there, or in a function it calls —
+joins it, so helpers that wrap their own changes in `atomic { }` compose into
+bigger transactions. And a transaction that had to run again 8 times runs its
+next attempt alone, with every other thread's commits waiting for it, so a
+busy variable can't starve anyone.
+
+**Waiting for a condition** is `retry`: it gives up this run of the
+transaction and waits until a shared variable it read changes, then runs it
+again. That replaces condition variables; a blocking queue is five lines:
+
+```mah
+import thread from "std:thread"
+
+shared let queue = []
+
+fn take() {
+    atomic {
+        if queue.len() == 0 { retry }
+        queue.pop_start()
+    }
+}
+
+let worker = thread.spawn()
+let got = worker.run(take)                     # waits for something to take
+atomic { queue.push("job 1") }
+print(got.await)                               # job 1
+worker.join()
+```
+
+The waiting task is a pending Promise, so its thread's other tasks keep
+running, and a `retry` nobody can ever wake fails with `ThreadError`
+`"stuck"` instead of hanging.
+
+### Why the compiler is strict about shared variables
+
+**Changing one in place, or `x = f(x)`, outside `atomic` is a compile
+error.** Outside a transaction a read gives you a copy, so `shared let v =
+[]` then `v.push(1)` would push onto a temporary copy, and the push would be
+silently lost. `count = count + 1` is a read followed by a write, and another
+thread can write in between:
+
+```text
+thread A: reads count      (5)
+thread B: reads count      (5)
+thread A: writes 5 + 1     (6)
+thread B: writes 5 + 1     (6)   # one increment is lost
+```
+
+Inside `atomic { count = count + 1 }`, B's commit notices that `count`
+changed after B read it, and B's body runs again on 6. So the compiler
+refuses both forms with a message that says to wrap the code in `atomic {
+... }`. To be honest about the limit: it only catches the obvious form, the
+read and the write in the same statement. `let y = count` followed by `count
+= y + 1` compiles and has exactly the same race. Passing a shared variable to
+a function that changes its parameter, or changing the loop variable of `for
+let item in v`, are checker warnings. The rule to remember: **to change a
+shared value based on itself, or in place, do it inside `atomic { }`.**
+
+**Inside `atomic`, there's no I/O and no waiting.** A transaction can run
+more than once, or be thrown away. Its changes to shared variables are
+private copies, so undoing them is free; effects on the outside world can't
+be undone. A `print` would print twice. An HTTP request or a file write would
+happen twice. A channel message sent by an attempt that was then thrown away
+would still be received, as if it had happened; a `recv` would take a
+message that the next run never sees. A semaphore permit taken by a discarded
+attempt would never come back, and a `detach`ed task would escape the
+transaction altogether. Waiting is out for a second reason: an `.await` or a
+sleep inside a transaction widens the window for conflicts, and while a
+transaction runs alone it would hold up every other thread's commits — if
+what it waits for needs one of those commits, we'd have built a deadlock.
+`retry` is the safe way to wait, because it ends the attempt first.
+
+So `print`, `input`, `.await`, `sleep_async` and `detach` written inside
+`atomic` are compile errors. A function call can hide an effect, though —
+`fn log(m) { print(m) }` called inside the block compiles fine — so the
+runtime checks too: I/O, files, sockets, timers, starting or joining jobs,
+channels and semaphores throw `ThreadError` `"in_atomic"` inside a
+transaction. Pure functions, `std:random` and clock reads are fine. Haskell
+enforces the same rule with its type system (STM code can't do IO), Clojure
+with `io!`. The pattern is *decide inside, act outside*:
+
+```mah
+shared let stock = 3
+
+let sold = atomic {
+    if stock > 0 {
+        stock = stock - 1
+        true
+    } else {
+        false
+    }
+}
+if sold { print("sold one") }                  # runs once, after the commit
+```
+
+**`shared let` is top level only.** Every thread runs its own copy of the
+program, and a local variable exists once per call and is copied into the
+jobs that use it. A top-level `shared let` has one identity that every thread
+agrees on; the compiler can see every use of it, which is what lets it
+enforce the rules above; and its value lives as long as the program does.
+First-class shared cells, `thread.ref`, that you make at run time and pass
+around like any value, are planned as a follow-up.
+
+## Waits that can never end are errors
+
+An `.await` or `join` that would wait, through threads, for itself — two
+jobs each joining the other's thread, or a job joining its own thread —
+throws `ThreadError` with kind `"deadlock"` at once. And when every thread is
+waiting for something only another thread could do — a semaphore, a channel,
+a job, or a `retry` nobody can wake — those waits fail with `"stuck"` instead
+of hanging forever.
 
 ## Semaphores and channels
 
@@ -145,12 +266,13 @@ pool.join()
 ```
 
 Everything in `std:thread` throws the new built-in `ThreadError { kind,
-message }`. The editor tooling knows the new syntax: `shared` and `lock`
-highlight and hover as keywords, a shared variable hovers as one, and `mah
+message }`. The editor tooling knows the new syntax: `shared`, `atomic` and
+`retry` highlight and hover as keywords, a shared variable hovers as one, and `mah
 format` writes `detach(t) f(x)` without a space before the `(`.
 
-The full guide is [std:thread](/std/thread); the design, with every rule, is
-`docs/contracts/M44_threads.md` in the repository.
+The full guide is [std:thread](/std/thread); the design, with every rule, is in
+`docs/contracts/M44_threads.md` and `docs/contracts/M45_atomic.md` in the
+repository.
 
 ## Compatibility
 
@@ -165,8 +287,10 @@ Three things that compiled before behave differently:
 - `ThreadError` is a new built-in name, so a program that declares its own
   `ThreadError` type gets the "built-in name" error. Rename it.
 
-`shared` and `lock` are contextual keywords: variables named `shared` or
-`lock` still work.
+`shared`, `atomic` and `retry` are contextual keywords: variables named
+`shared`, `atomic` or `retry` still work (a `retry` alone at the end of a
+statement inside `atomic` is the keyword; a variable of that name visible
+there is a compile error asking you to rename it).
 
 ## Also since 0.3.0
 
