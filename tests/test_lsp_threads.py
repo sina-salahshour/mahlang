@@ -1,9 +1,11 @@
-"""M44 (docs/contracts/M44_threads.md §11.3): the LSP on threads syntax.
+"""M44/M45 (docs/contracts/M44_threads.md §11.3, M45_atomic.md §11.3): the
+LSP on threads syntax.
 
-`shared` and `lock` are contextual keywords (ordinary `ID` tokens), so hover
-recognizes them positionally; a `shared let` hovers as a shared variable;
-go-to-definition and rename work through `lock` targets; completion offers
-both keywords; resolver errors (E1) and checker warnings (W1) show up as
+`shared`, `atomic` and `retry` are contextual keywords (ordinary `ID`
+tokens), so hover recognizes them positionally, exactly where the compiler
+reads them as keywords; a `shared let` hovers as a shared variable; rename
+works through `atomic` bodies; completion offers the three keywords;
+resolver errors (E1, E6b, E9) and checker warnings (W1) show up as
 diagnostics. Calls `mah.lsp.analysis` directly, like the other LSP tests.
 """
 
@@ -43,7 +45,7 @@ def _apply_edits(text: str, edits: list) -> str:
     return text
 
 
-SOURCE = "shared let n = 0\nlock n { n = n + 1 }\nprint(n)\n"
+SOURCE = "shared let n = 0\natomic { n = n + 1 }\nprint(n)\n"
 
 
 class ThreadHoverTests(unittest.TestCase):
@@ -51,20 +53,51 @@ class ThreadHoverTests(unittest.TestCase):
         value = _hover(SOURCE, SOURCE.index("shared"))
         self.assertIsNotNone(value)
         self.assertTrue(value.startswith("**keyword** `shared`"), value)
-        self.assertIn("lock NAME", value)
+        self.assertIn("atomic { ... }", value)
 
-    def test_lock_is_a_keyword_before_a_name(self):
-        value = _hover(SOURCE, SOURCE.index("lock"))
+    def test_atomic_is_a_keyword_before_a_block(self):
+        value = _hover(SOURCE, SOURCE.index("atomic"))
         self.assertIsNotNone(value)
-        self.assertTrue(value.startswith("**keyword** `lock`"), value)
-        self.assertIn("written back", value)
+        self.assertTrue(value.startswith("**keyword** `atomic`"), value)
+        self.assertIn("transaction", value)
 
-    def test_lock_as_a_variable_is_a_variable(self):
+    def test_retry_is_a_keyword_inside_atomic(self):
+        text = "shared let n = 0\natomic {\n    if n == 0 { retry }\n}\n"
+        value = _hover(text, text.index("retry"))
+        self.assertIsNotNone(value)
+        self.assertTrue(value.startswith("**keyword** `retry`"), value)
+
+    def test_atomic_as_a_variable_is_a_variable(self):
+        text = "let atomic = 2\nprint(atomic)\n"
+        value = _hover(text, text.rindex("atomic"))
+        self.assertIsNotNone(value)
+        self.assertTrue(value.startswith("**variable** `atomic`"), value)
+
+    def test_retry_as_a_variable_is_a_variable(self):
+        text = "let retry = 2\nprint(retry)\n"
+        value = _hover(text, text.rindex("retry"))
+        self.assertIsNotNone(value)
+        self.assertTrue(value.startswith("**variable** `retry`"), value)
+
+    def test_a_keyword_retry_with_a_variable_in_scope_is_the_keyword_and_e6b(self):
+        text = "let retry = 1\natomic {\n    let y = retry\n}\n"
+        value = _hover(text, text.rindex("retry"))
+        self.assertIsNotNone(value)
+        self.assertTrue(value.startswith("**keyword** `retry`"), value)
+        messages = [d["message"] for d in analysis.get_diagnostics(text)]
+        self.assertTrue(
+            any(
+                "'retry' here is the keyword (it ends this 'atomic { }' run); rename the variable 'retry'"
+                in m
+                for m in messages
+            ),
+            messages,
+        )
+
+    def test_lock_is_an_ordinary_name_again(self):
         text = "let lock = 2\nprint(lock)\n"
-        value = _hover(text, text.index("lock"))
-        self.assertIsNotNone(value)
-        self.assertTrue(value.startswith("**variable** `lock`"), value)
         value = _hover(text, text.rindex("lock"))
+        self.assertIsNotNone(value)
         self.assertTrue(value.startswith("**variable** `lock`"), value)
 
     def test_shared_as_a_variable_is_a_variable(self):
@@ -84,9 +117,16 @@ class ThreadHoverTests(unittest.TestCase):
         self.assertIn("detach(t) expr", value)
 
 
+class ThreadSymbolTests(unittest.TestCase):
+    def test_an_atomic_block_is_not_a_document_symbol(self):
+        text = "shared let n = 0\nfn f() { atomic { n = n + 1 } }\n"
+        names = [s["name"] for s in analysis.get_document_symbols(text)]
+        self.assertEqual(sorted(names), ["f", "n"])
+
+
 class ThreadNavigationTests(unittest.TestCase):
-    def test_definition_from_a_lock_target(self):
-        offset = SOURCE.index("lock n") + len("lock ")
+    def test_definition_from_inside_an_atomic_body(self):
+        offset = SOURCE.index("atomic { n") + len("atomic { ")
         p = _pos(SOURCE, offset)
         result = analysis.get_definition(SOURCE, p["line"], p["character"], None)
         self.assertIsNotNone(result)
@@ -95,7 +135,7 @@ class ThreadNavigationTests(unittest.TestCase):
         )
         self.assertEqual(start, SOURCE.index("n = 0"))
 
-    def test_rename_edits_the_declaration_the_lock_target_and_every_use(self):
+    def test_rename_edits_the_declaration_the_atomic_body_and_every_use(self):
         offset = SOURCE.index("print(n)") + len("print(")
         p = _pos(SOURCE, offset)
         result = analysis.get_rename_edits(SOURCE, p["line"], p["character"], "hits", None)
@@ -103,16 +143,18 @@ class ThreadNavigationTests(unittest.TestCase):
         edits = next(iter(result["changes"].values()))
         self.assertEqual(
             _apply_edits(SOURCE, edits),
-            "shared let hits = 0\nlock hits { hits = hits + 1 }\nprint(hits)\n",
+            "shared let hits = 0\natomic { hits = hits + 1 }\nprint(hits)\n",
         )
 
 
 class ThreadCompletionTests(unittest.TestCase):
-    def test_shared_and_lock_are_offered_as_keywords(self):
+    def test_shared_atomic_and_retry_are_offered_as_keywords(self):
         items = analysis.get_completions("let x = 1\n")
         keywords = {item["label"] for item in items if item.get("detail") == "keyword"}
         self.assertIn("shared", keywords)
-        self.assertIn("lock", keywords)
+        self.assertIn("atomic", keywords)
+        self.assertIn("retry", keywords)
+        self.assertNotIn("lock", keywords)
 
     def test_a_shared_variable_completes_as_one(self):
         text = "shared let counter = 0\nprint(counter)\n"
@@ -124,12 +166,16 @@ class ThreadCompletionTests(unittest.TestCase):
 
 
 class ThreadDiagnosticsTests(unittest.TestCase):
-    def test_a_method_call_outside_lock_is_an_error(self):
+    def test_a_method_call_outside_atomic_is_an_error(self):
         text = "shared let xs = []\nxs.push(1)\n"
         diagnostics = analysis.get_diagnostics(text)
         messages = [d["message"] for d in diagnostics]
         self.assertTrue(
-            any("Method call on shared variable 'xs' outside 'lock xs { }'" in m for m in messages),
+            any(
+                "Method call on shared variable 'xs' outside 'atomic { }': it would act on a copy; "
+                "wrap it in 'atomic { ... }'" in m
+                for m in messages
+            ),
             messages,
         )
         error = next(d for d in diagnostics if "Method call on shared variable" in d["message"])
@@ -139,15 +185,19 @@ class ThreadDiagnosticsTests(unittest.TestCase):
         )
         self.assertEqual(start, text.index("xs.push"))
 
-    def test_lock_on_a_plain_variable_is_an_error(self):
-        diagnostics = analysis.get_diagnostics("let a = 1\nlock a { a = 2 }\n")
+    def test_assigning_an_outer_variable_inside_atomic_is_an_error(self):
+        diagnostics = analysis.get_diagnostics("let total = 0\natomic { total = total + 1 }\n")
         self.assertTrue(
-            any("'lock' takes shared variables, and 'a' is not one" in d["message"] for d in diagnostics),
+            any(
+                "'total' is declared outside 'atomic { }', and changing it there isn't undone"
+                in d["message"]
+                for d in diagnostics
+            ),
             diagnostics,
         )
 
     def test_a_clean_threads_program_has_no_errors(self):
-        text = "shared let n = 0\nfn bump() { lock n { n = n + 1 } }\nbump()\nprint(n)\n"
+        text = "shared let n = 0\nfn bump() { atomic { n = n + 1 } }\nbump()\nprint(n)\n"
         diagnostics = analysis.get_diagnostics(text)
         self.assertEqual(
             [d for d in diagnostics if d["severity"] == analysis.SEVERITY_ERROR], [], diagnostics

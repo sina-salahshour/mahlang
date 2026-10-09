@@ -29,7 +29,7 @@
 "defer" @keyword
 "detach" @keyword
 "shared" @keyword
-"lock" @keyword
+"atomic" @keyword
 "throw" @keyword
 "try" @keyword
 "catch" @keyword
@@ -218,3 +218,12 @@
 ; M28: the contextual `test` of a test block -- last, so it wins over the
 ; generic identifier captures above.
 (test_block keyword: (identifier) @keyword)
+
+; M45: the contextual `retry` (it ends this run of an `atomic { }` block and
+; waits for a shared variable it read to change). It is an identifier in the
+; grammar, so only statement position is colored -- alone as a statement,
+; including a block's last statement (`if c { retry }`; a `match` arm body is
+; always a block, so `none => { retry }` is covered too). `retry` as an
+; argument, list item or field value is not colored. Last, so it wins over the
+; generic identifier captures above.
+((expr_stmt (expr (identifier) @keyword)) (#eq? @keyword "retry"))

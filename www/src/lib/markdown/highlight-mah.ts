@@ -44,9 +44,11 @@ const KEYWORDS = new Set([
 	'extern',
 	// M28: contextual, only before a test block's name; never a name in docs.
 	'test',
-	// M44: contextual (`shared let`, `lock NAME { }`); never a name in docs.
+	// M44/M45: contextual (`shared let`, `atomic { }`, `retry` inside it);
+	// never a name in docs.
 	'shared',
-	'lock'
+	'atomic',
+	'retry'
 ]);
 
 // Constant-like keywords get their own token class.

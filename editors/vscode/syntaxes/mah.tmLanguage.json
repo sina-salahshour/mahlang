@@ -85,13 +85,17 @@
           "match": "\\b(if|elif|else|while|for|in|break|continue|return|match|defer|detach)\\b"
         },
         {
-          "comment": "M44: `shared` and `lock` are contextual -- `shared` is a keyword only right before `let` (`shared let n = 0`), `lock` only right before a name (`lock n { ... }`), so `let shared = 1` and `let lock = 2` stay plain names.",
+          "comment": "M44/M45: `shared`, `atomic` and `retry` are contextual -- `shared` is a keyword only right before `let` (`shared let n = 0`), `atomic` only right before `{` (`atomic { n = n + 1 }`), `retry` only alone at the end of a statement (`if q.len() == 0 { retry }`), so `let shared = 1`, `let atomic = 2` and `let retry = 3` stay plain names.",
           "name": "keyword.control.mah",
           "match": "\\bshared(?=\\s+let\\b)"
         },
         {
           "name": "keyword.control.mah",
-          "match": "\\block(?=\\s+[A-Za-z_])"
+          "match": "\\batomic(?=\\s*\\{)"
+        },
+        {
+          "name": "keyword.control.mah",
+          "match": "\\bretry\\b(?=\\s*(;|\\}|$))"
         }
       ]
     },

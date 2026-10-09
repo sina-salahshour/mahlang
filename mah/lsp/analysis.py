@@ -29,6 +29,7 @@ from ..compiler.resolve import Resolver  # noqa: E402
 from ..compiler import typecheck  # noqa: E402
 from ..compiler.types import TCon, TFn, prune as prune_type, show as show_type, show_throws  # noqa: E402
 from ..preprocessor import BUFFER_PATH, PRELUDE_PATH, STD_DIR, STD_PREFIX, demangle_message, preprocess, source_label  # noqa: E402
+from ..preprocessor import _contextual_keywords, scan as _pp_scan  # noqa: E402
 from ..project.package_paths import PKG_PREFIX, package_of_path  # noqa: E402
 from ..project.manifest import check_level_for  # noqa: E402
 from ..runtime_values import BUILTIN_TYPE_NAMES  # noqa: E402
@@ -136,19 +137,28 @@ KEYWORD_DOCS = {
     # M44 (docs/contracts/M44_threads.md): contextual, see
     # `_is_thread_contextual_keyword`.
     "shared": "`shared let NAME = value` (top level only) declares a variable every "
-    "thread shares. Reading it gives a copy; assigning it is atomic; to change it "
-    "in place (`push`, `x[k] = v`) or to read and write it together, use "
-    "`lock NAME { ... }`. Contextual -- still usable as an ordinary name "
-    "elsewhere.\n\n"
+    "thread shares. Reading it gives a copy and never waits; assigning it "
+    "(`NAME = value`) is atomic; to change it in place (`push`, `x[k] = v`) or to "
+    "read and write it together, do it inside `atomic { ... }`. Contextual -- "
+    "still usable as an ordinary name elsewhere.\n\n"
     "```mah\nshared let hits = 0\nshared let seen: Vector<Number> = []\n```",
-    "lock": "`lock a, b { body }` gives this task the shared variables for the "
-    "block: other tasks and threads wait, the body changes them in place, and the "
-    "changes are written back when the block ends (also on `return`, `break` or a "
-    "throw). Re-entrant; waiting lets other tasks run; a wait that would deadlock "
-    "throws ThreadError. Its value is the body's value. Contextual -- still usable "
-    "as an ordinary name elsewhere.\n\n"
-    "```mah\nlock hits { hits = hits + 1 }\nlock seen { seen.push(n) }\n"
-    "let next = lock hits { hits = hits + 1; hits }\n```",
+    # M45 (docs/contracts/M45_atomic.md): contextual, see
+    # `_is_thread_contextual_keyword`.
+    "atomic": "`atomic { body }` runs `body` as one transaction: it reads a "
+    "consistent snapshot of the shared variables, and its changes are published "
+    "all at once when it ends. If another thread changed what it read in the "
+    "meantime, it runs again from the start, so the body can't do I/O, wait or "
+    "start tasks (ThreadError `in_atomic`). A throw out of it publishes nothing. "
+    "Its value is the body's value; an `atomic` inside another joins it. "
+    "Contextual -- still usable as an ordinary name elsewhere.\n\n"
+    "```mah\natomic { hits = hits + 1 }\nlet next = atomic {\n    hits = hits + 1\n"
+    "    hits\n}\n```",
+    "retry": "`retry` (only inside `atomic { }`) gives up this run of the "
+    "transaction and waits until a shared variable it read changes, then runs it "
+    "again -- the way to wait for a condition. Contextual -- an ordinary name "
+    "outside `atomic` bodies.\n\n"
+    "```mah\nshared let queue = []\nfn take() {\n    atomic {\n"
+    "        if queue.len() == 0 { retry }\n        queue.pop_start()\n    }\n}\n```",
     "await": "Suspend the current execution until this `Promise` settles "
     "(`Promise.Settled { value }`), then yield `value`. Written as a "
     "postfix pseudo-field (`value.await`), not a prefix keyword. Only "
@@ -493,18 +503,32 @@ def _is_error_contextual_keyword(token: Token, tokens: list[Token]) -> bool:
 
 
 def _is_thread_contextual_keyword(token: Token, tokens: list[Token], text: str = "") -> bool:
-    """M44 (docs/contracts/M44_threads.md): `shared` and `lock` stay ordinary
-    `ID` tokens (`let lock = 2` keeps working), so hover recognizes them
-    positionally, like the real parser does: `shared` right before `let` on
-    the same line, `lock` right before a name on the same line."""
-    if token.type != TokenType.ID or token.literal not in ("shared", "lock"):
+    """M44/M45 (docs/contracts/M44_threads.md, M45_atomic.md): `shared`,
+    `atomic` and `retry` stay ordinary `ID` tokens (`let atomic = 2` keeps
+    working), so hover recognizes them positionally, like the real parser
+    does: `shared` right before `let` on the same line; `atomic` and `retry`
+    exactly where the compiler reads them as keywords (#2.2/#2.3). For those
+    two this reuses the preprocessor's token-level mirror of the parser's
+    rules (`_contextual_keywords`), so hover can never disagree with the
+    compiler: a keyword `retry` hovers as the keyword even when a variable
+    `retry` is in scope (the compiler reports E6b there)."""
+    if token.type != TokenType.ID or token.literal not in ("shared", "atomic", "retry"):
         return False
+    if token.literal in ("atomic", "retry"):
+        if not text:
+            return False
+        try:
+            ptoks = _pp_scan(text)
+        except Exception:
+            return False
+        atomic_kw, retry_kw = _contextual_keywords(text, ptoks)
+        wanted = atomic_kw if token.literal == "atomic" else retry_kw
+        return any(ptoks[i].start == token.position for i in wanted)
     pos = next((i for i, t in enumerate(tokens) if t.position == token.position), None)
     if pos is None or pos + 1 >= len(tokens):
         return False
     nxt = tokens[pos + 1]
-    wanted = TokenType.LET if token.literal == "shared" else TokenType.ID
-    if nxt.type is not wanted:
+    if nxt.type is not TokenType.LET:
         return False
     between = text[token.position + len(token.literal) : nxt.position] if text else ""
     return "\n" not in between

@@ -3737,7 +3737,8 @@ node that resolved to it. Then:
       `tests/test_lsp_packages.py`; none needs the network, and the run
       tests use the VM `MAH_TEST_VM` selects.
 
-47. **M44a — threads and shared variables. ✅ Landed.**
+47. **M44a — threads and shared variables. ✅ Landed.** (`lock` was
+    replaced by M45's `atomic` before release.)
     `docs/NEXT_PHASES.md`'s "Optional multithreading"; the discussion paper
     is `docs/contracts/M44_threads_options.md`, the contract (normative, with
     every exact message) `docs/contracts/M44_threads.md`; the user reference
@@ -3876,6 +3877,119 @@ node that resolved to it. Then:
     Promises, so other tasks keep running, and count for quiescence. Deferred:
     `select` over several channels.
 
+49. **M45 — `atomic` blocks replace `lock`. ✅ Landed** (in bytecode 1.21,
+    redefined). The contract (normative, with every exact message and both
+    VMs' algorithms) is `docs/contracts/M45_atomic.md`; the M44 state with
+    `lock` is kept on the branch `m44-lock-block` for reference. The user
+    reference is `docs/STDLIB.md`'s `std:thread` and `docs/MAHC_FORMAT.md`
+    §6.11.
+
+    - **Decisions** (the user's, binding): **`lock` is removed entirely** (no
+      syntax remains; `lock` is an ordinary identifier again, and the opcodes
+      `sharedlock`/`sharedunlock`, lock deadlock detection, the lock wait-for
+      edges and M44's lock-target rules are gone) and **`atomic { body }`**
+      replaces it: software transactional memory modeled on Haskell's STM and
+      Clojure's `dosync`. It is an expression (its value is the body's);
+      reads of shared variables come from a consistent snapshot, writes and
+      in-place changes go to private working copies, and at the end the
+      runtime validates that nothing read has changed and publishes every
+      change at once (one version bump each), or discards the copies and
+      **runs the body again**. TL2-style: a global version clock,
+      per-variable versions, a snapshot check on every first read, commit-time
+      validation, all under the one runtime mutex.
+    - **Progress**: after **8** failed attempts the next attempt runs
+      **exclusive**: it takes the single exclusivity token, and every other
+      commit and plain shared assignment waits while it runs, so it can't
+      conflict. Only one transaction is exclusive at a time and it never
+      waits for anything while exclusive (await, detach, waiting natives and
+      `process.exit` are refused; nested `atomic`s join; every way an attempt
+      ends releases the token), so it can't deadlock.
+    - **`retry`** (only lexically inside `atomic`) abandons the attempt and
+      suspends the task as a pending Promise until a shared variable it read
+      changes, then reruns — it replaces condition variables. A `retry`
+      nobody can wake becomes `ThreadError stuck` through M44's quiescence
+      rule; one whose attempt read nothing fails at once with `stuck`.
+    - **Nesting is flat**: an `atomic` inside another (lexically, through
+      calls, or in a `to_string` the runtime calls) joins it; only the
+      outermost one validates, commits or restarts. `or_else` is deferred.
+    - **No side effects in a transaction**: compile errors for lexically
+      visible `.await`, `sleep_async`, `print`, `input`, `detach` (E4),
+      `retry` outside `atomic` (E6), a keyword `retry` with a visible
+      variable `retry` (E6b), `return`/`break`/`continue` leaving an `atomic`
+      (E8) and assigning a non-shared variable declared outside it (E9); at
+      run time `.await`, `detach` and 53 side-effecting natives throw the new
+      `ThreadError` kind **`in_atomic`**. A throw out of the outermost
+      `atomic` publishes nothing and propagates unchanged.
+    - **Outside `atomic`**: a read never waits and gives a copy; `x = e` is
+      an atomic one-variable write; in-place mutation and read-modify-write
+      are compile errors (E1–E3) that say to wrap the code in `atomic { }`.
+      Deadlock detection keeps only job/join await cycles (message now
+      `deadlock: this await would never end (it waits, through threads, for
+      itself)`) and the self-join check; semaphores and channels are
+      unchanged.
+    - **Bytecode 1.21 redefined in place** (never released: no tag, no
+      published `mah-vm`): `sharedget` (0x70, mode copy/working) and
+      `sharedset` (0x71) keep their encodings with new semantics, 0x72/0x73
+      are left unassigned so a stale development file fails cleanly, and
+      `atomicbegin` 0x74, `atomicend` 0x75, `atomicabort` 0x76 and `retry`
+      0x77 (no operands) are added. MINOR stays 21; no test pin changed.
+    - **Files**: `mah/compiler/{lexer,ast_nodes,parser,resolve,codegen,typecheck}.py`
+      (`peek_tokens`, `AtomicExpr`/`RetryExpr`, `FnExpr.atomic`, the
+      contextual `atomic`/`retry` rules, E1–E9, the `atomic` handler
+      region), `mah/preprocessor.py` (a token-level mirror of the parser's
+      rules so module name mangling never touches the keywords; E6b for
+      module-level `retry`s), `mah/bytecode/{format,lower,disasm}.py`,
+      `mah/thread_runtime.py` (the versioned store, transactions,
+      exclusivity, `retry` waits, `same_copy`, `ATOMIC_REFUSED_NATIVES`),
+      `mah/runtime_values.py`, `mah/code_interpreter.py`; `mah/std/thread.mh`
+      and the prelude's `ThreadError`; the Rust VM (`runtime/src/decode.rs`,
+      `runtime/src/vm/{error,value,link,exec,thread}.rs`; `TxSignal`
+      restarts); the tree-sitter grammar (`atomic_expr`, `retry` highlighted
+      in statement position), the VS Code grammar, `mah/lsp/analysis.py`
+      (`atomic`/`retry` hover and completion, reusing the preprocessor's
+      mirror so hover agrees with the compiler), the www highlighter, and
+      every doc and www page that mentioned `lock`.
+    - **Tests**: `tests/test_threads.py` (the lock tests converted: shared
+      counters, pools, semaphores, modules, implicit calls, read kinds; new
+      A1–A13: nested composition, a throw publishes nothing, `retry` as a
+      wait and as a blocking queue, hopeless `retry` is `stuck`, `in_atomic`
+      natives, bank transfers keep their total under contention, exclusive
+      mode ends starvation, join cycles, teardown of `retry` waits, aliasing;
+      E1–E9 compile errors; `AtomicRuntimeTests` 1–7; the refused-natives
+      parity check against the Rust list), `mah/std/thread.test.mh`,
+      parser/checker/bytecode tests, `tests/test_lsp_threads.py`, formatter
+      goldens, `examples/threads.mh` and its golden output, and the
+      `threads_*` `vm_diff.py` cases.
+    - **Judgment calls** (contract §15): TL2 (every attempt sees a
+      consistent snapshot, so read-only transactions skip validation and a
+      throw propagates without validation, unlike GHC); the body is a closure
+      (fresh locals per attempt; a restart restores pc, frame and stack
+      depths; abandoned attempts run no `defer`s); flat nesting and
+      `or_else` deferred; `retry` only lexically inside `atomic`; 8 failed
+      attempts then exclusive, FIFO among exclusive waiters, also for
+      transactions owned by an implicit runtime call; an exposed but
+      unassigned entry is published only if it changed (`same_copy`, by
+      internal type identity); E9 added because a rerun would repeat an
+      outer assignment (method calls on outer objects are documented
+      instead); the 53 refused natives (random, hooks, clock reads,
+      `promise.new`, new semaphores/channels and live counts allowed);
+      `atomic`/`retry` contextual with zero breakage (`atomic {}`/`atomic { x:
+      1 }` stay struct literals, condition heads keep the variable); the
+      await-deadlock message loses "locks"; `atomic` takes a postfix chain;
+      assigning a shared variable inside a transaction stores a local copy;
+      E6b instead of silently reinterpreting a `retry` variable; backtraces
+      keep one extra entry for the `atomic` line; `detach(t)` in a helper
+      reports `thread.submit`. Deviations found while building: a failed
+      `join` await removes its waiter (else the deadlocked join kept the job
+      alive and a join cycle ended in `stuck`); the preprocessor mirror also
+      never treats `atomic` after `struct`/`enum`/`impl`/`trait`/`for`/`fn`/
+      `throws`/`->` as the keyword; an undefined `retry(1)` call reports E6.
+      The docs write a consistent read of two variables as `let both =
+      atomic { [x, y] }` (Mah has no `let [a, b] = ...` destructuring).
+    - **Compatibility**: none for released code (`lock` never shipped). A
+      program that used an undefined `retry` gets E6's message instead of
+      "Undefined variable".
+
 Each milestone should land with its own `examples/*.mh` additions, keep
 prior milestones' examples running, **and add automated tests covering
 it** (`make test` must stay green) — see `docs/TESTING.md` for where
@@ -3887,7 +4001,7 @@ M1 was built and documented that way.
 
 ## Status
 
-M0 through M41c, M37 to M39, M41s, M42, M43 and M44a/M44b (and M21b, `mah format`) have all landed; each milestone's
+M0 through M41c, M37 to M39, M41s, M42, M43, M44a/M44b and M45 (and M21b, `mah format`) have all landed; each milestone's
 entry above says what changed and where it deliberately deviates from the
 design. The language has traits, generics, typed and checked errors, a
 static type checker, projects and `mah test`, async I/O with timers, and a
@@ -3904,7 +4018,8 @@ struct/enum/trait names module-scoped (a breaking change: export the types a
 module shares, write `lib.Point` to use one). Projects can use packages from
 GitHub repositories, imported as `pkg:NAME` and fetched and pinned by
 `mah install` (M43, `docs/PACKAGES.md`), and `std:http` serves HTTP and
-HTTPS (M42). Threads (`std:thread`, `detach(t)`, `shared`/`lock`, channels)
-landed with M44 (`docs/contracts/M44_threads.md`). What else is deferred and
+HTTPS (M42). Threads (`std:thread`, `detach(t)`, `shared`/`atomic`, channels)
+landed with M44 and M45 (`docs/contracts/M44_threads.md`,
+`docs/contracts/M45_atomic.md`). What else is deferred and
 what comes next is in `docs/NEXT_PHASES.md`; the web framework will
 live in a separate repository, built on `http.serve`.

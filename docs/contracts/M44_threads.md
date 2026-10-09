@@ -1,5 +1,7 @@
 # M44 contract: threads (`std:thread`, `detach(t)`), shared variables and `lock`, channels — bytecode 1.21
 
+> **Superseded in part by M45.** The `lock` construct, its opcodes `sharedlock`/`sharedunlock`, lock deadlock detection and the lock rules of §5 were replaced, before 0.4.0 shipped, by M45's `atomic { }` blocks (software transactional memory): see `docs/contracts/M45_atomic.md`. The M44 state is preserved on the git branch `m44-lock-block`. Everything else here (threads, jobs, copies, `shared let`, semaphores, channels, quiescence) still holds.
+
 Written by the thinker (`docs/DEVELOPMENT_WORKFLOW.md`) from the discussion paper
 `docs/contracts/M44_threads_options.md` and the user's binding decisions. It is the only spec the
 coders work from. Nothing here is open: where a choice was made by judgment it says so, and §15

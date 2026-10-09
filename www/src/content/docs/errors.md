@@ -87,12 +87,15 @@ Both print `Division by zero`. Every variant carries a `message`.
 
 ## `ThreadError`
 
-Threads, `shared` variables, `lock`, semaphores and channels throw the
-built-in `ThreadError { kind, message }`. Its `kind` is one of `"closed"`,
-`"full"`, `"cancelled"`, `"deadlock"` (a lock or `.await` that would wait
-for itself), `"stuck"` (every thread is waiting, so the wait can never
-finish), `"not_sendable"` (a Promise sent to another thread),
-`"foreign_promise"` and `"over_release"`:
+Threads, `shared` variables, `atomic` blocks, semaphores and channels throw
+the built-in `ThreadError { kind, message }`. Its `kind` is one of
+`"closed"`, `"full"`, `"cancelled"`, `"deadlock"` (an `.await` or `join`
+that would wait, through threads, for itself), `"stuck"` (every thread is
+waiting, including a `retry` nobody can wake, so the wait can never finish),
+`"not_sendable"` (a Promise sent to another thread or stored in a shared
+variable), `"foreign_promise"`, `"over_release"` and `"in_atomic"` (I/O,
+waiting or starting tasks inside `atomic { }`, whose body may run more than
+once):
 
 ```mah
 import thread from "std:thread"
@@ -102,8 +105,9 @@ t.close()
 print(try { t.run(fn() { 1 }) } catch { e: ThreadError => { e.kind } })   # closed
 ```
 
-A `lock` block left by a throw still writes its changes back; if that fails,
-the original error keeps going. Since `ThreadError` is a built-in name, a
+A throw out of `atomic { }` publishes nothing: the transaction's changes
+are discarded and the error keeps going. A commit that would store a Promise
+publishes nothing and throws `not_sendable`. Since `ThreadError` is a built-in name, a
 type of your own can't be called `ThreadError` any more.
 
 ## What the checker knows

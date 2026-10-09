@@ -34,6 +34,22 @@
     }
   },
   {
+    "type": "atomic_expr",
+    "named": true,
+    "fields": {
+      "body": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "block",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "binary_expr",
     "named": true,
     "fields": {},
@@ -774,6 +790,10 @@
           "named": true
         },
         {
+          "type": "atomic_expr",
+          "named": true
+        },
+        {
           "type": "binary_expr",
           "named": true
         },
@@ -819,10 +839,6 @@
         },
         {
           "type": "index_expr",
-          "named": true
-        },
-        {
-          "type": "lock_expr",
           "named": true
         },
         {
@@ -1587,36 +1603,6 @@
         "types": [
           {
             "type": "expr",
-            "named": true
-          }
-        ]
-      }
-    }
-  },
-  {
-    "type": "lock_expr",
-    "named": true,
-    "fields": {
-      "body": {
-        "multiple": false,
-        "required": true,
-        "types": [
-          {
-            "type": "block",
-            "named": true
-          }
-        ]
-      },
-      "target": {
-        "multiple": true,
-        "required": true,
-        "types": [
-          {
-            "type": ".",
-            "named": false
-          },
-          {
-            "type": "identifier",
             "named": true
           }
         ]
@@ -2834,6 +2820,10 @@
     "named": false
   },
   {
+    "type": "atomic",
+    "named": false
+  },
+  {
     "type": "break",
     "named": false
   },
@@ -2916,10 +2906,6 @@
   },
   {
     "type": "let",
-    "named": false
-  },
-  {
-    "type": "lock",
     "named": false
   },
   {

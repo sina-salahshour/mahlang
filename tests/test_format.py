@@ -254,7 +254,8 @@ class DecoratorTests(unittest.TestCase):
 
 
 class ThreadSyntaxTests(unittest.TestCase):
-    """M44 (docs/contracts/M44_threads.md §11.4): `detach(t)`, `shared let`, `lock`."""
+    """M44/M45 (M44_threads.md §11.4, M45_atomic.md §11.4): `detach(t)`, `shared let`,
+    `atomic { }` and `retry`."""
 
     def check(self, source: str, expected: str):
         self.assertEqual(format_source(source), expected)
@@ -277,17 +278,21 @@ class ThreadSyntaxTests(unittest.TestCase):
         self.check("export shared let x = 1\n", "export shared let x = 1\n")
         self.check("export   shared let x=1\n", "export shared let x = 1\n")
 
-    def test_lock(self):
-        self.check("shared let a = 1\nshared let b = 2\nlock a,b{a=b}\n", "shared let a = 1\nshared let b = 2\nlock a, b { a = b }\n")
-        self.check("let n = lock a { a = a + 1; a }\n", "let n = lock a {\n    a = a + 1;\n    a\n}\n")
+    def test_atomic(self):
+        self.check("atomic{n=n+1}\n", "atomic { n = n + 1 }\n")
+        self.check("let v = atomic { n = n + 1; n }\n", "let v = atomic {\n    n = n + 1;\n    n\n}\n")
 
-    def test_a_multi_line_lock_body_indents_like_any_block(self):
+    def test_a_multi_line_atomic_body_with_retry_indents_like_any_block(self):
         self.check(
-            "fn f() {\nlock xs {\nxs.push(1)\nprint(xs)\n}\n}\n",
-            "fn f() {\n    lock xs {\n        xs.push(1)\n        print(xs)\n    }\n}\n",
+            "fn f() {\natomic {\nxs.push(1)\nif xs.len()==0{retry}\n}\n}\n",
+            "fn f() {\n    atomic {\n        xs.push(1)\n        if xs.len() == 0 { retry }\n    }\n}\n",
         )
 
-    def test_shared_and_lock_still_format_as_plain_identifiers(self):
+    def test_atomic_and_retry_still_format_as_plain_identifiers(self):
+        self.check(
+            "let atomic=1\nlet retry=2\nprint(atomic+retry)\n",
+            "let atomic = 1\nlet retry = 2\nprint(atomic + retry)\n",
+        )
         self.check("let shared=1\nlet lock=2\nprint(shared+lock)\n", "let shared = 1\nlet lock = 2\nprint(shared + lock)\n")
 
 
