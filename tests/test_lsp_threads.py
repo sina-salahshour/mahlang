@@ -94,6 +94,29 @@ class ThreadHoverTests(unittest.TestCase):
             messages,
         )
 
+    def test_atomic_in_a_condition_head_is_the_variable(self):
+        # #2.2 rule 2: no struct literal (so no `atomic {`) in an `if` head
+        text = "let atomic = true\nif atomic { print(1) }\n"
+        value = _hover(text, text.rindex("atomic"))
+        self.assertIsNotNone(value)
+        self.assertTrue(value.startswith("**variable** `atomic`"), value)
+
+    def test_atomic_before_a_struct_literal_body_is_the_struct(self):
+        # #2.2 rule 5: `atomic { x: 1 }` stays a struct literal
+        text = "struct atomic { x: Number }\nlet v = atomic { x: 1 }\nprint(v.x)\n"
+        value = _hover(text, text.rindex("atomic"))
+        self.assertIsNotNone(value)
+        self.assertFalse(value.startswith("**keyword**"), value)
+
+    def test_retry_in_a_function_written_inside_atomic_is_not_the_keyword(self):
+        # #2.2: a `fn` body inside an atomic body is not inside it
+        text = "shared let n = 0\nlet retry = 1\natomic {\n    let f = fn() { retry }\n    n = f()\n}\n"
+        value = _hover(text, text.rindex("retry"))
+        self.assertIsNotNone(value)
+        self.assertTrue(value.startswith("**variable** `retry`"), value)
+        messages = [d["message"] for d in analysis.get_diagnostics(text)]
+        self.assertFalse(any("'retry' here is the keyword" in m for m in messages), messages)
+
     def test_lock_is_an_ordinary_name_again(self):
         text = "let lock = 2\nprint(lock)\n"
         value = _hover(text, text.rindex("lock"))
