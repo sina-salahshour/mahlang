@@ -280,20 +280,43 @@ its installed root.
 ## Optional multithreading for `detach`ed expressions
 
 ✅ Landed as M44 (M44a threads and shared variables, M44b channels, bytecode
-1.21) -- see docs/V2_DESIGN.md's M44a/M44b entries, the contract
-docs/contracts/M44_threads.md and the discussion paper
-docs/contracts/M44_threads_options.md. A `std:thread` Thread is a queue of
+1.21) and M45 (`atomic { }` transactions replacing M44's `lock`, in the same
+unreleased 1.21) -- see docs/V2_DESIGN.md's M44a/M44b/M45 entries, the
+contracts docs/contracts/M44_threads.md and docs/contracts/M45_atomic.md, and
+the discussion paper docs/contracts/M44_threads_options.md. A `std:thread` Thread is a queue of
 jobs; `detach(t) expr` and `t.run(f, ...args)` run work on it, in an isolated
 VM, on a copy of every global and of what it captures, taken when the job is
 queued. `shared let` variables live outside every VM and change in place only
-inside `lock NAME { }`; `Semaphore` and `Channel` are process-wide.
+inside `atomic { }` transactions (which rerun on conflict, wait with `retry`,
+and go exclusive after 8 failed attempts); `Semaphore` and `Channel` are
+process-wide.
 
 Deferred (follow-ups):
 
+- First-class shared cells, `thread.ref(value)`: a shared value made at run
+  time and passed around (to functions, into jobs, inside structs), read and
+  changed only inside `atomic { }` like a `shared let`. Today shared state is
+  top-level `shared let` only, because a top-level name is the one identity
+  every thread (each running its own copy of the program) agrees on and the
+  compiler can see every use; a ref's identity would travel with the value
+  instead, so copying a ref into a job must keep it pointing at the same
+  cell.
 - Copying only the globals a job uses (free-variable slicing), instead of the
   whole main frame per job.
-- Lock and acquire timeouts; `select` over several channels; `Condition`,
-  `WaitGroup` and atomic counters without `lock`.
+- Acquire timeouts; `select` over several channels; `WaitGroup`.
+- From M45 (docs/contracts/M45_atomic.md §16): `or_else` (it needs nested
+  rollback of the write set) and nested rollback of an inner `atomic` left
+  by a throw; `retry` inside implicit runtime calls (`to_string`,
+  `Error.message`); making `ch.len()`/`s.available()` transactional (or
+  waking `retry` on them) and transactional channels/semaphores; a
+  statistics/introspection API (attempt counts, exclusive runs) and
+  Rust-side debug counters like Python's `TX_STATS`; contention management
+  smarter than "8 then exclusive" (backoff, priorities); detecting
+  outer-object mutation inside `atomic` (`outer.push(x)`) and outer
+  assignments from called functions/closures; detecting a busy-wait loop
+  inside `atomic`; highlighting `retry` outside statement position in the
+  tree-sitter and VS Code grammars; cheaper transaction reads (copy-on-write
+  working copies).
 - Deadlock detection through semaphores, channels and not-yet-started jobs,
   and through cycles of plain same-VM awaits (today those are left to the
   quiescence rule, which fires only once every thread is waiting), and
@@ -307,7 +330,7 @@ Deferred (follow-ups):
 - Reporting several unobserved job failures in a deterministic order (today:
   the order the replies arrived).
 - Cheaper shared reads (copy-on-write or immutable sharing of shared values);
-  every read outside `lock` copies the whole value.
+  every read outside `atomic` copies the whole value.
 - A runtime test for a job Promise settled by hand (no exported std function
   can settle another Promise today, so that path is reachable only from std
   code).

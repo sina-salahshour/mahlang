@@ -139,7 +139,8 @@ the usual disassembly of the bytecode part.
 
 ## Threads
 
-M44 (docs/contracts/M44_threads.md, docs/MAHC_FORMAT.md §6.11) runs jobs on
+M44 (docs/contracts/M44_threads.md, docs/MAHC_FORMAT.md §6.11), with M45's
+transactions (docs/contracts/M45_atomic.md), runs jobs on
 real OS threads, so on this VM they run **in parallel** (the Python VM has
 the same semantics under the GIL). The design keeps every Mah heap
 single-threaded: values are `Rc`/`RefCell` and never cross threads; only
@@ -147,7 +148,8 @@ plain copies do.
 
 - **`ThreadRuntime`** (`runtime/src/vm/thread.rs`), one per run behind an
   `Arc` and shared by the main VM and every job VM: one `Mutex<RtState>`
-  (the shared-variable store and its locks, the wait-for graph, pools,
+  (the shared-variable store and its versions, the exclusivity token, the
+  `retry` watchers, the wait-for graph, pools,
   semaphores, channels, live VMs and the quiescence count) with the pools'
   `Condvar`s on that same mutex; the shared stdout (`Arc<Mutex<BufWriter<
   Stdout>>>`); the shared file and socket tables; the one stdin reader; the
@@ -155,6 +157,23 @@ plain copies do.
   `Arc<Program>`, the arguments and the test mode. Nothing blocks while
   holding the mutex; waking a waiter sends a `Completion` into its VM's
   done channel, and that VM settles its own Promise.
+- **Transactions** (`atomic { }`): a task's `tx` is an
+  `Rc<RefCell<Tx>>` shared, by reference, with the sub-task of an implicit
+  `to_string`/`message` call (`invoke_sync`). `thread.rs` has the opcode
+  functions (`get`, `set`, `begin`, `end`, `abort`, `retry`), the commit
+  (`tx_commit`: wait for the exclusivity token if another transaction holds
+  it, validate the read set's versions, bump the clock, publish, wake the
+  `retry` watchers) and `same_copy` over two `Payload` graphs. A conflict or
+  a `retry` is a `RuntimeError` whose `restart` is `Some(TxSignal::Conflict |
+  TxSignal::Retry)`: every `?` propagates it unchanged (out of `invoke_sync`
+  too), and `step_task_inner` handles it first, in the owning task, by
+  restoring the pc, frame and stack depths of the outermost `atomicbegin`.
+  A `retry` waits as `Wait::Retry` on a pending Promise whose continuation
+  has `restart: true` (resolving it re-runs the `atomicbegin`). Exclusivity
+  waits use `excl_cv`, a `Condvar` on the runtime mutex, with a 50 ms
+  timeout; no `RefCell` borrow is held across one. `ATOMIC_REFUSED_NATIVES`
+  is linked into `LinkedInstr::Native`'s `atomic` field, so the `in_atomic`
+  check costs one `Option` test per native call.
 - **`SendGraph`**: the copy format that crosses threads, a new type rather
   than an extension of `fs::IoValue` (which has no identity, cycles or
   closures; fs and socket jobs keep using it). `copy_out` walks a value

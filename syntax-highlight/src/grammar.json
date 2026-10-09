@@ -2587,7 +2587,7 @@
         },
         {
           "type": "SYMBOL",
-          "name": "lock_expr"
+          "name": "atomic_expr"
         },
         {
           "type": "SYMBOL",
@@ -3564,40 +3564,12 @@
         ]
       }
     },
-    "lock_expr": {
+    "atomic_expr": {
       "type": "SEQ",
       "members": [
         {
           "type": "STRING",
-          "value": "lock"
-        },
-        {
-          "type": "FIELD",
-          "name": "target",
-          "content": {
-            "type": "SYMBOL",
-            "name": "_lock_target"
-          }
-        },
-        {
-          "type": "REPEAT",
-          "content": {
-            "type": "SEQ",
-            "members": [
-              {
-                "type": "STRING",
-                "value": ","
-              },
-              {
-                "type": "FIELD",
-                "name": "target",
-                "content": {
-                  "type": "SYMBOL",
-                  "name": "_lock_target"
-                }
-              }
-            ]
-          }
+          "value": "atomic"
         },
         {
           "type": "FIELD",
@@ -3605,31 +3577,6 @@
           "content": {
             "type": "SYMBOL",
             "name": "block"
-          }
-        }
-      ]
-    },
-    "_lock_target": {
-      "type": "SEQ",
-      "members": [
-        {
-          "type": "SYMBOL",
-          "name": "identifier"
-        },
-        {
-          "type": "REPEAT",
-          "content": {
-            "type": "SEQ",
-            "members": [
-              {
-                "type": "STRING",
-                "value": "."
-              },
-              {
-                "type": "SYMBOL",
-                "name": "identifier"
-              }
-            ]
           }
         }
       ]

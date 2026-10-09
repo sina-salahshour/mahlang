@@ -103,10 +103,11 @@ sections   (id u8, length varuint, payload bytes(length))*   until end of file
   `socket.start_tls_server`. std:socket declares them, so every program
   importing `std:socket` (or `std:http`) is 1.20; `std:url` alone still
   needs no newer VM.
-  *(1.21)* It writes 21 when the file uses a `shared*` opcode (`sharedget`,
-  `sharedset`, `sharedlock`, `sharedunlock`: a program that declares a
-  `shared let` or uses `lock`) or lists a `thread.*` native (every program
-  importing `std:thread`).
+  *(1.21)* It writes 21 when the file uses a shared-variable or transaction
+  opcode (`sharedget`, `sharedset`, `atomicbegin`, `atomicend`,
+  `atomicabort`, `retry`: a program that declares a `shared let` or uses
+  `atomic { }`, even without a `shared let`) or lists a `thread.*` native
+  (every program importing `std:thread`).
 - **Required sections**, each present exactly once and in increasing id
   order: STRINGS (`0x01`), CONSTANTS (`0x02`), TYPES (`0x03`), NATIVES
   (`0x04`), FUNCTIONS (`0x05`), CODE (`0x06`), — in files with minor ≥ 1 —
@@ -222,7 +223,11 @@ count varuint
 count × (name str, arity varuint)
 ```
 
-Instructions refer to natives by their index in this table. A VM **must**
+Instructions refer to natives by their index in this table. *(1.21)* The
+natives listed in §6.11 "Refused natives" (all of `io`, `fs` and `socket`,
+timers, Promise settling, `process.exit`/`run`/`env_set`/`env_remove` and the
+`thread.*` operations that act on other threads) throw `ThreadError`
+`in_atomic` when called while the task is in a transaction. A VM **must**
 refuse to load a file listing a native it doesn't implement, or one whose
 arity doesn't match its own. Native names are dotted, `module.function`.
 Version 1.0 defines:
@@ -792,8 +797,10 @@ Opcodes (semantics in §6):
 | `0x60` | `throw` *(1.4)* | value `A` |
 | `0x70` | `sharedget` *(1.21)* | index `N`, name `S`, mode `N`, dest `A` |
 | `0x71` | `sharedset` *(1.21)* | index `N`, name `S`, src `A` |
-| `0x72` | `sharedlock` *(1.21)* | index `N`, name `S`, dest `A` |
-| `0x73` | `sharedunlock` *(1.21)* | index `N`, name `S`, mode `N` |
+| `0x74` | `atomicbegin` *(1.21)* | — |
+| `0x75` | `atomicend` *(1.21)* | — |
+| `0x76` | `atomicabort` *(1.21)* | — |
+| `0x77` | `retry` *(1.21)* | — |
 
 All other opcode values are reserved. Opcodes, operand kinds, and natives
 marked *(1.1)* **must not** appear in a file whose minor version is 0,
@@ -807,14 +814,18 @@ marked *(1.4)* not in one whose minor version is below 4, and those marked
 instruction I requires minor version >= 21, but this file's minor version is
 M`).
 
-The `shared*` opcodes *(1.21)* implement shared variables (§6.11). `index` is
-the shared variable's number (any varuint; a program numbers its shared
-variables from 0); `name` is its source name, used only in error messages.
-`sharedget`'s mode is 0 (a copy) or 1 (lexically locked: the working object
-itself); `sharedunlock`'s is 0 (release) or 1 (mark: a `lock` body is being
-left by a throw). Any other mode is refused at link time with
-`RuntimeError.Internal`, `bad mode M for 'OPCODE'`. `mah dis` prints the modes
-as `copy`/`locked` and `release`/`mark`.
+The `shared*` opcodes *(1.21)* implement shared variables and the
+`atomic*`/`retry` opcodes implement transactions (§6.11). `index` is the
+shared variable's number (any varuint; a program numbers its shared
+variables from 0); `name` is its source name, used in error messages and
+transaction entries. `sharedget`'s mode is 0 (**copy**) or 1 (**working**:
+the read is written lexically inside `atomic`, so it returns the
+transaction's working value itself). Any other mode is refused at link time
+with `RuntimeError.Internal`, `bad mode M for 'sharedget'`. `mah dis` prints
+the mode as `copy`/`working` and the four transaction opcodes with no
+operands. The codes `0x72` and `0x73` are unassigned (they were `sharedlock`/
+`sharedunlock` in unreleased development builds of 1.21); a file using them
+is refused like any unknown opcode (`unknown opcode 0x72 at instruction I`).
 
 `decorate kind a b values` *(1.15)* stores the decorators of one target
 (docs/REFLECTION.md, M41b). `values` are the addresses holding the decorator
@@ -1210,8 +1221,8 @@ Single-threaded cooperative scheduling:
   a pending `socket.accept`, `socket.recv` or `socket.connect`, until it settles
   (data, a connection, an error, its timeout, or its socket being closed). *(1.21)* So
   does every runtime wait of §6.11: a queued or running job this VM submitted,
-  a lock, semaphore or channel wait, and a join (idle threads don't count); a
-  run in which those waits can never be satisfied ends them with `stuck`
+  a semaphore or channel wait, a join and a `retry` wait (idle threads don't
+  count); a run in which those waits can never be satisfied ends them with `stuck`
   instead of waiting forever (§6.11, "Quiescence"). *(1.4)* Once it does, if any
   detached task's Promise failed and was never observed, the program
   still stops with the uncaught-error report (§6.8) for the **first**
@@ -1604,15 +1615,17 @@ message
 ...the message, to the end...
 ```
 
-### 6.11 Threads, jobs and shared variables *(1.21)*
+### 6.11 Threads, jobs, shared variables and transactions *(1.21)*
 
-The normative design is `docs/contracts/M44_threads.md` (§2–§6); this
-section condenses what a VM must do. Everything observable (output, exit
+The normative design is `docs/contracts/M44_threads.md` (§2–§6), with
+transactions from `docs/contracts/M45_atomic.md` (§3, §5, §6) replacing its
+locks; this section condenses what a VM must do. Everything observable (output, exit
 codes, error kinds and messages) is the same on every VM.
 
 **The runtime.** One process-wide runtime per program run, shared by the
 main VM and every **job VM**, guarded by one mutex: the shared-variable
-store and its locks, the wait-for graph, the threads (pools), semaphores,
+store and its versions, the exclusivity token, the `retry` watchers, the
+wait-for graph, the threads (pools), semaphores,
 channels, the live VMs (for quiescence), the shared file and socket tables,
 the single stdin reader and the shared stdout. A VM never touches another
 VM's heap: waking a waiter means posting a completion to that VM's done
@@ -1629,11 +1642,12 @@ messages (`NAME`, `VAR`, `N` substituted):
 | `closed` | `thread 'NAME' is closed` (queueing on a closed thread); `the channel is closed` |
 | `full` | `thread 'NAME' is full (N jobs queued or running)` (N = workers + capacity) |
 | `cancelled` | `thread 'NAME' was closed before this job started` |
-| `deadlock` | `deadlock: waiting for 'VAR' would never end` (a lock wait); `deadlock: this await would never end (it waits, through locks or threads, for itself)` (an await or join); `deadlock: a thread can't join itself` |
-| `stuck` | `the wait can never finish: every thread is waiting`; `the job never finished: it waits on a Promise nothing will settle` |
-| `not_sendable` | `a Promise can't be sent to another thread`; `shared variable 'VAR' can't hold a Promise` |
+| `deadlock` | `deadlock: this await would never end (it waits, through threads, for itself)` (an await or join); `deadlock: a thread can't join itself` |
+| `stuck` | `the wait can never finish: every thread is waiting`; `the job never finished: it waits on a Promise nothing will settle`; `retry can never wake up: this transaction read no shared variable` |
+| `not_sendable` | `a Promise can't be sent to another thread`; `shared variable 'VAR' can't hold a Promise` (a plain write or a commit) |
 | `foreign_promise` | `a Promise from another thread can't be awaited here (it was still pending when it was copied)` |
 | `over_release` | `release without a matching acquire (all N permits are free)` |
+| `in_atomic` | `'NAME' can't run inside 'atomic { }': its body may run more than once` |
 
 **Copies.** Values cross VMs only as copies, made by an iterative walk that
 preserves identity and cycles within one copy (one memo for the whole
@@ -1648,9 +1662,9 @@ values) refuses any Promise (`not_sendable`), checked before the memo;
 **environment** (everything reached through a frame or closure) copies a
 Promise by state — Settled and Failed are copied, Pending becomes a Failed
 Promise whose error is `ThreadError foreign_promise`; every copied Promise
-is observed and has no waiters; **local** (a non-locked read of a shared
-variable the task holds, which stays in the same VM) keeps every Promise as
-the same object.
+is observed and has no waiters; **local** (a read of a shared variable, and a working value
+or an assignment inside a transaction, all of which stay in the same VM)
+keeps every Promise as the same object.
 
 **Queueing a job** (`thread.submit`; `detach(t) expr` compiles to it with
 the operand wrapped in a zero-parameter closure and no arguments), in
@@ -1672,8 +1686,8 @@ worker, the next starts only after the previous finished) and runs it in a
 fresh job VM: the same program, a fresh heap with the snapshot restored,
 its own timers, I/O, done queue, pending map and failed-promise list. The
 root task calls the callee with the bound arguments; the job ends like a
-program: once the root has finished and nothing (timer, I/O, job, lock,
-semaphore, channel wait, join) is pending. Its outcome: the root failed →
+program: once the root has finished and nothing (timer, I/O, job,
+semaphore, channel wait, join, `retry` wait) is pending. Its outcome: the root failed →
 at once, the error (strict copy; a Promise inside it → `not_sendable`); the
 root never finished with nothing pending → `stuck`; a detached task failed
 unobserved → that error; else the root's value (strict copy; refusal →
@@ -1683,60 +1697,184 @@ done queue; a failed one is reported at that VM's end like an unobserved
 failed detached task when nobody observed it (with several, the order is
 the order the replies arrived). A job Promise already settled by hand drops
 the reply. **Teardown**: the job VM's line buffer is handed over; its waiters
-are removed from every lock, semaphore, channel and join list; then every
-lock it still owns passes to the next (other VM's) waiter **without
-write-back**; its wait-for
-edges are removed; a permit or message delivered to it too late is given
+are removed from every semaphore, channel and join list and its `retry`
+waits from every watcher set; if it owns the exclusivity token, the token
+is released (a transaction running in it is simply gone: nothing of it was
+published); its wait-for edges are removed; a permit or message delivered to it too late is given
 back (a message to the front of its channel).
 
-**Shared variables.** The store maps a shared variable's index to a
-strict copy of its value (absent = `none`). Each task has `held`: index →
-(working value, depth, unwinding depth); a task running an implicit call
-for its caller (`to_string`, `Error.message`) shares its caller's id and
-`held`.
-- `sharedlock k name dest` (acquire; `dest ←` a Promise, which the code
-  awaits at once): if the task holds `k`, depth + 1 and a settled `none`;
-  if nobody holds it, the task becomes the owner with a working value = a
-  copy of the stored value, depth 1, settled `none`; if another task owns
-  it and the wait-for graph leads from that owner back to this task, a
-  Promise **failed** with `deadlock` (`waiting for 'VAR'`); else the task
-  queues as a waiter (FIFO, a pending Promise counted as pending work).
-  When the lock passes to a waiter, the waiter's VM receives a copy of the
-  stored value as its working value.
-- `sharedget k name mode dest`: mode 1 → the working value itself (the task
-  must hold `k`, else `RuntimeError.Internal` `sharedget without holding
-  the lock`); mode 0 → a local copy of the working value if the task holds
-  `k`, else a strict copy of the stored value. Never waits.
-- `sharedset k name src`: the task must hold `k` (else `Internal`
-  `sharedset without holding the lock`); replaces the working value. (A
-  plain assignment outside `lock` compiles to acquire, await, `sharedset`,
-  release.)
-- `sharedunlock k name 1` (mark): if the task holds `k`, record the current
-  depth as the unwinding depth.
-- `sharedunlock k name 0` (release): the task must hold `k` (else `Internal`
-  `sharedunlock without holding the lock`); depth − 1; at depth 0 the entry
-  is removed, the working value is strict-copied and written to the store,
-  and the lock passes directly to the first waiter (no barging). If the
-  copy is refused (a Promise inside), the store keeps its old value and,
-  unless the release is leaving by a throw (the unwinding depth equals the
-  depth being left), `ThreadError not_sendable` (`shared variable 'VAR'
-  can't hold a Promise`) is thrown after the lock is released.
+**Shared variables.** The store maps a shared variable's index to
+`(stored value, version)`: the stored value is a strict copy that is never
+mutated or handed out; absent = `(none, 0)`. A global `clock` (from 0) is the
+version of the last commit or plain write. Outside a transaction:
+- `sharedget k name 0 dest`: a **local** copy of the stored value. Never
+  waits. (Mode 1 outside a transaction is `RuntimeError.Internal`
+  `sharedget in working mode outside a transaction`; the compiler never
+  emits it.)
+- `sharedset k name src` (a **plain write**; `shared let x = e` and `x = e`
+  outside `atomic` compile to it): strict-copy the value (a Promise inside →
+  `ThreadError not_sendable` `shared variable 'NAME' can't hold a Promise`,
+  nothing stored); then, under the runtime lock, wait while another task's
+  transaction is exclusive (below), `clock += 1`, store `(copy, clock)` and
+  wake the `retry` waiters of `k`.
 
-The compiler brackets a `lock a, b { body }` as: acquire `a`, defer its
-release, acquire `b`, defer its release, then the body inside its own
-handler region whose handler marks every target (mode 1) and re-throws.
+**Transactions.** `atomic { body }` compiles to: the body as a
+zero-parameter closure (so every attempt gets fresh locals), `atomicbegin`,
+a handler region covering only `call closure` and `retval v`, then
+`atomicend`, `dest ← v`, a jump over the handler; the handler runs
+`atomicabort` and re-throws the error. `atomicbegin`, `atomicend` and the
+handler are outside the region, so an error they raise unwinds to the
+enclosing handlers. `retry` compiles to the `retry` opcode.
 
-**Deadlocks.** The wait-for graph's nodes are tasks; edges: a task waiting
-for a lock → the lock's owner (strong); a task suspended on `await` of a
-Promise whose producer is known → that producer: a same-VM `detach` task
-(plain), a job's root task once it has started (strong), or every running
-job's root task of a joined thread (strong). Before a lock wait or an
-`await`/join suspension adds an edge, the VM checks (under the runtime
-lock) whether the graph leads back to the waiting task along a path that,
-with the new edge, contains a strong edge; if so the wait fails at once
-with `deadlock`. Await edges are tracked only once the run has used a lock
-or spawned a thread. Semaphores, channels, queued jobs and Promises without
-a producer are not edges.
+Each task has `tx` (none or a transaction) and `implicit` (none, or
+`to_string`/`message` for the sub-task of an implicit runtime call, which
+shares its caller's id and `tx`). A transaction has: `serial`
+(process-unique, from 1), `owner` (the task that began it), `implicit` (the
+owner's label), `depth` (nesting; 0 between a conflict and the restarted
+`atomicbegin`), `rv` (the snapshot time), `reads` (index → version, in
+first-read order), `entries` (index → `{name, base, working, assigned,
+exposed}`, in first-access order), `attempts` (failed attempts so far),
+`irrevocable` (this attempt is exclusive), `restart` (the pc of the
+outermost `atomicbegin`, the frame current there, the return-stack and the
+defer-stack lengths). `ATOMIC_ATTEMPTS` = 8.
+
+- `atomicbegin` (at pc `B`): with no `tx`, create one (depth 1, attempts 0,
+  `restart` = (B, frame, stack lengths)) and **start** it; with `depth > 0`,
+  `depth += 1` (an inner `atomic` **joins**; nothing else); with depth 0 (a
+  restart), `depth = 1`, mark it `irrevocable` if `attempts >= 8`, and start
+  it. **Start**, under the runtime lock: an irrevocable attempt first
+  acquires the exclusivity token; then `rv = clock`.
+- `sharedget k name mode dest` in a transaction: on the first access of `k`,
+  read `(v, ver)` from the store; `ver > rv` → **restart (conflict)**; else
+  `reads[k] = ver` and a new entry `{name, base: v, working: a local copy of
+  v, assigned: false, exposed: false}`. Mode 1 (**working**, written
+  lexically inside `atomic`): `exposed = true`, return the working value
+  itself (so `xs.push(1)` changes it). Mode 0 (a helper's read): return a
+  local copy of the working value.
+- `sharedset k name src` in a transaction: `w` = a **local copy** of the
+  value (Promises kept as the same object; never the value itself, so a
+  working value is reachable only through its own variable); no entry →
+  a new one `{name, base: none, working: w, assigned: true, exposed: false}`
+  (a blind write: no read-set record); else `working = w`, `assigned = true`.
+- `atomicend` (no `tx` → `Internal` `atomicend outside a transaction`):
+  `depth > 1` → `depth -= 1`, done. Else build the publish list, in entry
+  order: skip an entry that is neither assigned nor exposed; strict-copy its
+  working value (a Promise inside → stop: end the attempt, clear `tx`, throw
+  `ThreadError not_sendable` `shared variable 'NAME' can't hold a Promise`
+  for that entry); skip an unassigned entry whose copy is **same** as its
+  `base` (below); else publish it. Then **commit**, under the runtime lock:
+  with nothing to publish, just end (a read-only transaction neither waits
+  nor validates); else wait while another transaction is exclusive,
+  **validate** (every `reads[k]` still equals `k`'s version, absent = 0;
+  else **restart (conflict)**), `clock += 1`, store every published
+  `(copy, clock)`, wake their `retry` waiters. Release the token if held;
+  clear `tx`.
+- `atomicabort` (the handler; no `tx` → `Internal` `atomicabort outside a
+  transaction`): `depth > 1` → `depth -= 1` (flat nesting: the inner block's
+  changes are not undone). Else end the attempt (release the token if held)
+  and clear `tx`: **nothing is published**, and the handler re-throws the
+  error unchanged.
+- `retry` (no `tx` → `Internal` `retry outside a transaction`): an implicit
+  owner → `RuntimeError` (`Internal`) `'LABEL' cannot suspend (it used
+  'retry') when called implicitly by the runtime`; empty `reads` →
+  `ThreadError stuck` `retry can never wake up: this transaction read no
+  shared variable`; else **restart (retry)**.
+
+**Guards and the safety net.** Starting a transaction in `atomicbegin`, and
+the publish/commit steps of `atomicend`, end the whole transaction (release
+the token, clear `tx`) on any error other than a restart, then let the error
+unwind from that instruction. When a task ends with a `tx` it owns, the VM
+ends that transaction first. After such an error the task is outside any
+transaction.
+
+**Restart** is a non-local transfer to the owner: the step loop handles it
+before any other error handling, when the task owns its `tx` (an implicit
+sub-task that joined someone else's transaction passes it up to the
+owner's step). It restores the pc, frame and stack lengths of `restart`
+(no `defer` of the abandoned attempt runs) and releases the token if held.
+A conflict: `attempts += 1`, `depth = 0`, `reads`/`entries` emptied,
+`irrevocable = false`, and execution continues at `atomicbegin`. A retry:
+`tx` is cleared and the task waits for the read set (below); when woken it
+runs `atomicbegin` again, as a new transaction (the failure count starts
+again from 0); a failed wait is thrown at the `atomic` expression, outside
+the transaction.
+
+**`retry` waits.** Under the runtime lock: if a variable of the read set
+already has another version, run again at once. Else create a pending
+Promise, register it as an internal wait of this VM (pending work: it keeps
+the VM — a job, or the program — alive), and record it as a watcher of every
+index of the read set. Every commit that publishes and every plain write
+wakes (settles with `none`) and unregisters every watcher of the indices it
+wrote. Quiescence fails `retry` waits like any internal wait (`stuck`).
+Removing a waiter (quiescence, teardown) also unregisters it.
+
+**Same.** Whether an exposed, unassigned entry changed: a parallel,
+iterative walk over two strict copies with two memos (left → right and
+right → left). `none`/Bool/String: same kind and equal; Number: numerically
+equal; Type: equal kind and index; heap pairs of different kinds, or a left
+already paired with another right (or the reverse) → not same; Vector:
+equal lengths, items pairwise; Map: equal lengths, the same keys in the
+same order, values pairwise; Bytes: equal contents; struct: equal
+**internal type identity** (the module-scoped type name that `==` and
+`matchstruct` compare, never a source name), the same field names in
+order, fields pairwise; enum: also the same variant. A closure or frame
+anywhere → not same (always published). It only decides whether a version
+is bumped; it never changes what a program prints.
+
+**Exclusivity.** One token: `excl_owner` (none or a transaction serial and
+its VM), a FIFO `excl_queue` of serials waiting for it, and
+`commits_waiting`. Acquire (an irrevocable start): join the queue; wait
+until the token is free, this serial is at the front and
+`commits_waiting == 0`; take it. A commit with something to publish, or a
+plain write, while another transaction owns the token: `commits_waiting +=
+1`, wait until it is released, `commits_waiting -= 1`. Release: when the
+owning transaction's attempt ends in any way — commit, conflict, `retry`,
+abort, a `not_sendable` refusal, a guarded error, the end of the owning
+task, or its VM's teardown. Waits are OS-level (the VM thread blocks;
+Python VMs poll every 50 ms for test deadlines and exits). At most one
+transaction is exclusive; it can't conflict (nothing publishes after its
+`rv` until it releases), so it commits on that attempt; and it never waits
+for anything while it holds the token (`.await`, `detach`, every waiting
+native and `process.exit` are refused in a transaction, its own commit
+doesn't wait, nested `atomic`s join, an implicit call's `atomic` joins), so
+the waits-for relation between threads has no cycle: no deadlock.
+Exclusive waiters are served FIFO once the commits already waiting have
+gone through.
+
+**Refused natives.** While the task has a `tx` (lexically inside or in a
+called function), these throw `ThreadError in_atomic` `'NAME' can't run
+inside 'atomic { }': its body may run more than once` before doing
+anything: the `await` opcode (NAME `.await`, whatever the Promise's state),
+the four `detach*` opcodes (NAME `detach`), and a `native` call of one of
+these 53 (NAME = the native's name): `io.print`, `io.write`, `io.input`,
+`io.read_line`; `time.sleep_async`, `time.cancel`; `promise.resolve`,
+`promise.fail`; every `fs.*` native (`fs.read_text`, `fs.write_text`,
+`fs.append_text`, `fs.info`, `fs.list_dir`, `fs.mkdir`, `fs.remove`,
+`fs.rename`, `fs.copy`, `fs.temp_dir`, `fs.open`, `fs.read_line`,
+`fs.read_all`, `fs.write`, `fs.close`, `fs.read_bytes`, `fs.write_bytes`,
+`fs.append_bytes`, `fs.file_read_bytes`, `fs.file_write_bytes`);
+`process.exit`, `process.run`, `process.env_set`, `process.env_remove`;
+every `socket.*` native (`socket.connect`, `socket.listen`, `socket.accept`,
+`socket.send`, `socket.recv`, `socket.shutdown`, `socket.close`,
+`socket.start_tls`, `socket.tls_server_config`, `socket.start_tls_server`);
+`thread.spawn`, `thread.submit`, `thread.close`, `thread.join`,
+`thread.semaphore_acquire`, `thread.semaphore_try_acquire`,
+`thread.semaphore_release`, `thread.channel_send`, `thread.channel_recv`,
+`thread.channel_try_recv`, `thread.channel_close`. Every other native is
+allowed (pure ones, `random.*`, `hooks.*`, clock and environment reads,
+`promise.new`, new semaphores/channels, live counts). The throw is an
+ordinary, catchable error.
+
+**Deadlocks.** The wait-for graph's nodes are tasks; edges: a task
+suspended on `await` of a Promise whose producer is known → that producer:
+a same-VM `detach` task (plain), a job's root task once it has started
+(strong), or every running job's root task of a joined thread (strong).
+Before an `await`/join suspension adds an edge, the VM checks (under the
+runtime lock) whether the graph leads back to the waiting task along a path
+that, with the new edge, contains a strong edge; if so the wait fails at
+once with `deadlock`. Await edges are tracked only once the run has spawned
+a thread. Semaphores, channels, `retry` waits, queued jobs and Promises
+without a producer are not edges.
 
 **Quiescence.** A VM is blocked when it waits for a completion with no
 timeout, has no timers, an empty done queue, and only runtime waits pending
@@ -1880,15 +2018,18 @@ abandons any job VM still blocked and the process exits.
   `start_tls_server` and `std:http`'s `serve(tls:)`; and nothing else. The
   encoder writes 20 for a file that lists them, which every program importing
   std:socket does.
-- **1.21** added threads (M44, docs/contracts/M44_threads.md): the four
-  shared-variable opcodes `sharedget`/`sharedset`/`sharedlock`/`sharedunlock`
-  (`0x70`–`0x73`, §4.6) and the 19 `thread.*` natives behind `std:thread`
-  (§4.4), with the model of §6.11 (job VMs, copies, the shared-variable store,
-  locks, deadlock and quiescence detection, `ThreadError`). No new section,
-  type or constant tag; the prelude gains the `ThreadError` struct. The
-  encoder writes 21 for a file that uses a `shared*` opcode or lists a
-  `thread.*` native: a program that declares a `shared let`, uses `lock` or
-  imports `std:thread`.
+- **1.21** added threads (M44, docs/contracts/M44_threads.md) and
+  transactions (M45, docs/contracts/M45_atomic.md): the shared-variable
+  opcodes `sharedget`/`sharedset` (`0x70`/`0x71`), the transaction opcodes
+  `atomicbegin`/`atomicend`/`atomicabort`/`retry` (`0x74`–`0x77`, §4.6) and
+  the 19 `thread.*` natives behind `std:thread` (§4.4), with the model of
+  §6.11 (job VMs, copies, the versioned shared-variable store, transactions,
+  the exclusivity token, `retry` waits, join-cycle and quiescence detection,
+  the natives refused in a transaction, `ThreadError`). `0x72`/`0x73` are
+  unassigned. No new section, type or constant tag; the prelude gains the
+  `ThreadError` struct. The encoder writes 21 for a file that uses one of
+  those opcodes or lists a `thread.*` native: a program that declares a
+  `shared let`, uses `atomic { }` or imports `std:thread`.
 - Planned growth, for orientation: error-set checking (the static
   checker's `throws` inference and "unhandled error" diagnostics -- M26),
   string utilities, filesystem, networking, and process natives.

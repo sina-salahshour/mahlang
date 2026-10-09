@@ -255,10 +255,11 @@ let x = input("decimal: ").to_number()   # warning: unhandled NumberParseError, 
   = "fs.read_text"`); a native throws by returning an error value to the
   VM, which unwinds exactly as for `throw`.
 
-## Threads (M44, landed)
+## Threads (M44, M45, landed)
 
-`std:thread`, `detach(t)`, `shared let`/`lock` and channels
-(docs/contracts/M44_threads.md, docs/STDLIB.md) add one error type,
+`std:thread`, `detach(t)`, `shared let`/`atomic { }` and channels
+(docs/contracts/M44_threads.md, docs/contracts/M45_atomic.md, docs/STDLIB.md)
+add one error type,
 `ThreadError`, declared in the **prelude** (so it needs no import, and its
 name is global like `EndOfInput`'s):
 
@@ -274,18 +275,19 @@ impl Error for ThreadError {
 | `closed` | queueing a job on a closed Thread (`thread 'NAME' is closed`); `send` on a closed channel, `recv` on a closed empty one, a waiting send/recv when the channel closes (`the channel is closed`) |
 | `full` | queueing beyond `workers + capacity` jobs (`thread 'NAME' is full (N jobs queued or running)`) |
 | `cancelled` | a queued job dropped by `close(cancel: true)` (`thread 'NAME' was closed before this job started`) |
-| `deadlock` | a `lock` wait (or the lock an assignment takes) that would close a cycle of waits (`deadlock: waiting for 'VAR' would never end`); an `.await` or `t.join()` that would wait, through locks, jobs or joins, for itself (`deadlock: this await would never end (it waits, through locks or threads, for itself)`); `t.join()` from one of `t`'s own jobs (`deadlock: a thread can't join itself`) |
-| `stuck` | a lock, semaphore, channel, join or job-reply wait while every thread of the run is waiting (`the wait can never finish: every thread is waiting`); a job whose root waits on a Promise nothing will settle (`the job never finished: it waits on a Promise nothing will settle`) |
-| `not_sendable` | a Promise inside `t.run`'s arguments, a job's result or error, or a channel message (`a Promise can't be sent to another thread`); a shared variable written with a Promise inside (`shared variable 'VAR' can't hold a Promise`) |
+| `deadlock` | an `.await` or `t.join()` that would wait, through jobs or joins, for itself (`deadlock: this await would never end (it waits, through threads, for itself)`); `t.join()` from one of `t`'s own jobs (`deadlock: a thread can't join itself`) |
+| `stuck` | a semaphore, channel, join, job-reply or `retry` wait while every thread of the run is waiting (`the wait can never finish: every thread is waiting`); a job whose root waits on a Promise nothing will settle (`the job never finished: it waits on a Promise nothing will settle`); `retry` in a transaction attempt that read no shared variable (`retry can never wake up: this transaction read no shared variable`) |
+| `not_sendable` | a Promise inside `t.run`'s arguments, a job's result or error, or a channel message (`a Promise can't be sent to another thread`); a shared variable assigned, or an `atomic` block committing, a value with a Promise inside (`shared variable 'VAR' can't hold a Promise`) |
 | `foreign_promise` | `.await`, in a job, of a Promise that was still pending when it was copied into the job |
 | `over_release` | `Semaphore.release` with every permit free |
+| `in_atomic` | `.await`, `detach` or one of the 53 side-effecting natives (all of io, fs and socket, timers, settling Promises, `process.exit`/`run`/`env_set`/`env_remove`, the `std:thread` operations that act on other threads) while the task is in an `atomic` transaction, lexically or in a function it calls (`'NAME' can't run inside 'atomic { }': its body may run more than once`; NAME is `.await`, `detach` or the native's name, e.g. `io.write` for `print`) |
 
 - **Tracked where declared**: `std:thread`'s functions that can throw it
   declare `throws ThreadError` (like `std:socket`'s `SocketError`), so in a
   `strict` project a top-level call of one needs a `try`. The `ThreadError`s
-  the VM raises by itself — a `lock` that would deadlock, a write-back
-  refused with `not_sendable`, a failed job Promise's `.await` — are
-  **untracked**, like `RuntimeError`.
+  the VM raises by itself — an await cycle, a commit refused with
+  `not_sendable`, `in_atomic`, a `stuck` `retry`, a failed job Promise's
+  `.await` — are **untracked**, like `RuntimeError`.
 - **Jobs**: a job's error comes back through its Promise as a **copy** (same
   type, fields, throw site), so `try { p.await } catch { e: MyError => ... }`
   works across threads. If the error value itself contains a Promise, the
@@ -295,29 +297,45 @@ impl Error for ThreadError {
   exactly like an unobserved failed detached task. With **several**, which
   one is reported can differ from run to run (it is the order the replies
   arrived).
-- **`lock` and throws**: a `lock` block left by a throw still writes its
-  changes back and releases. If that write-back is refused (the value holds a
-  Promise), the throw keeps unwinding unchanged — a failed write-back never
-  replaces the error in flight (unlike an error thrown inside a `defer`,
-  above); leaving the block normally instead throws `not_sendable` at its
-  end.
-- **Compile errors** (resolver, exact texts in the contract §5.3): a method
-  call on a shared variable outside `lock` on it (`Method call on shared
-  variable 'xs' outside 'lock xs { }': it would act on a copy; write 'lock xs
-  { ... }'`), an assignment into one (`Assignment into shared variable ...`),
-  `x = ... x ...` outside `lock x` (`'x = ...' reads shared variable 'x'
-  outside 'lock x { }': ...`), `'lock' takes shared variables, and 'T' is not
-  one`, `'x' is locked twice in one 'lock'`, `'shared let' is only allowed at
-  the top level of a file`, `'x' is a shared variable and can't be declared
-  again in the same scope`. Two `detach(t)` parse errors: `detach(t) needs an
+- **`atomic` and throws**: a throw out of `atomic` publishes nothing: the
+  attempt's changes are discarded and the error keeps unwinding unchanged
+  (Haskell/Clojure semantics; the attempt saw a consistent snapshot, so the
+  error is one the program could really produce). A throw caught inside the
+  body is ordinary control flow and the transaction goes on. A throw out of
+  an `atomic` nested in another only leaves the inner block: its changes are
+  published with the rest if the outer body catches it. A commit that would
+  store a Promise publishes nothing and throws `not_sendable` at the end of
+  the `atomic`, outside the transaction. A `retry` wait that fails (`stuck`)
+  is thrown at the `atomic` expression.
+- **Compile errors** (resolver/codegen, exact texts in
+  docs/contracts/M45_atomic.md §4): outside `atomic`, a method call on a
+  shared variable (`Method call on shared variable 'xs' outside 'atomic { }':
+  it would act on a copy; wrap it in 'atomic { ... }'`), an assignment into
+  one (`Assignment into shared variable 'xs' outside 'atomic { }': it would
+  change a copy; wrap it in 'atomic { ... }'`), `x = ... x ...` (`'x = ...'
+  reads shared variable 'x' outside 'atomic { }': another thread can change
+  it in between; wrap it in 'atomic { ... }'`); inside `atomic`, `.await`,
+  `sleep_async`, `print`, `input` or `detach` (`'WHAT' can't be used inside
+  'atomic { }': its body may run more than once`), `return`/`break`/
+  `continue` leaving it (`'KEYWORD' can't leave an 'atomic { }' block (use
+  the block's value instead)`), assigning a non-shared variable declared
+  outside it (`'NAME' is declared outside 'atomic { }', and changing it there
+  isn't undone when the block runs again; return what you need as the
+  block's value`); `retry` outside `atomic` (`'retry' is only allowed inside
+  'atomic { }'`), the keyword `retry` where a variable `retry` is visible
+  (`'retry' here is the keyword (it ends this 'atomic { }' run); rename the
+  variable 'retry'`); `'shared let' is only allowed at the top level of a
+  file`, `'x' is a shared variable and can't be declared again in the same
+  scope`. Two `detach(t)` parse errors: `detach(t) needs an
   expression; write 'detach(t) { ... }'` (a statement after `detach(t)` on
   the same line) and `detach(t) and its operand must be on the same line;
   write 'detach(t) {' on one line` (`detach (name)` then `{` on the next
   line). The checker reports `detach(...) needs a thread.Thread, got T` when
   it knows the type, and three warnings: `detach (...)` that isn't the
   thread form although its parenthesized expression is a Thread, a shared
-  variable passed as a copy to a call, and assigning into the loop variable
-  of `for let item in shared_vec`.
+  variable passed as a copy to a call (`... to change it, call inside
+  'atomic { ... }'`), and assigning into the loop variable of `for let item
+  in shared_vec` (`... loop inside 'atomic { ... }'`).
 
 **M44 compatibility notes.** Three things that compiled before mean
 something else or stop compiling:

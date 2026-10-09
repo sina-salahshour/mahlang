@@ -146,7 +146,7 @@ operator.
 | generic `<` `>` | no space inside or before `<` | `Vector<Number>` |
 | keywords | one space after (`let`, `fn`, `if`, `return`, `detach`, ...); `fn(` in a type or anonymous fn has none | `fn(x) { }` |
 | `detach(t)` (M44, the thread form) | no space between `detach` and `(`; one space after `)` | `detach(t) f(x)`, `detach(t) { 1 }` (plain `detach (a + b)` keeps its space) |
-| `shared let`, `lock a, b { }` (M44) | single spaces, like any keyword | `shared let n = 0`, `lock a, b { a = b }` |
+| `shared let` (M44), `atomic { }` (M45) | single spaces, like any keyword; `retry` formats as a plain word | `shared let n = 0`, `atomic { n = n + 1 }`, `if q.len() == 0 { retry }` |
 | `#` trailing comment | see Comments | |
 | any two tokens that would lex as something else when touching | one space | `100.. =>` (not `100..=>`) |
 

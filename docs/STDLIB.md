@@ -11,7 +11,8 @@ first module; **M29 landed the String methods** (Phase 1's first item);
 cancellable timers); **M35 landed `std:fs`** (with Phase 0 step 3,
 handles); **M36 landed `std:process`**; **M37 landed `Bytes`, `std:bytes` and `std:fs`'s binary I/O**; **M38 landed `std:socket`** (TCP, Phase 4's first module); **M41a landed `std:reflect`** and `json.decode`
 (see [`REFLECTION.md`](REFLECTION.md)); **M44 landed `std:thread`** (Phase 5, threads,
-shared variables and channels; [`contracts/M44_threads.md`](contracts/M44_threads.md)). The rest is design. Agreed 2026-09-28. Depends on
+shared variables and channels; [`contracts/M44_threads.md`](contracts/M44_threads.md)), and **M45 replaced
+its `lock` blocks with `atomic { }` transactions** ([`contracts/M45_atomic.md`](contracts/M45_atomic.md)). The rest is design. Agreed 2026-09-28. Depends on
 [`ERRORS.md`](ERRORS.md) (every failure below is a thrown, typed error)
 and on the static checker in [`TYPES.md`](TYPES.md).
 
@@ -925,10 +926,11 @@ header helpers, chunked decoder). Client decisions:
 
 ### `std:thread`
 
-✅ **Landed (M44: M44a threads and shared variables, M44b channels)**, in
-`mah/std/thread.mh`, designed in
-[`contracts/M44_threads.md`](contracts/M44_threads.md). Bytecode **1.21**: every
-program importing `std:thread`, declaring a `shared let` or using `lock` is
+✅ **Landed (M44: M44a threads and shared variables, M44b channels; M45
+`atomic` blocks)**, in `mah/std/thread.mh`, designed in
+[`contracts/M44_threads.md`](contracts/M44_threads.md) and
+[`contracts/M45_atomic.md`](contracts/M45_atomic.md). Bytecode **1.21**: every
+program importing `std:thread`, declaring a `shared let` or using `atomic { }` is
 1.21. Jobs run **in parallel on the Rust VM** and **concurrently on the Python
 VM** (real `threading.Thread`s, one at a time under the GIL); the results are
 the same.
@@ -997,41 +999,147 @@ worker.join()
   each VM hands whole lines to the shared stdout.
 - **Shared variables** (`shared let NAME = value`, top level only, `export
   shared let` too) live in one process-wide store outside every VM, as
-  copied plain data, and are never part of a snapshot. A read outside `lock`
-  returns a copy (of the committed value, or of this task's working value
-  while it holds the lock) and never waits; an assignment is atomic (it
-  takes the lock for the moment). `lock a, b { body }` acquires the
-  variables in order (waiting is a pending Promise: other tasks keep
-  running; FIFO; re-entrant per task), gives the body the working copies to
-  change in place, and writes them back when the block exits — normally, by
-  `return`/`break`/`continue`, or by a throw. A write-back of a value
-  holding a Promise is refused: `not_sendable` at the block's end, or
-  nothing when a throw is already leaving the block (that error wins). A
-  `lock` is an expression; its value is the body's.
-- **Compile errors** outside `lock NAME`: a method call on it or on a path
-  into it (`xs.push(1)`, also `xs.len()`), an assignment into it
-  (`xs[0] = 1`), `x = e` where `e` mentions `x`, plus `lock` on something
-  that isn't a shared variable, the same variable twice in one `lock`,
-  `shared let` below the top level, and redeclaring a shared variable in its
-  scope. A `shared let` whose type is `thread.Thread`/`Semaphore`/`Channel`
-  (or whose value is a direct `spawn`/`semaphore`/`channel` call) is a
-  **handle variable**: its own methods may be called anywhere.
+  copied plain data, and are never part of a snapshot. Reading one gives a
+  copy and never waits; assigning it (`NAME = value`) is atomic (a
+  one-variable write that waits only while an exclusive transaction runs);
+  to change it in place (`push`, `x[k] = v`) or to read and write it
+  together, do it inside `atomic { ... }`.
+- **`atomic { body }`** (M45, [`contracts/M45_atomic.md`](contracts/M45_atomic.md))
+  runs `body` as one transaction: it reads a consistent snapshot of the
+  shared variables, and its changes are published all at once when it ends.
+  If another thread changed what it read in the meantime, it runs again from
+  the start, so the body can't do I/O, wait or start tasks (ThreadError
+  `in_atomic`). A throw out of it publishes nothing. Its value is the body's
+  value; an `atomic` inside another (directly or in a function it calls)
+  joins it (flat nesting: a throw out of the inner one undoes nothing by
+  itself). Inside the block, shared reads and writes act on private working
+  copies; a helper it calls sees them too (reads in a helper are copies). A
+  commit whose value holds a Promise publishes nothing and throws
+  `not_sendable`.
+- **`retry`** (only inside `atomic { }`) gives up this run of the
+  transaction and waits until a shared variable it read changes, then runs it
+  again — the way to wait for a condition. The wait is a pending Promise:
+  other tasks keep running. A job (and the program) stays alive while one of
+  its tasks waits in `retry`; the wait ends when a variable it read changes,
+  or with `stuck` when nothing can change it. A `retry` in an attempt that
+  read no shared variable throws `stuck` at once.
+
+  ```mah
+  shared let queue = []
+  fn take() {
+      atomic {
+          if queue.len() == 0 { retry }
+          queue.pop_start()
+      }
+  }
+  ```
+- **Exclusive mode**: a transaction that had to run again 8 times runs its
+  next attempt alone: while it does, every other thread's commits and shared
+  assignments wait for it. So every transaction finishes; a long exclusive
+  transaction holds up the other threads' commits while it runs.
+- **Compile errors** outside `atomic`: a method call on a shared variable
+  or on a path into it (`xs.push(1)`, also `xs.len()`), an assignment into
+  it (`xs[0] = 1`), `x = e` where `e` mentions `x` — each message says to
+  wrap it in `atomic { ... }`. Inside `atomic`: `.await`, `sleep_async`,
+  `print`, `input` and `detach`; `return`/`break`/`continue` leaving the
+  block (use its value instead); assigning a non-shared variable declared
+  outside it (it wouldn't be undone on a rerun). Anywhere: `retry` outside
+  `atomic`, a keyword `retry` where a variable `retry` is visible (rename
+  it), `shared let` below the top level, and redeclaring a shared variable
+  in its scope. A `shared let` whose type is `thread.Thread`/`Semaphore`/
+  `Channel` (or whose value is a direct `spawn`/`semaphore`/`channel` call)
+  is a **handle variable**: its own methods may be called anywhere.
+- **Refused at run time inside a transaction** (`in_atomic`, lexically or in
+  a function the block calls): `.await`, `detach`, and 53 side-effecting
+  natives — all of io (`print`, `input`), fs and socket; timers
+  (`sleep_async`, cancelling); settling Promises; `process.exit`/`run`/
+  `env_set`/`env_remove`; and every `std:thread` operation that acts on other
+  threads (`spawn`, `run`/`detach(t)`, `close`, `join`, semaphore
+  acquire/release, channel send/recv/close). Allowed: pure functions (math,
+  strings, regex, bytes, reflect, json), `std:random`, clock and environment
+  reads, new semaphores/channels, `available()`/`len()`.
 - **These act on a copy and change nothing shared**: `let s = xs;
   s.push(1)`; `let m = shared_map; m[k] = v`; passing a shared variable to a
   function that changes its parameter (`mutate(xs)`); changing the loop
-  variable of `for let item in xs` (`item.n = 1`). Inside `lock xs { }` all
-  of these work on the shared value itself. The checker warns about the last
-  two. **Read-compute-write needs `lock`**: `x = g()` where `g` reads `x`
-  loses updates made in between; write `lock x { x = g() }`. A shared read
-  happens at its place in left-to-right evaluation (`f(x, g())` passes the
-  `x` from before `g` ran), and every read outside `lock` copies the whole
-  value: read a big one once into a local, or work inside one `lock`.
-- **Deadlocks and waits that can never finish**: a lock wait, `.await` or
-  `join` that would close a cycle of waits through a lock, a job or a join
-  throws `deadlock` at once instead of waiting (`lock x { (detach(t) { x = 1
-  }).await }` is one). When every thread of the run is blocked on waits only
-  other threads could end (locks, semaphores, channels, joins, job replies),
-  the main thread's waits fail with `stuck`. A wait that only another
+  variable of `for let item in xs` (`item.n = 1`). Inside `atomic { }` all
+  of these work on the transaction's value. The checker warns about the last
+  two. **Read-compute-write needs `atomic`**: `x = g()` where `g` reads `x`
+  loses updates made in between; write `atomic { x = g() }`. A helper that
+  changes a shared variable in place must itself use `atomic { }` (it joins
+  the caller's transaction when there is one).
+- **Not undone when the block runs again**: anything that isn't a shared
+  variable — assigning a variable declared outside the block (a compile
+  error), changing an object reached from one (`outer.push(x)`, not
+  detected), assigning an outer variable from a function or closure the
+  block calls (not detected), random draws; reading `ch.len()`/
+  `s.available()` isn't part of the snapshot.
+- **Reading several variables**: reads outside `atomic` happen one variable
+  at a time, so `print(a, b)` can see `a` from before another thread's
+  transaction and `b` from after it; to read several shared variables
+  consistently, read them together: `let both = atomic { [x, y] }` (a
+  read-only transaction never waits and never bumps a version). A shared
+  read happens at its place in left-to-right evaluation (`f(x, g())` passes
+  the `x` from before `g` ran), and every read outside `atomic` copies the
+  whole value: read a big one once into a local, or work inside one
+  `atomic`.
+- **Waiting**: inside `atomic`, wait for a condition with `retry`, not a
+  loop: the body reads a snapshot, so `atomic { while !ready { } }` never
+  sees `ready` change (and, if the transaction is running exclusively, it
+  holds up every other thread's commits). A plain read outside `atomic`
+  (`while !stop { ... }`) does see changes.
+- **Why in-place changes and `x = f(x)` outside `atomic` are compile
+  errors.** A shared variable's value lives outside every thread; outside a
+  transaction a read gives a copy, so `xs.push(1)` would change a temporary
+  copy and be silently lost. `count = count + 1` reads and then writes, and
+  another thread can write in between, losing an increment:
+
+  ```text
+  thread A: reads count (5)    thread B: reads count (5)
+  thread A: writes 6           thread B: writes 6        # should be 7
+  ```
+
+  Inside `atomic { count = count + 1 }`, B's commit sees that `count`
+  changed after B read it and runs B's body again on 6. Honest limit: only
+  the obvious form, the read and the write in one statement, is caught;
+  `let y = count` ⏎ `count = y + 1` compiles and has the same race.
+- **Why `.await`/`detach` are compile errors and I/O, sleeps, thread jobs,
+  channels and semaphores throw `in_atomic` inside `atomic`.** A transaction
+  can run more than once or be thrown away. Its shared-variable changes are
+  private copies, safe to undo; effects on the outside world are not: a
+  `print` twice, an HTTP request or a file write twice, a channel message
+  from an attempt that never counted, a `recv` consuming a message the rerun
+  then loses, a semaphore permit never given back, a `detach`ed task
+  escaping the transaction. Waiting widens the conflict window and, in
+  exclusive mode, would hold up every other thread's commits — if the wait
+  needs one of them, a deadlock is back. `retry` is the safe way to wait (it
+  ends the attempt first). The compiler refuses what it can see; calls hide
+  effects (`fn log(m) { print(m) }` called in the block), so the runtime
+  checks too. Haskell enforces the same rule with its type system (no IO in
+  STM), Clojure with `io!`. The pattern is *decide inside, act outside*:
+
+  ```mah
+  shared let stock = 3
+  let sold = atomic {
+      if stock > 0 {
+          stock = stock - 1
+          true
+      } else {
+          false
+      }
+  }
+  if sold { print("sold one") }    # once, after the commit
+  ```
+- **Why `shared let` is top level only.** Every thread runs its own copy of
+  the program, and locals exist per call and are copied into jobs; a
+  top-level `shared let` has one identity every thread agrees on, the
+  compiler sees every use of it (so it can enforce the rules above), and its
+  store entry lives as long as the program. First-class shared cells
+  (`thread.ref`, made at run time and passed around as values) are planned
+  as a follow-up ([`NEXT_PHASES.md`](NEXT_PHASES.md)).
+- **Waits that can never end** fail with `ThreadError` `stuck` once every
+  thread is waiting (on semaphores, channels, joins, job replies — including
+  a `retry` nobody can wake); `.await`/`join` cycles through threads fail
+  with `deadlock` at once instead of waiting. A wait that only another
   running thread could end (a server loop, a timer) keeps waiting.
 - **Semaphores**: `semaphore(permits)` returns a `Semaphore { id, permits
   }` (printed `Semaphore(available/permits)`) with `acquire()` (waits,
@@ -1045,8 +1153,9 @@ worker.join()
   at once, `close()` ends sending (queued messages stay receivable; waiting
   senders and receivers of an empty channel fail with `closed`), `len()`,
   `closed()`, and `for let m in ch { }` receives until closed and empty.
-- **No `Mutex` type**: a `shared let` plus `lock` is the mutex; no
-  `Condition`/`WaitGroup` (channels and `async.all` cover them).
+- **No `Mutex` type**: a `shared let` plus `atomic { }` replaces it; no
+  `Condition` (`retry` inside `atomic` is the condition wait) and no
+  `WaitGroup` (channels and `async.all` cover it).
 - **Unobserved failures**: a failed job Promise nobody awaited is reported
   at exit like a failed detached task; with several, which one is reported
   can differ from run to run.
@@ -1058,11 +1167,12 @@ worker.join()
 | `closed` | queueing on a closed Thread; `send` on a closed channel, `recv` on a closed empty one, a waiting send/recv when the channel closes |
 | `full` | queueing beyond `workers + capacity` jobs |
 | `cancelled` | a queued job dropped by `close(cancel: true)` |
-| `deadlock` | a lock wait, `.await` or `join` that would wait for itself; `join` from the thread's own job |
-| `not_sendable` | a Promise inside `t.run` arguments, a job result/error or a channel message; a shared variable written with a Promise inside |
+| `deadlock` | an `.await` or `join` that would wait, through threads, for itself (`deadlock: this await would never end (it waits, through threads, for itself)`); `join` from the thread's own job |
+| `not_sendable` | a Promise inside `t.run` arguments, a job result/error or a channel message; a shared variable assigned, or an `atomic` committing, a value with a Promise inside |
 | `foreign_promise` | awaiting, in a job, a Promise that was still pending when it was copied |
 | `over_release` | `Semaphore.release` with every permit free |
-| `stuck` | a wait that can never finish because every thread is waiting; a job whose root waits on a Promise nothing will settle |
+| `stuck` | a wait that can never finish because every thread is waiting (including a `retry` nobody can wake); a job whose root waits on a Promise nothing will settle; `retry` in an attempt that read no shared variable |
+| `in_atomic` | `.await`, `detach` or a side-effecting native inside a transaction (`'NAME' can't run inside 'atomic { }': its body may run more than once`) |
 
 Bad argument values throw `RuntimeError.ArgumentError` (`thread.spawn:
 workers must be a whole number from 1 up`, ...); `detach(x)` on something
@@ -1070,9 +1180,11 @@ that isn't a Thread throws `RuntimeError.TypeMismatch` (`detach(...) needs a
 thread.Thread to run on, got T`), which the checker also reports when it
 knows `x`'s type. Natives: the 19 `thread.*` rows of
 [`MAHC_FORMAT.md`](MAHC_FORMAT.md) §4.4; the shared-variable opcodes are in
-§4.6 and the model in §6.11.
+§4.6 (with the transaction opcodes) and the model in §6.11.
 
-Not yet: lock or acquire timeouts, `select` over several channels,
+Not yet: `or_else` (choosing between transactions), first-class shared
+cells (`thread.ref`), acquire timeouts,
+`select` over several channels,
 interrupting a running job, thread-local storage, priorities, copying only
 the globals a job uses (see [`NEXT_PHASES.md`](NEXT_PHASES.md)).
 

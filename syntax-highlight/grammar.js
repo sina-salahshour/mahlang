@@ -652,7 +652,7 @@ module.exports = grammar({
         $.some_expr,
         $.none_expr,
         $.detach_expr,
-        $.lock_expr,
+        $.atomic_expr,
         $.throw_expr,
         $.try_expr,
         $.sleep_async_call,
@@ -903,22 +903,15 @@ module.exports = grammar({
         ),
       ),
 
-    // M44: `lock a, b { body }` -- the shared variables `a` and `b` belong
-    // to this task for the block. A target may be dotted (`lib.hits`, a
-    // shared variable another module exports). Like `shared`, `lock` is
-    // contextual in the real parser (a keyword only before a name on the
-    // same line); here it is a keyword token, so `let lock = 2` still
-    // parses but an expression starting with a variable named `lock`
-    // doesn't highlight cleanly.
-    lock_expr: ($) =>
-      seq(
-        "lock",
-        field("target", $._lock_target),
-        repeat(seq(",", field("target", $._lock_target))),
-        field("body", $.block),
-      ),
-
-    _lock_target: ($) => seq($.identifier, repeat(seq(".", $.identifier))),
+    // M45: `atomic { body }` runs `body` as one transaction (software
+    // transactional memory over the `shared let` variables). Like `shared`,
+    // `atomic` is contextual in the real parser (a keyword only when `{`
+    // follows on the same line and the braces can't be a struct literal);
+    // here it is a keyword token, so `let atomic = 2` still parses but an
+    // expression starting with a variable named `atomic` doesn't highlight
+    // cleanly. `retry` has no rule: it is an identifier here, colored by
+    // highlights.scm in statement position.
+    atomic_expr: ($) => seq("atomic", field("body", $.block)),
 
     sleep_async_call: ($) => seq("sleep_async", "(", $.expr, ")"),
 

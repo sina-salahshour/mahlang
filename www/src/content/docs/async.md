@@ -102,7 +102,7 @@ worker.join()
 The job runs on a **copy** of every global and of what it captures, taken
 when it's queued, so it can't change your variables (it changes its copy);
 its result comes back as a copy. To share state between threads, use
-`shared let` variables with `lock`, semaphores or channels: see
+`shared let` variables changed inside `atomic { }`, semaphores or channels: see
 [std:thread](/std/thread).
 
 It's the thread form only when the operand starts on the same line as

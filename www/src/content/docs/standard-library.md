@@ -631,7 +631,8 @@ address, description }`.
 Run jobs on other threads. A thread is a queue of jobs; `detach(t) expr`
 and `t.run(f, ...args)` give Promises. A job works on a copy of every global
 and of what it captures; `shared let` variables, changed in place inside
-`lock`, are shared by every thread, and so are semaphores and channels.
+`atomic { }` transactions, are shared by every thread, and so are semaphores
+and channels.
 
 ```mah
 import thread from "std:thread"
@@ -639,7 +640,7 @@ import thread from "std:thread"
 shared let total = 0
 
 fn add(n) {
-    lock total { total = total + n }
+    atomic { total = total + n }
 }
 
 let pool = thread.spawn(workers: 4)
@@ -651,7 +652,7 @@ pool.join()
 ```
 
 Failures throw `ThreadError { kind, message }` (`"closed"`, `"deadlock"`,
-`"stuck"`, ...).
+`"stuck"`, `"in_atomic"`, ...).
 
 ## `std:url`
 
