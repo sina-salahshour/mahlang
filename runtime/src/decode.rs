@@ -312,15 +312,22 @@ pub enum RawInstr {
     /// M41c (1.16): `dest` <- the WrapParam hooks stored for parameter `param`
     /// of function `func` (or `none`)
     ParamHooks { func: usize, param: usize, dest: Addr },
-    /// M44 (1.21): read shared variable `index` (`mode` 1 = the lexically
-    /// locked working object itself, 0 = a copy); `name` is its source name
+    /// M44 (1.21): read shared variable `index` (`mode` 1 = the transaction's
+    /// working value itself -- lexically inside `atomic` -- 0 = a copy);
+    /// `name` is its source name
     SharedGet { index: u64, name: usize, mode: u64, dest: Addr },
-    /// M44 (1.21): replace the working value of a shared variable the task holds
+    /// M44 (1.21): assign a shared variable (in a transaction: its working
+    /// value; else a plain atomic write)
     SharedSet { index: u64, name: usize, src: Addr },
-    /// M44 (1.21): acquire a shared variable's lock; `dest` <- a Promise
-    SharedLock { index: u64, name: usize, dest: Addr },
-    /// M44 (1.21): `mode` 0 release, 1 mark (a `lock` body left by a throw)
-    SharedUnlock { index: u64, name: usize, mode: u64 },
+    /// M45 (1.21, redefined; docs/contracts/M45_atomic.md #6.3): begin or
+    /// join a transaction
+    AtomicBegin,
+    /// M45: the body finished -- commit (outermost) or leave a joined block
+    AtomicEnd,
+    /// M45: a throw is leaving the block -- discard the attempt (outermost)
+    AtomicAbort,
+    /// M45: abandon the attempt and wait for a change of what it read
+    Retry,
     Defmethod { closure: Addr, type_name: usize, trait_: Option<usize>, name: usize, is_method: bool },
     Detach { callee: Addr, args: Vec<Addr>, dest: Addr },
     DetachKw { callee: Addr, args: Vec<Addr>, kwnames: Vec<usize>, dest: Addr },
@@ -1009,8 +1016,11 @@ fn opcode_info(op: u8) -> Option<(&'static str, Option<u16>)> {
         0x60 => ("throw", Some(4)),
         0x70 => ("sharedget", Some(21)),
         0x71 => ("sharedset", Some(21)),
-        0x72 => ("sharedlock", Some(21)),
-        0x73 => ("sharedunlock", Some(21)),
+        // 0x72/0x73: unassigned (M44's unreleased `sharedlock`/`sharedunlock`)
+        0x74 => ("atomicbegin", Some(21)),
+        0x75 => ("atomicend", Some(21)),
+        0x76 => ("atomicabort", Some(21)),
+        0x77 => ("retry", Some(21)),
         _ => return None,
     })
 }
@@ -1189,18 +1199,10 @@ fn decode_one_instr(name: &str, pr: &mut Reader, ctx: &CodeCtx, _i: u64) -> FRes
             let src = decode_addr(pr)?;
             RawInstr::SharedSet { index, name, src }
         }
-        "sharedlock" => {
-            let index = pr.varuint()?;
-            let name = decode_s(pr, ctx)?;
-            let dest = decode_addr(pr)?;
-            RawInstr::SharedLock { index, name, dest }
-        }
-        "sharedunlock" => {
-            let index = pr.varuint()?;
-            let name = decode_s(pr, ctx)?;
-            let mode = pr.varuint()?;
-            RawInstr::SharedUnlock { index, name, mode }
-        }
+        "atomicbegin" => RawInstr::AtomicBegin,
+        "atomicend" => RawInstr::AtomicEnd,
+        "atomicabort" => RawInstr::AtomicAbort,
+        "retry" => RawInstr::Retry,
         "paramhooks" => {
             let func = pr.varuint()? as usize;
             let param = pr.varuint()? as usize;
@@ -2103,14 +2105,17 @@ mod tests {
 
     #[test]
     fn decodes_the_shared_variable_opcodes() {
-        // M44 (1.21): sharedget 3 "a" mode 1 -> (0,0); sharedset 3 "a" <- (0,0);
-        // sharedlock 3 "a" -> (0,1); sharedunlock 3 "a" mode 0; halt
-        let code = [5, 0x70, 3, 0, 1, 0, 0, 0x71, 3, 0, 0, 0, 0x72, 3, 0, 0, 1, 0x73, 3, 0, 0, 0x00];
+        // M44/M45 (1.21): sharedget 3 "a" mode 1 -> (0,0); sharedset 3 "a" <- (0,0);
+        // atomicbegin; atomicend; atomicabort; retry; halt
+        let code = [7, 0x70, 3, 0, 1, 0, 0, 0x71, 3, 0, 0, 0, 0x74, 0x75, 0x76, 0x77, 0x00];
         let program = decode(&file_with_params(21, &[0], &code)).expect("should decode");
         assert_eq!(program.code[0], RawInstr::SharedGet { index: 3, name: 0, mode: 1, dest: (0, 0) });
         assert_eq!(program.code[1], RawInstr::SharedSet { index: 3, name: 0, src: (0, 0) });
-        assert_eq!(program.code[2], RawInstr::SharedLock { index: 3, name: 0, dest: (0, 1) });
-        assert_eq!(program.code[3], RawInstr::SharedUnlock { index: 3, name: 0, mode: 0 });
+        assert_eq!(program.code[2], RawInstr::AtomicBegin);
+        assert_eq!(program.code[3], RawInstr::AtomicEnd);
+        assert_eq!(program.code[4], RawInstr::AtomicAbort);
+        assert_eq!(program.code[5], RawInstr::Retry);
+        assert_eq!(program.code[6], RawInstr::Halt);
         let e = decode(&file_with_params(20, &[0], &code)).unwrap_err();
         assert_eq!(
             e.0,
@@ -2118,6 +2123,9 @@ mod tests {
         );
         assert_eq!(native_since_minor("thread.submit"), Some(21));
         assert_eq!(native_since_minor("thread.channel_closed"), Some(21));
+        // M45: M44's unreleased `sharedlock` (0x72) is unassigned again
+        let e = decode(&file_with_params(21, &[0], &[2, 0x72, 3, 0, 0, 1, 0x00])).unwrap_err();
+        assert_eq!(e.0, "unknown opcode 0x72 at instruction 0");
     }
 
     #[test]

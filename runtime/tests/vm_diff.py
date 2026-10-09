@@ -978,9 +978,10 @@ print(server.connections() >= 0)
 server.close()
 print(server.connections())
 """, b""),
-    # M44 (docs/contracts/M44_threads.md #12.2): threads, shared variables,
-    # locks, semaphores and channels. No case has more than one unobserved
-    # failing job (#2.3).
+    # M44 (docs/contracts/M44_threads.md #12.2) / M45
+    # (docs/contracts/M45_atomic.md #12.2): threads, shared variables,
+    # `atomic { }` transactions and `retry`, semaphores and channels. No case
+    # has more than one unobserved failing job (M44 #2.3).
     ("threads_basic", """
 import thread from "std:thread"
 let t = thread.spawn(name: "worker")
@@ -1083,41 +1084,37 @@ import thread from "std:thread"
 shared let n = 0
 shared let xs = []
 fn bump() {
-    lock n {
+    atomic {
         n = n + 1
         n
     }
 }
-print(lock n {
+print(atomic {
     bump()
     bump()
 })
 print(n)
-lock xs { xs.push("a") }
+atomic { xs.push("a") }
 let mine = xs
-lock xs { xs.push("b") }
+atomic { xs.push("b") }
 print(xs, mine)
 let t = thread.spawn()
 print(detach(t) {
-    lock xs { xs.push("c") }
-    lock xs { xs.len() }
+    atomic { xs.push("c") }
+    atomic { xs.len() }
 }.await)
 print(xs)
 xs = ["reset"]
 print(t.run(fn() { xs }).await)
-try {
-    lock xs {
-        xs.push("d")
-        throw RuntimeError.ArgumentError { message: "stop" }
-    }
-} catch {
-    e => { print("caught", e.message()) }
-}
-print(xs)
 shared let slot = none
 try { slot = [detach { 1 }] } catch {
     e: ThreadError => { print(e.kind, e.message, slot) }
 }
+let p2 = detach { 2 }
+try { atomic { slot = [p2] } } catch {
+    e: ThreadError => { print(e.kind, e.message, slot) }
+}
+t.join()
 """, b""),
     ("threads_pool", """
 import thread from "std:thread"
@@ -1126,9 +1123,9 @@ shared let log = []
 let pool = thread.spawn(name: "pool", workers: 4)
 fn work(n) {
     for let i in 0..100 {
-        lock total { total = total + 1 }
+        atomic { total = total + 1 }
     }
-    lock log { log.push(n) }
+    atomic { log.push(n) }
     n * 2
 }
 let jobs = []
@@ -1140,28 +1137,6 @@ let sum = 0
 for let n in snapshot { sum = sum + n }
 print(total, snapshot.len(), sum, doubled)
 pool.join()
-""", b""),
-    ("threads_deadlock", """
-shared let a = 0
-shared let b = 0
-let p1 = detach {
-    lock a {
-        sleep_async(20)
-        lock b { "p1 got both" }
-    }
-}
-let p2 = detach {
-    lock b {
-        sleep_async(60)
-        try {
-            lock a { "p2 got both" }
-        } catch {
-            e: ThreadError => { e.kind + " | " + e.message }
-        }
-    }
-}
-print(p1.await)
-print(p2.await)
 """, b""),
     ("threads_semaphore", """
 import thread from "std:thread"
@@ -1178,12 +1153,12 @@ shared let most = 0
 fn job(n) {
     gate.acquire()
     defer gate.release()
-    lock inside, most {
+    atomic {
         inside = inside + 1
         if inside > most { most = inside }
     }
     sleep_async(20)
-    lock inside { inside = inside - 1 }
+    atomic { inside = inside - 1 }
     n
 }
 let pool = thread.spawn(workers: 4)
@@ -1295,15 +1270,16 @@ shared let n = 0
 struct P { x: Number }
 impl Printable for P {
     fn to_string(self) {
-        lock n { n = n + 1 }
+        atomic { n = n + 1 }
         "P(" + self.x + ", n=" + n + ")"
     }
 }
-lock n {
+let s = atomic {
     n = 10
-    print(P { x: 1 })
+    "" + P { x: 1 }
 }
-print(n)
+print(s, n)
+print(P { x: 2 })
 """, b""),
     ("threads_reads", """
 shared let xs = [1]
@@ -1313,59 +1289,10 @@ fn count_with(v) {
     s.len()
 }
 print(count_with(2), xs)
-print(lock xs {
+print(atomic {
     xs.push(5)
     [count_with(9), xs.len()]
 }, xs)
-""", b""),
-    ("threads_writeback", """
-shared let slot = []
-struct Boom { why: String }
-impl Error for Boom {
-    fn message(self) { "boom: " + self.why }
-}
-try {
-    lock slot {
-        slot.push(detach { 1 })
-        throw Boom { why: "first" }
-    }
-} catch {
-    e: Boom => { print("caught", e.message()) }
-    e: ThreadError => { print("wrong", e.kind) }
-}
-print(slot)
-try {
-    lock slot { slot.push(detach { 2 }) }
-} catch {
-    e: ThreadError => { print(e.kind) }
-}
-print(slot)
-""", b""),
-    ("threads_await_deadlock", """
-shared let x = 0
-let p = none
-try {
-    lock x {
-        p = detach { x = 1 }
-        p.await
-    }
-} catch {
-    e: ThreadError => { print(e.kind, "|", e.message) }
-}
-p.await
-print(x)
-""", b""),
-    ("threads_await_deadlock_job", """
-import thread from "std:thread"
-shared let x = 0
-let t = thread.spawn()
-try {
-    lock x { detach(t) { x = 1 }.await }
-} catch {
-    e: ThreadError => { print(e.kind) }
-}
-t.join()
-print("joined")
 """, b""),
     ("threads_stuck", """
 import thread from "std:thread"
@@ -1394,16 +1321,228 @@ gate.acquire()
 print(jobs.recv(), gate.available(), jobs.len())
 gate.release()
 """, b""),
-    ("threads_teardown_lock", """
+    ("threads_nested", """
+shared let a = 0
+shared let b = 0
+fn move(n) {
+    atomic {
+        a = a - n
+        b = b + n
+    }
+}
+fn move_twice(n) {
+    atomic {
+        move(n)
+        move(n)
+        [a, b]
+    }
+}
+print(move_twice(5), a, b)
+let r = atomic {
+    a = 100
+    try {
+        atomic {
+            b = 100
+            throw RuntimeError.ArgumentError { message: "inner" }
+        }
+    } catch {
+        e => { "caught " + e.message() }
+    }
+}
+print(r, a, b)
+""", b""),
+    ("threads_atomic_throw", """
+shared let xs = [1]
+shared let n = 0
+try {
+    atomic {
+        xs.push(2)
+        n = 5
+        throw RuntimeError.ArgumentError { message: "stop" }
+    }
+} catch {
+    e => { print("caught", e.message()) }
+}
+print(xs, n)
+shared let slot = []
+let p = detach { 1 }
+try {
+    atomic {
+        n = 7
+        slot.push(p)
+    }
+} catch {
+    e: ThreadError => { print(e.kind, "|", e.message) }
+}
+print(slot, n)
+""", b""),
+    ("threads_retry_local", """
+shared let box = ""
+let waiter = detach {
+    atomic {
+        if box == "" { retry }
+        box
+    }
+}
+box = "filled"
+print(waiter.await)
+""", b""),
+    ("threads_retry_queue", """
+import thread from "std:thread"
+shared let queue = []
+fn take() {
+    atomic {
+        if queue.len() == 0 { retry }
+        queue.pop_start()
+    }
+}
+fn put(v) {
+    atomic { queue.push(v) }
+}
+let t = thread.spawn(name: "consumer")
+let got = t.run(fn() {
+    let out = []
+    for let i in 0..5 { out.push(take()) }
+    out
+})
+for let i in 1..=5 { put(i * 10) }
+print(got.await)
+t.join()
+""", b""),
+    ("threads_retry_stuck", """
+shared let flag = false
+try {
+    atomic {
+        if !flag { retry }
+        1
+    }
+} catch {
+    e: ThreadError => { print(e.kind, "|", e.message) }
+}
+try { atomic { retry } } catch {
+    e: ThreadError => { print(e.kind, "|", e.message) }
+}
+print("end")
+""", b""),
+    ("threads_in_atomic", """
+import thread from "std:thread"
+fn say(s) { print(s) }
+fn nap() { sleep_async(1) }
+fn wait_for(p) { p.await }
+fn spawn_one() { detach { 1 } }
+let ch = thread.channel()
+fn post(v) { ch.send(v) }
+let done = detach { 1 }
+let tries = [fn() { say("hi") }, fn() { nap() }, fn() { wait_for(done) }, fn() { spawn_one() }, fn() { post(1) }]
+for let f in tries {
+    try {
+        atomic { f() }
+    } catch {
+        e: ThreadError => { print(e.kind, "|", e.message) }
+    }
+}
+print(ch.len())
+""", b""),
+    ("threads_bank", """
+import thread from "std:thread"
+shared let accounts = [100, 100, 100, 100]
+fn transfer(from, to, amount) {
+    atomic {
+        accounts[from] = accounts[from] - amount
+        accounts[to] = accounts[to] + amount
+    }
+}
+fn worker(seed) {
+    let bad = 0
+    for let i in 0..200 {
+        transfer((seed + i) % 4, (seed + i * 3 + 1) % 4, 1 + i % 7)
+        let total = atomic {
+            let s = 0
+            for let a in accounts { s = s + a }
+            s
+        }
+        if total != 400 { bad = bad + 1 }
+    }
+    bad
+}
+let pool = thread.spawn(workers: 4)
+let jobs = []
+for let s in 0..4 { jobs.push(pool.run(worker, s)) }
+let bad = 0
+for let j in jobs { bad = bad + j.await }
+let final = accounts
+let sum = 0
+for let a in final { sum = sum + a }
+print(bad, sum, final.len())
+pool.join()
+""", b""),
+    ("threads_exclusive", """
+import thread from "std:thread"
+shared let hot = 0
+shared let stop = false
+fn hammer() {
+    let n = 0
+    while !stop {
+        atomic { hot = hot + 1 }
+        n = n + 1
+    }
+    n
+}
+fn slow() {
+    while hot < 50 { }
+    atomic {
+        let seen = hot
+        let s = 0
+        for let i in 0..20000 { s = s + i }
+        hot = seen + 1000000
+        s
+    }
+}
+let pool = thread.spawn(name: "hammers", workers: 3)
+let hs = []
+for let i in 0..3 { hs.push(pool.run(hammer)) }
+let t = thread.spawn(name: "slow")
+let s = t.run(slow).await
+stop = true
+let total = 0
+for let h in hs { total = total + h.await }
+print(s, hot - total)
+pool.join()
+t.join()
+""", b""),
+    ("threads_join_cycle", """
+import thread from "std:thread"
+let t1 = thread.spawn(name: "a")
+let t2 = thread.spawn(name: "b")
+let go = thread.channel()
+fn join_other(other) {
+    go.recv()
+    try {
+        other.join()
+        "joined"
+    } catch {
+        e: ThreadError => { e.message }
+    }
+}
+let pa = t1.run(join_other, t2)
+let pb = t2.run(join_other, t1)
+go.send(1)
+go.send(2)
+let ra = pa.await
+let rb = pb.await
+let msg = "deadlock: this await would never end (it waits, through threads, for itself)"
+print(ra == "joined" | rb == "joined", ra == msg | rb == msg)
+""", b""),
+    ("threads_teardown_retry", """
 import thread from "std:thread"
 shared let k = 0
 let t = thread.spawn()
 let p = detach(t) {
     detach {
-        lock k { sleep_async(50) }
-    }
-    detach {
-        lock k { k = 1 }
+        atomic {
+            if k == 0 { retry }
+            k
+        }
     }
     sleep_async(10)
     throw RuntimeError.ArgumentError { message: "boom" }
@@ -1411,7 +1550,62 @@ let p = detach(t) {
 try { p.await } catch {
     e => { print("failed") }
 }
-lock k { print(k) }
+k = 1
+print(k)
+t.join()
+""", b""),
+    ("threads_alias", """
+shared let xs = [1]
+shared let ys = []
+print(atomic {
+    ys = xs
+    ys.push(2)
+    xs.len()
+}, xs, ys)
+let v = [1]
+atomic {
+    xs = v
+    xs.push(3)
+}
+print(v, xs)
+""", b""),
+    ("threads_rerun_alias", """
+import thread from "std:thread"
+shared let xs = [0]
+shared let ys = []
+shared let stop = false
+fn hammer() {
+    let n = 0
+    while !stop {
+        n = n + 1
+        xs = [n]
+    }
+    n
+}
+let t = thread.spawn(name: "hammer")
+let h = t.run(hammer)
+while xs[0] == 0 { }
+let v = [1]
+let r = atomic {
+    let seen = xs
+    ys = v
+    ys.push(0)
+    let i = 0
+    while i < 20000 { i = i + 1 }
+    seen.len()
+}
+stop = true
+h.await
+print(r, v, ys)
+t.join()
+""", b""),
+    ("threads_atomic_uncaught", """
+shared let n = 0
+fn bad() { throw RuntimeError.ArgumentError { message: "inside" } }
+atomic {
+    n = 1
+    bad()
+}
 """, b""),
     ("std_csv", """
 import csv from "std:csv"
@@ -1422,11 +1616,74 @@ print(try { csv.parse("a\\n\\"b") } catch { e => { e.message() } })
 ]
 
 
+# Multi-file programs: {file name: source}; `main.mh` is the entry point.
+# M45 (docs/contracts/M45_atomic.md #12.2 `threads_modules`, T13b): a module's
+# `atomic {` and `retry` stay keywords although the module declares a
+# `struct atomic` / `fn retry` (the preprocessor must not mangle them).
+MODULE_PROGRAMS: list[tuple[str, dict[str, str], bytes]] = [
+    ("threads_modules_keywords", {
+        "lib.mh": """struct atomic { v: Number }
+export fn retry(n) { n + 1 }
+export shared let k = 0
+export fn both() {
+    let s = atomic { v: 1 }
+    atomic {
+        k = retry(k)
+        k + s.v
+    }
+}
+""",
+        "main.mh": """import lib from "lib.mh"
+print(lib.both(), lib.both(), lib.k)
+""",
+    }, b""),
+    ("threads_modules_retry", {
+        "lib.mh": """export shared let k = 0
+export fn wait_k() {
+    atomic {
+        if k == 0 { retry }
+        k
+    }
+}
+""",
+        "main.mh": """import lib from "lib.mh"
+let p = detach { lib.wait_k() }
+lib.k = 4
+print(p.await)
+""",
+    }, b""),
+]
+
+
+def compile_files(files: dict[str, str], tmpdir: str, name: str) -> str:
+    """Write a multi-file program into its own directory and build `main.mh`."""
+    root = os.path.join(tmpdir, name)
+    os.makedirs(root, exist_ok=True)
+    for fname, text in files.items():
+        with open(os.path.join(root, fname), "w") as f:
+            f.write(text)
+    out = os.path.join(tmpdir, f"{name}.mahc")
+    subprocess.run(
+        [sys.executable, "-m", "mah", "build", os.path.join(root, "main.mh"), "-o", out],
+        check=True,
+        cwd=REPO_ROOT,
+        env={**os.environ, "PYTHONPATH": REPO_ROOT},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return out
+
+
 def run_inline_programs(vm_path: str, tmpdir: str, verbose: bool) -> list[Result]:
     results = []
-    for name, source, stdin_data in RUNTIME_ERROR_PROGRAMS:
+    programs = [(n, s, d, False) for n, s, d in RUNTIME_ERROR_PROGRAMS]
+    programs += [(n, s, d, True) for n, s, d in MODULE_PROGRAMS]
+    for name, source, stdin_data, multi in programs:
         try:
-            mahc = compile_source(source, tmpdir, name)
+            if multi:
+                mahc = compile_files(source, tmpdir, name)
+            else:
+                mahc = compile_source(source, tmpdir, name)
         except subprocess.CalledProcessError as e:
             r = Result(name)
             r.fail(f"failed to compile: {e.stderr.decode('utf-8', 'replace')}")

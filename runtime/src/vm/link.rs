@@ -368,15 +368,18 @@ pub enum LinkedInstr {
     DeferAbove { depth: Addr, dest: Addr },
     /// M25 (1.4)
     Throw { value: Addr },
-    Native { native: NativeFn, args: Vec<Addr>, dest: Option<Addr> },
-    /// M44 (1.21, docs/contracts/M44_threads.md #6.4): shared variables
-    /// (`name`, the source name, is for messages; reads and sets have none).
-    #[allow(dead_code)]
-    SharedGet { index: u64, name: Rc<str>, locked: bool, dest: Addr },
-    #[allow(dead_code)]
+    /// M45: `atomic` is the native's name when a transaction may not call it
+    /// (`thread::ATOMIC_REFUSED_NATIVES`, docs/contracts/M45_atomic.md #6.7).
+    Native { native: NativeFn, args: Vec<Addr>, dest: Option<Addr>, atomic: Option<&'static str> },
+    /// M44/M45 (1.21, docs/contracts/M45_atomic.md #6.3): shared variables
+    /// (`name`, the source name, is for messages); `working` = mode 1
+    /// (lexically inside `atomic`).
+    SharedGet { index: u64, name: Rc<str>, working: bool, dest: Addr },
     SharedSet { index: u64, name: Rc<str>, src: Addr },
-    SharedLock { index: u64, name: Rc<str>, dest: Addr },
-    SharedUnlock { index: u64, name: Rc<str>, mark: bool },
+    AtomicBegin,
+    AtomicEnd,
+    AtomicAbort,
+    Retry,
 }
 
 pub struct LinkedProgram {
@@ -455,12 +458,18 @@ fn build_types(type_decls: &[TypeDecl], interned: &[Rc<str>], minor: u16) -> Vec
     infos
 }
 
-fn validate_natives(native_refs: &[NativeRef], strings: &[String]) -> decode::FResult<Vec<NativeFn>> {
+fn validate_natives(
+    native_refs: &[NativeRef],
+    strings: &[String],
+) -> decode::FResult<Vec<(NativeFn, Option<&'static str>)>> {
     let mut out = Vec::with_capacity(native_refs.len());
     for r in native_refs {
         let name = &strings[r.name];
         match native_by_name(name) {
-            Some((arity, nf)) if arity == r.arity => out.push(nf),
+            Some((arity, nf)) if arity == r.arity => {
+                let atomic = super::thread::ATOMIC_REFUSED_NATIVES.iter().copied().find(|n| *n == name.as_str());
+                out.push((nf, atomic));
+            }
             _ => {
                 return Err(decode::FormatError(format!(
                     "this VM does not support native '{name}' (arity {})",
@@ -501,7 +510,7 @@ fn link_instr(
     interned: &[Rc<str>],
     constants: &[Value],
     functions: &[Rc<FunctionInfo>],
-    natives: &[NativeFn],
+    natives: &[(NativeFn, Option<&'static str>)],
     types: &[TypeInfo],
 ) -> LinkedInstr {
     let s = |i: usize| interned[i].clone();
@@ -621,29 +630,27 @@ fn link_instr(
         RawInstr::DeferAbove { depth, dest } => LinkedInstr::DeferAbove { depth: *depth, dest: *dest },
         RawInstr::Throw { value } => LinkedInstr::Throw { value: *value },
         RawInstr::Native { native, args, dest } => {
-            LinkedInstr::Native { native: natives[*native], args: args.clone(), dest: *dest }
+            let (native, atomic) = natives[*native];
+            LinkedInstr::Native { native, args: args.clone(), dest: *dest, atomic }
         }
         RawInstr::SharedGet { index, name, mode, dest } => {
-            LinkedInstr::SharedGet { index: *index, name: s(*name), locked: *mode == 1, dest: *dest }
+            LinkedInstr::SharedGet { index: *index, name: s(*name), working: *mode == 1, dest: *dest }
         }
         RawInstr::SharedSet { index, name, src } => LinkedInstr::SharedSet { index: *index, name: s(*name), src: *src },
-        RawInstr::SharedLock { index, name, dest } => {
-            LinkedInstr::SharedLock { index: *index, name: s(*name), dest: *dest }
-        }
-        RawInstr::SharedUnlock { index, name, mode } => {
-            LinkedInstr::SharedUnlock { index: *index, name: s(*name), mark: *mode == 1 }
-        }
+        RawInstr::AtomicBegin => LinkedInstr::AtomicBegin,
+        RawInstr::AtomicEnd => LinkedInstr::AtomicEnd,
+        RawInstr::AtomicAbort => LinkedInstr::AtomicAbort,
+        RawInstr::Retry => LinkedInstr::Retry,
     }
 }
 
 /// M44 (docs/contracts/M44_threads.md #7.1): linking refuses a
-/// `sharedget`/`sharedunlock` mode other than 0 or 1 -- a runtime error
+/// `sharedget` mode other than 0 or 1 -- a runtime error
 /// (`RuntimeError.Internal`), like the Python VM's `_link`.
 pub fn check_modes(program: &Program) -> Result<(), super::error::RuntimeError> {
     for instr in &program.code {
         let (mode, op) = match instr {
             RawInstr::SharedGet { mode, .. } => (*mode, "sharedget"),
-            RawInstr::SharedUnlock { mode, .. } => (*mode, "sharedunlock"),
             _ => continue,
         };
         if mode > 1 {

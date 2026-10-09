@@ -50,6 +50,14 @@ impl ErrorKind {
     }
 }
 
+/// M45 (docs/contracts/M45_atomic.md #6.4): why a transaction's attempt is
+/// abandoned -- a conflict (run it again) or `retry` (wait for a change).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxSignal {
+    Conflict,
+    Retry,
+}
+
 #[derive(Clone)]
 pub struct RuntimeError {
     pub message: String,
@@ -57,18 +65,27 @@ pub struct RuntimeError {
     pub kind: ErrorKind,
     /// M25: see this module's docstring.
     pub thrown: Option<Value>,
+    /// M45: not an error but a transfer to the transaction's owner (its
+    /// step loop restarts the attempt); every `?` passes it on unchanged.
+    pub restart: Option<TxSignal>,
 }
 
 impl RuntimeError {
     pub fn new(msg: impl Into<String>) -> Self {
-        RuntimeError { message: demangle_text(msg.into()), located: false, kind: ErrorKind::Internal, thrown: None }
+        RuntimeError {
+            message: demangle_text(msg.into()),
+            located: false,
+            kind: ErrorKind::Internal,
+            thrown: None,
+            restart: None,
+        }
     }
 
     /// Same as `new`, with an explicit M25 classification (docs/MAHC_FORMAT.md
     /// #4.5) -- every raise site that has one should use this instead of
     /// leaving the default `Internal`.
     pub fn with_kind(msg: impl Into<String>, kind: ErrorKind) -> Self {
-        RuntimeError { message: demangle_text(msg.into()), located: false, kind, thrown: None }
+        RuntimeError { message: demangle_text(msg.into()), located: false, kind, thrown: None, restart: None }
     }
 
     /// M25: a Mah *value* being thrown across a Rust boundary -- `exec.rs`'s
@@ -77,7 +94,24 @@ impl RuntimeError {
     /// nearest enclosing `step_task` loop; never reported directly (see
     /// `RuntimeError`'s own docstring).
     pub fn thrown_value(value: Value) -> Self {
-        RuntimeError { message: String::new(), located: false, kind: ErrorKind::Internal, thrown: Some(value) }
+        RuntimeError {
+            message: String::new(),
+            located: false,
+            kind: ErrorKind::Internal,
+            thrown: Some(value),
+            restart: None,
+        }
+    }
+
+    /// M45: abandon the current attempt of the task's transaction.
+    pub fn restart(sig: TxSignal) -> Self {
+        RuntimeError {
+            message: String::new(),
+            located: false,
+            kind: ErrorKind::Internal,
+            thrown: None,
+            restart: Some(sig),
+        }
     }
 }
 
@@ -97,6 +131,7 @@ impl fmt::Debug for RuntimeError {
             .field("located", &self.located)
             .field("kind", &self.kind)
             .field("thrown", &self.thrown.is_some())
+            .field("restart", &self.restart)
             .finish()
     }
 }
