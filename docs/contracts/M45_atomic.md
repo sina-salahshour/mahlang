@@ -445,7 +445,10 @@ In the process-wide runtime, all under the one runtime mutex (M44 §6.1):
   `(none, 0)`.
 - `clock: integer` from 0 (the version of the last commit or plain write).
 - `watchers: map index → set of retry-wait keys`; `retry_waits: map key → (VM, promise/pending id,
-  list of indices)`. Python key = `id(promise)`; Rust key = `(vm id, pending id)`.
+  list of indices)`. Python key = `id(promise)`; Rust key = `(vm id, pending id)`. The watcher
+  sets are ordered by when each wait began (Python: a dict used as an ordered set; Rust: a
+  `BTreeSet` of `(vm id, pending id)`), so one write wakes a VM's waiters in the order they
+  waited, on both VMs.
 - Exclusivity: `excl_owner` = none or `(tx serial, vm id)`; `excl_queue` = FIFO of tx serials
   waiting to become exclusive; `commits_waiting` = how many commits/plain writes are blocked on
   the token; a condition variable `excl_cv` on the runtime mutex (Python

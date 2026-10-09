@@ -2446,6 +2446,33 @@ mod tests {
     }
 
     #[test]
+    fn atomic_teardown_drops_retry_waits_and_the_token() {
+        // #6.8: a job VM torn down while it holds the token and has retry
+        // waits releases the one and forgets the others (the main VM's
+        // retry wait on the same variable stays and is woken)
+        let (rt, rx) = runtime();
+        let (job_tx, _job_rx) = std::sync::mpsc::channel();
+        rt.register_vm(7, job_tx);
+        rt.write_shared(0, 0, number(1));
+        let version = rt.read_shared(0).1;
+        assert!(rt.register_retry(7, 3, &[(0, version)]));
+        assert!(rt.register_retry(0, 4, &[(0, version)]));
+        let _ = rt.tx_start(7, 42, true);
+        assert_eq!(rt.lock().excl_owner, Some((42, 7)));
+        rt.forget_vm(7, None, None);
+        {
+            let st = rt.lock();
+            assert_eq!(st.excl_owner, None);
+            assert_eq!(st.retry_waits.keys().copied().collect::<Vec<_>>(), vec![(0, 4)]);
+            assert_eq!(st.watchers.get(&0).map(|w| w.iter().copied().collect::<Vec<_>>()), Some(vec![(0, 4)]));
+        }
+        // the token is free: a plain write doesn't wait, and wakes vm 0 only
+        rt.write_shared(0, 0, number(2));
+        assert!(matches!(rx.try_recv(), Ok((4, Completion::Settle(Ok(_))))));
+        assert!(rt.lock().retry_waits.is_empty());
+    }
+
+    #[test]
     fn same_copy_compares_graphs() {
         let v = |items: Vec<Value>| Value::Vector(Rc::new(RefCell::new(items)));
         let n = |i: i64| Value::Number(Decimal::from_i64(i));

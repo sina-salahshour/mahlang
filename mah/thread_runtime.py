@@ -818,7 +818,9 @@ class ThreadRuntime:
             vt.add_wait(promise, "retry", keys)
             self.retry_waits[key] = (vt, promise, keys)
             for k in keys:
-                self.watchers.setdefault(k, set()).add(key)
+                # a dict as an ordered set: waiters wake in the order they
+                # started waiting, like the Rust VM's (vm id, pending id) order
+                self.watchers.setdefault(k, {})[key] = None
             return promise
 
     def _reads_valid(self, reads: dict) -> bool:
@@ -840,7 +842,7 @@ class ThreadRuntime:
                     if other != k:
                         watching = self.watchers.get(other)
                         if watching is not None:
-                            watching.discard(key)
+                            watching.pop(key, None)
                 self.post(vt, (promise, "settle", (True, NONE_VALUE)))
 
     def _drop_retry_wait(self, key) -> None:
@@ -850,7 +852,7 @@ class ThreadRuntime:
         for k in entry[2]:
             watching = self.watchers.get(k)
             if watching is not None:
-                watching.discard(key)
+                watching.pop(key, None)
                 if not watching:
                     del self.watchers[k]
 

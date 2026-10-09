@@ -1607,6 +1607,24 @@ atomic {
     bad()
 }
 """, b""),
+    # M45 review: retry waiters wake in the order they started waiting
+    ("threads_retry_order", """
+shared let go = 0
+shared let other = 0
+fn waiter(i) {
+    atomic {
+        if i % 2 == 0 {
+            let o = other
+        }
+        if go == 0 { retry }
+    }
+    print(i)
+}
+let ps = []
+for let i in 0..12 { ps.push(detach waiter(i)) }
+go = 1
+for let p in ps { p.await }
+""", b""),
     ("std_csv", """
 import csv from "std:csv"
 print(csv.parse("a,\\"b,c\\"\\r\\n\\n\\"q\\"\\"x\\",\\n"), csv.parse_records("n,v\\nx,1\\n"))

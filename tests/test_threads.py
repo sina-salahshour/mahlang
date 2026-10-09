@@ -764,6 +764,28 @@ t.join()
         if self._python_vm():
             self.assertGreaterEqual(TX_STATS["conflicts"], 1)
 
+    def test_a14_retry_waiters_wake_in_the_order_they_waited(self):
+        # M45 review: one write wakes every waiter of the variable in the
+        # order they started waiting, on both VMs (the Python VM used to
+        # wake them in set-hash order)
+        src = """shared let go = 0
+shared let other = 0
+fn waiter(i) {
+    atomic {
+        if i % 2 == 0 {
+            let o = other
+        }
+        if go == 0 { retry }
+    }
+    print(i)
+}
+let ps = []
+for let i in 0..12 { ps.push(detach waiter(i)) }
+go = 1
+for let p in ps { p.await }
+"""
+        self.assertEqual(run_source(src), "".join(f"{i}\n" for i in range(12)))
+
     def test_t24_quiescence(self):
         src = THREAD + """let ch = thread.channel()
 try { ch.recv() } catch {
