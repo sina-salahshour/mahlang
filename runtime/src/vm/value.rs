@@ -162,6 +162,10 @@ pub struct Continuation {
     pub task: TaskRef,
     pub dest: Addr,
     pub resume_pc: usize,
+    /// M45 (docs/contracts/M45_atomic.md #6.4): a `retry` wait -- when the
+    /// Promise settles, nothing is written and the task resumes at
+    /// `resume_pc - 1` (its outermost `atomicbegin`).
+    pub restart: bool,
 }
 
 pub struct PromiseData {
@@ -217,21 +221,64 @@ pub struct Task {
     pub return_stack: Vec<(usize, FrameRef)>,
     pub defer_stack: Vec<Vec<Value>>,
     pub watching_promise: Option<Rc<RefCell<PromiseData>>>,
-    /// M44 (docs/contracts/M44_threads.md #6.1): a process-unique id, the
-    /// shared variables this task holds (shared by reference with an
-    /// implicit-call sub-task, #5.2), and whether it recorded an await edge.
+    /// M44 (docs/contracts/M44_threads.md #6.1): a process-unique id and
+    /// whether it recorded an await edge.
     pub id: u64,
-    pub held: Rc<RefCell<Vec<Held>>>,
     pub awaits_edge: bool,
+    /// M45 (docs/contracts/M45_atomic.md #6.2): the transaction it runs in
+    /// (an implicit-call sub-task shares its caller's, by reference), and
+    /// the label (`to_string`/`message`) of an implicit runtime call's
+    /// sub-task.
+    pub tx: Option<Rc<RefCell<Tx>>>,
+    pub implicit: Option<Rc<str>>,
 }
 
-/// M44: one shared variable a task holds: its working value, the lock's
-/// re-entrancy depth, and `unwinding` (0, or the depth a throw is leaving).
-pub struct Held {
-    pub index: u64,
-    pub value: Value,
+/// M45: one `atomic { }` transaction. `reads`: (index, version) and
+/// `entries`, both in first-access order; `restart`: (pc of the outermost
+/// `atomicbegin`, the frame there, return-stack length, defer-stack
+/// length).
+pub struct Tx {
+    pub serial: u64,
+    /// `Rc::as_ptr` of the task that began it
+    pub owner: usize,
+    pub implicit: Option<Rc<str>>,
     pub depth: u32,
-    pub unwinding: u32,
+    pub rv: u64,
+    pub reads: Vec<(u64, u64)>,
+    pub entries: Vec<TxEntry>,
+    pub attempts: u32,
+    pub irrevocable: bool,
+    pub restart: (usize, FrameRef, usize, usize),
+}
+
+/// M45: a transaction's working copy of one shared variable.
+pub struct TxEntry {
+    pub index: u64,
+    pub name: Rc<str>,
+    /// the stored value it was copied from (`None` for a blind write)
+    pub base: Option<std::sync::Arc<super::thread::Payload>>,
+    pub working: Value,
+    pub assigned: bool,
+    pub exposed: bool,
+}
+
+static NEXT_TX: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+impl Tx {
+    pub fn new(owner: usize, implicit: Option<Rc<str>>, restart: (usize, FrameRef, usize, usize)) -> Tx {
+        Tx {
+            serial: NEXT_TX.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            owner,
+            implicit,
+            depth: 1,
+            rv: 0,
+            reads: Vec::new(),
+            entries: Vec::new(),
+            attempts: 0,
+            irrevocable: false,
+            restart,
+        }
+    }
 }
 
 pub type TaskRef = Rc<RefCell<Task>>;
@@ -247,8 +294,9 @@ pub fn new_task(pc: usize, frame: FrameRef, watching_promise: Option<Rc<RefCell<
         defer_stack: Vec::new(),
         watching_promise,
         id: NEXT_TASK_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-        held: Rc::new(RefCell::new(Vec::new())),
         awaits_edge: false,
+        tx: None,
+        implicit: None,
     }))
 }
 

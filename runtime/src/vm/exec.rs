@@ -612,8 +612,6 @@ pub enum Completion {
     Job(Result<Payload, Payload>),
     /// Joins, send acknowledgements, channel-closed failures.
     Settle(Result<Payload, Payload>),
-    /// A lock granted, with the store's value.
-    Lock(Arc<Payload>),
     /// A semaphore permit, by semaphore id.
     Sem(u64),
     /// A channel message, by channel id.
@@ -624,7 +622,8 @@ pub enum Completion {
 
 /// M44: one runtime wait of this VM (an *internal* pending entry, #6.1).
 pub enum Wait {
-    Lock { task: TaskRef, index: u64 },
+    /// M45: a `retry` waiting for a change of what its attempt read.
+    Retry,
     Sem,
     Recv,
     Send,
@@ -760,6 +759,12 @@ impl<'p> Vm<'p> {
     pub(super) fn add_wait(&mut self, id: u64, promise: Rc<RefCell<PromiseData>>, wait: Wait) {
         self.io.pending.insert(id, promise);
         self.waits.insert(id, wait);
+    }
+
+    /// Drop an internal pending entry that will never be settled.
+    pub(super) fn take_wait(&mut self, id: u64) {
+        self.io.pending.remove(&id);
+        self.waits.remove(&id);
     }
 
     /// A copied value, built in this VM's heap.
@@ -1354,16 +1359,18 @@ impl<'p> Vm<'p> {
         }
         let sub_task = value::new_task(closure.func.entry, frame, None);
         if let Some(top) = self.stepping.last() {
-            // M44: an implicit runtime call belongs to its caller's task (the
-            // same identity and held locks, docs/contracts/M44_threads.md #5.2).
-            let (id, held) = {
+            // M44/M45: an implicit runtime call belongs to its caller's task
+            // (the same identity and transaction,
+            // docs/contracts/M45_atomic.md #6.2).
+            let (id, tx) = {
                 let t = top.borrow();
-                (t.id, t.held.clone())
+                (t.id, t.tx.clone())
             };
             let mut st = sub_task.borrow_mut();
             st.id = id;
-            st.held = held;
+            st.tx = tx;
         }
+        sub_task.borrow_mut().implicit = Some(Rc::from(label));
         match self.step_task(&sub_task, None)? {
             StepControl::Done(v) => Ok(v),
             StepControl::Suspended => Err(RuntimeError::new(format!(
@@ -1417,9 +1424,14 @@ impl<'p> Vm<'p> {
         let callbacks = std::mem::take(&mut p.borrow_mut().callbacks);
         for cb in callbacks {
             self.clear_await(&cb.task);
-            let frame = cb.task.borrow().current_frame.clone();
-            value::write_addr(&frame, cb.dest, value.clone())?;
-            cb.task.borrow_mut().pc = cb.resume_pc;
+            if cb.restart {
+                // M45 #6.4: a woken `retry` -- its `atomicbegin` runs again
+                cb.task.borrow_mut().pc = cb.resume_pc - 1;
+            } else {
+                let frame = cb.task.borrow().current_frame.clone();
+                value::write_addr(&frame, cb.dest, value.clone())?;
+                cb.task.borrow_mut().pc = cb.resume_pc;
+            }
             self.drive(cb.task.clone(), None)?;
         }
         Ok(())
@@ -1489,6 +1501,11 @@ impl<'p> Vm<'p> {
         self.stepping.push(task.clone());
         let result = self.step_task_inner(task, pending);
         self.stepping.pop();
+        if matches!(result, Ok(StepControl::Done(_)) | Ok(StepControl::Failed(_))) {
+            // M45 safety net (docs/contracts/M45_atomic.md #6.3): a task
+            // never ends inside its transaction
+            threads::end_task_tx(&self.rt, task);
+        }
         result
     }
 
@@ -1505,6 +1522,18 @@ impl<'p> Vm<'p> {
                 Ok(Some(outcome)) => return Ok(outcome),
                 Ok(None) => continue,
                 Err(e) => {
+                    if let Some(sig) = e.restart {
+                        // M45 (#6.4): a conflict or `retry` -- only the
+                        // transaction's owner restarts it; an implicit
+                        // call's sub-task passes it up.
+                        if !threads::owns_tx(task) {
+                            return Err(e);
+                        }
+                        match threads::restart_tx(self, task, sig)? {
+                            Some(()) => return Ok(StepControl::Suspended),
+                            None => continue,
+                        }
+                    }
                     if e.located {
                         // A fatal, already-reported error bubbling out (see
                         // `drive`) -- never caught/unwound, just re-raised
@@ -1542,7 +1571,7 @@ impl<'p> Vm<'p> {
             return Ok(());
         }
         let Some(promise) = self.io.pending.remove(&id) else { return Ok(()) };
-        let wait = self.waits.remove(&id);
+        self.waits.remove(&id);
         match completion {
             Completion::Stuck => Ok(()),
             Completion::Job(outcome) => {
@@ -1572,14 +1601,6 @@ impl<'p> Vm<'p> {
                     self.fail_promise(&promise, e)
                 }
             },
-            Completion::Lock(stored) => {
-                if let Some(Wait::Lock { task, index }) = wait {
-                    let v = self.materialize(&stored);
-                    let held = task.borrow().held.clone();
-                    held.borrow_mut().push(value::Held { index, value: v, depth: 1, unwinding: 0 });
-                }
-                self.resolve_promise(&promise, Value::None)
-            }
             Completion::Sem(_) => self.resolve_promise(&promise, Value::None),
             Completion::Recv(_, message) => {
                 let v = self.materialize(&message);
@@ -1877,6 +1898,9 @@ impl<'p> Vm<'p> {
                 }
             }
             LinkedInstr::Detach { callee, args, dest } => {
+                if task.borrow().tx.is_some() {
+                    return threads::in_atomic("detach");
+                }
                 let closure_val = rd(*callee)?;
                 let Value::Function(c) = &closure_val else {
                     return Err(RuntimeError::with_kind(
@@ -1895,6 +1919,9 @@ impl<'p> Vm<'p> {
                 wr!(*dest, Value::Promise(promise));
             }
             LinkedInstr::DetachKw { callee, args, kwnames, dest } => {
+                if task.borrow().tx.is_some() {
+                    return threads::in_atomic("detach");
+                }
                 let closure_val = rd(*callee)?;
                 let Value::Function(c) = &closure_val else {
                     return Err(RuntimeError::with_kind(
@@ -1918,6 +1945,9 @@ impl<'p> Vm<'p> {
                 wr!(*dest, Value::Promise(promise));
             }
             LinkedInstr::DetachMethod { recv, name, args, trait_, dest } => {
+                if task.borrow().tx.is_some() {
+                    return threads::in_atomic("detach");
+                }
                 let recv_v = rd(*recv)?;
                 let (target, include_self) = self.find_method(&recv_v, name, trait_.as_ref())?;
                 let values: Vec<Value> = args.iter().map(|a| rd(*a)).collect::<RResult<_>>()?;
@@ -1934,6 +1964,9 @@ impl<'p> Vm<'p> {
                 wr!(*dest, Value::Promise(promise));
             }
             LinkedInstr::DetachMethodKw { recv, name, args, kwnames, trait_, dest } => {
+                if task.borrow().tx.is_some() {
+                    return threads::in_atomic("detach");
+                }
                 let recv_v = rd(*recv)?;
                 let (target, include_self) = self.find_method(&recv_v, name, trait_.as_ref())?;
                 let npos = args.len() - kwnames.len();
@@ -1955,6 +1988,9 @@ impl<'p> Vm<'p> {
                 wr!(*dest, Value::Promise(promise));
             }
             LinkedInstr::Await { promise, dest } => {
+                if task.borrow().tx.is_some() {
+                    return threads::in_atomic(".await");
+                }
                 let pv = rd(*promise)?;
                 let Value::Promise(p) = &pv else {
                     return Err(RuntimeError::with_kind(
@@ -1980,13 +2016,26 @@ impl<'p> Vm<'p> {
                                 // deadlock throws here; else the edge is recorded.
                                 let task_id = task.borrow().id;
                                 if !self.rt.await_check(self.vm_id, task_id, producer) {
+                                    if let Producer::Join(_) = producer {
+                                        // M45: std:thread's `join` awaits its
+                                        // Promise at once and drops it, so a
+                                        // join that fails here can never be
+                                        // awaited again: drop its waiter and
+                                        // pending entry, or it would keep this
+                                        // VM (and its job) alive forever.
+                                        let pid = self.io.pending.iter().find(|(_, q)| Rc::ptr_eq(q, p)).map(|(id, _)| *id);
+                                        if let Some(pid) = pid {
+                                            self.rt.take_stuck(self.vm_id, &[pid]);
+                                            self.take_wait(pid);
+                                        }
+                                    }
                                     return threads::throw_thread_error("deadlock", threads::AWAIT_DEADLOCK_MESSAGE);
                                 }
                                 task.borrow_mut().awaits_edge = true;
                             }
                         }
                         let resume_pc = task.borrow().pc;
-                        p.borrow_mut().callbacks.push(Continuation { task: task.clone(), dest: *dest, resume_pc });
+                        p.borrow_mut().callbacks.push(Continuation { task: task.clone(), dest: *dest, resume_pc, restart: false });
                         return Ok(Some(StepControl::Suspended));
                     }
                 }
@@ -2138,7 +2187,12 @@ impl<'p> Vm<'p> {
                 };
                 return Err(RuntimeError::thrown_value(v));
             }
-            LinkedInstr::Native { native, args, dest } => {
+            LinkedInstr::Native { native, args, dest, atomic } => {
+                if let Some(name) = atomic {
+                    if task.borrow().tx.is_some() {
+                        return threads::in_atomic(name);
+                    }
+                }
                 let vals: Vec<Value> = args.iter().map(|a| rd(*a)).collect::<RResult<_>>()?;
                 let r = natives::call_native(self, *native, &vals)?;
                 match dest {
@@ -2146,25 +2200,20 @@ impl<'p> Vm<'p> {
                     None => self.return_register = r,
                 }
             }
-            // M44 (1.21, docs/contracts/M44_threads.md #6.4): shared variables.
-            LinkedInstr::SharedGet { index, locked, dest, .. } => {
-                let v = threads::get(self, task, *index, *locked)?;
+            // M44/M45 (1.21, docs/contracts/M45_atomic.md #6.3): shared
+            // variables and transactions.
+            LinkedInstr::SharedGet { index, name, working, dest } => {
+                let v = threads::get(self, task, *index, name, *working)?;
                 wr!(*dest, v);
             }
-            LinkedInstr::SharedSet { index, src, .. } => {
-                threads::set(task, *index, rd(*src)?)?;
+            LinkedInstr::SharedSet { index, name, src } => {
+                let v = rd(*src)?;
+                threads::set(self, task, *index, name, v)?;
             }
-            LinkedInstr::SharedLock { index, name, dest } => {
-                let p = threads::acquire(self, task, *index, name)?;
-                wr!(*dest, p);
-            }
-            LinkedInstr::SharedUnlock { index, name, mark } => {
-                if *mark {
-                    threads::mark(task, *index);
-                } else {
-                    threads::release(self, task, *index, name)?;
-                }
-            }
+            LinkedInstr::AtomicBegin => threads::begin(self, task, pc)?,
+            LinkedInstr::AtomicEnd => threads::end(self, task)?,
+            LinkedInstr::AtomicAbort => threads::abort(self, task)?,
+            LinkedInstr::Retry => threads::retry(task)?,
         }
         Ok(None)
     }

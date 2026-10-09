@@ -1,8 +1,11 @@
 //! M44 (docs/contracts/M44_threads.md): the process-wide thread runtime of
-//! the Rust VM -- jobs on other threads, shared variables and their locks,
-//! semaphores, channels, the wait-for graph and the quiescence rule. A port
-//! of `mah/thread_runtime.py` and `mah/thread_natives.py`, which define every
-//! rule and message.
+//! the Rust VM -- jobs on other threads, shared variables, semaphores,
+//! channels, the wait-for graph and the quiescence rule. A port of
+//! `mah/thread_runtime.py` and `mah/thread_natives.py`, which define every
+//! rule and message. M45 (docs/contracts/M45_atomic.md): the shared
+//! variables' store with versions, `atomic { }` transactions (TL2-style
+//! validation under the one runtime mutex), `retry` waits and the
+//! exclusivity token.
 //!
 //! Every VM of a run (the main VM and one per running job) has its own heap
 //! (`Rc`, never shared). Values cross threads only as copies (`copy_out` into
@@ -18,19 +21,19 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::decimal::{Decimal, SendDecimal};
 use crate::decode::Program;
 
-use super::error::{ErrorKind, RResult, RuntimeError};
+use super::error::{ErrorKind, RResult, RuntimeError, TxSignal};
 use super::exec::{Completion, Vm, Wait};
 use super::fs::FileTable;
 use super::link::LinkedProgram;
 use super::socket::SocketTable;
 use super::value::{
-    self, display_name, type_name_of, ClosureData, EnumData, FrameRef, FunctionInfo, MapData, Producer, PromiseData,
-    StructData, TaskRef, TypeData, Value,
+    self, display_name, type_name_of, ClosureData, Continuation, EnumData, FrameRef, FunctionInfo, MapData, Producer,
+    PromiseData, StructData, TaskRef, Tx, TxEntry, TypeData, Value,
 };
 
 pub const NOT_SENDABLE_MESSAGE: &str = "a Promise can't be sent to another thread";
@@ -38,8 +41,72 @@ pub const FOREIGN_PROMISE_MESSAGE: &str =
     "a Promise from another thread can't be awaited here (it was still pending when it was copied)";
 pub const STUCK_MESSAGE: &str = "the wait can never finish: every thread is waiting";
 pub const JOB_STUCK_MESSAGE: &str = "the job never finished: it waits on a Promise nothing will settle";
-pub const AWAIT_DEADLOCK_MESSAGE: &str =
-    "deadlock: this await would never end (it waits, through locks or threads, for itself)";
+pub const AWAIT_DEADLOCK_MESSAGE: &str = "deadlock: this await would never end (it waits, through threads, for itself)";
+
+// -- M45: transactions (docs/contracts/M45_atomic.md #5, #6) ------------------
+
+/// A transaction that failed this many attempts runs its next one exclusive.
+pub const ATOMIC_ATTEMPTS: u32 = 8;
+pub const RETRY_NO_READS_MESSAGE: &str = "retry can never wake up: this transaction read no shared variable";
+/// The natives a task in a transaction may not call (#5.2) -- exactly the
+/// Python VM's `ATOMIC_REFUSED_NATIVES` (mah/thread_runtime.py).
+pub const ATOMIC_REFUSED_NATIVES: &[&str] = &[
+    "io.print",
+    "io.write",
+    "io.input",
+    "io.read_line",
+    "time.sleep_async",
+    "time.cancel",
+    "promise.resolve",
+    "promise.fail",
+    "fs.read_text",
+    "fs.write_text",
+    "fs.append_text",
+    "fs.info",
+    "fs.list_dir",
+    "fs.mkdir",
+    "fs.remove",
+    "fs.rename",
+    "fs.copy",
+    "fs.temp_dir",
+    "fs.open",
+    "fs.read_line",
+    "fs.read_all",
+    "fs.write",
+    "fs.close",
+    "fs.read_bytes",
+    "fs.write_bytes",
+    "fs.append_bytes",
+    "fs.file_read_bytes",
+    "fs.file_write_bytes",
+    "process.exit",
+    "process.run",
+    "process.env_set",
+    "process.env_remove",
+    "socket.connect",
+    "socket.listen",
+    "socket.accept",
+    "socket.send",
+    "socket.recv",
+    "socket.shutdown",
+    "socket.close",
+    "socket.start_tls",
+    "socket.tls_server_config",
+    "socket.start_tls_server",
+    "thread.spawn",
+    "thread.submit",
+    "thread.close",
+    "thread.join",
+    "thread.semaphore_acquire",
+    "thread.semaphore_try_acquire",
+    "thread.semaphore_release",
+    "thread.channel_send",
+    "thread.channel_recv",
+    "thread.channel_try_recv",
+    "thread.channel_close",
+];
+/// How long an exclusivity wait sleeps before looking again (#6.9).
+const EXCL_WAIT: Duration = Duration::from_millis(50);
 const CHANNEL_CLOSED_MESSAGE: &str = "the channel is closed";
 
 // ---------------------------------------------------------------------------
@@ -413,6 +480,90 @@ pub fn payload_of(v: &Value) -> Result<Payload, NotSendable> {
     Ok(Payload { graph, root: roots.pop().expect("one root") })
 }
 
+/// M45 #6.6: whether two strict copies are the same value graph (decides
+/// whether an exposed, unassigned working value changed). Closures and
+/// frames never count as the same.
+pub fn same_copy(a: &Payload, b: &Payload) -> bool {
+    let mut left: HashMap<usize, usize> = HashMap::new();
+    let mut right: HashMap<usize, usize> = HashMap::new();
+    let mut stack: Vec<(&SendValue, &SendValue)> = vec![(&a.root, &b.root)];
+    while let Some((x, y)) = stack.pop() {
+        let (i, j) = match (x, y) {
+            (SendValue::Ref(i), SendValue::Ref(j)) => (*i, *j),
+            (SendValue::None, SendValue::None) | (SendValue::Absent, SendValue::Absent) => continue,
+            (SendValue::Bool(p), SendValue::Bool(q)) if p == q => continue,
+            (SendValue::Number(p), SendValue::Number(q)) if p == q => continue,
+            (SendValue::Str(p), SendValue::Str(q)) if p == q => continue,
+            (SendValue::Type { kind: k1, index: i1, .. }, SendValue::Type { kind: k2, index: i2, .. })
+                if k1 == k2 && i1 == i2 =>
+            {
+                continue
+            }
+            _ => return false,
+        };
+        match (left.get(&i), right.get(&j)) {
+            (None, None) => {}
+            (Some(&pj), Some(&pi)) if pj == j && pi == i => continue,
+            _ => return false,
+        }
+        left.insert(i, j);
+        right.insert(j, i);
+        match (&a.graph.nodes[i], &b.graph.nodes[j]) {
+            (SendNode::Vector(p), SendNode::Vector(q)) => {
+                if p.len() != q.len() {
+                    return false;
+                }
+                stack.extend(p.iter().zip(q.iter()));
+            }
+            (SendNode::Map(p), SendNode::Map(q)) => {
+                if p.len() != q.len() {
+                    return false;
+                }
+                for ((k1, v1), (k2, v2)) in p.iter().zip(q.iter()) {
+                    stack.push((k1, k2));
+                    stack.push((v1, v2));
+                }
+            }
+            (SendNode::Bytes(p), SendNode::Bytes(q)) => {
+                if p != q {
+                    return false;
+                }
+            }
+            (
+                SendNode::Struct { type_name: t1, fields: f1, .. },
+                SendNode::Struct { type_name: t2, fields: f2, .. },
+            ) => {
+                if t1 != t2 || !same_fields(f1, f2, &mut stack) {
+                    return false;
+                }
+            }
+            (
+                SendNode::Enum { type_name: t1, variant: v1, fields: f1, .. },
+                SendNode::Enum { type_name: t2, variant: v2, fields: f2, .. },
+            ) => {
+                if t1 != t2 || v1 != v2 || !same_fields(f1, f2, &mut stack) {
+                    return false;
+                }
+            }
+            // different kinds, or a Closure/Frame/Promise: conservatively changed
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn same_fields<'a>(
+    f1: &'a [(String, SendValue)],
+    f2: &'a [(String, SendValue)],
+    stack: &mut Vec<(&'a SendValue, &'a SendValue)>,
+) -> bool {
+    if f1.len() != f2.len() || f1.iter().zip(f2.iter()).any(|((n1, _), (n2, _))| n1 != n2) {
+        return false;
+    }
+    stack.extend(f1.iter().zip(f2.iter()).map(|((_, a), (_, b))| (a, b)));
+    true
+}
+
 enum Mat {
     V(Value),
     F(FrameRef),
@@ -724,13 +875,6 @@ fn failed(e: Value) -> Value {
 // The runtime (docs/contracts/M44_threads.md #6.1)
 // ---------------------------------------------------------------------------
 
-struct LockState {
-    /// (task id, vm id)
-    owner: Option<(u64, u64)>,
-    /// (task id, vm id, pending id)
-    waiters: VecDeque<(u64, u64, u64)>,
-}
-
 struct Semaphore {
     permits: u64,
     available: u64,
@@ -769,9 +913,17 @@ pub const NO_ENTRY: u64 = u64::MAX;
 
 #[derive(Default)]
 pub struct RtState {
-    shared: HashMap<u64, Arc<Payload>>,
-    locks: BTreeMap<u64, LockState>,
-    waiting_on: HashMap<u64, u64>,
+    /// M45 (#6.1): index -> (stored strict copy, version); the version
+    /// clock; retry waits by (vm id, pending id) with the indices they
+    /// watch; the exclusivity token.
+    shared: HashMap<u64, (Arc<Payload>, u64)>,
+    clock: u64,
+    watchers: HashMap<u64, BTreeSet<(u64, u64)>>,
+    retry_waits: HashMap<(u64, u64), Vec<u64>>,
+    /// (tx serial, vm id)
+    excl_owner: Option<(u64, u64)>,
+    excl_queue: VecDeque<u64>,
+    commits_waiting: usize,
     /// task id -> (producer, vm id)
     awaiting: HashMap<u64, (Producer, u64)>,
     job_roots: HashMap<u64, u64>,
@@ -789,15 +941,12 @@ pub struct RtState {
     finishing: HashSet<u64>,
 }
 
-impl Default for LockState {
-    fn default() -> Self {
-        LockState { owner: None, waiters: VecDeque::new() }
-    }
-}
-
 pub struct ThreadRuntime {
     state: Mutex<RtState>,
-    /// false until the first `sharedlock` or `thread.spawn` of the run
+    /// M45: signalled whenever the exclusivity token or `commits_waiting`
+    /// changes (#6.9).
+    excl_cv: Condvar,
+    /// false until the first `thread.spawn` of the run
     pub tracking: AtomicBool,
     /// The one stdout every VM hands whole lines to.
     pub stdout: Mutex<BufWriter<Stdout>>,
@@ -816,6 +965,7 @@ impl ThreadRuntime {
         let state = RtState { next_thread: 1, next_job: 1, next_semaphore: 1, next_channel: 1, ..RtState::default() };
         ThreadRuntime {
             state: Mutex::new(state),
+            excl_cv: Condvar::new(),
             tracking: AtomicBool::new(false),
             stdout: Mutex::new(BufWriter::new(std::io::stdout())),
             files: FileTable::default(),
@@ -905,37 +1055,146 @@ impl ThreadRuntime {
         self.lock().job_roots.insert(job_id, task_id);
     }
 
-    // -- shared variables (#6.4) ------------------------------------------------
+    // -- shared variables and transactions (docs/contracts/M45_atomic.md #6) --
 
-    /// The store's value of shared variable `k` (absent: `none`).
-    pub fn shared_value(&self, k: u64) -> Option<Arc<Payload>> {
-        self.lock().shared.get(&k).cloned()
+    /// The store's `(value, version)` of shared variable `k` (absent:
+    /// `(none, 0)`).
+    pub fn read_shared(&self, k: u64) -> (Arc<Payload>, u64) {
+        let st = self.lock();
+        match st.shared.get(&k) {
+            Some((p, v)) => (p.clone(), *v),
+            None => (Arc::new(Payload::none()), 0),
+        }
     }
 
-    /// Write back (`value` = `None`: refused) and pass the lock on.
-    pub fn release(&self, k: u64, value: Option<Payload>) {
+    /// A plain assignment outside a transaction (`stored` is a strict copy):
+    /// a new version, waking `retry` waiters of `k`.
+    pub fn write_shared(&self, vm_id: u64, k: u64, stored: Payload) {
+        let st = self.lock();
+        let mut st = self.wait_no_excl(st, vm_id, None);
+        st.clock += 1;
+        let clock = st.clock;
+        st.shared.insert(k, (Arc::new(stored), clock));
+        st.wake_watchers(&[k]);
+    }
+
+    /// Start an attempt: take the token first when it is exclusive. Returns
+    /// the attempt's snapshot time `rv`.
+    pub fn tx_start(&self, vm_id: u64, serial: u64, irrevocable: bool) -> u64 {
         let mut st = self.lock();
-        if let Some(p) = value {
-            st.shared.insert(k, Arc::new(p));
+        if irrevocable {
+            st = self.acquire_excl(st, vm_id, serial);
         }
-        st.grant_next(k);
+        st.clock
+    }
+
+    /// Validate `reads` and publish `publish` atomically (a read-only
+    /// transaction neither waits nor validates); releases the token.
+    pub fn tx_commit(&self, vm_id: u64, serial: u64, reads: &[(u64, u64)], publish: Vec<(u64, Payload)>) -> bool {
+        let mut st = self.lock();
+        if !publish.is_empty() {
+            st = self.wait_no_excl(st, vm_id, Some(serial));
+            if !st.reads_valid(reads) {
+                return false;
+            }
+            st.clock += 1;
+            let clock = st.clock;
+            let keys: Vec<u64> = publish.iter().map(|(k, _)| *k).collect();
+            for (k, p) in publish {
+                st.shared.insert(k, (Arc::new(p), clock));
+            }
+            st.wake_watchers(&keys);
+        }
+        self.release_excl(&mut st, serial);
+        true
+    }
+
+    /// The attempt of transaction `serial` ends without a commit.
+    pub fn end_attempt(&self, serial: u64) {
+        let mut st = self.lock();
+        self.release_excl(&mut st, serial);
+    }
+
+    /// Register pending entry `pid` of VM `vm_id` as a retry wait on
+    /// `reads`; false = one of them changed already (run again now).
+    pub fn register_retry(&self, vm_id: u64, pid: u64, reads: &[(u64, u64)]) -> bool {
+        let mut st = self.lock();
+        if !st.reads_valid(reads) {
+            return false;
+        }
+        let key = (vm_id, pid);
+        let keys: Vec<u64> = reads.iter().map(|(k, _)| *k).collect();
+        for &k in &keys {
+            st.watchers.entry(k).or_default().insert(key);
+        }
+        st.retry_waits.insert(key, keys);
+        true
+    }
+
+    fn excl_wait<'a>(&'a self, st: MutexGuard<'a, RtState>) -> MutexGuard<'a, RtState> {
+        match self.excl_cv.wait_timeout(st, EXCL_WAIT) {
+            Ok((g, _)) => g,
+            Err(e) => e.into_inner().0,
+        }
+    }
+
+    /// Become the one exclusive transaction (#6.9): FIFO among the waiting
+    /// ones, after the commits already waiting have gone through.
+    fn acquire_excl<'a>(&'a self, mut st: MutexGuard<'a, RtState>, vm_id: u64, serial: u64) -> MutexGuard<'a, RtState> {
+        st.excl_queue.push_back(serial);
+        while !(st.excl_owner.is_none() && st.excl_queue.front() == Some(&serial) && st.commits_waiting == 0) {
+            st = self.excl_wait(st);
+        }
+        st.excl_queue.pop_front();
+        st.excl_owner = Some((serial, vm_id));
+        st
+    }
+
+    /// Wait while another transaction is exclusive (a commit of `serial`, or
+    /// a plain write when `serial` is `None`).
+    fn wait_no_excl<'a>(
+        &'a self,
+        mut st: MutexGuard<'a, RtState>,
+        _vm_id: u64,
+        serial: Option<u64>,
+    ) -> MutexGuard<'a, RtState> {
+        let blocked = |st: &RtState| matches!(st.excl_owner, Some((owner, _)) if Some(owner) != serial);
+        if !blocked(&st) {
+            return st;
+        }
+        st.commits_waiting += 1;
+        while blocked(&st) {
+            st = self.excl_wait(st);
+        }
+        st.commits_waiting -= 1;
+        if st.commits_waiting == 0 {
+            self.excl_cv.notify_all();
+        }
+        st
+    }
+
+    fn release_excl(&self, st: &mut RtState, serial: u64) {
+        if matches!(st.excl_owner, Some((owner, _)) if owner == serial) {
+            st.excl_owner = None;
+            self.excl_cv.notify_all();
+        }
     }
 
     /// Program end / teardown of a job VM (#6.6).
     pub fn forget_vm(&self, vm_id: u64, job_id: Option<u64>, rx: Option<&Receiver<(u64, Completion)>>) {
         {
             let mut st = self.lock();
-            let RtState { locks, waiting_on, semaphores, channels, threads, awaiting, .. } = &mut *st;
-            for l in locks.values_mut() {
-                l.waiters.retain(|&(task, vm, _)| {
-                    if vm == vm_id {
-                        waiting_on.remove(&task);
-                        false
-                    } else {
-                        true
-                    }
-                });
+            // M45 (#6.8): this VM's retry waits and its exclusivity token
+            let mine: Vec<(u64, u64)> = st.retry_waits.keys().filter(|(vm, _)| *vm == vm_id).copied().collect();
+            for key in mine {
+                st.drop_retry_wait(key);
             }
+            if let Some((serial, vm)) = st.excl_owner {
+                if vm == vm_id {
+                    self.release_excl(&mut st, serial);
+                }
+            }
+            let RtState { semaphores, channels, threads, awaiting, .. } = &mut *st;
             for s in semaphores.values_mut() {
                 s.waiters.retain(|&(vm, _)| vm != vm_id);
             }
@@ -947,17 +1206,6 @@ impl ThreadRuntime {
                 p.joiners.retain(|&(vm, _)| vm != vm_id);
             }
             awaiting.retain(|_, (_, vm)| *vm != vm_id);
-            // After this VM's waiters are gone, so a lock it owns never
-            // passes to another of its own (dying) tasks (#6.6).
-            let owned: Vec<u64> = st
-                .locks
-                .iter()
-                .filter(|(_, l)| matches!(l.owner, Some((_, v)) if v == vm_id))
-                .map(|(k, _)| *k)
-                .collect();
-            for k in owned {
-                st.grant_next(k);
-            }
             if let Some(j) = job_id {
                 st.job_roots.remove(&j);
                 st.finishing.insert(j);
@@ -1054,11 +1302,6 @@ impl RtState {
 
     fn out_edges(&self, node: u64) -> Vec<(u64, bool)> {
         let mut edges = Vec::new();
-        if let Some(k) = self.waiting_on.get(&node) {
-            if let Some(LockState { owner: Some((owner, _)), .. }) = self.locks.get(k) {
-                edges.push((*owner, true));
-            }
-        }
         if let Some((producer, _)) = self.awaiting.get(&node) {
             edges.extend(self.producer_edges(*producer));
         }
@@ -1087,18 +1330,37 @@ impl RtState {
         false
     }
 
-    fn cycle(&self, start: u64, target: u64) -> bool {
-        self.cycle_from(vec![(start, false)], target, true)
+    fn reads_valid(&self, reads: &[(u64, u64)]) -> bool {
+        reads.iter().all(|(k, version)| self.shared.get(k).map_or(0, |(_, v)| *v) == *version)
     }
 
-    fn grant_next(&mut self, k: u64) {
-        let Some(state) = self.locks.get_mut(&k) else { return };
-        state.owner = None;
-        if let Some((task, vm, pid)) = state.waiters.pop_front() {
-            state.owner = Some((task, vm));
-            self.waiting_on.remove(&task);
-            let value = self.shared.get(&k).cloned().unwrap_or_else(|| Arc::new(Payload::none()));
-            self.post(vm, pid, Completion::Lock(value));
+    /// M45 #6.5: wake every retry wait watching one of `keys`.
+    fn wake_watchers(&mut self, keys: &[u64]) {
+        for k in keys {
+            let Some(waiting) = self.watchers.remove(k) else { continue };
+            for key in waiting {
+                let Some(indices) = self.retry_waits.remove(&key) else { continue };
+                for other in indices {
+                    if other != *k {
+                        if let Some(w) = self.watchers.get_mut(&other) {
+                            w.remove(&key);
+                        }
+                    }
+                }
+                self.post(key.0, key.1, Completion::Settle(Ok(Payload::none())));
+            }
+        }
+    }
+
+    fn drop_retry_wait(&mut self, key: (u64, u64)) {
+        let Some(indices) = self.retry_waits.remove(&key) else { return };
+        for k in indices {
+            if let Some(w) = self.watchers.get_mut(&k) {
+                w.remove(&key);
+                if w.is_empty() {
+                    self.watchers.remove(&k);
+                }
+            }
         }
     }
 
@@ -1115,17 +1377,8 @@ impl RtState {
     }
 
     fn remove_waiter(&mut self, vm_id: u64, pid: u64) {
-        let RtState { locks, waiting_on, semaphores, channels, threads, .. } = self;
-        for l in locks.values_mut() {
-            l.waiters.retain(|&(task, vm, p)| {
-                if vm == vm_id && p == pid {
-                    waiting_on.remove(&task);
-                    false
-                } else {
-                    true
-                }
-            });
-        }
+        self.drop_retry_wait((vm_id, pid));
+        let RtState { semaphores, channels, threads, .. } = self;
         for s in semaphores.values_mut() {
             s.waiters.retain(|&(vm, p)| !(vm == vm_id && p == pid));
         }
@@ -1681,120 +1934,305 @@ pub fn channel_closed(vm: &mut Vm, args: &[Value]) -> RResult<Value> {
 }
 
 // ---------------------------------------------------------------------------
-// Locks (#6.4) -- the VM side
+// Transactions (docs/contracts/M45_atomic.md #6.3) -- the VM side
 // ---------------------------------------------------------------------------
 
-/// `sharedlock`: acquire shared variable `k` for `task`; a Promise.
-pub fn acquire(vm: &mut Vm, task: &TaskRef, k: u64, name: &str) -> RResult<Value> {
-    let held = task.borrow().held.clone();
-    if let Some(h) = held.borrow_mut().iter_mut().find(|h| h.index == k) {
-        h.depth += 1;
-        return Ok(settled(Value::None));
-    }
-    let task_id = task.borrow().id;
-    let rt = vm.rt.clone();
-    let entry = vm.alloc_id();
-    let granted = {
-        let mut st = rt.lock();
-        rt.tracking.store(true, Ordering::SeqCst);
-        let owner = st.locks.entry(k).or_default().owner;
-        match owner {
-            None => {
-                st.locks.get_mut(&k).expect("just made").owner = Some((task_id, vm.vm_id));
-                Some(st.shared.get(&k).cloned())
-            }
-            Some((u, _)) => {
-                if st.cycle(u, task_id) {
-                    drop(st);
-                    return Ok(failed(thread_error("deadlock", &format!("deadlock: waiting for '{name}' would never end"))));
-                }
-                st.locks.get_mut(&k).expect("just made").waiters.push_back((task_id, vm.vm_id, entry));
-                st.waiting_on.insert(task_id, k);
-                None
-            }
-        }
-    };
-    match granted {
-        Some(stored) => {
-            let value = match stored {
-                Some(p) => vm.materialize(&p),
-                None => Value::None,
-            };
-            held.borrow_mut().push(value::Held { index: k, value, depth: 1, unwinding: 0 });
-            Ok(settled(Value::None))
-        }
-        None => {
-            let promise = PromiseData::new_pending();
-            vm.add_wait(entry, promise.clone(), Wait::Lock { task: task.clone(), index: k });
-            Ok(Value::Promise(promise))
-        }
-    }
+/// `ThreadError in_atomic` for `name` (#3.8), thrown as a Mah value.
+pub fn in_atomic<T>(name: &str) -> RResult<T> {
+    throw_thread_error("in_atomic", &format!("'{name}' can't run inside 'atomic {{ }}': its body may run more than once"))
 }
 
-/// `sharedunlock` mode 0: release (and write back) at the outermost level.
-pub fn release(vm: &mut Vm, task: &TaskRef, k: u64, name: &str) -> RResult<()> {
-    let held = task.borrow().held.clone();
-    let working = {
-        let mut h = held.borrow_mut();
-        let Some(pos) = h.iter().position(|e| e.index == k) else {
-            return Err(RuntimeError::new("sharedunlock without holding the lock"));
-        };
-        let entry = &mut h[pos];
-        let leaving_by_throw = entry.unwinding == entry.depth;
-        if leaving_by_throw {
-            entry.unwinding = 0;
+fn task_key(task: &TaskRef) -> usize {
+    Rc::as_ptr(task) as *const () as usize
+}
+
+/// Whether `task` began (owns) the transaction it is in.
+pub fn owns_tx(task: &TaskRef) -> bool {
+    let t = task.borrow();
+    matches!(&t.tx, Some(tx) if tx.borrow().owner == task_key(task))
+}
+
+/// `sharedget k, name, mode` (`working` = mode 1).
+pub fn get(vm: &mut Vm, task: &TaskRef, k: u64, name: &Rc<str>, working: bool) -> RResult<Value> {
+    let tx = task.borrow().tx.clone();
+    let Some(tx) = tx else {
+        if working {
+            return Err(RuntimeError::new("sharedget in working mode outside a transaction"));
         }
-        entry.depth -= 1;
-        if entry.depth > 0 {
-            return Ok(());
-        }
-        let entry = h.remove(pos);
-        (entry.value, leaving_by_throw)
+        let (p, _) = vm.rt.read_shared(k);
+        return Ok(vm.materialize(&p));
     };
-    let (value, leaving_by_throw) = working;
-    let copy = payload_of(&value).ok();
-    let refused = copy.is_none();
-    vm.rt.release(k, copy);
-    if refused && !leaving_by_throw {
-        return throw_thread_error("not_sendable", &format!("shared variable '{name}' can't hold a Promise"));
+    let pos = tx.borrow().entries.iter().position(|e| e.index == k);
+    let pos = match pos {
+        Some(pos) => pos,
+        None => {
+            let (p, version) = vm.rt.read_shared(k);
+            if version > tx.borrow().rv {
+                return Err(RuntimeError::restart(TxSignal::Conflict));
+            }
+            let working_value = vm.materialize(&p);
+            let mut t = tx.borrow_mut();
+            t.reads.push((k, version));
+            t.entries.push(TxEntry {
+                index: k,
+                name: name.clone(),
+                base: Some(p),
+                working: working_value,
+                assigned: false,
+                exposed: false,
+            });
+            t.entries.len() - 1
+        }
+    };
+    let mut t = tx.borrow_mut();
+    let entry = &mut t.entries[pos];
+    if working {
+        entry.exposed = true;
+        return Ok(entry.working.clone());
     }
+    Ok(copy_local(&entry.working))
+}
+
+/// `sharedset k, name, src`.
+pub fn set(vm: &mut Vm, task: &TaskRef, k: u64, name: &Rc<str>, v: Value) -> RResult<()> {
+    let tx = task.borrow().tx.clone();
+    if let Some(tx) = tx {
+        let w = copy_local(&v);
+        let mut t = tx.borrow_mut();
+        match t.entries.iter_mut().find(|e| e.index == k) {
+            Some(entry) => {
+                entry.working = w;
+                entry.assigned = true;
+            }
+            None => t.entries.push(TxEntry {
+                index: k,
+                name: name.clone(),
+                base: None,
+                working: w,
+                assigned: true,
+                exposed: false,
+            }),
+        }
+        return Ok(());
+    }
+    let Ok(stored) = payload_of(&v) else {
+        return throw_thread_error("not_sendable", &format!("shared variable '{name}' can't hold a Promise"));
+    };
+    vm.rt.write_shared(vm.vm_id, k, stored);
     Ok(())
 }
 
-/// `sharedunlock` mode 1: a `lock` body is being left by a throw.
-pub fn mark(task: &TaskRef, k: u64) {
-    let held = task.borrow().held.clone();
-    if let Some(h) = held.borrow_mut().iter_mut().find(|h| h.index == k) {
-        h.unwinding = h.depth;
+/// `tx_start`, guarded: any error but a restart ends the transaction.
+fn start(rt: &ThreadRuntime, vm_id: u64, task: &TaskRef, tx: &Rc<RefCell<Tx>>) -> RResult<()> {
+    let (serial, irrevocable) = {
+        let t = tx.borrow();
+        (t.serial, t.irrevocable)
+    };
+    // (never hold a RefCell borrow across the exclusivity wait)
+    let rv = rt.tx_start(vm_id, serial, irrevocable);
+    tx.borrow_mut().rv = rv;
+    let _ = task;
+    Ok(())
+}
+
+/// `atomicbegin` at pc `pc`.
+pub fn begin(vm: &mut Vm, task: &TaskRef, pc: usize) -> RResult<()> {
+    let rt = vm.rt.clone();
+    begin_in(&rt, vm.vm_id, task, pc)
+}
+
+fn begin_in(rt: &ThreadRuntime, vm_id: u64, task: &TaskRef, pc: usize) -> RResult<()> {
+    let tx = task.borrow().tx.clone();
+    match tx {
+        None => {
+            let tx = {
+                let t = task.borrow();
+                Tx::new(
+                    task_key(task),
+                    t.implicit.clone(),
+                    (pc, t.current_frame.clone(), t.return_stack.len(), t.defer_stack.len()),
+                )
+            };
+            let tx = Rc::new(RefCell::new(tx));
+            task.borrow_mut().tx = Some(tx.clone());
+            guarded(rt, task, &tx, |rt| start(rt, vm_id, task, &tx))
+        }
+        Some(tx) => {
+            {
+                let mut t = tx.borrow_mut();
+                if t.depth > 0 {
+                    t.depth += 1;
+                    return Ok(());
+                }
+                t.depth = 1;
+                if t.attempts >= ATOMIC_ATTEMPTS {
+                    t.irrevocable = true;
+                }
+            }
+            guarded(rt, task, &tx, |rt| start(rt, vm_id, task, &tx))
+        }
     }
 }
 
-/// `sharedget`.
-pub fn get(vm: &mut Vm, task: &TaskRef, k: u64, locked: bool) -> RResult<Value> {
-    let held = task.borrow().held.clone();
-    let working = held.borrow().iter().find(|h| h.index == k).map(|h| h.value.clone());
-    if locked {
-        return working.ok_or_else(|| RuntimeError::new("sharedget without holding the lock"));
+/// #6.3 "Guards": an error (not a restart) out of `f` ends the transaction.
+fn guarded(
+    rt: &ThreadRuntime,
+    task: &TaskRef,
+    tx: &Rc<RefCell<Tx>>,
+    f: impl FnOnce(&ThreadRuntime) -> RResult<()>,
+) -> RResult<()> {
+    match f(rt) {
+        Ok(()) => Ok(()),
+        Err(e) if e.restart.is_some() => Err(e),
+        Err(e) => {
+            rt.end_attempt(tx.borrow().serial);
+            let mut t = task.borrow_mut();
+            if matches!(&t.tx, Some(cur) if Rc::ptr_eq(cur, tx)) {
+                t.tx = None;
+            }
+            Err(e)
+        }
     }
-    if let Some(w) = working {
-        return Ok(copy_local(&w));
+}
+
+fn the_tx(task: &TaskRef, op: &str) -> RResult<Rc<RefCell<Tx>>> {
+    task.borrow().tx.clone().ok_or_else(|| RuntimeError::new(format!("{op} outside a transaction")))
+}
+
+/// `atomicend`: the body's call returned.
+pub fn end(vm: &mut Vm, task: &TaskRef) -> RResult<()> {
+    let rt = vm.rt.clone();
+    end_in(&rt, vm.vm_id, task)
+}
+
+fn end_in(rt: &ThreadRuntime, vm_id: u64, task: &TaskRef) -> RResult<()> {
+    let tx = the_tx(task, "atomicend")?;
+    {
+        let mut t = tx.borrow_mut();
+        if t.depth > 1 {
+            t.depth -= 1;
+            return Ok(());
+        }
     }
-    Ok(match vm.rt.shared_value(k) {
-        Some(p) => vm.materialize(&p),
-        None => Value::None,
+    guarded(rt, task, &tx, |rt| {
+        let mut publish: Vec<(u64, Payload)> = Vec::new();
+        let mut refused: Option<Rc<str>> = None;
+        let (serial, reads) = {
+            let t = tx.borrow();
+            for entry in &t.entries {
+                if !(entry.assigned || entry.exposed) {
+                    continue;
+                }
+                let Ok(stored) = payload_of(&entry.working) else {
+                    refused = Some(entry.name.clone());
+                    break;
+                };
+                if !entry.assigned {
+                    if let Some(base) = &entry.base {
+                        if same_copy(&stored, base) {
+                            continue;
+                        }
+                    }
+                }
+                publish.push((entry.index, stored));
+            }
+            (t.serial, t.reads.clone())
+        };
+        if let Some(name) = refused {
+            rt.end_attempt(serial);
+            task.borrow_mut().tx = None;
+            return throw_thread_error("not_sendable", &format!("shared variable '{name}' can't hold a Promise"));
+        }
+        if !rt.tx_commit(vm_id, serial, &reads, publish) {
+            return Err(RuntimeError::restart(TxSignal::Conflict));
+        }
+        task.borrow_mut().tx = None;
+        Ok(())
     })
 }
 
-/// `sharedset`.
-pub fn set(task: &TaskRef, k: u64, v: Value) -> RResult<()> {
-    let held = task.borrow().held.clone();
-    let mut h = held.borrow_mut();
-    match h.iter_mut().find(|h| h.index == k) {
-        Some(entry) => {
-            entry.value = v;
-            Ok(())
+/// `atomicabort`: a throw is leaving the block.
+pub fn abort(vm: &mut Vm, task: &TaskRef) -> RResult<()> {
+    let rt = vm.rt.clone();
+    abort_in(&rt, task)
+}
+
+fn abort_in(rt: &ThreadRuntime, task: &TaskRef) -> RResult<()> {
+    let tx = the_tx(task, "atomicabort")?;
+    let serial = {
+        let mut t = tx.borrow_mut();
+        if t.depth > 1 {
+            t.depth -= 1;
+            return Ok(());
         }
-        None => Err(RuntimeError::new("sharedset without holding the lock")),
+        t.serial
+    };
+    rt.end_attempt(serial);
+    task.borrow_mut().tx = None;
+    Ok(())
+}
+
+/// `retry`.
+pub fn retry(task: &TaskRef) -> RResult<()> {
+    let tx = the_tx(task, "retry")?;
+    let t = tx.borrow();
+    if let Some(label) = &t.implicit {
+        return Err(RuntimeError::new(format!(
+            "'{label}' cannot suspend (it used 'retry') when called implicitly by the runtime"
+        )));
+    }
+    if t.reads.is_empty() {
+        return throw_thread_error("stuck", RETRY_NO_READS_MESSAGE);
+    }
+    Err(RuntimeError::restart(TxSignal::Retry))
+}
+
+/// #6.4: abandon the attempt of `task`'s transaction -- back to its
+/// outermost `atomicbegin`; a `retry` then waits for a change of what the
+/// attempt read. `Ok(None)`: keep stepping; `Ok(Some(()))`: suspended.
+pub fn restart_tx(vm: &mut Vm, task: &TaskRef, sig: TxSignal) -> RResult<Option<()>> {
+    let tx = task.borrow().tx.clone().expect("restart_tx: the task is in a transaction");
+    let (pc, frame, rs, ds, serial) = {
+        let t = tx.borrow();
+        let (pc, frame, rs, ds) = t.restart.clone();
+        (pc, frame, rs, ds, t.serial)
+    };
+    {
+        let mut t = task.borrow_mut();
+        t.pc = pc;
+        t.current_frame = frame;
+        t.return_stack.truncate(rs);
+        t.defer_stack.truncate(ds);
+    }
+    vm.rt.end_attempt(serial);
+    if sig == TxSignal::Conflict {
+        let mut t = tx.borrow_mut();
+        t.attempts += 1;
+        t.depth = 0;
+        t.reads.clear();
+        t.entries.clear();
+        t.irrevocable = false;
+        return Ok(None);
+    }
+    let reads = std::mem::take(&mut tx.borrow_mut().reads);
+    task.borrow_mut().tx = None;
+    let pid = vm.alloc_id();
+    let promise = PromiseData::new_pending();
+    // registered before the runtime can post its wake-up
+    vm.add_wait(pid, promise.clone(), Wait::Retry);
+    if !vm.rt.register_retry(vm.vm_id, pid, &reads) {
+        vm.take_wait(pid);
+        return Ok(None);
+    }
+    promise.borrow_mut().callbacks.push(Continuation { task: task.clone(), dest: (0, 0), resume_pc: pc + 1, restart: true });
+    Ok(Some(()))
+}
+
+/// #6.3 safety net: a task never ends inside a transaction it began.
+pub fn end_task_tx(rt: &ThreadRuntime, task: &TaskRef) {
+    if owns_tx(task) {
+        let tx = task.borrow_mut().tx.take().expect("owns_tx");
+        rt.end_attempt(tx.borrow().serial);
     }
 }
 
@@ -1808,10 +2246,6 @@ mod tests {
 
     fn state() -> RtState {
         RtState { next_thread: 1, next_job: 1, next_semaphore: 1, next_channel: 1, ..RtState::default() }
-    }
-
-    fn own(st: &mut RtState, k: u64, task: u64) {
-        st.locks.entry(k).or_default().owner = Some((task, 0));
     }
 
     fn pool(st: &mut RtState, id: u64, running: &[u64]) {
@@ -1833,55 +2267,26 @@ mod tests {
     }
 
     #[test]
-    fn lock_to_lock() {
+    fn join_cycle() {
         let mut st = state();
-        own(&mut st, 1, 10);
-        own(&mut st, 2, 20);
-        st.waiting_on.insert(10, 2);
-        // 20 asks for lock 1 (owned by 10, which waits for 20's lock 2)
-        assert!(st.cycle(10, 20));
-    }
-
-    #[test]
-    fn await_task_then_lock_back() {
-        let mut st = state();
-        own(&mut st, 1, 10);
-        st.waiting_on.insert(20, 1);
-        // 10 awaits task 20, which waits for 10's lock
-        let edges = st.producer_edges(Producer::Task(20));
-        assert!(st.cycle_from(edges, 10, false));
-    }
-
-    #[test]
-    fn await_job_whose_root_waits_on_my_lock() {
-        let mut st = state();
-        own(&mut st, 1, 10);
-        st.job_roots.insert(5, 30);
-        st.waiting_on.insert(30, 1);
-        let edges = st.producer_edges(Producer::Job(5));
-        assert!(st.cycle_from(edges, 10, true));
+        pool(&mut st, 1, &[7]);
+        st.job_roots.insert(7, 40);
+        pool(&mut st, 2, &[8]);
+        st.job_roots.insert(8, 50);
+        st.awaiting.insert(40, (Producer::Join(2), 0));
+        let edges = st.producer_edges(Producer::Join(1));
+        assert!(st.cycle_from(edges, 50, true));
     }
 
     #[test]
     fn a_job_not_started_yet_is_no_edge_until_it_is() {
         let mut st = state();
-        own(&mut st, 1, 10);
-        st.waiting_on.insert(30, 1);
+        st.awaiting.insert(30, (Producer::Job(6), 0));
+        st.job_roots.insert(6, 10);
         let edges = st.producer_edges(Producer::Job(5));
         assert!(!st.cycle_from(edges, 10, true));
         st.job_roots.insert(5, 30);
         let edges = st.producer_edges(Producer::Job(5));
-        assert!(st.cycle_from(edges, 10, true));
-    }
-
-    #[test]
-    fn join_reaches_a_running_jobs_root() {
-        let mut st = state();
-        own(&mut st, 1, 10);
-        pool(&mut st, 3, &[7]);
-        st.job_roots.insert(7, 40);
-        st.waiting_on.insert(40, 1);
-        let edges = st.producer_edges(Producer::Join(3));
         assert!(st.cycle_from(edges, 10, true));
     }
 
@@ -1905,5 +2310,154 @@ mod tests {
         let p = Value::Promise(PromiseData::new_pending());
         let bad = Value::Vector(Rc::new(RefCell::new(vec![p])));
         assert!(copy_out(&[(&bad, true)]).is_err());
+    }
+
+    // -- M45: the runtime's transaction helpers, driven by hand (mirrors
+    // tests/test_threads.py::AtomicRuntimeTests 1-3 and 6) ------------------
+
+    fn runtime() -> (ThreadRuntime, Receiver<(u64, Completion)>) {
+        let program = Program {
+            strings: Vec::new(),
+            constants: Vec::new(),
+            types: Vec::new(),
+            natives: Vec::new(),
+            functions: Vec::new(),
+            code: Vec::new(),
+            debug: None,
+            minor: 21,
+            handlers: Vec::new(),
+            tests: Vec::new(),
+            meta: None,
+        };
+        let rt = ThreadRuntime::new(Arc::new(program), &[], false);
+        let (tx, rx) = std::sync::mpsc::channel();
+        rt.register_vm(0, tx);
+        (rt, rx)
+    }
+
+    fn number(n: i64) -> Payload {
+        payload_of(&Value::Number(Decimal::from_i64(n))).expect("a Number")
+    }
+
+    fn number_of(p: &Payload) -> Decimal {
+        match &p.root {
+            SendValue::Number(n) => Decimal::from_send(n.clone()),
+            _ => panic!("a Number"),
+        }
+    }
+
+    #[test]
+    fn atomic_1_validation() {
+        let (rt, _rx) = runtime();
+        rt.write_shared(0, 0, number(1));
+        let rv = rt.tx_start(0, 1, false);
+        assert_eq!(rv, 1);
+        rt.write_shared(0, 0, number(2));
+        assert!(!rt.tx_commit(0, 1, &[(0, 1)], vec![(0, number(5))]));
+        let (p, v) = rt.read_shared(0);
+        assert_eq!((number_of(&p), v), (Decimal::from_i64(2), 2));
+        let _ = rt.tx_start(0, 2, false);
+        assert!(rt.tx_commit(0, 2, &[(0, 2)], vec![(0, number(5))]));
+        let (p, v) = rt.read_shared(0);
+        assert_eq!((number_of(&p), v), (Decimal::from_i64(5), 3));
+    }
+
+    #[test]
+    fn atomic_2_read_only() {
+        let (rt, _rx) = runtime();
+        rt.write_shared(0, 0, number(1));
+        let _ = rt.tx_start(0, 1, false);
+        rt.write_shared(0, 0, number(2));
+        let clock = rt.lock().clock;
+        assert!(rt.tx_commit(0, 1, &[(0, 1)], Vec::new()));
+        assert_eq!(rt.lock().clock, clock);
+    }
+
+    #[test]
+    fn atomic_3_retry_wake_ups() {
+        let (rt, rx) = runtime();
+        rt.write_shared(0, 0, number(1));
+        rt.write_shared(0, 1, number(1));
+        let version = rt.read_shared(0).1;
+        assert!(rt.register_retry(0, 5, &[(0, version)]));
+        rt.write_shared(0, 1, number(2));
+        assert!(rx.try_recv().is_err());
+        rt.write_shared(0, 0, number(2));
+        match rx.try_recv() {
+            Ok((5, Completion::Settle(Ok(p)))) => assert!(matches!(p.root, SendValue::None)),
+            _ => panic!("a settle ok none for pending id 5"),
+        }
+        assert!(!rt.register_retry(0, 6, &[(0, 1)]));
+        assert!(rt.lock().retry_waits.is_empty());
+    }
+
+    fn task_in(attempts: u32, implicit: Option<&str>) -> (TaskRef, Rc<RefCell<Tx>>) {
+        let task = value::new_task(0, value::new_frame(0, None), None);
+        let mut tx = Tx::new(task_key(&task), implicit.map(Rc::from), (0, value::new_frame(0, None), 0, 0));
+        tx.depth = 0;
+        tx.attempts = attempts;
+        let tx = Rc::new(RefCell::new(tx));
+        task.borrow_mut().tx = Some(tx.clone());
+        (task, tx)
+    }
+
+    #[test]
+    fn atomic_6_the_ninth_attempt_is_exclusive() {
+        let (rt, _rx) = runtime();
+        let (task, tx) = task_in(ATOMIC_ATTEMPTS, None);
+        begin_in(&rt, 0, &task, 0).expect("begins");
+        assert!(tx.borrow().irrevocable);
+        assert_eq!(tx.borrow().depth, 1);
+        assert_eq!(rt.lock().excl_owner, Some((tx.borrow().serial, 0)));
+        end_in(&rt, 0, &task).expect("commits");
+        assert_eq!(rt.lock().excl_owner, None);
+        assert!(task.borrow().tx.is_none());
+
+        let (task, tx) = task_in(ATOMIC_ATTEMPTS - 1, None);
+        begin_in(&rt, 0, &task, 0).expect("begins");
+        assert!(!tx.borrow().irrevocable);
+        assert_eq!(rt.lock().excl_owner, None);
+        end_in(&rt, 0, &task).expect("commits");
+
+        let (task, tx) = task_in(ATOMIC_ATTEMPTS, Some("to_string"));
+        begin_in(&rt, 0, &task, 0).expect("begins");
+        assert!(tx.borrow().irrevocable);
+        assert_eq!(rt.lock().excl_owner, Some((tx.borrow().serial, 0)));
+        end_in(&rt, 0, &task).expect("commits");
+        assert_eq!(rt.lock().excl_owner, None);
+    }
+
+    #[test]
+    fn atomic_exclusivity_blocks_writers() {
+        let (rt, _rx) = runtime();
+        let rt = Arc::new(rt);
+        let _ = rt.tx_start(0, 1, true);
+        let writer = {
+            let rt = rt.clone();
+            std::thread::spawn(move || rt.write_shared(1, 0, number(9)))
+        };
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(rt.read_shared(0).1, 0);
+        assert!(!writer.is_finished());
+        rt.end_attempt(1);
+        writer.join().expect("the writer finishes");
+        assert_eq!(number_of(&rt.read_shared(0).0), Decimal::from_i64(9));
+    }
+
+    #[test]
+    fn same_copy_compares_graphs() {
+        let v = |items: Vec<Value>| Value::Vector(Rc::new(RefCell::new(items)));
+        let n = |i: i64| Value::Number(Decimal::from_i64(i));
+        let a = payload_of(&v(vec![n(1), Value::Str(Rc::from("x"))])).unwrap();
+        let b = payload_of(&v(vec![n(1), Value::Str(Rc::from("x"))])).unwrap();
+        let c = payload_of(&v(vec![n(2), Value::Str(Rc::from("x"))])).unwrap();
+        assert!(same_copy(&a, &b));
+        assert!(!same_copy(&a, &c));
+        // shared vs. separate inner objects differ
+        let inner = v(vec![n(1)]);
+        let shared = payload_of(&v(vec![inner.clone(), inner])).unwrap();
+        let separate = payload_of(&v(vec![v(vec![n(1)]), v(vec![n(1)])])).unwrap();
+        assert!(!same_copy(&shared, &separate));
+        assert!(same_copy(&Payload::none(), &Payload::none()));
     }
 }
